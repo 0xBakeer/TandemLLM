@@ -1,0 +1,535 @@
+# Recursive Flint in TandemLLM: the setup guide's registry entry (docs/setup.md). Schema 1.
+#
+# Recursive's mixture-of-experts model for coding agents (engine/models/flint), from our EXL3 packs or the BF16
+# checkpoint, drafting with the lookup cut by StairCut (the checkpoint has no draft layer). weights_gib: allocated
+# at load (measured 2026-10-22). Window 262,144 tokens (131,072 for BF16); the 14 full layers keep 28,672 bytes a
+# token, the 35 sliding layers a ring of 640 rows. Rows of the measured table come from real runs only.
+schema: 1
+id: flint
+name: Recursive Flint
+family: Flint
+params: 39.8B, ~2.5B active a token
+recommended: false
+order: 8
+pitch: Recursive's mixture-of-experts model for coding agents, from our EXL3 packs or the BF16 checkpoint.
+architecture: '49 layers: 2 dense and 47 with a mixture of 256 experts of which 6 and a shared one run a token; grouped-query
+  attention with a learned sink per head, 35 sliding-window layers (513 tokens) with rotary and 14 full layers without positional
+  encoding. It decides on each turn whether to reason in a <think> block and calls tools in its own arg-key form.'
+license: The model's license (Apache-2.0) is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.
+icon: null
+links:
+- label: Model card
+  url: https://huggingface.co/RecursiveSI/flint
+devices:
+- id: dgx-spark
+  label: NVIDIA DGX Spark (128 GB unified memory)
+  total_gib: 121.63
+  reserved_gib: 10.0
+  note: The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB.
+assets:
+- id: qwen3.5-2b
+  label: Qwen3.5-2B (the narrator, and Wren)
+  path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: Qwen/Qwen3.5-2B
+  fetch:
+  - repo: Qwen/Qwen3.5-2B
+    files:
+    - '*.json'
+    - '*.safetensors'
+    - '*.jinja'
+    - merges.txt
+    - LICENSE
+    to: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b
+    gb: 4.57
+  source: Public on Hugging Face; install.sh --setup downloads it for Wren, the fetch step when the narrator is on (VIS-153).
+- id: laya
+  label: Laya decision models
+  path: ${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: convaiinnovations/laya
+  fetch:
+  - repo: convaiinnovations/laya
+    files:
+    - config.json
+    - rl_agent_config.json
+    - model.safetensors
+    - encoder/*
+    - tokenizer/*
+    - multilingual/*
+    - typed-decisions/*
+    to: ${HOME}/.qwen38-spark-engine/deciders/laya
+    gb: 2.35
+  source: Public on Hugging Face (no token needed); the fetch step downloads its three models when Laya is on (VIS-153). Its
+    Python files are not downloaded.
+profiles:
+- id: flint-exl3-4.0
+  label: EXL3 4.0 bpw
+  format: exl3
+  bpw: 4.0
+  disk_gb: 20.6
+  weights_gib: 19.25
+  drafters_gib: 0.0
+  hf_repo: 0xBakeer/TandemLLM-Flint-EXL3-4.0
+  hf_private: true
+  made_by:
+    kind: ours
+    name: 0xBakeer
+    github: 0xBakeer
+  recommended: true
+  badges:
+  - recommended
+  quality:
+    kl_vs_bf16: 0.1602
+    top1_pct: 80.48
+    ppl: 31.647
+    date: '2026-10-22'
+    source: this engine against exllamav3's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
+      job, BF16 ppl 29.88); two BF16 forwards of the same weights differ by KL 0.034 / top-1 92.9 % on these rows (Flint's
+      routing is sensitive to rounding)
+  assets_required: []
+  note: 'Converted from the BF16 checkpoint (revision 2a247be0) by exllamav3 1.6.2 with our Flint architecture: every projection
+    at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 121.9 to 124.1 tok/s, prefill 4,652 tok/s at 4,096
+    tokens. Not published yet: the weights directory is filled by hand.'
+  max_window: 262144
+- id: flint-exl3-6.0
+  label: EXL3 6.0 bpw
+  format: exl3
+  bpw: 6.0
+  disk_gb: 30.5
+  weights_gib: 28.49
+  drafters_gib: 0.0
+  hf_repo: 0xBakeer/TandemLLM-Flint-EXL3-6.0
+  hf_private: true
+  made_by:
+    kind: ours
+    name: 0xBakeer
+    github: 0xBakeer
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0515
+    top1_pct: 91.56
+    ppl: 30.066
+    date: '2026-10-22'
+    source: this engine against exllamav3's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
+      job, BF16 ppl 29.88); two BF16 forwards of the same weights differ by KL 0.034 / top-1 92.9 % on these rows (Flint's
+      routing is sensitive to rounding)
+  assets_required: []
+  note: 'Every projection at 6 bits, head 8. Measured 2026-10-22: 28.49 GiB at load, plain decode 90.8 to 91.7 tok/s, prefill
+    4,463 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+  max_window: 262144
+- id: flint-bf16
+  label: BF16 (Recursive)
+  format: bf16
+  bpw: 16.0
+  disk_gb: 80.4
+  weights_gib: 75.53
+  drafters_gib: 0.0
+  hf_repo: RecursiveSI/flint
+  hf_private: false
+  made_by:
+    kind: vendor
+    name: Recursive
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0
+    top1_pct: 100.0
+    ppl: 29.79
+    date: '2026-10-22'
+    source: 'the reference; this engine''s ppl on the same 8 rows (exllamav3''s BF16 forward: 29.88)'
+  assets_required: []
+  note: 'Recursive''s BF16 checkpoint as published. Measured 2026-10-22: 75.53 GiB at load, plain decode 40.4 to 40.8 tok/s.
+    Its window stays at 131,072 tokens so the chat sandbox keeps room beside it.'
+  max_window: 131072
+  hf_revision: 2a247be0c0aec895ccb0ac7ca92229ec6df37288
+measurements:
+  build: flint
+  date: '2026-10-22'
+  method: tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block,
+    SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack and FLINT_ANCHOR_BACKOFF=8;
+    every drafted text the plain run's
+  source: models/flint/measurements/2026-10-22-summary.json
+  rows:
+  - profile: flint-exl3-4.0
+    build: flint
+    date: '2026-10-22'
+    comparable: true
+    note: The lookup cut by StairCut, anchor backoff 8, the price file; edit / copy asks 134.67 / 410.68 tok/s, a 2,048-token
+      game file 134.01; plain prose / chat / code / edit / copy 125.22 / 122.70 / 122.47 / 118.38 / 118.43 and the game file
+      119.34; every text the plain run's.
+    cells:
+      greedy_512:
+        prose:
+        - 117.1
+        - 117.1
+        - 8.63
+        - 1.01
+        - 1
+        chat:
+        - 123.52
+        - 123.52
+        - 8.58
+        - 1.06
+        - 1
+        code:
+        - 121.42
+        - 121.42
+        - 9.22
+        - 1.12
+        - 1
+    ttft_s: {}
+    lossless: null
+  - profile: flint-exl3-6.0
+    build: flint
+    date: '2026-10-22'
+    comparable: true
+    note: The lookup cut by StairCut, anchor backoff 8, the price file; edit / copy asks 99.46 / 289.54 tok/s, a 2,048-token
+      game file 105.29; plain prose / chat / code / edit / copy 91.86 / 90.71 / 90.75 / 88.24 / 88.26 and the game file 88.83;
+      every text the plain run's.
+    cells:
+      greedy_512:
+        prose:
+        - 90.28
+        - 90.28
+        - 11.19
+        - 1.01
+        - 1
+        chat:
+        - 92.33
+        - 92.33
+        - 11.7
+        - 1.08
+        - 1
+        code:
+        - 92.75
+        - 92.75
+        - 12.29
+        - 1.14
+        - 1
+    ttft_s: {}
+    lossless: null
+memory:
+  parts:
+  - id: engine
+    label: Engine state, the decode graphs and warm-up
+    gib: 1.0
+    kind: fixed
+    source: 'measured 2026-10-22 at load (4.0 pack, the lookup drafter): the engine 0.98, the drafters 0.05, the warm-up 0.02
+      GiB beyond the weights (server [memory] line)'
+  - id: allocator
+    label: Allocator reserve
+    gib: 1.5
+    kind: reserve
+    source: an estimate until measured on the Spark
+  - id: prefill_workspace
+    label: Prefill workspace (a 4,096-token chunk's activations and the attention's keys)
+    gib: 4.0
+    kind: reserve
+    source: an estimate until measured on the Spark
+  sources:
+  - engine/models/flint/pack.py PackIndex.decode_bytes (the pack's headers, 2026-10-22)
+components:
+- id: conductor
+  label: Conductor
+  group: features
+  what: Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.
+  default: true
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.1
+  depends_on: []
+  conflicts: []
+  knobs:
+    CONDUCTOR:
+      'on': 'on'
+      'off': raw
+    QSE_CONDUCTOR_CONFIG:
+      'on': ${HOME}/.qwen38-spark-engine/conductor
+      'off': 'off'
+  assets: []
+  docs: docs/server.md
+  note: On by default, with the conductor's default fit until it is measured on Flint.
+- id: narrator
+  label: Narrator
+  group: roles
+  what: A small model that writes short status lines while the big model thinks, so you can see what it is doing.
+  default: false
+  required: false
+  memory_gib: 3.6
+  memory_max_gib: null
+  elastic: true
+  disk_gb: 4.3
+  depends_on:
+  - conductor
+  conflicts: []
+  knobs:
+    QWEN38_NARRATOR_MODEL:
+      'on': qwen3.5-2b
+      'off': ''
+    QWEN38_NARRATOR_DIR:
+      'on': ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b
+      'off': ''
+  assets:
+  - qwen3.5-2b
+  docs: docs/server.md
+  note: Qwen3.5-2B, 3.60 GiB in the live memory split. Off by default under Flint.
+- id: laya
+  label: Laya decision models
+  group: roles
+  what: Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.
+  default: true
+  required: false
+  memory_gib: 1.6
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 2.3
+  depends_on:
+  - conductor
+  conflicts: []
+  knobs:
+    QWEN38_DECIDER_MODELS:
+      'on': laya-english,laya-multilingual,laya-typed-decisions
+      'off': ''
+  assets:
+  - laya
+  docs: docs/server.md
+  note: The class question's answer under the model fit (served_classifier off).
+- id: response_cache
+  label: Response cache
+  group: caches
+  what: Answers an identical greedy request again from memory, without running the model.
+  default: false
+  required: false
+  memory_gib: 0.25
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    RESPONSE_CACHE:
+      'on': 'on'
+      'off': 'off'
+  assets: []
+  docs: docs/caches.md
+  note: Off on the reference box. Useful for scripts that send the same request many times; never for a benchmark.
+- id: proxy
+  label: Other backends
+  group: features
+  what: Lets the dashboard send some model names to other servers or cloud APIs, beside this engine.
+  default: false
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    QSE_BACKENDS:
+      'on': ${HOME}/.qwen38-spark-engine/backends/config.sqlite3
+      'off': ''
+  assets: []
+  docs: docs/proxy.md
+  note: You add the backends later, on the Backends screen.
+- id: prompt_cache
+  label: Conversation cache
+  group: caches
+  what: Keeps the conversation the model is in, so the next turn starts where the last one ended instead of reading everything
+    again.
+  default: true
+  required: false
+  memory_gib: 0.16
+  memory_max_gib: 2.5
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    RESIDENT_GB:
+      'on': '2.5'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: The resident prefix with its anchors every 4,096 tokens (the prefill's chunk), the end anchor, the pin and the park;
+    an anchor holds the 35 sliding layers' rings (44.8 MiB) and 4,096 tokens of the full layers' KV at 28,672 bytes.
+- id: state_store
+  label: State store
+  group: caches
+  what: Saves the model's state after short chats, so the same start a second time costs nothing.
+  default: true
+  required: false
+  memory_gib: 0.49
+  memory_max_gib: 2.0
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    CACHE_GB:
+      'on': '2'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: null
+parallelism:
+  slots:
+    min: 1
+    max: 1
+    default: 1
+  window:
+    min: 8192
+    max: 262144
+    default: 262144
+    step: 4096
+  side_window:
+    min: 8192
+    max: 262144
+    default: 65536
+    step: 4096
+  kv_pool:
+    default: false
+  floor_gb:
+    min: 10
+    max: 40
+    default: 15
+  kv_hard_floor_gb: 10
+  kv_bytes_per_token: 28672
+  typical_fill_tokens: 32768
+  side_slot_const_gib: 0.0
+  knobs:
+    slots: QSE_PARALLEL
+    window: MAX_LEN
+    side_window: QSE_SIDE_MAX_LEN
+    kv_pool: QSE_KV_POOL
+    floor_gb: QSE_PARALLEL_FLOOR_GB
+  fixed: {}
+methods:
+- id: temperature
+  label: Temperature
+  what: How random the answers are when a client does not say. The model's generation config sets 1.0.
+  type: number
+  min: 0
+  max: 2
+  default: 1.0
+  recommended: 1.0
+  knob: TEMPERATURE
+  docs: docs/server.md
+- id: top_p
+  label: Top-p
+  what: The share of probability a sampled answer draws from, when a client does not say.
+  type: number
+  min: 0
+  max: 1
+  default: 0.95
+  recommended: 0.95
+  knob: TOP_P
+  docs: docs/server.md
+- id: default_max_tokens
+  label: Default answer length
+  what: The longest answer, in tokens, when a client does not set max_tokens.
+  type: int
+  min: 1024
+  max: 262144
+  default: 32768
+  recommended: 32768
+  knob: DEFAULT_MAX_TOKENS
+  docs: docs/server.md
+- id: request_timeout
+  label: Request time limit
+  what: Seconds one request may run before the engine stops it.
+  type: int
+  min: 60
+  max: 14400
+  default: 3600
+  recommended: 3600
+  knob: REQUEST_TIMEOUT
+  docs: docs/server.md
+- id: max_queue
+  label: Queue length
+  what: How many requests may wait for a free slot before new ones are turned away.
+  type: int
+  min: 1
+  max: 64
+  default: 8
+  recommended: 8
+  knob: MAX_QUEUE
+  docs: docs/server.md
+- id: queue_timeout
+  label: Queue wait
+  what: Seconds a request may wait in the queue before it gets an error.
+  type: int
+  min: 10
+  max: 3600
+  default: 240
+  recommended: 240
+  knob: QUEUE_TIMEOUT
+  docs: docs/server.md
+advanced:
+- id: port
+  label: Port
+  what: The port the API and the dashboard answer on.
+  type: int
+  min: 1024
+  max: 65535
+  default: 8000
+  recommended: 8000
+  knob: PORT
+  docs: docs/operations.md
+- id: host
+  label: Listen on
+  what: The whole network, or only this machine.
+  type: enum
+  options:
+  - value: 0.0.0.0
+    label: the whole network
+  - value: 127.0.0.1
+    label: this machine only
+  default: 0.0.0.0
+  recommended: 0.0.0.0
+  knob: HOST
+  docs: docs/operations.md
+- id: served_model
+  label: Raw engine name
+  what: The model name of the raw engine. With the conductor on, clients see TandemLLM and this name is a hidden alias.
+  type: string
+  pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$
+  default: qwen38-spark-engine
+  recommended: qwen38-spark-engine
+  knob: SERVED_MODEL
+  docs: docs/server.md
+- id: dashboard_login
+  label: Dashboard login
+  what: With an admin password set, on makes the dashboard ask for it too.
+  type: enum
+  options:
+  - value: 'off'
+    label: 'off'
+  - value: 'on'
+    label: 'on'
+  default: 'off'
+  recommended: 'off'
+  knob: QSE_DASHBOARD_LOGIN
+  docs: docs/server.md
+- id: admin_password
+  label: Admin password
+  what: Without one, anyone who reaches the port can change the setup. Generate writes a random one into secrets.env on the
+    box; read it there with cat.
+  type: enum
+  options:
+  - value: keep
+    label: keep as it is
+  - value: generate
+    label: generate one
+  default: keep
+  recommended: keep
+  knob: null
+  docs: docs/operations.md

@@ -320,7 +320,7 @@ def test_every_pack_names_its_maker():
     turboderp's Flash-Next packs are a community author's; the weights' repository is hf_repo except
     Bolt's IQ2, whose weights are NVIDIA's GGUF repository"""
     kinds = {"0xBakeer": ("ours", "0xBakeer"), "nvidia": ("vendor", "NVIDIA"), "LiquidAI": ("vendor", "LiquidAI"),
-             "turboderp": ("community", "turboderp")}
+             "turboderp": ("community", "turboderp"), "RecursiveSI": ("vendor", "Recursive")}
     seen = set()
     for m in registry.load_all()[0].values():
         for p in m["profiles"]:

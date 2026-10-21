@@ -565,6 +565,7 @@ class FlintEngine(FlintRef):
             h, n = add_rms(h, m, nxt, eps)
         st.length = L + T
         self.prompt_hidden = n
+        self.prompt_hidden_pre = h            # the last layer's output before the final norm (a draft head's input)
         if head == "none":
             return None
         return self.head(n[-1:] if head == "last" else n)

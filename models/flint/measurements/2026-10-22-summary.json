@@ -1,0 +1,164 @@
+{
+ "build": "flint branch (0.13.0 + batches A-C + Flint), not released",
+ "date": "2026-10-22",
+ "device": "dgx-spark",
+ "method": "tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block, SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack and FLINT_ANCHOR_BACKOFF=8; every drafted text the plain run's",
+ "configs": {
+  "plain": "plain decode (--drafter none)",
+  "lookup": "the lookup cut by StairCut (--drafter mtp, no head)"
+ },
+ "rows": {
+  "flint-exl3-4.0:plain": {
+   "prose": {
+    "tok_s": 125.22,
+    "per_block": 1.0,
+    "n": 341,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 122.47,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 122.7,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 118.38,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 118.43,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 119.34,
+    "per_block": 1.0,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-4.0:lookup": {
+   "prose": {
+    "tok_s": 117.1,
+    "per_block": 1.01,
+    "n": 341,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 121.42,
+    "per_block": 1.12,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 123.52,
+    "per_block": 1.06,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 134.67,
+    "per_block": 1.27,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 410.68,
+    "per_block": 11.61,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 134.01,
+    "per_block": 1.41,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-6.0:plain": {
+   "prose": {
+    "tok_s": 91.86,
+    "per_block": 1.0,
+    "n": 384,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 90.75,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 90.71,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 88.24,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 88.26,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 88.83,
+    "per_block": 1.0,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-6.0:lookup": {
+   "prose": {
+    "tok_s": 90.28,
+    "per_block": 1.01,
+    "n": 384,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 92.75,
+    "per_block": 1.14,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 92.33,
+    "per_block": 1.08,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 99.46,
+    "per_block": 1.28,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 289.54,
+    "per_block": 10.65,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 105.29,
+    "per_block": 1.43,
+    "n": 2048,
+    "prompt": 48
+   }
+  }
+ }
+}
