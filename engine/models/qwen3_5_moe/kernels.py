@@ -152,6 +152,46 @@ def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Te
     return out
 
 
+#: whether SDPA's flash kernel takes the KV heads as they are on this device (None: not asked yet)
+FLASH_GQA = None
+
+
+def prompt_attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, L: int, block: int = 1024) -> torch.Tensor:
+    """A prompt chunk's attention: q [T, Hq, D] bf16 at cache rows [L, L + T) (their K and V written),
+    kc / vc [Hk, cap, D] -> o [T, Hq, D]; SDPA over rows [0, L + T) with the lower-right causal mask,
+    query blocks of `block` rows. The KV heads go in as they are (`enable_gqa`) on the flash kernel,
+    which SDPA picked on the Spark for the copy repeated per query head too: the same bits. The copy wrote and read
+    the whole context Hq / Hk = 16 times over (SRV-673): at 174k tokens a 3-row MTP prime took 87 ms a
+    layer against 6, a 1,024-row chunk 117 ms a layer against 70. Where the flash kernel refuses (no
+    such kernel on the device, the CPU), the repeated copy as before."""
+    global FLASH_GQA
+    import torch.nn.functional as F
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from torch.nn.attention.bias import causal_lower_right
+    T, HQ, D = q.shape
+    HK = kc.shape[0]
+    o = torch.empty(T, HQ, D, dtype=q.dtype, device=q.device)
+    for q0 in range(0, T, block):
+        q1 = min(q0 + block, T)
+        k = kc[:, :L + q1].unsqueeze(0)
+        v = vc[:, :L + q1].unsqueeze(0)
+        qh = q[q0:q1].transpose(0, 1).unsqueeze(0)
+        mask = causal_lower_right(q1 - q0, L + q1)
+        oo = None
+        if HQ != HK and q.is_cuda and FLASH_GQA is not False:
+            try:
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    oo = F.scaled_dot_product_attention(qh, k, v, attn_mask=mask, enable_gqa=True)
+                FLASH_GQA = True
+            except RuntimeError:
+                FLASH_GQA = False
+        if oo is None:
+            oo = F.scaled_dot_product_attention(qh, k.repeat_interleave(HQ // HK, 1), v.repeat_interleave(HQ // HK, 1),
+                                                attn_mask=mask)
+        o[q0:q1] = oo[0].transpose(0, 1)
+    return o
+
+
 def attn_rows_reference(q, kc, vc, ctl, anc):
     """The kernel's result in fp32 torch (`ctl[:, 0]` visible keys, `ctl[:, 1]` block start)."""
     M, HQ, D = q.shape

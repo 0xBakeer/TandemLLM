@@ -38,6 +38,11 @@ LFM2.5's legacy fingerprints reached neither 0.9.x's fp4 nor 0.10.0-0.11.1's. Th
   * LFM2.5's legacy fingerprints hold 0.10.0-0.11.1's fp4 too;
   * an edit to an LFM2.5 module with no entry reaches neither.
 
+SRV-673: Ornith's prompt attention reads the KV heads as they are (the same kernel and bits), which
+changed engine/models/qwen3_5_moe/engine.py and kernels.py; with their entries:
+
+  * Ornith's legacy fingerprints hold 0.13.0's fp4.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -77,6 +82,8 @@ FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "
 FP4_LFM25_011 = "9049446866c5e4fc"
 #: OPS-215: the fp4 of 0.12.2 by model (extra {}), before ENG-383's router took other expert counts
 FP4_0122 = {"flashnext": "dac45dfe10281b1e", "lfm25": "899978df1e8b979b", "nemotron_h": "8cfead8de4befc19"}
+#: SRV-673: Ornith-1.5-122B's fp4 of 0.13.0 (extra {}), before its prompt attention dropped the repeated KV
+FP4_0130_ORNITH = "78496db10e59d74d"
 
 
 def _sha(path):
@@ -260,6 +267,17 @@ def test_flash_next_lfm25_and_nemotron_h_adopt_0_12_2s_files():
         assert any(g.startswith(FP4_0122[name]) for g in got), (name, [g[:16] for g in got])
         out.append(f"{name} {FP4_0122[name]}")
     return ", ".join(out)
+
+
+def test_ornith_adopts_0_13_0s_files():
+    """SRV-673: engine/models/qwen3_5_moe/engine.py and kernels.py changed bytes, not rows; with their
+    entries a start adopts what 0.13.0 stored (the disk tier, the spilled conversations)."""
+    from engine.models.qwen3_5_moe import serving as q_serving
+    m = q_serving.manifest()
+    assert not mf.fingerprint(ROOT, m, {}).startswith(FP4_0130_ORNITH), "the files are 0.13.0's: drop the entries"
+    got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
+    assert any(g.startswith(FP4_0130_ORNITH) for g in got), [g[:16] for g in got]
+    return f"ornith {FP4_0130_ORNITH} among {len(got)} variants"
 
 
 if __name__ == "__main__":

@@ -54,6 +54,34 @@ def test_rows_attention():
     assert torch.equal(wide, o)
 
 
+def test_prompt_attention():
+    """SRV-673: the prompt chunk's attention with the KV heads as they are is SDPA over a copy repeated
+    per query head bit for bit on the GPU (the same flash kernel), over the cache's strided rows, in
+    query blocks; and the causal attention it stands for (each row its rows below and itself)."""
+    import torch.nn.functional as F
+    from torch.nn.attention.bias import causal_lower_right
+    g = torch.Generator().manual_seed(1)
+    HQ, HK, D, cap, L, T = 32, 2, 256, 2600, 1900, 300
+    kc = (torch.randn(HK, cap, D, generator=g) * 0.5).to(torch.bfloat16).to(DEV)
+    vc = torch.randn(HK, cap, D, generator=g).to(torch.bfloat16).to(DEV)
+    q = torch.randn(T, HQ, D, generator=g).to(torch.bfloat16).to(DEV)
+    o = K.prompt_attention(q, kc, vc, L, block=128)
+    ctl = torch.tensor([[L + t + 1, L + t + 1] for t in range(T)], dtype=torch.int32)
+    anc = torch.zeros(T, 1, dtype=torch.int32)
+    ref = K.attn_rows_reference(q.cpu(), kc.cpu(), vc.cpu(), ctl, anc)
+    assert (o.float().cpu() - ref).abs().max() < 2e-2 * ref.abs().max()
+    if DEV != "cuda":
+        return None
+    assert K.FLASH_GQA is True, "the flash kernel refused the KV heads as they are on this GPU"
+    for q0 in range(0, T, 128):
+        q1 = min(q0 + 128, T)
+        k, v = kc[:, :L + q1].unsqueeze(0), vc[:, :L + q1].unsqueeze(0)
+        rep = F.scaled_dot_product_attention(q[q0:q1].transpose(0, 1).unsqueeze(0), k.repeat_interleave(HQ // HK, 1),
+                                             v.repeat_interleave(HQ // HK, 1),
+                                             attn_mask=causal_lower_right(q1 - q0, L + q1))
+        assert torch.equal(rep[0].transpose(0, 1), o[q0:q1]), q0
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())

@@ -56,6 +56,11 @@ FORMULA = "fp4"
 #: up to 256; before it refused any count but 512, and at 512 it launches the same instantiation with the
 #: same arguments, so no row a released profile stored changes (by the code; not run on the GPU)
 #: OPS-219: engine/models/flashnext/ref.py's module docstring loses half a sentence; no code changes
+#: SRV-673: engine/models/qwen3_5_moe/engine.py's prompt chunks and MTP primes call kernels.py's new
+#: `prompt_attention`: SDPA over the KV heads as they are (`enable_gqa`) on the flash kernel in place of a
+#: copy repeated per query head (still the path where flash refuses); on the Spark its output equalled the
+#: repeated copy's bit for bit (tests/test_q35m_kernels.py), and a 179,678-token request wrote the same
+#: text plain and drafted, before and after
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -82,7 +87,11 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              ("engine/grammar.py", "9c6617a799bd64b1fdbc3cfc23a2eba5b2ee471b64d1d21b4da7dc23adf59c65"):
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
              ("engine/models/flashnext/ref.py", "497c681a0b2e8d33e45a3bb2d4f565b5983ca2edc9da021619048bdb258267c4"):
-             "f814ce162695f81e1ff8d7b80eb8c90619837f99e6cebb35f10bcb39983bf3f4"}
+             "f814ce162695f81e1ff8d7b80eb8c90619837f99e6cebb35f10bcb39983bf3f4",
+             ("engine/models/qwen3_5_moe/engine.py", "77fa0e939417f8a7a3f4402b9e65f9804544f91adbcf752e19c4a055e28b5520"):
+             "78fcdad2522b216c6d7f07c7cca8a6a065a79104231544eb01a8e60c839044fd",
+             ("engine/models/qwen3_5_moe/kernels.py", "2bc18f6e41b6f483360c5e0215e5df6f30da5ea254bfed026d212164dfc66331"):
+             "d6fa493c51d8746cc8b5a974bbc5e636c034894ffbd86a8e2ef8b4caaf5487d7"}
 
 
 def adoption() -> str:

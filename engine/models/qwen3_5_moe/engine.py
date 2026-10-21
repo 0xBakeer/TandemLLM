@@ -224,29 +224,17 @@ class Qwen35MoeEngine(FlashNextEngine):
 
     def _attn_pre(self, x, li, st):
         """Attention of a prompt chunk: q|k|v, the prep kernel (the chunk's K and V into the cache at
-        their positions), SDPA over the cache's rows [0, L + T) with the lower-right causal mask (query
-        blocks of 1,024 rows), the output gate, o_proj."""
-        import torch.nn.functional as F
-        from torch.nn.attention.bias import causal_lower_right
-
+        their positions), `kernels.prompt_attention` over the cache's rows [0, L + T), the output gate,
+        o_proj."""
         from tools import fn_kernels as K
         c, P = self.cfg, self._pre
         p = self.pre(li) + "self_attn."
-        T, L = x.shape[0], st.length
+        L = st.length
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
         qkv = self.lin(x, self.W[p + "qkv"])
         q = K.attn_prep(qkv, None, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
                         P["cos"], P["sin"], st.k[li], st.v[li], None, Hq, Hk, 0, c.rms_norm_eps, slot=P["pos"])
-        o = torch.empty(T, Hq, D, dtype=self.dtype, device=x.device)
-        rep = Hq // Hk
-        for q0 in range(0, T, 1024):
-            q1 = min(q0 + 1024, T)
-            k = st.k[li][:, :L + q1].unsqueeze(0)
-            v = st.v[li][:, :L + q1].unsqueeze(0)
-            qh = q[q0:q1].transpose(0, 1).unsqueeze(0)
-            oo = F.scaled_dot_product_attention(qh, k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1),
-                                                attn_mask=causal_lower_right(q1 - q0, L + q1))
-            o[q0:q1] = oo[0].transpose(0, 1)
+        o = AK.prompt_attention(q, st.k[li], st.v[li], L)
         y = K.gate_mul(o, qkv, D)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
