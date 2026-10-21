@@ -11,6 +11,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
+| [conductor.md](conductor.md) | the conductor in one page: modes and headers, profiles, the router, effort, packages, the note, side requests, sessions, the monitor and loop guards, the journal, raw mode, measured effect |
 | [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text, Flash-Next |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |

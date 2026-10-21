@@ -333,6 +333,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 - [Exactness](docs/exactness.md): what the engine promises about its text, and the near-tie exception
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
+- [The conductor](docs/conductor.md): what `TandemLLM` decides for each request, and where each rule is described
 - [Dashboard](docs/dashboard.md)
 - [The Chat tab](docs/chat.md), in beta: the sandbox, the permission modes, the known limitations
 - [Parallel requests](docs/parallel-requests.md)
