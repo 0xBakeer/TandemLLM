@@ -397,7 +397,10 @@ class Sandboxes:
 
     # ------------------------------------------------------------------ availability
     def available(self) -> bool:
-        """The image exists and the engine answers (cached for 60 s)."""
+        """The image exists and the engine answers (cached for 60 s). A check that gets no answer
+        (the Docker socket busy past 5 s, a reset) keeps the last answer: the sandbox's tools are
+        the prompt's head, and a flap would make the next request read the whole chat again
+        (SRV-663); a call while it is really gone fails as a call."""
         if self._avail is not None and self.clock() - self._avail[0] < 60:
             return self._avail[1]
         try:
@@ -405,6 +408,9 @@ class Sandboxes:
                                      f"/json", timeout=5)
             ok = st == 200
         except OSError:
+            if self._avail is not None:
+                self._avail = (self.clock(), self._avail[1])
+                return self._avail[1]
             ok = False
         self._avail = (self.clock(), ok)
         return ok

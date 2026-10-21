@@ -309,9 +309,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         self.emit(conv, {"type": "sandbox.changed", "sandbox": status})
 
     def library_available(self) -> bool:
+        """Whether the library's tools go into requests. A check that gets no answer (a busy
+        engine: the 3 s timeout, a reset) keeps the last answer (SRV-663): the tool list is the
+        prompt's head, and a flap dropped library_search and library_read from one request of a
+        196,472-token run on Ornith, which read it all again twice (2026-10-21 05:29, 05:42).
+        Only an answer of the engine's (any status) changes it."""
         if self._library is None or time.monotonic() - self._library[0] > 300:
             st, _ = self.engine.get_json("/v1/library", timeout=3.0)
-            self._library = (time.monotonic(), st == 200)
+            if st == 0 and self._library is not None:
+                self._library = (time.monotonic(), self._library[1])
+            else:
+                self._library = (time.monotonic(), st == 200)
         return self._library[1]
 
     def store_blob(self, cid: str | None, name: str, mime: str, data: bytes) -> dict:

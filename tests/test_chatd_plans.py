@@ -51,6 +51,37 @@ def test_plan_mode_only_reads():
         c.close()
 
 
+def test_a_check_that_gets_no_answer_keeps_the_tool_list():
+    """SRV-663 (live 2026-10-21 05:29 and 05:42, Ornith): the library check timed out once on a
+    busy engine, library_search and library_read left one request, and a 196,472-token run read
+    everything again twice (the tool list is the prompt's head). A check with no answer keeps the
+    last answer; an answer of the engine's changes it. The sandbox's check alike."""
+    c = Chat()
+    try:
+        svc = c.svc
+        answers = [(200, {}), (0, None), (0, None), (404, None)]
+        svc.engine.get_json = lambda path, timeout=3.0: answers.pop(0)
+        svc._library = None
+        assert svc.library_available() is True
+        for _ in range(2):
+            svc._library = (svc._library[0] - 301, svc._library[1])     # the 300 s are up
+            assert svc.library_available() is True                     # no answer: as it was
+        svc._library = (svc._library[0] - 301, svc._library[1])
+        assert svc.library_available() is False                        # the engine said 404
+        sb = svc.sandboxes
+        calls = [OSError("busy")]
+
+        def call(method, path, timeout=5):
+            if calls:
+                raise calls.pop(0)
+            return 200, None
+        sb.engine.call = call
+        sb._avail = (sb.clock() - 61, True)
+        assert sb.available() is True and not calls                    # no answer: as it was
+    finally:
+        c.close()
+
+
 def _prefix_kept(prev: dict, cur: dict) -> bool:
     n = len(prev["messages"])
     return (json.dumps(cur["messages"][:n]) == json.dumps(prev["messages"]) and
