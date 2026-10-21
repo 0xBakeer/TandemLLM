@@ -11,7 +11,10 @@ the slot. The engine log's cache lines of the window are counted beside it. Minu
 of a model run; on the box, beside a served engine (it adds one short request at a time).
 
     python tools/prefix_check.py <bodies.jsonl> [--url http://127.0.0.1:8000] [--side-at N]
-        [--limit N] [--log ~/tandem-bolt/logs/engine.log]
+        [--from N] [--limit N] [--no-side] [--log ~/tandem-bolt/logs/engine.log]
+
+`--from N` starts at request N (that one is read cold), so a long conversation's last steps are
+checked without its first hours; `--no-side` leaves the side request out.
 """
 
 from __future__ import annotations
@@ -71,19 +74,26 @@ def main(argv=None) -> int:
     ap.add_argument("--side-at", type=int, default=None, help="index of the request after which "
                     "a side request runs (default: the middle)")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--from", dest="start", type=int, default=0)
+    ap.add_argument("--no-side", action="store_true")
     ap.add_argument("--log", default=os.path.expanduser("~/tandem-bolt/logs/engine.log"))
     ap.add_argument("--ledger", default=LEDGER)
     a = ap.parse_args(argv)
     bodies = [json.loads(ln) for ln in open(a.bodies) if ln.strip()]
     if a.limit:
         bodies = bodies[:a.limit]
-    side_at = a.side_at if a.side_at is not None else len(bodies) // 2
+    first = max(0, a.start)
+    side_at = a.side_at if a.side_at is not None else (first + len(bodies)) // 2
+    if a.no_side:
+        side_at = -1
     session = "chat-prefixcheck-" + uuid.uuid4().hex[:8]
     head = {"x-session-id": session, "X-QSE-Client": "chat-app"}
     log0 = os.path.getsize(a.log) if os.path.exists(a.log) else 0
     prev_n, bad, rows = 0, [], []
     t_start = time.time()
     for k, b in enumerate(bodies):
+        if k < first:
+            continue
         body = {kk: v for kk, v in b.items() if kk not in ("stream_options",)}
         body.update(model="TandemLLM", stream=False, max_tokens=1)
         t0 = time.time()
@@ -93,7 +103,7 @@ def main(argv=None) -> int:
         fw = int(row.get("forwarded_tokens") or 0)
         tail = max(0, n - prev_n)
         allowed = tail + CHUNK + SLACK
-        ok = k == 0 or fw <= allowed
+        ok = k == first or fw <= allowed
         rows.append((k, n, fw, row.get("cache_source"), round(time.time() - t0, 1), ok))
         if not ok:
             bad.append(f"request {k}: read {fw:,} again of {n:,} (new tail {tail:,})")
