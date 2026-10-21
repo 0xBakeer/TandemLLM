@@ -166,6 +166,7 @@ KNOBS: dict[str, tuple] = {
     # its last one is served where the model saw it), and the prompt length from which a turn
     # the end anchor did not serve says why in the log
     'END_ALIGN_MOVED': ('on', 'server/endalign.py'),
+    'END_ALIGN_CALLS': ('on', 'server/endalign.py'),
     # FX17: a router note stays live when its user message still ends with the same tokens
     'NOTE_ANCHOR': ('on', 'server/conductor/router.py'),
     # FX17: a short new chat waits this long for a busy side slot before it takes slot 0 and

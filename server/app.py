@@ -10684,7 +10684,8 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
             STATE["end_align"] = endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
                 reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off",
-                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off")
+                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off",
+                calls=(_S.get("END_ALIGN_CALLS") or "on").strip().lower() != "off")
             STATE["end_align"].marks = _marks_of(tok)       # FX16: the moved-block pass
         # SRV-546: the guest stash's buffers while no guest's rows wait in them, before anything
         # that holds a conversation (live 10:14:34: the end anchor went for 0.31 GB, then 1.27 GB
@@ -10946,7 +10947,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
             values.update(resident=res_i, end_align=endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
                 reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off",
-                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off"))
+                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off",
+                calls=(_S.get("END_ALIGN_CALLS") or "on").strip().lower() != "off"))
             values["end_align"].marks = _marks_of(tok)
         slot = slots_mod.Slot(i, L, values=values)
         slots.append(slot)

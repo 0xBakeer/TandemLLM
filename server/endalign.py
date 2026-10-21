@@ -60,6 +60,8 @@ off`): `ResidentPrefix.replay` alone, as before.
 
 from __future__ import annotations
 
+import json
+
 WS = b" \t\n\r"
 THINK_END = b"</think>"
 #: engine/vision.py's KEY_BASE: ids at or above it are image rows' content keys
@@ -125,9 +127,11 @@ class EndAlign:
     """The whitespace alignment of a copy against the end anchor's rows, and the regions it may
     use. One per server; called under the engine lock, as the replay is."""
 
-    def __init__(self, tbytes, on: bool = True, reasoning: bool = True, moved: bool = True):
+    def __init__(self, tbytes, on: bool = True, reasoning: bool = True, moved: bool = True,
+                 calls: bool = True):
         self.tbytes = tbytes
         self.on = bool(on)
+        self.calls = bool(calls)          # SRV-679: a call the copy re-rendered, the same call
         self.reasoning = bool(reasoning)  # SRV-239: the second pass, without the reasoning
         self.moved = bool(moved)          # FX16: the third pass, a client's block that moved
         # the chat template's marks (`<|im_start|>`, the ids of `user`, `<|im_end|>`), for the
@@ -139,7 +143,8 @@ class EndAlign:
         self._carry: list[tuple[int, int, int]] = []    # the served prompt's, for the next `kept`
         self.stats = {"aligned": 0, "aligned_tokens": 0, "refused": 0, "regions": 0,
                       "aligned_reasoning": 0, "reasoning_tokens": 0,
-                      "aligned_moved": 0, "moved_tokens": 0, "partial": 0, "partial_tokens": 0}
+                      "aligned_moved": 0, "moved_tokens": 0, "partial": 0, "partial_tokens": 0,
+                      "aligned_calls": 0, "calls_tokens": 0}
         # SRV-657: the rows ranges the first pass found token for token in the copy, (rows start,
         # rows end, copy start), for a partial alignment (`_partial`); and the rows line the last
         # `replay` served a partial alignment up to (None: a whole one, or none)
@@ -275,7 +280,8 @@ class EndAlign:
                       "mark": end.get("mark"),
                       # FX16: the notes the client never sent, for the moved-block pass
                       "served_hidden": [(int(a), int(b)) for a, b in (end.get("served_hidden") or ())]})
-        probe = EndAlign(self.tbytes, on=True, reasoning=self.reasoning, moved=self.moved)
+        probe = EndAlign(self.tbytes, on=True, reasoning=self.reasoning, moved=self.moved,
+                         calls=self.calls)
         probe.marks = self.marks
         probe.adopt(rows, regions or [])
         return probe._align(rows, list(copy)) is not None
@@ -513,11 +519,15 @@ class EndAlign:
                 segs.append((i, a, j))
             j += a - i
             want = b"".join(_bare(tb(rows[p])) for p in range(a, b) if p not in hid)
-            pos = 0
+            pos, j0 = 0, j
             while pos < len(want):
                 piece = _bare(tb(copy[j])) if j < len(copy) else None
                 if piece is None or want[pos:pos + len(piece)] != piece:
-                    return self._refuse("in_zone", c, e, at=a)
+                    k = self._calls_zone(rows, a, b, e, hid, copy, j0)
+                    if k is None:
+                        return self._refuse("in_zone", c, e, at=a)
+                    j, pos = k, len(want)
+                    break
                 pos += len(piece)
                 j += 1
             i = b
@@ -533,8 +543,86 @@ class EndAlign:
         self.stats["aligned_tokens"] += aligned
         return rows[:e] + copy[j + e - i:], aligned, left
 
+    def _calls_zone(self, rows: list, a: int, b: int, e: int, hid: set, copy: list[int],
+                    j: int) -> int | None:
+        """SRV-679: a generation whose tool calls the copy re-rendered in more than whitespace (a
+        boolean the parser typed and the template wrote back as `True`, a number as `1.0`, an
+        object's keys sorted by `tojson`, its characters escaped). Where the copy's text of the
+        generation -- up to its `<|im_end|>` -- holds the same calls as the rows' (each the same
+        name and the same arguments once every value is read as JSON) and the same text around
+        them up to whitespace, the rows' tokens are served for it: the model reads its calls as
+        it wrote them, which is also what the template's copy means. The copy's position after
+        the generation, or None (no marks, no call in it, anything else different)."""
+        if not self.calls or self.marks is None:
+            return None
+        im_end = self.marks[2]
+        if b < e and rows[b] != im_end:
+            return None
+        try:
+            k = copy.index(im_end, j)
+        except ValueError:
+            return None
+        tb = self.tbytes
+        mine = b"".join(tb(rows[p]) for p in range(a, b) if p not in hid)
+        theirs = b"".join(tb(t) for t in copy[j:k])
+        if b"<tool_call>" not in mine:
+            return None
+        got = same_calls(mine.decode("utf-8", "replace"), theirs.decode("utf-8", "replace"))
+        if not got:
+            return None
+        self.stats["aligned_calls"] += 1
+        self.stats["calls_tokens"] += b - a
+        return k
+
     def report(self) -> dict:
-        return {"on": self.on, "reasoning": self.reasoning, **self.stats}
+        return {"on": self.on, "reasoning": self.reasoning, "calls": self.calls, **self.stats}
+
+
+def _canon(v):
+    """A call's argument as the value it means: a string read as JSON (or Python's True, False
+    and None, the template's `|string` of a typed value), recursively; JSON text, keys sorted."""
+    def read(x):
+        if isinstance(x, str):
+            t = x.strip()
+            if t in ("True", "False", "None"):
+                return {"True": True, "False": False, "None": None}[t]
+            try:
+                return read(json.loads(t))
+            except ValueError:
+                return t
+        if isinstance(x, dict):
+            return {str(k): read(y) for k, y in x.items()}
+        if isinstance(x, list):
+            return [read(y) for y in x]
+        if isinstance(x, float) and x.is_integer() and abs(x) < 2 ** 53:
+            return int(x)                  # `1` typed as a number is written back `1.0`
+        return x
+    return json.dumps(read(v), sort_keys=True)
+
+
+def same_calls(mine: str, theirs: str) -> bool:
+    """SRV-679: the two texts of one generation hold the same tool calls (names and arguments as
+    values, in order, at least one) and the same text around them, whitespace aside."""
+    from server import toolcall
+    try:
+        ca, a = toolcall.parse_tool_calls(mine)
+        cb, b = toolcall.parse_tool_calls(theirs)
+    except Exception:                                              # noqa: BLE001
+        return False
+    if not a or len(a) != len(b):
+        return False
+    if _bare(ca.encode()) != _bare(cb.encode()):
+        return False
+    for x, y in zip(a, b):
+        fx, fy = x["function"], y["function"]
+        if fx["name"] != fy["name"]:
+            return False
+        try:
+            if _canon(json.loads(fx["arguments"])) != _canon(json.loads(fy["arguments"])):
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 class _Rows:
