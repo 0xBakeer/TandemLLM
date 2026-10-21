@@ -88,14 +88,17 @@ def test_filters_pipes_and_bad_files_are_refused():
 # ---------------------------------------------------------------------- through chatd
 class HostBoxes(FakeBoxes):
     """A sandbox played on the host for the runner: the command runs with HOME = the chat's home
-    folder. Only the fixtures without requirements or pydantic run here."""
+    folder, in the chat's workspace folder (a container's /workspace; in the test's own folder the
+    sandbox start's `git init .` made a repository of a release tree, OPS-223). Only the fixtures
+    without requirements or pydantic run here."""
 
     def run(self, cid, cmd, *, timeout=600, on_output=None, cancel=None):
         self.ran.append(cmd)
-        _, home, _ = self.paths(cid)
+        ws, home, _ = self.paths(cid)
         os.makedirs(home, exist_ok=True)
+        os.makedirs(ws, exist_ok=True)
         cmd = [x.replace("python3 run.py", f"{sys.executable} run.py") for x in cmd]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=ws,
                            env={**os.environ, "HOME": home})
         on_output and on_output(p.stdout + p.stderr)
         return p.returncode, False

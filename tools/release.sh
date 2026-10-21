@@ -469,6 +469,7 @@ if want verify; then
         PREV="$(prev_tag "$TAG_SHA" 2>/dev/null || true)"
         check_hf "$PREV" "$TAG_SHA"
     fi
-    [ "$FAILS" = 0 ] && say "VERIFY: all checks pass" || die "verify: $FAILS failed"
+    if [ "$FAILS" != 0 ]; then die "verify: $FAILS failed"; fi
+    if [ -z "$TAG_SHA" ]; then say "VERIFY: listed (dry run)"; else say "VERIFY: all checks pass"; fi
 fi
 exit 0

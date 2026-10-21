@@ -98,7 +98,17 @@ GATEPY="$GATE/pyenv/bin/tandem-gate-py"
 section "Release"
 REL="$GATE/release"
 mkdir -p "$REL"
-( cd "$SRC_TREE" && { git ls-files 2>/dev/null || find . -type f -not -path './.git/*' | sed 's|^\./||'; } \
+# git's file list only where the tree is a checkout with a commit of its own (a release archive has no
+# .git, and an empty or enclosing repository would list nothing or other files: OPS-223)
+listing() {
+    if [ "$(git -C "$SRC_TREE" rev-parse --show-toplevel 2>/dev/null)" = "$SRC_TREE" ] \
+            && git -C "$SRC_TREE" rev-parse -q --verify HEAD > /dev/null 2>&1; then
+        git -C "$SRC_TREE" ls-files
+    else
+        ( cd "$SRC_TREE" && find . -type f -not -path './.git/*' | sed 's|^\./||' )
+    fi
+}
+( cd "$SRC_TREE" && listing \
     | grep -vE '^(run|logs|train|results|dashboard/node_modules)/' | tar -cf - -T - ) | tar -xf - -C "$REL"
 git -C "$REL" init -q && git -C "$REL" add -A && \
     git -C "$REL" -c user.name=gate -c user.email=gate@example.invalid commit -qm "release under test" || exit 2
