@@ -396,6 +396,29 @@ def test_7b_an_exception_says_where_it_was_thrown():
                     "exception: Uncaught SyntaxError"], errs
 
 
+def test_7c_a_shader_error_keeps_the_compiler_lines():
+    """Ornith's reef replay (2026-10-21): three.js's shader error came back clipped after its first
+    `ERROR:` line, and the model read the library for 14 calls. The report keeps the first line,
+    every compiler error line and the marked source line, without the source dump; other errors
+    are clipped as before."""
+    dump = "\n".join(f"{i}: float x{i} = 0.0;" for i in range(1700, 1766))
+    msg = ("THREE.WebGLProgram: Shader Error 0 - VALIDATE_STATUS false\n\nMaterial Name: \n"
+           "Material Type: MeshStandardMaterial\n\nProgram Info Log: Fragment shader is not "
+           "compiled.\n\nFRAGMENT\n\nERROR: 0:1768: 'vReefW' : undeclared identifier\n"
+           "ERROR: 0:1771: 'uTime' : undeclared identifier\n\n" + dump +
+           "\n> 1768: \tfloat r = vReefW.y * 0.5;\n1769: }")
+    ev = [{"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [
+              {"type": "string", "value": msg}]}},
+          {"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [
+              {"type": "string", "value": "x" * 400}]}}]
+    errs, _ = ld._problems(ev)
+    assert errs[0] == ("console: THREE.WebGLProgram: Shader Error 0 - VALIDATE_STATUS false\n"
+                       "ERROR: 0:1768: 'vReefW' : undeclared identifier\n"
+                       "ERROR: 0:1771: 'uTime' : undeclared identifier\n"
+                       "> 1768: \tfloat r = vReefW.y * 0.5;"), errs[0]
+    assert errs[1] == "console: " + "x" * 231 + "...", errs[1]
+
+
 def test_8_browser_cdp_and_the_in_page_kit():
     if ld.find_chrome() is None:
         print("    (skipped: no Chrome or Chromium on this machine)")

@@ -46,6 +46,7 @@ import glob
 import hashlib
 import http.client
 import json
+import re
 import os
 import shlex
 import shutil
@@ -713,6 +714,30 @@ def _short(v, n: int = 300):
     return t if len(t) <= n else t[:n] + "..."
 
 
+#: a GLSL compiler's error line (`ERROR: 0:1768: 'vReefW' : undeclared identifier`), and the
+#: marked source line three.js prints after the log (`> 1768: ...`)
+_GLSL_ERROR = re.compile(r"^\s*(ERROR: \d+:\d+: .*|>\s*\d+: .*)$", re.M)
+
+
+def _error_line(x: str, n: int = 240) -> str:
+    """One console error as the report carries it: clipped at `n`, but a shader compile or link
+    error keeps its first line and every compiler error line and marked source line, the source
+    dump left out. Live (2026-10-21, Ornith's reef replay) the clip ended right after the first
+    `ERROR: 0:1768:`, and the model spent 14 of its 100 calls reading three.js's WebGLProgram to
+    find what the compiler had already said."""
+    lines = _GLSL_ERROR.findall(x)
+    if not lines:
+        return _short(x, n)
+    head = x.strip().split("\n")[0][:n]
+    keep, seen = [], set()
+    for ln in (ln.strip() for ln in lines):
+        if ln not in seen:
+            seen.add(ln)
+            keep.append(_short(ln, 200))
+    more = len(keep) - 12
+    return "\n".join([head] + keep[:12] + ([f"({more} more compiler lines)"] if more > 0 else []))
+
+
 def _problems(events: list[dict]) -> tuple[list[str], int]:
     """(console errors, uncaught exceptions and failed loads; the number of warnings). A missing
     favicon is not the page's fault."""
@@ -746,7 +771,7 @@ def _problems(events: list[dict]) -> tuple[list[str], int]:
     seen: dict = {}
     for x in errs:
         seen[x] = seen.get(x, 0) + 1
-    return [_short(x, 240) for x, n in seen.items()], warns
+    return [_error_line(x) for x, n in seen.items()], warns
 
 
 class PageCheck:
