@@ -102,6 +102,16 @@ register(Arch(
     serve="engine.models.qwen3_5_moe.serving:serve",
 ))
 
+register(Arch(
+    name="flint",
+    architectures=("FlintForCausalLM",),
+    model_types=("flint",),
+    config="engine.models.flint.config:load_flint_config",
+    engine="engine.models.flint.engine:FlintEngine",
+    package="models/flint",
+    serve="engine.models.flint.serving:serve",
+))
+
 
 def architecture(raw: dict) -> Arch:
     """The registered architecture of a checkpoint's config.json, by its `architectures` list

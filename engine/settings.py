@@ -352,6 +352,10 @@ KNOBS: dict[str, tuple] = {
     'Q35M_SIBLINGS': ('0', 'engine/models/qwen3_5_moe/serving.py'),
     # rounds after an anchor-only cut that take the plain step (1, 2, 4 .. up to this; 0 = off)
     'Q35M_ANCHOR_BACKOFF': ('0', 'engine/models/qwen3_5_moe/serving.py'),
+    # Flint: the lookup cut by StairCut (0 = plain decode); rounds after an anchor-only cut that take the plain
+    # step (1, 2, 4 .. up to this; 0 = off)
+    'FLINT_LOOKUP': ('1', 'engine/models/flint/serving.py'),
+    'FLINT_ANCHOR_BACKOFF': ('0', 'engine/models/flint/serving.py'),
 }
 
 
