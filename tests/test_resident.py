@@ -238,16 +238,31 @@ def test_the_anchor_budget_bounds_memory_and_keeps_the_newest():
     assert torch.equal(warm, lg)
 
 
-def test_a_session_start_leaves_no_anchors():
-    """A session snapshot was written by verify blocks: nothing after it is a cold state."""
+def test_a_session_start_keeps_the_rows_as_a_sessions():
+    """A session snapshot was written by verify blocks: nothing after it is a cold state. Until
+    SRV-678 the prefix took nothing of such a prompt, and the generation after it kept no end
+    anchor; the restore writes the snapshot's rows in place, so the prefix takes them with
+    `taint` 0: its anchors are resumes under the gate (the same greedy token as cold), and no
+    prefix snapshot is taken of them."""
     turn1 = tokens(48, seed=26)
     store = cache.StateStore(BIG, chunk=CH)
     res, eng = resident(), fresh()
     cache.prefill(eng, None, turn1, DEV, store=store, chunk=CH, resident=res)
     store.put(turn1, cache.capture(eng), kind="session")
+    puts = store.stats["puts"]
     turn2 = turn1 + tokens(60, seed=27)
-    cache.prefill(eng, None, turn2, DEV, store=store, chunk=CH, resident=res)
-    assert res.valid == 0 and not res.anchors
+    info = {}
+    cache.prefill(eng, None, turn2, DEV, store=store, chunk=CH, resident=res, info=info,
+                  checkpoint=True)
+    assert info["kind"] == "session" and res.valid == len(turn2) and res.taint == 0
+    assert sorted(res.anchors) and min(res.anchors) > len(turn1), sorted(res.anchors)
+    assert store.stats["puts"] == puts, "no prefix snapshot of a session's rows"
+    b = max(res.anchors)
+    turn3 = turn2[:b + 3] + tokens(20, seed=28)
+    warm, reused, _ = cache.prefill(eng, None, turn3, DEV, chunk=CH, resident=res)
+    assert reused == b
+    _, lg = cold(turn3)
+    assert int(warm.argmax()) == int(lg.argmax())
 
 
 class Pos:
