@@ -1,0 +1,50 @@
+{
+ "0": {
+  "chain": {
+   "1": 8.513,
+   "2": 10.906,
+   "3": 12.394,
+   "4": 13.873,
+   "5": 15.229,
+   "6": 16.267,
+   "7": 17.447,
+   "8": 18.456,
+   "9": 19.767,
+   "10": 21.063,
+   "11": 21.818,
+   "12": 22.791,
+   "13": 23.982,
+   "14": 25.003,
+   "15": 25.732,
+   "16": 26.228
+  },
+  "plain": {
+   "1": 8.143
+  }
+ },
+ "32768": {
+  "chain": {
+   "1": 10.588,
+   "2": 12.828,
+   "3": 14.384,
+   "4": 15.848,
+   "5": 17.539,
+   "6": 18.745,
+   "7": 20.256,
+   "8": 21.266,
+   "9": 23.1,
+   "10": 24.419,
+   "11": 25.887,
+   "12": 27.339,
+   "13": 28.557,
+   "14": 29.998,
+   "15": 31.186,
+   "16": 32.752
+  },
+  "plain": {
+   "1": 8.143
+  }
+ },
+ "step_ms": 1.57,
+ "measured": "tools/flint_check.py staircase and bench on stair-4.0.json, bench-4.0.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut drafts and learns them online."
+}
