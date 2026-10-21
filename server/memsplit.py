@@ -247,9 +247,9 @@ def split(state: dict, probe=None, avail=mem_available, total=mem_total, pool=No
     vmm = 0
     if kinds is not None and kinds.get("paged"):
         for name, key in (("kv_pool", "engine_kv"), ("drafter_kv", "drafter_kv"), ("kv_pool", "other")):
-            # SRV-655: Flash-Next's and the Qwen3.5 MoE trunk's rows (`fn.*` buffers) are the pool's
-            # "other" kind; their adapters count no paged bytes themselves (the window's addresses,
-            # 6.44 GB on Ornith with 0.61 committed, were its KV here)
+            # SRV-655: a model whose KV buffers are not named `kv.*` has its rows in the pool's
+            # "other" kind; its adapter counts no paged bytes itself (a 262,144-row window's
+            # addresses, 6.44 GB with 0.61 committed, were its KV here)
             if kinds.get(key):
                 put(name, kinds[key])
                 if name not in vmm_parts:
