@@ -428,10 +428,13 @@ def test_a_worker_cannot_delegate():
         assert names == [t for t in T.WORKER_TOOLS if t in names]           # BUILTINS order
         main = [t["function"]["name"] for t in main_calls(c, cid)[0][1]["tools"]]
         assert main[-1] == "task" or "task" in main
-        # plan mode keeps the read tools and the todo list: no task, Agents mode or not
+        # plan mode keeps the request's tool list (SRV-663: the head stays); the run refuses
+        # every call but the read tools and the todo list, task too
         settings = {**c.svc.settings_of(cid), "plan_mode": True}
         info = c.svc.model_info(settings.get("model"))
-        assert "task" not in [t.name for t in c.svc.tools_for(settings, info, cid, agents=True)]
+        assert [t.name for t in c.svc.tools_for(settings, info, cid, agents=True)] == \
+            [t.name for t in c.svc.tools_for({**settings, "plan_mode": False}, info, cid,
+                                             agents=True)]
         # no picker lists it
         assert "task" not in [t["id"] for t in c.ok("GET", "/tools")]
         assert "task" not in c.ok("GET", "/capabilities")["defaults"]["tools"]

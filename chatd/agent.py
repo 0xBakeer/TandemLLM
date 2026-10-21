@@ -15,7 +15,7 @@ from chatd import compaction as comp
 from chatd import egress, render
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
-from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
+from chatd.plans import PLAN_REFUSAL, PLAN_TOOLS
 from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
 from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note, ws_digest
@@ -338,9 +338,10 @@ class AgentMixin:
             out = [t for t in out if t.needs != "web_search"]
         if cid and self.root_cid(cid) != cid:
             return [t for t in out if t.name in tools_mod.WORKER_TOOLS]
-        if settings.get("plan_mode"):
-            # SRV-363: the read tools and the todo list, nothing that changes the world
-            return [t for t in out if t.name in PLAN_TOOLS]
+        # SRV-363: plan mode runs the read tools and the todo list only; since SRV-663 the request
+        # keeps every tool (the run refuses the others, `PLAN_REFUSAL`): a tool list that changed
+        # with the mode changed the prompt's head, and the turn into plan mode and the turn out
+        # of it read the whole conversation again (84,423 tokens cold, live 2026-10-21 03:31)
         if agents:
             # SRV-583: no bash, write_file or edit_file; the todo list and task
             out = [t for t in out if t.name in tools_mod.AGENTS_TOOLS] + [tools_mod.BY_NAME["task"]]
@@ -535,7 +536,8 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
-            if tool is None and settings.get("plan_mode") and self.tool(part.get("name") or ""):
+            if settings.get("plan_mode") and part.get("name") not in PLAN_TOOLS and (
+                    tool is not None or self.tool(part.get("name") or "")):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
             if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
@@ -761,10 +763,10 @@ class AgentMixin:
             prompt = r["template"] if r else None
         skills = self.skill_index(settings) if hasattr(self, "skill_index") else None
         today = _dt.date.today().isoformat() if tools else None
+        # the plan rule rides on the plan turn's user message (`plans.plan_onto`), not here: the
+        # system block is the prompt's head, the same in and out of plan mode (SRV-663)
         return render.system_block(today=today, tools=bool(tools), summary=summary,
-                                   skills=skills, prompt=prompt,
-                                   plan=PLAN_RULE if settings.get("plan_mode") and not worker
-                                   else None, worker=worker, agents=agents)
+                                   skills=skills, prompt=prompt, worker=worker, agents=agents)
 
     def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c,
                  head: dict | None = None, **kw) -> dict:

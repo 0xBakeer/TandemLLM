@@ -838,6 +838,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             self.store.run("UPDATE conversations SET head_id = ? WHERE id = ?", (mid, conv.id))
         else:
             self.todos_onto(conv.id, user_mid)
+            self.plan_onto(conv.id, user_mid)
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}

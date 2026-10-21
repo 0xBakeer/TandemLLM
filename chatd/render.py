@@ -72,6 +72,9 @@ def _user(m: dict, vision: bool, blob=None) -> dict:
     todos = text_of(parts, "todos")                 # the open todo list at the run's start
     if todos:
         text += "\n\n" + todos
+    plan = text_of(parts, "plan")                   # plan mode's rule, on its turn (SRV-663)
+    if plan:
+        text += "\n\n" + plan
     images = []
     for a in m.get("attachments") or []:
         data = blob(a) if blob is not None else None
