@@ -2860,12 +2860,20 @@ def _say_reread(cid: str, res, copy: list[int], plan, why_mm: str | None = None)
 def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
     """The end anchor's replay of a client's copy: the hidden spans put back
     (`ResidentPrefix.replay`), or, with `--end-align on`, the copy aligned to the rows where it
-    differs from them in whitespace alone (server/endalign.py). `(ids, spans, tokens aligned)`."""
+    differs from them in whitespace alone (server/endalign.py); when no pass aligns the whole
+    copy, the part up to the highest anchor it aligns (SRV-657). `(ids, spans, tokens aligned)`."""
     al = STATE.get("end_align")
     if al is None:
         out, spans = res.replay(ids)
         return out, spans, 0
-    return al.replay(res, ids)
+    got = al.replay(res, ids)
+    if al.last_partial is not None and res.end is not None:
+        ref = (al.last_refusal or {})
+        print(f"[cache] end alignment partial: the rows served up to token {al.last_partial:,} of "
+              f"{int(res.end['at']):,} (the copy parts from them at {ref.get('c', 0):,}; the whole "
+              f"refused: {ref.get('why')}" + (f" at {ref['at']:,}" if ref.get("at") is not None else "")
+              + ")", flush=True)
+    return got
 
 
 def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
