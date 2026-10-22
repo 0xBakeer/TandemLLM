@@ -15,6 +15,7 @@
     $PY tools/flint_check.py staircase --model <dir>               verify ms for 1..16 rows, the experts a block
                                                                    reads, prefill tok/s
     $PY tools/flint_check.py prices --stair s.json --bench b.json --out <price file>
+    $PY tools/flint_check.py kvfp8 --model <dir> --bundle <dir>    the e4m3 cache (FLINT_KV_FP8) against the bf16 one
     $PY tools/flint_check.py audit --pack <dir>                    the pack's audit record (CPU)
 
 A comparison reports, over every position: the argmax agreement, the positions where the two disagree and
@@ -278,6 +279,74 @@ def cmd_bundle(a) -> None:
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 
+def _teacher(eng, st, ids: torch.Tensor, start: int, block: int) -> torch.Tensor:
+    """Logits of rows `start`.. of `ids` teacher-forced through verify blocks of `block` rows after a prefill
+    of the first `start` (each block reads the cache the rows before it left), fp32 on the host."""
+    from engine.models.flint.ref import chain
+    eng.prefill(ids[:start], st, head="none")
+    out = []
+    for a in range(start, ids.numel(), block):
+        toks = [int(t) for t in ids[a:a + block]]
+        eng.stage_rows(toks, chain(len(toks)), st)
+        out.append(eng.rows_step(st, len(toks)).float().cpu().clone())
+        eng.commit(st, list(range(len(toks))))
+    return torch.cat(out)
+
+
+def _kl_rows(p_logits: torch.Tensor, q_logits: torch.Tensor, tgt: torch.Tensor) -> dict:
+    p, q = torch.log_softmax(p_logits, -1), torch.log_softmax(q_logits, -1)
+    kl = (p.exp() * (p - q)).sum(-1)
+    n = tgt.numel()
+    return {"kl_mean": round(float(kl.mean()), 5), "kl_median": round(float(kl.median()), 5),
+            "kl_p90": round(float(kl.quantile(0.9)), 4),
+            "top1_agree_pct": round(100 * float((p_logits.argmax(-1) == q_logits.argmax(-1)).float().mean()), 2),
+            "ppl_exact": round(float(torch.exp(-p[:n].gather(1, tgt[:, None]).mean())), 4),
+            "ppl_fp8": round(float(torch.exp(-q[:n].gather(1, tgt[:, None]).mean())), 4)}
+
+
+def cmd_kvfp8(a) -> None:
+    """FLINT_KV_FP8 against the exact cache, one engine with both states: each bundle row prefilled to
+    `--start` tokens, the rest teacher-forced through `--block`-row verify blocks that read the cache (the
+    path decode and drafting take); then one long prompt of held-out text to `--long` tokens, its last
+    `--tail` tokens teacher-forced the same way. KL, top-1 and perplexity of the e4m3 cache against the bf16."""
+    from safetensors.torch import load_file
+    from engine.models.flint.engine import ROWS_MAX
+    from transformers import AutoTokenizer
+    idx, eng, info = _engine(a.model, max(a.max_len, a.long + 64))
+    c = eng.cfg
+
+    def state(fp8: bool):
+        eng.kv_fp8 = fp8
+        if fp8 and eng._kst is None:
+            eng._kst = torch.zeros(c.num_key_value_heads, ROWS_MAX + 1, c.head_dim, dtype=eng.dtype, device=eng.device)
+            eng._vst = torch.zeros_like(eng._kst)
+        return eng.new_state(max(a.max_len, a.long + 64))
+    d = load_file(os.path.join(a.bundle, "input_ids.safetensors"))
+    ids = d["input_ids"] if "input_ids" in d else torch.cat([d[f"tensor.{i}"] for i in range(len(d))])
+    ids = ids.view(-1, ids.shape[-1])
+    res = {"model": a.model, "block": a.block, "start": a.start, "rows": ids.shape[0], "length": ids.shape[1]}
+    P, Q, T = [], [], []
+    for r in range(ids.shape[0]):
+        # a row's last logit has no target in the row: dropped, so the rows line up with T when joined
+        P.append(_teacher(eng, state(False), ids[r], a.start, a.block)[:-1])
+        Q.append(_teacher(eng, state(True), ids[r], a.start, a.block)[:-1])
+        T.append(ids[r, a.start + 1:].long())
+    res["bundle"] = _kl_rows(torch.cat(P), torch.cat(Q), torch.cat(T))
+    print(json.dumps({"bundle": res["bundle"]}), flush=True)
+    tok = AutoTokenizer.from_pretrained(a.model)
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench")
+    text = "\n\n".join(open(os.path.join(root, f)).read() for f in ("heldout_prose.txt", "heldout_code.txt", "calib.txt"))
+    base = tok(text, add_special_tokens=False)["input_ids"]
+    lid = torch.tensor((base * (a.long // len(base) + 1))[:a.long])
+    s0 = a.long - a.tail
+    p = _teacher(eng, state(False), lid, s0, a.block)
+    q = _teacher(eng, state(True), lid, s0, a.block)
+    res["long"] = {"tokens": a.long, "tail": a.tail, **_kl_rows(p, q, lid[s0 + 1:].long())}
+    print(json.dumps({"long": res["long"]}), flush=True)
+    if a.json:
+        json.dump(res, open(a.json, "w"), indent=1)
+
+
 def cmd_staircase(a) -> None:
     """Verify blocks of 1..16 rows (chains) from captured graphs at two context lengths: ms a block
     (CUDA events, the median of `reps`), and the distinct experts the block's rows route to, summed
@@ -426,6 +495,15 @@ def main() -> None:
     b.add_argument("--prefill", type=int, default=4096)
     b.add_argument("--max-len", type=int, default=8192)
     b.add_argument("--json")
+    kv = sub.add_parser("kvfp8")
+    kv.add_argument("--model", required=True)
+    kv.add_argument("--bundle", required=True)
+    kv.add_argument("--start", type=int, default=128)
+    kv.add_argument("--block", type=int, default=16)
+    kv.add_argument("--long", type=int, default=65536)
+    kv.add_argument("--tail", type=int, default=512)
+    kv.add_argument("--max-len", type=int, default=8192)
+    kv.add_argument("--json")
     s = sub.add_parser("staircase")
     s.add_argument("--model", required=True)
     s.add_argument("--contexts", type=int, nargs="+", default=[2048, 16384])
@@ -444,7 +522,7 @@ def main() -> None:
     a = ap.parse_args()
     {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "bundle": cmd_bundle,
      "mkbundle": cmd_mkbundle,
-     "bench": cmd_bench, "staircase": cmd_staircase}[a.cmd](a)
+     "bench": cmd_bench, "staircase": cmd_staircase, "kvfp8": cmd_kvfp8}[a.cmd](a)
 
 
 if __name__ == "__main__":

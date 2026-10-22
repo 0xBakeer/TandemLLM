@@ -48,7 +48,8 @@ TABLES = ("ops/flint-dense-splits.json",)
 
 
 def manifest() -> Manifest:
-    return Manifest(arch="flint", modules=MODULES, data=TABLES)
+    # an e4m3 cache stores other rows: its entries are another arch's, never read as the bf16 cache's
+    return Manifest(arch="flint-kvfp8" if _S.get("FLINT_KV_FP8") == "1" else "flint", modules=MODULES, data=TABLES)
 
 
 def _tensors(o) -> list:
@@ -119,6 +120,8 @@ class FlintCacheState(SectionState):
         for li in sorted(st.k):
             if li not in st.ring:
                 out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+                if li in st.ks:
+                    out += [(f"ks.{li}", st.ks[li], 1), (f"vs.{li}", st.vs[li], 1)]
         return out
 
 
@@ -176,7 +179,9 @@ class FlintServing:
         """A snapshot: the sliding layers' rings whole; K and V of the full layers a token (bf16)."""
         st = self.st
         sec = sum(st.k[li].numel() * st.k[li].element_size() * 2 for li in st.ring)
-        per_tok = 2 * self.cfg.kv_dim * 2 * len(self.cfg.full_layers)
+        # bf16 K and V, or e4m3 codes and one fp32 scale a head (FLINT_KV_FP8)
+        per_tok = (2 * (self.cfg.kv_dim + 4 * self.cfg.num_key_value_heads) if self.fn.kv_fp8
+                   else 2 * self.cfg.kv_dim * 2) * len(self.cfg.full_layers)
         return CostModel(section_bytes=sec, view_bytes_per_token=per_tok, parts={"recurrent": 0, "conv": 0, "ring": sec})
 
     def manifest(self) -> Manifest:

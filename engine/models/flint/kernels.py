@@ -44,10 +44,10 @@ SW_CHUNKS = 2
 if HAVE_TRITON:
 
     @triton.jit
-    def _attn_split(Q, K, V, CTL, ANCT, PM, PL, PACC, s_kh, s_kn, s_vh, s_vn, WIN, RING,
+    def _attn_split(Q, K, V, CTL, ANCT, PM, PL, PACC, s_kh, s_kn, s_vh, s_vn, WIN, RING, KS, VS, s_sh,
                     SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr, HK: tl.constexpr,
                     BM: tl.constexpr, BN: tl.constexpr, CHUNK_: tl.constexpr, NA: tl.constexpr, NS: tl.constexpr,
-                    SLIDING: tl.constexpr, DOT32_: tl.constexpr, PDL: tl.constexpr = False):
+                    SLIDING: tl.constexpr, DOT32_: tl.constexpr, PDL: tl.constexpr = False, FP8: tl.constexpr = False):
         # CTL[t] = (visible keys n = pos + 1, block start L): key c < L is cache position c, c >= L the
         # row's ancestor at depth c - L (ANCT[t, c - L], a cache slot = its position); a sliding layer
         # sees c >= n - WIN only and reads slot % RING
@@ -83,7 +83,13 @@ if HAVE_TRITON:
             slot = tl.where(tail, a, cols)
             if SLIDING:
                 slot = slot % RING
-            k = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
+            if FP8:
+                # an e4m3 cache (FLINT_KV_FP8): the codes times the (head, token) scale, rounded to bf16
+                kq = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0)
+                ksc = tl.load(KS + kvh * s_sh + slot, mask=cmask, other=0.0)
+                k = (kq.to(tl.float8e4nv, bitcast=True).to(tl.float32) * ksc[:, None]).to(tl.bfloat16)
+            else:
+                k = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
             if DOT32_:
                 s = tl.dot(q.to(tl.float32), tl.trans(k.to(tl.float32))) * SCALE
             else:
@@ -94,7 +100,12 @@ if HAVE_TRITON:
             p = tl.exp(s - m_safe[:, None])
             alpha = tl.exp(m_i - m_safe)
             l_i = l_i * alpha + tl.sum(p, 1)
-            v = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
+            if FP8:
+                vq = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0)
+                vsc = tl.load(VS + kvh * s_sh + slot, mask=cmask, other=0.0)
+                v = (vq.to(tl.float8e4nv, bitcast=True).to(tl.float32) * vsc[:, None]).to(tl.bfloat16)
+            else:
+                v = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
             if DOT32_:
                 acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16).to(tl.float32), v.to(tl.float32))
             else:
@@ -351,7 +362,8 @@ def add2_rms(h: torch.Tensor, d1: torch.Tensor, d2: torch.Tensor, w: torch.Tenso
 
 def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Tensor, anc: torch.Tensor, ns: int,
               sink: torch.Tensor, window: int = 0, ring: int = 0, bufs: dict | None = None,
-              out: torch.Tensor | None = None) -> torch.Tensor:
+              out: torch.Tensor | None = None, ks: torch.Tensor | None = None,
+              vs: torch.Tensor | None = None) -> torch.Tensor:
     """q [M, Hq, D] bf16, kc / vc [Hk, cap, D] bf16 (a ring of `ring` rows on a sliding layer), ctl int32
     [M, 2] (visible keys, block start), anc int32 [M, ANC] (the row's ancestors' positions by depth), `ns`
     CHUNK programs of a full layer (the class, `class_of`; a sliding layer takes SW_CHUNKS), sink fp32 [Hq],
@@ -382,13 +394,69 @@ def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Te
     pm, pl, pacc = pm[:n], pl[:n], pacc[:n]
     if out is None:
         out = torch.empty(M, HQ, D, dtype=torch.bfloat16, device=q.device)
+    fp8 = ks is not None
     _attn_split[(M, HK, ns)](q, kc, vc, ctl, anc, pm, pl, pacc, kc.stride(0), kc.stride(1), vc.stride(0),
-                             vc.stride(1), int(window), int(max(ring, 1)), SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ,
+                             vc.stride(1), int(window), int(max(ring, 1)), ks if fp8 else sink, vs if fp8 else sink,
+                             ks.stride(0) if fp8 else 0, SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ,
                              HK=HK, BM=BM, BN=32, CHUNK_=CHUNK, NA=anc.shape[1], NS=ns, SLIDING=sliding,
-                             DOT32_=DOT32, PDL=PDL, launch_pdl=PDL, num_warps=4, num_stages=2)
+                             DOT32_=DOT32, PDL=PDL, launch_pdl=PDL, FP8=fp8, num_warps=4, num_stages=2)
     _attn_combine[(M, HQ)](pm, pl, pacc, sink, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ns, PDL=PDL, launch_pdl=PDL,
                            num_warps=1)
     return out
+
+
+#: e4m3's largest finite value
+FP8_MAX = 448.0
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _kv_quant(SRC, s_sh, s_sn, IDX, DST, s_dh, s_dn, DS, s_dsh, SLOT, D: tl.constexpr,
+                  PDL: tl.constexpr = False):
+        # row m of head h: SRC[h, IDX[m]] bf16 -> DST[h, SLOT[m]] e4m3 codes (as uint8) and DS[h, SLOT[m]] its
+        # scale, amax / 448 in fp32 (tools/attn_kernels.quantize_kv's arithmetic)
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        m = tl.program_id(0) + z
+        h = tl.program_id(1) + z
+        od = tl.arange(0, D)
+        i = tl.load(IDX + m)
+        sl = tl.load(SLOT + m)
+        x = tl.load(SRC + h * s_sh + i * s_sn + od).to(tl.float32)
+        sc = tl.maximum(tl.max(tl.abs(x), 0), 1e-12) / 448.0
+        c = tl.minimum(tl.maximum(x / sc, -448.0), 448.0).to(tl.float8e4nv)
+        tl.store(DST + h * s_dh + sl * s_dn + od, c.to(tl.uint8, bitcast=True))
+        tl.store(DS + h * s_dsh + sl, sc)
+
+
+def quantize_kv(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """[..., D] bf16 -> e4m3 codes as uint8 and one fp32 scale a vector (amax / 448)."""
+    amax = x.float().abs().amax(-1).clamp_min(1e-12)
+    s = amax / FP8_MAX
+    codes = (x.float() / s[..., None]).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    return codes.view(torch.uint8), s
+
+
+def kv_quant(src: torch.Tensor, idx: torch.Tensor, dst: torch.Tensor, scales: torch.Tensor,
+             slot: torch.Tensor) -> None:
+    """Rows `idx` of src [Hk, R, D] bf16 into dst [Hk, cap, D] uint8 (e4m3 codes) and scales [Hk, cap] fp32 at
+    `slot` (int64 [M]), one launch."""
+    M = idx.numel()
+    HK, _, D = src.shape
+    if not src.is_cuda:
+        codes, sc = quantize_kv(src[:, idx.long()])
+        dst[:, slot.long()] = codes
+        scales[:, slot.long()] = sc
+        return
+    _kv_quant[(M, HK)](src, src.stride(0), src.stride(1), idx, dst, dst.stride(0), dst.stride(1), scales,
+                       scales.stride(0), slot, D=D, PDL=PDL, launch_pdl=PDL, num_warps=1)
+
+
+def kv_dequant(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """[Hk, n, D] uint8 e4m3 codes and [Hk, n] fp32 scales -> bf16 (a prompt chunk's view of the cache)."""
+    return (codes.view(torch.float8_e4m3fn).float() * scales[..., None]).to(torch.bfloat16)
 
 
 def attn_rows_reference(q, kc, vc, ctl, anc, sink, window: int = 0, ring: int = 0):

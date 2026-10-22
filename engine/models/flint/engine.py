@@ -128,6 +128,14 @@ class FlintEngine(FlintRef):
         self.side = torch.cuda.Stream(device=self.device) \
             if cuda and ARCH.hooks.side_stream and _S.get("FLINT_SIDE_STREAM") == "1" else None
         self._sev: dict = {}
+        # FLINT_KV_FP8: the full layers' K and V as e4m3 codes with one fp32 scale a (head, token), half the
+        # bytes a decode step reads at long context; a row is written in bf16 to a staging buffer, then coded
+        self.kv_fp8 = cuda and _S.get("FLINT_KV_FP8") == "1"
+        self._kst = self._vst = None
+        if self.kv_fp8:
+            self._kst = torch.zeros(c.num_key_value_heads, ROWS_MAX + 1, c.head_dim, dtype=self.dtype,
+                                    device=self.device)
+            self._vst = torch.zeros_like(self._kst)
         if cuda and ARCH.hooks.pdl and _S.get("FLINT_PDL") == "1":
             K.PDL = True
 
@@ -147,13 +155,18 @@ class FlintEngine(FlintRef):
             rows = self.ring if sliding else cap
             if sliding:
                 st.ring[li] = self.ring
+            fp8 = self.kv_fp8 and not sliding
+            dt = torch.uint8 if fp8 else self.dtype
             for kind, d in (("k", st.k), ("v", st.v)):
                 shape = (c.num_key_value_heads, rows, c.head_dim)
                 if st.pages is None or sliding:
-                    d[li] = torch.zeros(*shape, dtype=self.dtype, device=self.device)
+                    d[li] = torch.zeros(*shape, dtype=dt, device=self.device)
                 else:
-                    d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, self.dtype, self.device, owner=st.pages.owner,
+                    d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, dt, self.device, owner=st.pages.owner,
                                                           name=f"flint.{kind}.{li}")).tensor
+            if fp8:
+                st.ks[li] = torch.zeros(c.num_key_value_heads, rows, dtype=torch.float32, device=self.device)
+                st.vs[li] = torch.zeros_like(st.ks[li])
         return st
 
     def reset(self, st: FlintState) -> None:
@@ -274,7 +287,7 @@ class FlintEngine(FlintRef):
         if rb is not None:
             return rb
         c, dev = self.cfg, self.device
-        n64 = 5 * M
+        n64 = 6 * M
         n32 = M * (2 + K.ANC)
         n32 += n32 % 2
         nb = 8 * n64 + 4 * n32
@@ -282,7 +295,8 @@ class FlintEngine(FlintRef):
         def views(b):
             i64 = b[:8 * n64].view(torch.int64)
             i32 = b[8 * n64:].view(torch.int32)
-            v = {name: i64[j * M:(j + 1) * M] for j, name in enumerate(("tok", "pos", "slot", "rslot", "zero"))}
+            v = {name: i64[j * M:(j + 1) * M] for j, name in enumerate(("tok", "pos", "slot", "rslot", "zero",
+                                                                          "idx"))}
             v["ctl"] = i32[:2 * M].view(M, 2)
             v["anc"] = i32[2 * M:2 * M + K.ANC * M].view(M, K.ANC)
             return v
@@ -313,6 +327,7 @@ class FlintEngine(FlintRef):
         h["pos"].numpy()[0] = L
         h["slot"].numpy()[0] = L
         h["rslot"].numpy()[0] = L % max(self.ring, 1)
+        h["idx"].numpy()[0] = 0
         h["ctl"].numpy()[0] = (L + 1, L)
         h["anc"].numpy()[0, 0] = L
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
@@ -337,6 +352,7 @@ class FlintEngine(FlintRef):
         h["pos"].numpy()[:] = L + d
         h["slot"].numpy()[:] = L + np.arange(M)
         h["rslot"].numpy()[:] = (L + np.arange(M)) % max(self.ring, 1)
+        h["idx"].numpy()[:] = np.arange(M)
         h["ctl"].numpy()[:, 0] = L + d + 1
         h["ctl"].numpy()[:, 1] = L
         anc = h["anc"].numpy()
@@ -379,13 +395,20 @@ class FlintEngine(FlintRef):
             o = torch.empty(R, c.num_attention_heads, c.head_dim, dtype=self.dtype, device=self.device)
             for (st, rb, M, ns), r in zip(parts, sl):
                 d = rb["d"]
-                q = LK.qk_prep(qkv[r], d["pos"] if rope else d["zero"], d["rslot"] if sliding else d["slot"],
+                fp8 = li in st.ks
+                q = LK.qk_prep(qkv[r], d["pos"] if rope else d["zero"],
+                               d["idx"] if fp8 else d["rslot"] if sliding else d["slot"],
                                self.W[a + "q_norm.weight"], self.W[a + "k_norm.weight"],
                                self.rope_cos if rope else self.id_cos, self.rope_sin if rope else self.id_sin,
-                               st.k[li], st.v[li], c.num_attention_heads, c.num_key_value_heads, eps, pdl=K.PDL)
+                               self._kst if fp8 else st.k[li], self._vst if fp8 else st.v[li],
+                               c.num_attention_heads, c.num_key_value_heads, eps, pdl=K.PDL)
+                if fp8:
+                    K.kv_quant(self._kst, d["idx"], st.k[li], st.ks[li], d["slot"])
+                    K.kv_quant(self._vst, d["idx"], st.v[li], st.vs[li], d["slot"])
                 K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, self._sink[li],
                             window=c.sliding_window if sliding else 0, ring=self.ring,
-                            bufs=rb["attn"].setdefault("sw" if sliding else ns, {}), out=o[r])
+                            bufs=rb["attn"].setdefault("sw" if sliding else ns, {}), out=o[r],
+                            ks=st.ks.get(li), vs=st.vs.get(li))
             out = self.lin(o.view(R, -1), self.W[a + "o_proj.weight"])
             h, n = LK.add_rms(h, out, self.W[p + "post_attention_layernorm.weight"], eps, pdl=K.PDL)
             m = self.moe_rows(n, li) if c.is_moe(li) else self.glu_rows(n, p + "mlp.", c.intermediate_size)
@@ -544,6 +567,9 @@ class FlintEngine(FlintRef):
             s, t = (d["rsrc"], d["rdst"]) if c.is_sliding(li) else (d["src"], d["dst"])
             st.k[li].index_copy_(1, t, st.k[li].index_select(1, s))
             st.v[li].index_copy_(1, t, st.v[li].index_select(1, s))
+            if li in st.ks:
+                st.ks[li].index_copy_(1, t, st.ks[li].index_select(1, s))
+                st.vs[li].index_copy_(1, t, st.vs[li].index_select(1, s))
 
     # ------------------------------------------------------------------------- prompt chunks
     @torch.no_grad()
@@ -647,7 +673,22 @@ class FlintEngine(FlintRef):
         cos, sin = (self.rope_cos, self.rope_sin) if rope else (self.id_cos, self.id_sin)
         qpos = pos if rope else torch.zeros_like(pos)
         prep = LK.qk_prep if qkv.is_cuda else _qk_prep_cpu
-        if not c.is_sliding(li):
+        if not c.is_sliding(li) and li in st.ks:
+            # FLINT_KV_FP8: the chunk's own rows in bf16 as computed, the cached ones decoded; then the chunk coded
+            kt = torch.empty(Hk, T, D, dtype=self.dtype, device=n.device)
+            vt = torch.empty_like(kt)
+            own = torch.arange(T, device=n.device)
+            q = prep(qkv, qpos, own, self.W[a + "q_norm.weight"], self.W[a + "k_norm.weight"], cos, sin,
+                     kt, vt, Hq, Hk, c.rms_norm_eps)
+            if L:
+                kk = torch.cat([K.kv_dequant(st.k[li][:, :L], st.ks[li][:, :L]), kt], 1)
+                vv = torch.cat([K.kv_dequant(st.v[li][:, :L], st.vs[li][:, :L]), vt], 1)
+            else:
+                kk, vv = kt, vt
+            o = K.prompt_attention(q, kk, vv, 0, self._sink[li], 0)
+            K.kv_quant(kt, own, st.k[li], st.ks[li], pos)
+            K.kv_quant(vt, own, st.v[li], st.vs[li], pos)
+        elif not c.is_sliding(li):
             q = prep(qkv, qpos, pos, self.W[a + "q_norm.weight"], self.W[a + "k_norm.weight"], cos, sin,
                      st.k[li], st.v[li], Hq, Hk, c.rms_norm_eps)
             o = K.prompt_attention(q, st.k[li][:, :L + T], st.v[li][:, :L + T], 0, self._sink[li], 0)
@@ -892,7 +933,7 @@ def _state_saved(eng: FlintEngine, st: FlintState) -> list:
     (`CAPTURE_ROWS`), the rings whole (the rows past the length wrap)."""
     L = st.length
     out = []
-    for d in (st.k, st.v):
+    for d in (st.k, st.v, st.ks, st.vs):
         for li, t in d.items():
             if li in st.ring:
                 out.append((t, 1, 0, t.shape[1]))

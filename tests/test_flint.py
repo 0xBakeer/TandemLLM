@@ -286,6 +286,62 @@ def test_engine_rows_against_reference_and_itself():
     assert torch.equal(torch.stack(rows), dec[2:10]), "the committed moved path does not continue the chain"
 
 
+def test_fp8_kv_cache():
+    """FLINT_KV_FP8: the full layers' e4m3 cache. Prefill, decode and verify follow the bf16 cache's logits
+    closely (e4m3 has 3 mantissa bits); a verify block equals the decode steps bit for bit on the coded cache;
+    a moved path's codes and scales commit; the codes and scales are what kernels.quantize_kv makes."""
+    if not GPU:
+        print("skipped: the e4m3 cache runs on a GPU")
+        return
+    from engine.settings import SETTINGS
+    import os as _os
+    old = _os.environ.get("QWEN38_FLINT_KV_FP8")
+    _os.environ["QWEN38_FLINT_KV_FP8"] = "1"
+    try:
+        assert SETTINGS.get("FLINT_KV_FP8") == "1"
+        cfg, W0, eng = _tiny_engine()
+    finally:
+        if old is None:
+            _os.environ.pop("QWEN38_FLINT_KV_FP8", None)
+        else:
+            _os.environ["QWEN38_FLINT_KV_FP8"] = old
+    assert eng.kv_fp8
+    _, _, ref = _tiny_engine()
+    assert not ref.kv_fp8
+    ids = torch.randint(4, 256, (170,), generator=torch.Generator().manual_seed(5))
+    st, sr = eng.new_state(512), ref.new_state(512)
+    full = [li for li in range(cfg.num_hidden_layers) if not cfg.is_sliding(li)]
+    assert full and all(st.k[li].dtype == torch.uint8 and li in st.ks for li in full)
+    lg = eng.prefill(ids[:150], st, head="all")
+    lr = ref.prefill(ids[:150], sr, head="all")
+    agree = (lg.argmax(-1) == lr.argmax(-1)).float().mean().item()
+    assert agree >= 0.9, agree
+    li = full[0]
+    codes, sc = K.quantize_kv(sr.k[li][:, :150])
+    same = (st.k[li][:, :150] == codes).float().mean().item()
+    assert same >= 0.999 and torch.allclose(st.ks[li][:, :150], sc), same
+    L = st.length
+    rows = []
+    for t in ids[150:166]:
+        eng.stage(int(t), st)
+        rows.append(eng.step(st)[0].clone())
+        st.length += 1
+    dec = torch.stack(rows)
+    st.length = L
+    eng.stage_rows([int(t) for t in ids[150:166]], chain(16), st)
+    assert torch.equal(eng.rows_step(st, 16), dec), "a verify row differs from the decode step's on the e4m3 cache"
+    eng.stage_rows([int(ids[150]), 9, int(ids[151])], [-1, 0, 0], st)
+    eng.rows_step(st, 3)
+    eng.commit(st, [0, 2])
+    rows = []
+    for t in ids[152:160]:
+        eng.stage(int(t), st)
+        rows.append(eng.step(st)[0].clone())
+        st.length += 1
+    assert torch.equal(torch.stack(rows), dec[2:10]), "the committed moved path does not continue the chain"
+    return f"prefill top-1 agreement with the bf16 cache {agree:.3f}"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

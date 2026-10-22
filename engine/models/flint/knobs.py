@@ -12,4 +12,6 @@ KNOBS: dict[str, tuple] = {
     'FLINT_SIDE_STREAM': ('1', 'engine/models/flint/engine.py'),
     # Flint: the decode step's Triton kernels as programmatic dependent launches (SPD-145)
     'FLINT_PDL': ('1', 'engine/models/flint/engine.py'),
+    # Flint: the full layers' K and V as e4m3 codes with one fp32 scale a (head, token); off (the exact bf16 cache)
+    'FLINT_KV_FP8': ('0', 'engine/models/flint/engine.py'),
 }

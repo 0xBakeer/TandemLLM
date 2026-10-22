@@ -52,6 +52,8 @@ class FlintState:
     k: dict = field(default_factory=dict)
     v: dict = field(default_factory=dict)
     ring: dict = field(default_factory=dict)   # the board engine's: layer -> ring rows (absent: the whole history)
+    ks: dict = field(default_factory=dict)     # FLINT_KV_FP8: a full layer's e4m3 scales [kv heads, cap] fp32
+    vs: dict = field(default_factory=dict)
     pages: object = None
     block: tuple | None = None
 
