@@ -100,6 +100,10 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              # SRV-647: the masks keyed by a serial of the grammar, not its id(); no row changes
              ("engine/grammar.py", "9c6617a799bd64b1fdbc3cfc23a2eba5b2ee471b64d1d21b4da7dc23adf59c65"):
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
+             # SRV-689: tool_choice's calls in the arg-key form for a model that writes it; a mask
+             # on the sampled token, never a stored row
+             ("engine/grammar.py", "7d08c32d4841f5bbad40e4d55c22936c4b357dc854b3f848538d8efa634cfc8a"):
+             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
              ("engine/models/flashnext/ref.py", "497c681a0b2e8d33e45a3bb2d4f565b5983ca2edc9da021619048bdb258267c4"):
              "f814ce162695f81e1ff8d7b80eb8c90619837f99e6cebb35f10bcb39983bf3f4",
              # OPS-225: the files' code unchanged (comments, docstrings, one message); dflash2.py's
