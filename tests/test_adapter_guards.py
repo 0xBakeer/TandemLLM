@@ -20,7 +20,6 @@ from __future__ import annotations
 import collections
 import glob
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -58,9 +57,7 @@ SAME_ROWS_SHA256 = "8f5071c81945e487ddfe54f9a2891df42f9eda89b7f9499937be113a9461
 
 def _manifest(name: str):
     """The registered adapter's manifest (imports its serving module, torch)."""
-    a = REGISTRY[name]
-    mod = "engine.models.qwen3_5.adapter" if a.serve is None else a.serve.split(":")[0]
-    return importlib.import_module(mod).manifest()
+    return REGISTRY[name].manifest_of()
 
 
 def _torch() -> bool:
@@ -178,7 +175,7 @@ BASELINE = {
     # the 27B's own config and drafters (engine/*.py is its package by history, ENG-221)
     "engine/config.py": 2, "engine/drafters/dflash2.py": 1, "engine/drafters/dspark.py": 1,
     # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new)
-    "engine/methods/manifest.py": 13, "engine/settings.py": 26,
+    "engine/methods/manifest.py": 13, "engine/settings.py": 16,
     # ENG-409 moves these rows into models/<name>/model.yaml
     "server/setup/community.py": 7, "server/setup/registry.py": 7,
     # ENG-406/407 take these to zero
@@ -245,16 +242,46 @@ def test_the_lint_reads_code_not_comments():
 
 # ------------------------------------------------------------------ 5: contract
 
+#: family knobs engine/settings.py kept from before ENG-405 (frozen: a new family knob goes in its package's
+#: knobs.py)
+LEGACY_FAMILY_KNOBS = {
+    "FN_DENSE", "FN_DRAFT_HOT", "FN_DROP_SHARD_CACHE", "FN_FOLD_COMMIT", "FN_LOOKUP", "FN_MIX", "FN_PREFILL",
+    "FN_PREFILL_CHUNK", "FN_TABLE", "FN_TABLE_CACHE_GB", "FN_WARM_TABLE", "Q35M_ANCHOR_BACKOFF",
+    "Q35M_DFLASH2_HOT", "Q35M_DFLASH2_NVFP4", "Q35M_LOOKUP", "Q35M_SIBLINGS"}
+
+
 def test_every_adapter_has_the_contract():
+    pkgs = sorted(d for d in os.listdir(os.path.join(ROOT, "engine", "models"))
+                  if os.path.isfile(os.path.join(ROOT, "engine", "models", d, "arch.py")))
+    assert len(pkgs) == len(REGISTRY), "a package's arch.py registers no adapter, or two"
     for name, a in REGISTRY.items():
         assert a.name == name and a.architectures and a.model_types, name
-        assert a.config.count(":") == 1 and a.engine.count(":") == 1, name
-        assert a.serve is None or a.serve.count(":") == 1, name
+        for ref in (a.config, a.engine, a.manifest) + ((a.serve,) if a.serve else ()):
+            assert ref and ref.count(":") == 1, (name, ref)
         if a.package:
             assert os.path.isdir(os.path.join(ROOT, "engine", a.package)), name
     names = [m for a in REGISTRY.values() for m in a.model_types]
     assert len(names) == len(set(names)), "a model_type selects two adapters"
-    return f"{len(REGISTRY)} adapters"
+    return f"{len(REGISTRY)} adapters from {len(pkgs)} packages"
+
+
+def test_family_knobs_live_in_their_package():
+    from engine import settings
+    from engine.methods.manifest import _knob_table
+    shared = _knob_table(os.path.join(ROOT, "engine", "settings.py"))
+    fam = {k for k, v in shared.items() if len(v) > 1 and str(v[1]).startswith("engine/models/")}
+    assert fam == LEGACY_FAMILY_KNOBS, f"a family knob in engine/settings.py: {sorted(fam - LEGACY_FAMILY_KNOBS)}"
+    for path in glob.glob(os.path.join(ROOT, "engine", "models", "*", "knobs.py")):
+        pkg = os.path.relpath(os.path.dirname(path), ROOT) + "/"
+        for k, v in _knob_table(path).items():
+            assert str(v[1]).startswith(pkg), (path, k, v)
+            assert settings.KNOBS[k] == v and settings.SETTINGS.get(k) is not None, k
+    if _torch():
+        for name, a in REGISTRY.items():
+            own = os.path.join(ROOT, "engine", a.package or "", "knobs.py")
+            if a.package and os.path.isfile(own):
+                assert os.path.relpath(own, ROOT) in a.manifest_of().modules, f"{name}: knobs.py not in its manifest"
+    return f"{len(LEGACY_FAMILY_KNOBS)} legacy family knobs in the shared table, none new"
 
 
 if __name__ == "__main__":

@@ -1,25 +1,25 @@
-"""The model layer: which architecture a checkpoint is, and the code that runs it (ENG-221).
+"""The model layer: which architecture a checkpoint is, and the code that runs it (ENG-221, ENG-405).
 
-The engine served one architecture, the Qwen3.8-27B (`engine/model.py`, `Qwen38Engine`), and every
-caller knew it. A second one, Qwen3.8-Flash-Next (`qwen4_exp`, `engine/models/flashnext/`), is
-selected here by the checkpoint's own config, never by its file name, and so is LiquidAI's LFM2 MoE
-(`lfm2_moe`, `engine/models/lfm2_moe/`, ENG-E10) and NVIDIA's NemotronH hybrid (`nemotron_h`,
-`engine/models/nemotron_h/`):
+Each family package declares itself in its own `arch.py` (`register(Arch(...))`), and this module
+discovers them (`_discover`): adding a model edits no file here. A checkpoint's family is chosen by its
+own config, never by its file name:
 
     arch = architecture(raw_config)       # an Arch, or ValueError naming the registered ones
     cfg = arch.load_config(snapshot)      # that model's config object
 
-Each entry names its config reader and its engine by import path, so registering a model imports
-nothing; `Arch.load_config()` / `Arch.engine_class()` import on use.
+Each entry names its config reader, its engine, its server builder and its manifest by import path, so
+registering a model imports nothing heavy; `Arch.load_config()` / `Arch.engine_class()` import on use.
 
 The package sits outside the disk tier's fingerprint v2 (`engine/disk_cache._engine_files` leaves it
-out like `decision/` and `generative/`), so the 27B's v2 is the same bytes with or without it. A
-model's fingerprint v3 (ENG-243) is what its adapter's `manifest()` lists (engine/methods/manifest.py).
+out like `decision/` and `generative/`). A model's fingerprint v3 (ENG-243) is what its adapter's
+manifest lists (engine/methods/manifest.py); tests/test_adapter_guards.py holds every adapter's to its
+golden and checks that a change to one package moves only its own.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 from dataclasses import dataclass
 
 
@@ -34,6 +34,10 @@ class Arch:
     # "module:function" -> the model built for the server, `serve(a, ctx) -> dict` (server/app.py
     # `_load`, SRV-341); None: the server's own builder, the 27B's (`_build_qwen3_5`)
     serve: str | None = None
+    # "module:function" -> the adapter's fingerprint manifest (engine/methods/manifest.py `Manifest`)
+    manifest: str | None = None
+    # the registry's order (architecture()'s message lists them so); a new family takes the default
+    rank: int = 100
 
     def _resolve(self, ref: str):
         mod, attr = ref.split(":")
@@ -48,6 +52,10 @@ class Arch:
     def serve_builder(self):
         return self._resolve(self.serve) if self.serve else None
 
+    def manifest_of(self):
+        """The adapter's manifest (imports its module)."""
+        return self._resolve(self.manifest)()
+
 
 REGISTRY: dict[str, Arch] = {}
 
@@ -57,60 +65,16 @@ def register(arch: Arch) -> Arch:
     return arch
 
 
-register(Arch(
-    name="qwen3_5",
-    architectures=("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"),
-    model_types=("qwen3_5", "qwen3_5_text"),
-    config="engine.config:load_config",
-    engine="engine.models.qwen3_5.adapter:Qwen38Engine",     # engine/model.py's, with the cold verbs
-))
-register(Arch(
-    name="qwen4_exp",
-    architectures=("Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM"),
-    model_types=("qwen4_exp", "qwen4_exp_text"),
-    config="engine.models.flashnext.config:load_flashnext_config",
-    engine="engine.models.flashnext.engine:FlashNextEngine",
-    package="models/flashnext",
-    serve="engine.models.flashnext.serving:serve",
-))
-register(Arch(
-    name="nemotron_h",
-    architectures=("NemotronHForCausalLM", "NemotronHPuzzleForCausalLM", "NemotronH_Nano_Omni_Reasoning_V3",
-                   "NemotronH_Omni_Reasoning_V3"),
-    model_types=("nemotron_h", "nemotron_h_puzzle"),
-    config="engine.models.nemotron_h.config:load_nemotron_h_config",
-    engine="engine.models.nemotron_h.engine:NemotronHEngine",
-    package="models/nemotron_h",
-    serve="engine.models.nemotron_h.serving:serve",
-))
-register(Arch(
-    name="lfm2_moe",
-    architectures=("Lfm2MoeForCausalLM",),
-    model_types=("lfm2_moe",),
-    config="engine.models.lfm2_moe.config:load_lfm2_moe_config",
-    engine="engine.models.lfm2_moe.engine:Lfm2MoeEngine",
-    package="models/lfm2_moe",
-    serve="engine.models.lfm2_moe.serving:serve",
-))
-register(Arch(
-    name="qwen3_5_moe",
-    architectures=("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM"),
-    model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
-    config="engine.models.qwen3_5_moe.config:load_qwen35_moe_config",
-    engine="engine.models.qwen3_5_moe.engine:Qwen35MoeEngine",
-    package="models/qwen3_5_moe",
-    serve="engine.models.qwen3_5_moe.serving:serve",
-))
-
-register(Arch(
-    name="flint",
-    architectures=("FlintForCausalLM",),
-    model_types=("flint",),
-    config="engine.models.flint.config:load_flint_config",
-    engine="engine.models.flint.engine:FlintEngine",
-    package="models/flint",
-    serve="engine.models.flint.serving:serve",
-))
+def _discover() -> None:
+    """ENG-405: every family package that has an `arch.py` registers itself there, so adding a model
+    edits no shared file. Imported in name order, then kept in `rank` order."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in sorted(os.listdir(here)):
+        if os.path.isfile(os.path.join(here, name, "arch.py")):
+            importlib.import_module(f"{__name__}.{name}.arch")
+    ordered = sorted(REGISTRY.values(), key=lambda a: (a.rank, a.name))
+    REGISTRY.clear()
+    REGISTRY.update((a.name, a) for a in ordered)
 
 
 def architecture(raw: dict) -> Arch:
@@ -125,3 +89,6 @@ def architecture(raw: dict) -> Arch:
     what = names[0] if names else (types[0] or types[1] or "<no architectures, no model_type>")
     known = ", ".join(f"{a.name} ({', '.join(a.architectures)})" for a in REGISTRY.values())
     raise ValueError(f"unknown architecture {what!r}: this engine runs {known}")
+
+
+_discover()

@@ -220,7 +220,10 @@ def tables(root: str, owners: set, env=None) -> list[str]:
     """The tables the owners read: a knob of theirs whose value (the environment's, else its default)
     names a .json file, and a module's own default table when its knob is unset (`DEFAULT_TABLES`)."""
     env = os.environ if env is None else env
-    knobs = _knob_table(os.path.join(root, dc.SETTINGS_FILE))
+    knobs = dict(_knob_table(os.path.join(root, dc.SETTINGS_FILE)))
+    for own in sorted(owners):
+        if own.endswith("/knobs.py"):
+            knobs.update(_knob_table(os.path.join(root, own)))   # a family's own table (ENG-405)
     out = set()
     for k, v in knobs.items():
         if len(v) > 1 and str(v[1]) in owners:

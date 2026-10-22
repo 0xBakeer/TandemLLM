@@ -352,17 +352,35 @@ KNOBS: dict[str, tuple] = {
     'Q35M_SIBLINGS': ('0', 'engine/models/qwen3_5_moe/serving.py'),
     # rounds after an anchor-only cut that take the plain step (1, 2, 4 .. up to this; 0 = off)
     'Q35M_ANCHOR_BACKOFF': ('0', 'engine/models/qwen3_5_moe/serving.py'),
-    # Flint: the lookup cut by StairCut (0 = plain decode); rounds after an anchor-only cut that take the plain
-    # step (1, 2, 4 .. up to this; 0 = off)
-    'FLINT_LOOKUP': ('1', 'engine/models/flint/serving.py'),
-    'FLINT_ANCHOR_BACKOFF': ('0', 'engine/models/flint/serving.py'),
-    # Flint: rounds after a lookup miss (or an anchor-only cut) that take the plain step without looking, 1, 2, 4 ..
-    'FLINT_LOOK_BACKOFF': ('0', 'engine/models/flint/serving.py'),
-    # Flint: the shared expert on a second stream beside the routed experts (SPD-145)
-    'FLINT_SIDE_STREAM': ('1', 'engine/models/flint/engine.py'),
-    # Flint: the decode step's Triton kernels as programmatic dependent launches (SPD-145)
-    'FLINT_PDL': ('1', 'engine/models/flint/engine.py'),
 }
+
+
+def _family_knobs(models_dir: str | None = None) -> dict[str, tuple]:
+    """ENG-405: a model family's own knobs, from its package's `knobs.py` (a literal `KNOBS` table of the
+    same shape, read without importing the package). This table keeps the shared knobs and the families'
+    that predate it; a new family knob goes in its package (tests/test_adapter_guards.py)."""
+    import ast
+    base = models_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    out: dict[str, tuple] = {}
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else ():
+        path = os.path.join(base, name, "knobs.py")
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in tree.body:
+            target = node.target if isinstance(node, ast.AnnAssign) else (
+                node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None)
+            if isinstance(target, ast.Name) and target.id == "KNOBS" and node.value is not None:
+                table = ast.literal_eval(node.value)
+                clash = set(table) & (set(KNOBS) | set(out))
+                if clash:
+                    raise ValueError(f"{path}: knobs registered twice: {sorted(clash)}")
+                out.update(table)
+    return out
+
+
+KNOBS.update(_family_knobs())
 
 
 class EngineSettings:

@@ -34,6 +34,7 @@ from engine.settings import SETTINGS as _S
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/flint/__init__.py", "engine/models/flint/config.py", "engine/models/flint/engine.py",
+           "engine/models/flint/knobs.py",
            "engine/models/flint/kernels.py", "engine/models/flint/load.py", "engine/models/flint/pack.py",
            "engine/models/flint/ref.py", "engine/models/lfm2_moe/kernels.py", "engine/models/lfm2_moe/load.py",
            "engine/models/lfm2_moe/ref.py", "engine/settings.py")
