@@ -130,7 +130,7 @@ Half of it is built. Since 2026-10-12 the adapters, the state, the shared method
 
 ### Model adapters
 
-`engine/models/__init__.py` keeps a registry of architectures. An entry names the `architectures` strings and `model_type`s that select it, its config reader, its engine class and, when the model brings one, its server builder, all by import path. `architecture(config)` returns the entry, or fails naming every registered one.
+`engine/models/__init__.py` keeps a registry of architectures, each registered by its own package's `arch.py`. An entry names the `architectures` strings and `model_type`s that select it, its config reader, its engine class, its server builder and its manifest, all by import path, and what the shared code needs to know about the model as data (its tool-call form and reasoning, the files it shares with other families, the kernel options it turns on; [adding-a-model.md](adding-a-model.md#what-a-family-declares)). `architecture(config)` returns the entry, or fails naming every registered one.
 
 | name | model | engine | server builder |
 |-|-|-|-|

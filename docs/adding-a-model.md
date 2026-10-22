@@ -4,7 +4,7 @@ TandemLLM serves models of the Qwen3.8 family: the 27B, a hybrid of Gated DeltaN
 
 ## The adapter path in ten steps
 
-A new architecture is a package under `engine/models/<name>/`, one registry entry, and data files. Nothing under `server/`, `engine/cache.py`, `engine/disk_cache.py`, `engine/spill.py` or `engine/methods/` changes for it. [architecture.md](architecture.md#methods-written-once-models-plugged-in) shows the layers; Flash-Next's package (`engine/models/flashnext/`) is the worked example.
+A new architecture is a package under `engine/models/<name>/` with its own registry entry, and data files. Nothing under `server/`, `engine/cache.py`, `engine/disk_cache.py`, `engine/spill.py`, `engine/methods/` or `engine/settings.py` changes for it, and `tests/test_adapter_guards.py` holds every package to that: work on one model never moves another model's fingerprint. [architecture.md](architecture.md#methods-written-once-models-plugged-in) shows the layers; Flash-Next's package (`engine/models/flashnext/`) is the worked example.
 
 1. Config. A reader that turns the checkpoint's `config.json` into the model's config object and stops on a field it does not know, naming it. Flash-Next's (`config.py`) keeps three lists: fields it reads, fields that only matter for training (`IGNORED`), and fields whose other values would change the arithmetic (`FIXED`).
 2. Weights. A reader for the checkpoint's files and a `Linear` object for every weight the model multiplies by ([Weight formats](adding-a-model.md#weight-formats-the-linear-interface)). A new format needs a new class and a row-invariant kernel ([kernels.md](kernels.md)). Flash-Next's reader (`pack.py`) audits the pack before anything loads: a missing tensor, a truncated shard or a wrong sha256 stops it with the name.
@@ -13,7 +13,7 @@ A new architecture is a package under `engine/models/<name>/`, one registry entr
 5. The cold verbs: `caps`, `cost()`, `cache_state()` with its sections and views, `resume_at(n)`, `settle()`, `discard_pending()`, `trim_pending(n)`, `manifest()`, `memory_parts()`, `resident_files()` and `precapture()`. Flash-Next keeps them in `serving.py` (`FlashNextServing`); the 27B's are installed on its class by `engine/models/qwen3_5/adapter.py`.
 6. A draft head, if the checkpoint ships one. The shared MTP drafter (`engine/methods/mtp_drafter.py`) asks the head for `depth`, `reset()`, `prime()`, `capture_all()`, `launch()`, `read()` (the top-2 tokens and their probabilities a depth), `views()` and `resume(n)`; the engine offers it through `draft_heads()`. Flash-Next's head is `mtp.py`.
 7. A server builder, `serve(a, ctx) -> dict`: load the weights, build the engine, the tokenizer and the drafter, and return them with the record `/health` shows.
-8. The registry entry in `engine/models/__init__.py`: `Arch(name, architectures, model_types, config, engine, package, serve)`.
+8. The registry entry, in the package's own `arch.py` ([What a family declares](adding-a-model.md#what-a-family-declares)): `register(Arch(name, architectures, model_types, config, engine, package, serve, manifest, ...))`. `engine/models/__init__.py` finds it; nothing else is edited.
 9. Data files: a StairCut price file for each profile and device (`ops/prices/<model>/<profile>.<device>.json`; without one the cut learns its prices online), the weight profiles (`ops/profiles/<name>.env`) and the Setup Guide's entry (`models/<id>/model.yaml`, [below](adding-a-model.md#register-the-model-for-the-setup-guide)).
 10. Pass the tests under [The tests a new model must pass](adding-a-model.md#the-tests-a-new-model-must-pass).
 
@@ -93,13 +93,26 @@ A new model needs its own block drafter. DFlash2 drafters are trained against on
 
 The server renders prompts with the model's own chat template and reads the model's own tool-call and reasoning formats. For Qwen3.8 that means the `<think>` block, which the template opens in the prompt, and tool calls in the model's XML form (`server/toolcall.py`). A model with another format needs its own parser behind the same OpenAI output. `tests/fixtures/qwen38_chat_template.jinja` is the fixture the server tests render with.
 
+### What a family declares
+
+A family's `arch.py` registers its entry; `engine/models/__init__.py` imports every package's `arch.py` and keeps the entries in their `rank` order. Besides the import paths, an entry carries what the shared code needs to know, as data:
+
+| field | what it says | read by |
+|-|-|-|
+| `spec` | `ServeSpec(tool_format, reasoning)`: the form the model writes tool calls in (a name in `server/toolformats/`) and `ReasoningSpec(opens_itself)`, a model that writes its own `<think>` | the request loop, the conductor's checks, the forced-call constraint |
+| `shares`, `uses` | the package's files other families build on, and the other packages' files this family builds on | the guards: a manifest or an import across packages must be declared, and a change to a shared file moves exactly its dependents' fingerprints |
+| `hooks` | `EngineHooks(pdl, side_stream)`: launch options the family turns on in the shared kernels, which take them as plain arguments | the family's engine |
+| `default` | the family a server without a checkpoint directory serves (one family is) | the loader |
+
+A family's own knobs go in its package's `knobs.py` (a `KNOBS` table of the same shape as `engine/settings.py`'s), which joins the shared table at import and belongs in the family's manifest. A tool-call form the server does not know yet is a module in `server/toolformats/` behind the `ToolFormat` interface (rewrite to the JSON tier, a stream reader, the diagnosis of a broken block, the reminder's example line, the forced-call constraint); `tests/test_toolformats.py` runs the same contract on every form. A model that is the base of community packs says so in its `model.yaml` (`community_base`), and its package writes their weight profiles and checks their files (`community.py`, named by `community_base.hook`).
+
 ### The model layer: architecture registry and per-model state
 
 `engine/models/__init__.py` says which architecture a checkpoint is. Each entry names the checkpoint's `architectures` strings and `model_type`s, a config reader and an engine class by import path, so registering a model imports nothing. `architecture(raw_config)` returns the entry, or fails with a message that names the checkpoint's architecture and every registered one.
 
 | name | selected by | config | engine | server builder |
 |-|-|-|-|-|
-| `qwen3_5` | `Qwen3_5ForConditionalGeneration`, `qwen3_5_text` | `engine.config.load_config` | `engine.models.qwen3_5.adapter.Qwen38Engine` (engine/model.py's class with the adapter's cold verbs) | the server's own, `server/app.py` `_build_qwen3_5` |
+| `qwen3_5` | `Qwen3_5ForConditionalGeneration`, `qwen3_5_text` | `engine.config.load_config` | `engine.models.qwen3_5.adapter.Qwen38Engine` (engine/model.py's class with the adapter's cold verbs) | `engine.models.qwen3_5.serving.serve` (the default family) |
 | `qwen4_exp` | `Qwen4ExpForConditionalGeneration`, `qwen4_exp_text` | `engine.models.flashnext.config.load_flashnext_config` | `engine.models.flashnext.engine.FlashNextEngine` | `engine.models.flashnext.serving.serve` |
 | `lfm2_moe` | `Lfm2MoeForCausalLM`, `lfm2_moe` | `engine.models.lfm2_moe.config.load_lfm2_moe_config` | `engine.models.lfm2_moe.engine.Lfm2MoeEngine` | `engine.models.lfm2_moe.serving.serve` |
 | `nemotron_h` | `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM`, the Omni architectures, `nemotron_h`, `nemotron_h_puzzle` | `engine.models.nemotron_h.config.load_nemotron_h_config` | `engine.models.nemotron_h.engine.NemotronHEngine` | `engine.models.nemotron_h.serving.serve` |
