@@ -185,6 +185,7 @@ class _Sup:
         self.memo: dict = {}
         self.task_acts: dict = {}
         self.req = type("Req", (), {"messages": messages or [], "tools_offered": bool(tools),
+                                    "tools": tools if isinstance(tools, list) else [],
                                     "n": 1, "max_tokens": None})()
         self.tool_types = None
 
@@ -1173,7 +1174,7 @@ class Turn:
             fn = (tl or {}).get("function") or {}
             if fn.get("name"):
                 schemas[fn["name"]] = fn.get("parameters")
-        sup = _Sup(self.messages, self.tools)
+        sup = _Sup(self.messages, (self.client_body.get("tools") or []) if self.tools else [])
         regen = None
         for idx in sorted(self.calls, key=lambda x: (str(type(x)), x)):
             c = self.calls[idx]

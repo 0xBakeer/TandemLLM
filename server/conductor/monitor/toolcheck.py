@@ -306,17 +306,23 @@ def _call_format(sup, block: str) -> str:
     """C4's format line: a call in the model's own format, shown with a tool the request offers
     -- the one the block names, else the first -- and one of its arguments (a required one
     first). Never a placeholder name the model could copy into its next call."""
-    names = list(sup.tool_names or ())
+    fmt = getattr(sup.req, "tool_format", None) or None
+    # a supervisor, or a reader of its parts (proxy/harness.py `_Sup`): the request's tools
+    fns = [t.get("function") for t in getattr(sup.req, "tools", None) or () if isinstance(t, dict)]
+    schemas = {f["name"]: f.get("parameters") for f in fns
+               if isinstance(f, dict) and isinstance(f.get("name"), str)}
+    names = list(getattr(sup, "tool_names", None) or schemas)
     if not names:
-        return toolcall.call_format(sup.req.tool_format or None, "the tool's name")
+        return toolcall.call_format(fmt, "the tool's name")
     name = next((n for n in sorted(names, key=len, reverse=True)
                  if re.search(r"(?<![\w.-])" + re.escape(n) + r"(?![\w.-])", block or "")),
                 names[0])
-    schema = sup._tool_meta()[2].get(name) or {}
+    schema = schemas.get(name) or {}
+    schema = schema if isinstance(schema, dict) else {}
     props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
     req = [k for k in schema.get("required") or () if isinstance(k, str) and k in props]
     keys = req + [k for k in props if k not in req]
-    return toolcall.call_format(sup.req.tool_format or None, name, keys[0] if keys else None)
+    return toolcall.call_format(fmt, name, keys[0] if keys else None)
 
 
 # ------------------------------------------------------------------ C4: malformed
