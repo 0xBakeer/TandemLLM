@@ -192,7 +192,9 @@ def test_one_late_frame_old_gate_fails_new_gate_retries():
     def new(rc, rep, log):
         s = rep["summary"]
         assert rc == 0 and s["verdict"] == "PASS", (s, log[-1500:])
-        assert s["retried"] == 1 and s["loopback"] is True, s
+        # request 2 is retried; on a loaded runner a request that was not made late may be as well, and
+        # the gate passes it on its retry too (OPS-231): the check is the late one's retry and the pass
+        assert s["retried"] >= 1 and s["loopback"] is True, s
         r2 = [r for r in rep["rows"] if r["i"] == 2][0]
         # the late frame is on try 1 only; a loaded runner may land a later try past 2 % as well, which
         # the gate retries again (OPS-231): what matters is a retry and a pass within the tries
