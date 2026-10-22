@@ -174,6 +174,9 @@ SCHEMA = _obj({
     "id": {"type": "string", "pattern": MODEL_ID},
     "name": _STR, "family": _STR, "params": _STR, "pitch": _STR, "architecture": _STR,
     "license": _STR, "icon": _NOTE, "recommended": {"type": "boolean"},
+    # #104: the engine family that serves it (engine/models, a registry name): what it can do (side slots)
+    # comes from the family's entry, not from this file
+    "engine": {"type": "string", "pattern": r"^[a-z0-9_]+$"},
     # the tile's place on the models step (lower first; a file without one is 0), then the folder's name
     "order": {"type": "integer", "minimum": 0},
     "links": {"type": "array", "items": _obj({"label": _STR, "url": _STR})},
@@ -400,6 +403,8 @@ def _cycle(comps: list[dict]) -> str | None:
 
 def _cross(m: dict, root: str) -> list[str]:
     errs = []
+    if m.get("engine") is not None and engine_arch(m["engine"]) is None:
+        errs.append(f"$.engine: {m['engine']!r} is no engine family (engine/models)")
     for key in ("profiles", "components", "methods", "advanced", "devices", "assets"):
         ids = [x["id"] for x in m[key]]
         if len(set(ids)) != len(ids):
@@ -526,9 +531,33 @@ def parse(data, path: str = "model.yaml", root: str | None = None) -> dict:
         for r in data["measurements"]["rows"]])
     m.setdefault("recommended", False)
     m["parallelism"] = dict(data["parallelism"], fixed=dict(data["parallelism"].get("fixed") or {}))
+    m["parallelism"]["slots"] = dict(data["parallelism"]["slots"], **slots_limit(data))
     m.pop("quality_source", None)
     m.pop("community_base", None)      # the registry's own rules (community_bases), not the payload's
     return m
+
+
+def engine_arch(name: str | None):
+    """The engine family's registry entry (engine/models), or None."""
+    if not name:
+        return None
+    from engine.models import REGISTRY
+    return REGISTRY.get(name)
+
+
+def slots_limit(m: dict) -> dict:
+    """#104: how many parallel chats the model's engine can serve: ENGINE_MAX_SLOTS, or 1 with the reason
+    when its family builds no side slots (its ServeSpec.side_slots, engine/models/adapter.py)."""
+    a = engine_arch(m.get("engine"))
+    if a is not None and not a.spec.side_slots:
+        return {"engine_max": 1, "engine_max_reason": f"{m.get('name') or m.get('id')} serves one chat at a time "
+                                                       "for now: its engine has no side slots yet."}
+    return {"engine_max": ENGINE_MAX_SLOTS, "engine_max_reason": None}
+
+
+def slots_max(m: dict) -> int:
+    """The most parallel chats a selection may ask for (#104)."""
+    return int(m["parallelism"]["slots"].get("engine_max") or ENGINE_MAX_SLOTS)
 
 
 def load(path: str, root: str | None = None) -> dict:
@@ -737,7 +766,7 @@ def wizard_fields(m: dict) -> list[dict]:
                        for c in m["components"]],
         "parallelism": [
             {"field": "slots", "label": "Parallel requests", "type": "int",
-             "min": p["slots"]["min"], "max": ENGINE_MAX_SLOTS},
+             "min": p["slots"]["min"], "max": slots_max(m)},
             {"field": "window", "label": "Context window, first slot", "type": "int",
              "min": p["window"]["min"], "max": p["window"]["max"]},
             {"field": "side_window", "label": "Context window, other slots", "type": "int",

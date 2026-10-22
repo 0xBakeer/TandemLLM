@@ -1249,7 +1249,9 @@ export interface SetupField {
 }
 
 export interface SetupParallelism {
-  slots: { min: number; max: number; default: number };
+  /** engine_max (#104): the most chats the model's engine serves (ENGINE_MAX_SLOTS, or 1 for a family with no
+   *  side slots), with the reason when it is 1 */
+  slots: { min: number; max: number; default: number; engine_max?: number; engine_max_reason?: string | null };
   window: { min: number; max: number; default: number; step: number };
   side_window: { min: number; max: number; default: number; step: number };
   kv_pool: { default: boolean };

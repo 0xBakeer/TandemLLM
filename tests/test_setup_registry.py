@@ -490,6 +490,48 @@ def test_engine_max_slots():
     assert slots.share(n + 1, meet.max_rows) * (n + 1) > meet.max_rows
 
 
+def test_slots_follow_the_engine_family():
+    """#104: every model names its engine family; a family without side slots (Ornith's, qwen3_5_moe) caps
+    the guide's parallel chats at one with the reason, in the payload, the step field and the selection
+    check; every other family keeps the engine's 16."""
+    from engine.models import REGISTRY
+    from server.setup import estimate
+    models, errs = registry.load_all()
+    assert not errs, errs
+    for mid, m in models.items():
+        assert m.get("engine") in REGISTRY, (mid, m.get("engine"))
+        s = m["parallelism"]["slots"]
+        side = REGISTRY[m["engine"]].spec.side_slots
+        assert s["engine_max"] == (registry.ENGINE_MAX_SLOTS if side else 1), (mid, s)
+        assert (s["engine_max_reason"] is None) == side, (mid, s)
+        assert registry.step_field(m, "parallelism", "slots")["max"] == s["engine_max"], mid
+    orn = models["ornith-1.5-122b"]
+    assert "one chat at a time" in orn["parallelism"]["slots"]["engine_max_reason"]
+    assert estimate.check(orn, {"model": orn["id"], "slots": 1})["slots"] == 1
+    try:
+        estimate.check(orn, {"model": orn["id"], "slots": 2})
+    except estimate.SelectionError as exc:
+        assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
+    else:
+        raise AssertionError("two chats on a model whose engine has no side slots")
+    fl = models["flint"]
+    assert estimate.check(fl, {"model": fl["id"], "slots": 4})["slots"] == 4
+    # a file that names no family is refused by name, not read as the 27B's
+    import copy
+    import yaml
+    with open(os.path.join(ROOT, "models", "flint", "model.yaml")) as fh:
+        data = yaml.safe_load(fh)
+    bad = copy.deepcopy(data)
+    bad["engine"] = "nope"
+    try:
+        registry.parse(bad)
+    except registry.RegistryError as exc:
+        assert "$.engine" in str(exc), exc
+    else:
+        raise AssertionError("an unknown engine family was read")
+    return "ornith: 1 (no side slots); the rest: 16"
+
+
 def test_field_values():
     m = registry.load(SEED)
     _, name = registry.fields(m)["served_model"]

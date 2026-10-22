@@ -9,6 +9,7 @@ schema: 1
 id: nemotron-3.5-lightning-30b-a3b
 name: Nemotron 3.5 Lightning 30B-A3B
 family: Nemotron 3.5
+engine: nemotron_h
 params: ~31.6B, ~3.5B active a token
 recommended: false
 # the test model: after the served models on the models step

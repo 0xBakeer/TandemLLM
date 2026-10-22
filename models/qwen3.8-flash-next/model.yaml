@@ -19,6 +19,7 @@ schema: 1
 id: qwen3.8-flash-next
 name: Qwen3.8-Flash-Next
 family: Qwen3.8
+engine: qwen4_exp
 params: ~124B, ~3B active a token
 recommended: false
 pitch: A mixture-of-experts model that reads only a few experts a token, in turboderp's EXL3 packs, with its own

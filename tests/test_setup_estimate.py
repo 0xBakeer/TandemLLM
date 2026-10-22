@@ -27,6 +27,7 @@ The test matrix:
      score buffer grows with the window; the context that fits is capped at the profile's largest
      window; 6.05 fits no window and says by how much; a window above a profile's largest is a 422;
      the fixture holds a case per pack at 131,072 and 262,144     test_flash_next_packs
+ 11  #104, Ornith (no side slots): one chat fits, two are a 422 in both copies of the check   test_the_fixture
  10  SPD-150, Flint's e4m3 cache: the fixture holds Flint with the cache off and on, so the page's copy
      counts the component's 14,784 KV bytes a token as the server does   test_the_fixture
 
@@ -61,6 +62,10 @@ def _fn() -> dict:
 
 def _fl() -> dict:
     return registry.get("flint")
+
+
+def _orn() -> dict:
+    return registry.get("ornith-1.5-122b")
 
 
 def _est(**kw) -> dict:
@@ -253,7 +258,10 @@ def _cases() -> list[dict]:
     for on in (False, True):
         out.append({"name": f"Flint, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
                     "selection": {"model": fl["id"], "components": {"kv_fp8": on}}})
-    models = {m["id"]: m, f["id"]: f, fl["id"]: fl}
+    orn = _orn()
+    out.append({"name": "Ornith, one chat (its engine has no side slots, #104)", "selection": {"model": orn["id"]}})
+    out.append({"name": "refused: Ornith, two chats", "selection": {"model": orn["id"], "slots": 2}})
+    models = {m["id"]: m, f["id"]: f, fl["id"]: fl, orn["id"]: orn}
     for c in out:
         mm = models[c["selection"].get("model", m["id"])] if c["selection"].get("model") in models else m
         try:
@@ -299,7 +307,7 @@ def _fixture() -> dict:
                      "every `error` case with that status and code. `model` is the part of the "
                      "model payload (GET /v1/setup/models/{id}) the formula reads. Regenerate with "
                      "python tests/test_setup_estimate.py --write after a registry change.",
-            "model": _formula_model(m), "models": {x["id"]: _formula_model(x) for x in (_fn(), _fl())}, "cases": _cases()}
+            "model": _formula_model(m), "models": {x["id"]: _formula_model(x) for x in (_fn(), _fl(), _orn())}, "cases": _cases()}
 
 
 def test_the_fixture():

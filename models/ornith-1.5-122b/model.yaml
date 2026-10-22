@@ -9,6 +9,7 @@ schema: 1
 id: ornith-1.5-122b
 name: Ornith-1.5-122B
 family: Ornith 1.5
+engine: qwen3_5_moe
 params: ~122B, ~10B active a token
 recommended: false
 order: 7

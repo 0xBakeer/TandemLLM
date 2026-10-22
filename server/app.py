@@ -539,6 +539,19 @@ def _lane_room(job, where: str) -> bool:
         return where != "prefill"
 
 
+def _par_status() -> dict:
+    """`/health`'s `parallel` key: the pool's report with side slots, the one slot and why when `--parallel N`
+    asked for more than the model's engine builds (#104), nothing otherwise."""
+    if dict.get(STATE, "pool") is not None:
+        return {"parallel": _par_health()}
+    n = dict.get(STATE, "parallel_unbuilt")
+    if n:
+        return {"parallel": {"n": 1, "running": INFLIGHT["running"], "decoding": [], "requested": n,
+                             "max_running": 1, "max_running_reason": "side slots are not built for this "
+                             "model yet: one slot", "slots": []}}
+    return {}
+
+
 def _par_health() -> dict:
     """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
     (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader), and the
@@ -5818,8 +5831,7 @@ def _system() -> dict:
                   "lane": INFLIGHT["lane"],
                   "side_lane": STATE["lane"].report() if STATE.get("lane") is not None else None,
                   # `--parallel N` only: a server without side slots sends what it always did
-                  **({"parallel": _par_health()}
-                     if dict.get(STATE, "pool") is not None else {}),
+                  **_par_status(),
                   "max_queue": STATE.get("max_queue"),
                   "queue_timeout_s": STATE.get("queue_timeout"),
                   "request_timeout_s": STATE.get("request_timeout")},
@@ -6747,8 +6759,7 @@ class Handler(BaseHTTPRequestHandler):
                 "roles": _safe(roles_report),
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
                 # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
-                **({"parallel": _par_health()}
-                   if dict.get(STATE, "pool") is not None else {}),
+                **_par_status(),
             })
         if path == "/metrics/up":
             # a public page with one number and nothing else, so the scrape can tell an
@@ -10545,6 +10556,8 @@ def _load(a) -> None:
         else:
             print(f"[parallel] --parallel {a.parallel}: side slots are not built for this model yet "
                   f"(ENG-241): one slot", flush=True)
+            # #104: /health names the slot the server runs, not the count asked for
+            STATE["parallel_unbuilt"] = int(a.parallel)
     print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
         f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
         for x in led.stages()), flush=True)

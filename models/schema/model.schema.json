@@ -429,6 +429,10 @@
       },
       "type": "array"
     },
+    "engine": {
+      "pattern": "^[a-z0-9_]+$",
+      "type": "string"
+    },
     "family": {
       "maxLength": 2000,
       "type": "string"

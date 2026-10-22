@@ -39,10 +39,43 @@ def test_every_family_has_a_spec():
     for name, a in REGISTRY.items():
         assert isinstance(a.spec, ServeSpec) and isinstance(a.spec.reasoning, ReasoningSpec), name
         assert a.spec.tool_format and a.spec.tool_format == a.spec.tool_format.strip(), name
-    own = {n: (a.spec.tool_format, a.spec.reasoning.opens_itself, a.spec.prompt.system_first)
+    own = {n: (a.spec.tool_format, a.spec.reasoning.opens_itself, a.spec.prompt.system_first, a.spec.side_slots)
            for n, a in REGISTRY.items() if a.spec != ServeSpec()}
-    assert own == {"flint": ("argkey", True, False), "lfm2_moe": ("pythonic", False, True)}, own
+    assert own == {"flint": ("argkey", True, False, True), "lfm2_moe": ("pythonic", False, True, True),
+                   "qwen3_5_moe": ("xml", False, True, False)}, own
     return f"{len(REGISTRY)} families, {len(own)} with their own spec"
+
+
+def test_the_spec_says_what_the_engine_builds():
+    """#104: a family's ServeSpec.side_slots (what the Setup Guide reads) is its engine's
+    Capabilities.side_slots (what the server reads at load)."""
+    import importlib
+    import inspect
+    from engine.models.adapter import Capabilities
+    seen = {}
+    for name, a in REGISTRY.items():
+        pkg = a.serve.split(":")[0].rsplit(".", 1)[0] if a.serve else "engine.models.qwen3_5"
+        mod = importlib.import_module(pkg + ".serving")
+        caps = [c.caps for _, c in inspect.getmembers(mod, inspect.isclass)
+                if c.__module__ == mod.__name__ and isinstance(getattr(c, "caps", None), Capabilities)]
+        if not caps and name == "qwen3_5":       # the 27B's engine carries its own (engine/models/qwen3_5/adapter.py)
+            importlib.import_module("engine.models.qwen3_5.adapter")
+            caps = [a.engine_class().caps]
+        assert caps, (name, "no engine class with Capabilities")
+        assert all(c.side_slots == a.spec.side_slots for c in caps), (name, a.spec.side_slots, caps)
+        seen[name] = a.spec.side_slots
+    assert seen["qwen3_5_moe"] is False and sum(seen.values()) == len(seen) - 1, seen
+    return seen
+
+
+def test_health_names_the_slot_it_runs():
+    """#104: `--parallel 2` on an engine without side slots runs one slot, and /health says so."""
+    _serve(None)
+    assert app._par_status() == {}
+    app.STATE["parallel_unbuilt"] = 2
+    p = app._par_status()["parallel"]
+    assert p["requested"] == 2 and p["max_running"] == 1 and p["n"] == 1 and "not built" in p["max_running_reason"]
+    app.STATE.pop("parallel_unbuilt")
 
 
 def test_the_server_reads_the_served_spec():

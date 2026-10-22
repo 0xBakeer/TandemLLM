@@ -107,3 +107,7 @@ class ServeSpec:
     tool_format: str = "xml"
     reasoning: ReasoningSpec = field(default_factory=ReasoningSpec)
     prompt: PromptSpec = field(default_factory=PromptSpec)
+    # #104: the family's engine builds side slots (`--parallel` beyond one); False: it serves one chat at a
+    # time, and the Setup Guide caps its parallel chats at one. The engine's own Capabilities.side_slots says
+    # the same (tests/test_modelspec.py holds them together)
+    side_slots: bool = True

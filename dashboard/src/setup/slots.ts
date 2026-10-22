@@ -6,7 +6,7 @@
 
 import type { SetupModel, SetupSelection } from '../api/types';
 import { estimateLoose, GIB, KV_TYPICAL_TOKENS, kvBytes, overBy } from './estimate';
-import { ENGINE_MAX_SLOTS } from './fields';
+import { ENGINE_MAX_SLOTS, slotsMax } from './fields';
 import { S } from './strings';
 
 export { ENGINE_MAX_SLOTS };
@@ -20,7 +20,7 @@ export interface SlotsRange {
 
 export function slotsRange(m: SetupModel): SlotsRange {
   const p = m.parallelism.slots;
-  return { min: p.min, max: ENGINE_MAX_SLOTS, measured: p.max };
+  return { min: p.min, max: slotsMax(m), measured: p.max };
 }
 
 /** A typed count: the number, or why it is not one the engine takes. Never clamped: a value out of

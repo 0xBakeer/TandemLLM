@@ -11,6 +11,7 @@ schema: 1
 id: nemotron-3.5-bolt-74b-a9b
 name: Nemotron 3.5 Bolt 74B-A9B
 family: Nemotron 3.5
+engine: nemotron_h
 params: ~74B, ~9B active a token
 recommended: true
 order: 5

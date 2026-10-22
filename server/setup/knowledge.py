@@ -172,8 +172,10 @@ def model_sections(m: dict) -> list[dict]:
                                 f"{rng}; recommended {f['recommended']}."})
     p = m["parallelism"]
     out.append({"path": path, "title": "Parallel requests and memory",
-                "text": f"Up to {registry.ENGINE_MAX_SLOTS} requests at once (slots; measured up to "
-                        f"{p['slots']['max']} on this model, as many as the memory holds), each with a context "
+                "text": (f"{p['slots']['engine_max_reason']} " if p["slots"].get("engine_max_reason") else
+                         f"Up to {registry.slots_max(m)} requests at once (slots; measured up to "
+                         f"{p['slots']['max']} on this model, as many as the memory holds). ")
+                        + f"Each request has a context "
                         f"window of up to {p['window']['max']:,} tokens. A token of window costs "
                         f"{p['kv_bytes_per_token']:,} bytes ({p['kv_bytes_per_token'] / 1024:g} "
                         f"KiB). With the shared KV pool, memory is taken only as conversations grow. "

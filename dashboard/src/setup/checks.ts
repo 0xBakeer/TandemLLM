@@ -6,7 +6,7 @@ import type { SetupDevice, SetupEstimate, SetupModel, SetupPageState, SetupSelec
 import { isOn, lowerLabel } from './deps';
 import { isCommunity } from './community';
 import { estimateLoose, overBy, profileOf } from './estimate';
-import { ENGINE_MAX_SLOTS, fieldError, stepIndex, stepsOf } from './fields';
+import { fieldError, slotsMax, stepIndex, stepsOf } from './fields';
 import { slotsVerdict } from './slots';
 import { S, STEP_TITLE } from './strings';
 
@@ -50,7 +50,7 @@ export function stepIssues(m: SetupModel, sel: SetupSelection, device: SetupDevi
   // VIS-199: the count is wrong when the engine does not take it or when it is why the setup does
   // not fit; above the card's measured range is only a note on the step
   const par = m.parallelism;
-  if (sel.slots < par.slots.min || sel.slots > ENGINE_MAX_SLOTS) add('parallelism', `${S.slots}: ${sel.slots}`);
+  if (sel.slots < par.slots.min || sel.slots > slotsMax(m)) add('parallelism', `${S.slots}: ${sel.slots}`);
   else if (est && !est.fits) {
     const v = slotsVerdict(m, sel);
     if (v.over) add('parallelism', S.slotsOver(v.n, v.overGb, v.fitMax));

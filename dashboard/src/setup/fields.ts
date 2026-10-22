@@ -11,6 +11,12 @@ import { STEP_TITLE } from './strings';
  *  of them at least, so 16 verify in one pass. The card's slots.max is how far it was measured. */
 export const ENGINE_MAX_SLOTS = 16;
 
+/** #104: the most parallel chats this model's engine serves: 1 for a family with no side slots
+ *  (server/setup/registry.py slots_max), else ENGINE_MAX_SLOTS. */
+export function slotsMax(m: Pick<SetupModel, 'parallelism'>): number {
+  return m.parallelism.slots.engine_max ?? ENGINE_MAX_SLOTS;
+}
+
 export const STEP_IDS: SetupStepId[] = ['models', 'overview', 'weights', 'components', 'parallelism', 'methods', 'review', 'install'];
 
 export function stepIndex(id: SetupStepId): number {
@@ -69,7 +75,7 @@ export function deriveSteps(m: SetupModel): SetupStep[] {
     weights: [{ field: 'profile', label: 'Weights', type: 'enum', options: m.profiles.map((x) => x.id) }],
     components: m.components.map((c) => ({ field: c.id, label: c.label, type: 'bool' as const })),
     parallelism: [
-      { field: 'slots', label: 'Parallel chats', type: 'int', min: p.slots.min, max: ENGINE_MAX_SLOTS },
+      { field: 'slots', label: 'Parallel chats', type: 'int', min: p.slots.min, max: slotsMax(m) },
       { field: 'window', label: 'Longest conversation', type: 'int', min: p.window.min, max: p.window.max },
       { field: 'side_window', label: 'Longest conversation in the extra chats', type: 'int', min: p.side_window.min, max: p.side_window.max },
       { field: 'kv_pool', label: 'Shared memory pool', type: 'bool' },

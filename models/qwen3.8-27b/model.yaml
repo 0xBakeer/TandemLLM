@@ -17,6 +17,7 @@ schema: 1
 id: qwen3.8-27b
 name: Qwen3.8-27B
 family: Qwen3.8
+engine: qwen3_5
 params: 27B
 recommended: true
 pitch: A 27-billion-parameter model that reads images too, fast on one DGX Spark.

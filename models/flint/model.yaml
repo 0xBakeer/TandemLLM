@@ -8,6 +8,7 @@ schema: 1
 id: flint
 name: Recursive Flint
 family: Flint
+engine: flint
 params: 39.8B, ~2.5B active a token
 recommended: false
 order: 8

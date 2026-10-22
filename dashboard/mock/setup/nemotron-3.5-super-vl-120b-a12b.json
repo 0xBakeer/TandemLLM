@@ -3,6 +3,7 @@
  "id": "nemotron-3.5-super-vl-120b-a12b",
  "name": "Nemotron 3.5 Super VL 120B-A12B",
  "family": "Nemotron 3.5",
+ "engine": "nemotron_h",
  "params": "~120B, ~12B active a token",
  "recommended": false,
  "order": 6,
@@ -552,7 +553,9 @@
   "slots": {
    "min": 1,
    "max": 3,
-   "default": 3
+   "default": 3,
+   "engine_max": 16,
+   "engine_max_reason": null
   },
   "window": {
    "min": 8192,

@@ -12,6 +12,7 @@ schema: 1
 id: lfm2.5-24b-a2b
 name: LFM2.5-24B-A2B
 family: LFM2.5
+engine: lfm2_moe
 params: ~24B, ~2B active a token
 recommended: false
 # after the two Qwen3.8 models on the models step
