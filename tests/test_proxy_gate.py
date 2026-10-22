@@ -34,7 +34,6 @@ import os
 import re
 import sys
 import tempfile
-import threading
 import time
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,74 +50,86 @@ N_TOK, GAP_S, LATE_S = 40, 0.010, 0.080
 ATTEMPTS = 3
 
 
-class Engine:
-    """late: {request index: tries that get the late frame} (None: every try)."""
+def _serve(late: dict, ports) -> None:
+    """The fake engine's process: frames at GAP_S apart, the last one held back LATE_S on the tries `late`
+    names ({request index: tries}, None: every try)."""
+    tries: dict[int, int] = {}
 
-    def __init__(self, late: dict):
-        self.late = late
-        self.tries: dict[int, int] = {}
-        eng = self
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
 
-        class H(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
+        def log_message(self, *a):
+            pass
 
-            def log_message(self, *a):
-                pass
+        def do_GET(self):
+            body = json.dumps({"object": "list", "data": [{"id": "fake-38",
+                                                           "object": "model"}]}).encode()
+            self.send_response(200 if self.path.endswith("/models") else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-            def do_GET(self):
-                body = json.dumps({"object": "list", "data": [{"id": "fake-38",
-                                                               "object": "model"}]}).encode()
-                self.send_response(200 if self.path.endswith("/models") else 404)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+        def do_POST(self):
+            t0 = time.perf_counter()
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            m = re.search(r"\(run (\d+)\)", req["messages"][-1]["content"])
+            i = int(m.group(1)) if m else -1
+            k = tries[i] = tries.get(i, 0) + 1
+            which = late.get(i, ())
+            is_late = i in late and (which is None or k in which)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
 
-            def do_POST(self):
-                t0 = time.perf_counter()
-                req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                m = re.search(r"\(run (\d+)\)", req["messages"][-1]["content"])
-                i = int(m.group(1)) if m else -1
-                k = eng.tries[i] = eng.tries.get(i, 0) + 1
-                tries = eng.late.get(i, ())
-                late = i in eng.late and (tries is None or k in tries)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Connection", "close")
-                self.end_headers()
-
-                def frame(obj):
-                    self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
-                    self.wfile.flush()
-
-                sent = []
-                for n in range(N_TOK):
-                    if n:
-                        time.sleep(GAP_S)
-                    if n == N_TOK - 1 and late:
-                        sent.append(time.perf_counter())     # the engine's clock stops here
-                        time.sleep(LATE_S)                    # the network holds the frame back
-                    else:
-                        sent.append(time.perf_counter())
-                    frame({"id": "c", "object": "chat.completion.chunk", "model": "fake-38",
-                           "choices": [{"index": 0, "delta": {"content": f"w{n} "}}]})
-                tps = (N_TOK - 1) / (sent[-1] - sent[0])
-                frame({"id": "c", "object": "chat.completion.chunk", "model": "fake-38",
-                       "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                       "usage": {"prompt_tokens": 31, "completion_tokens": N_TOK,
-                                 "total_tokens": 31 + N_TOK},
-                       "timings": {"predicted_per_second": tps,
-                                   "ttft_ms": (sent[0] - t0) * 1e3, "cache_n": 0}})
-                self.wfile.write(b"data: [DONE]\n\n")
+            def frame(obj):
+                self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
                 self.wfile.flush()
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.port = self.srv.server_address[1]
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+            sent = []
+            for n in range(N_TOK):
+                if n:
+                    time.sleep(GAP_S)
+                if n == N_TOK - 1 and is_late:
+                    sent.append(time.perf_counter())     # the engine's clock stops here
+                    time.sleep(LATE_S)                    # the network holds the frame back
+                else:
+                    sent.append(time.perf_counter())
+                frame({"id": "c", "object": "chat.completion.chunk", "model": "fake-38",
+                       "choices": [{"index": 0, "delta": {"content": f"w{n} "}}]})
+            tps = (N_TOK - 1) / (sent[-1] - sent[0])
+            frame({"id": "c", "object": "chat.completion.chunk", "model": "fake-38",
+                   "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                   "usage": {"prompt_tokens": 31, "completion_tokens": N_TOK,
+                             "total_tokens": 31 + N_TOK},
+                   "timings": {"predicted_per_second": tps,
+                               "ttft_ms": (sent[0] - t0) * 1e3, "cache_n": 0}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    ports.put(srv.server_address[1])
+    srv.serve_forever()
+
+
+class Engine:
+    """The fake engine in a process of its own (OPS-231): in the test's process its frames shared the GIL
+    with the gate's reader, and under load the reader's stalls showed as a slower decode on a clean try
+    (request 2's retry at -4.4 %, 2026-10-22). late: {request index: tries that get the late frame}
+    (None: every try)."""
+
+    def __init__(self, late: dict):
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        ports = ctx.Queue()
+        self.proc = ctx.Process(target=_serve, args=(late, ports), daemon=True)
+        self.proc.start()
+        self.port = ports.get(timeout=60)
 
     def close(self):
-        self.srv.shutdown()
-        self.srv.server_close()
+        self.proc.terminate()
+        self.proc.join(10)
 
 
 def _gate(late: dict, *args) -> tuple[int, dict, str]:

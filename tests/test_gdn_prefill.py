@@ -54,8 +54,11 @@ def test_the_doubling_series_is_the_triangular_solve():
                                         unitriangular=True, left=True)
     got = doubling_inverse(A, STEPS)
     d = (got - ref).abs().max().item()
-    check("test_the_doubling_series_is_the_triangular_solve", d < 1e-4,
-          f"max |diff| {d:.2e} over 8 matrices of {CHUNK}x{CHUNK}")
+    # OPS-231: a few ulps of the inverse's largest entry over a CHUNK-long reduction (7.6e-6 of 37.4 on
+    # aarch64, 2.4e-4 on x86 CPU torch; one doubling short is off by order one, the next test)
+    bound = 4 * torch.finfo(torch.float32).eps * CHUNK * ref.abs().max().item()
+    check("test_the_doubling_series_is_the_triangular_solve", d < bound,
+          f"max |diff| {d:.2e} over 8 matrices of {CHUNK}x{CHUNK} (bound {bound:.1e})")
 
 
 def test_the_series_terminates_exactly_at_the_chunk():

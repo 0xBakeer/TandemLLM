@@ -411,9 +411,29 @@ def _fastest_cores() -> set | None:
     return fast if len(fast) < len(caps) else None
 
 
+#: the usage query's CPU time against the reference scan's (`_reference_scan`): 12.6 and 12.8 on the Spark's
+#: fast cores (2026-10-22, 757/749 ms against 60/59 ms); the bound leaves room for another CPU and Python
+#: (a hosted x86 runner took 2.9 s for the query), not for a Python loop over the rows
+USAGE_VS_SCAN = 30.0
+
+
+def _reference_scan(path: str) -> float:
+    """The CPU time of one plain scan of the ledger's year in SQLite (no index, every row read and summed):
+    the box's own unit for the usage query's cost."""
+    con = sqlite3.connect(path)
+    try:
+        c0 = time.process_time()
+        con.execute("SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), MAX(ts_ms) FROM requests "
+                    "WHERE ts_ms >= 0").fetchone()
+        return max(time.process_time() - c0, 1e-3)
+    finally:
+        con.close()
+
+
 def test_fast_enough():
-    """500,000 synthetic rows over a year: the 365-day usage query under 1 s of CPU (a laptop CPU
-    here; the board's CPU is in the same range).
+    """500,000 synthetic rows over a year: the 365-day usage query within USAGE_VS_SCAN times the CPU
+    time of one plain SQLite scan of the same rows on the same box (OPS-231: an absolute 1 s held on the
+    Spark, 0.75 s, and failed on a slower hosted runner, 2.9 s).
 
     The bound is on the query's own cost, the process's CPU time across the call, measured on the
     box's fastest cores (the thread is pinned there for the call: on a big.LITTLE board the small
@@ -421,8 +441,9 @@ def test_fast_enough():
     time measured the wait for a core and failed at 1.0-1.6 s while the query's work had not
     changed. CPU time still catches a slower query (more rows read, a lost index, a Python loop
     per row). A query that waits instead of computing (a lock, a sleep, a subprocess) does not
-    show in CPU time, so the wall clock keeps a loose bound for that: 10 s, or 1 s when the
-    box is idle (1-minute load average under half the cores)."""
+    show in CPU time, so the wall clock keeps a loose bound for that: ten times its CPU time (at
+    least 10 s), or three times (at least 1 s) when the box is idle (1-minute load average under half
+    the cores)."""
     from tools import ledger_synth
     path = os.path.join(tempfile.mkdtemp(prefix="qse-synth-"), "l.sqlite3")
     n = ledger_synth.write(path, 500_000, 365, seed=7, end=NOW / 1000)
@@ -437,6 +458,7 @@ def test_fast_enough():
         c0, t0 = time.process_time(), time.perf_counter()
         u = api.usage({"bucket": "day"})
         cpu_usage, dt_usage = time.process_time() - c0, time.perf_counter() - t0
+        cpu_ref = _reference_scan(path)
     finally:
         if keep:
             os.sched_setaffinity(0, keep)
@@ -459,8 +481,14 @@ def test_fast_enough():
     print(f"    500k rows: usage(365 d) cold {dt_usage * 1000:.0f} ms ({cpu_usage * 1000:.0f} ms CPU, "
           f"load {load:.1f}{', fastest cores ' + str(len(fast)) if fast else ''}), summary after it {dt_summary * 1000:.0f} ms, usage again "
           f"{dt_warm * 1000:.0f} ms")
-    assert cpu_usage < 1.0, f"the query's own CPU time {cpu_usage:.2f} s (wall {dt_usage:.2f} s)"
-    assert dt_usage < (1.0 if idle else 10.0), \
+    print(f"    the same box's reference scan of the year: {cpu_ref * 1000:.0f} ms CPU, the query "
+          f"{cpu_usage / cpu_ref:.1f} times it")
+    # OPS-231: the bound is the query's CPU time against the same box's own scan of the same rows (a
+    # slower runner is slower at both); a lost index or a Python loop a row is several times the scan
+    assert cpu_usage < USAGE_VS_SCAN * cpu_ref, \
+        f"the query's own CPU time {cpu_usage:.2f} s, {cpu_usage / cpu_ref:.1f} times the scan's {cpu_ref:.2f} s"
+    # a query that waits (a lock, a sleep) instead of computing: its wall time against its own CPU time
+    assert dt_usage < (max(1.0, 3.0 * cpu_usage) if idle else max(10.0, 10.0 * cpu_usage)), \
         f"wall {dt_usage:.2f} s for {cpu_usage:.2f} s of CPU at load {load:.1f}: the query waits"
     led.close()
 

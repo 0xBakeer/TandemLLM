@@ -214,7 +214,17 @@ def test_chain_kept_in_part():
     ref.decode(7, alone)
     ref.decode(19, alone)
     a, b = ref.decode(60, st), ref.decode(60, alone)
-    assert (a - b).abs().max().item() < 1e-5
+    d = (a - b).abs().max().item()
+    assert d <= _fp32_bound(cfg, a), (d, _fp32_bound(cfg, a))
+
+
+def _fp32_bound(cfg, a) -> float:
+    """OPS-231: how far two fp32 runs of the same rows may land apart when the matmuls sum in another order
+    (a block of 5 rows against one row at a time): a few ulps of the largest logit a reduction over the
+    hidden width and every layer. 0.0 on aarch64 (the same order); over 1e-5 on x86 CPU torch. A wrong
+    commit moves a logit by more than 0.1."""
+    eps = torch.finfo(torch.float32).eps
+    return 4 * eps * cfg.hidden_size * cfg.num_hidden_layers * max(1.0, a.abs().max().item())
 
 
 def test_commit_refuses_a_non_path():
