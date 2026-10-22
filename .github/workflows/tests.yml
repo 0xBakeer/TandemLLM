@@ -1,19 +1,9 @@
 # The CPU test suite (CONTRIBUTING.md) on every pull request and push to main: each tests/test_*.py
 # through tests/script_suite.py in a clean process, CUDA hidden, four files at a time. The engine's
 # Python packages are the versions install.sh pins, with the CPU builds of torch and torchvision.
-# A file that ran no test fails; a file that prints `skipped: <why>` (a GPU kernel test) is listed;
-# a file that fails runs once more alone, and passes with a warning when it passes then (until the
-# two load-sensitive tests named at the retry are fixed).
+# A file that fails or runs no test fails the job; a file that prints `skipped: <why>` (a GPU kernel
+# test) is listed. .github/cpu-suite-skip.txt names files left out here, one a line; it is empty.
 # The GPU tests in tests/gpu/ run on a DGX Spark (the run-gpu label).
-#
-# Left out here (.github/cpu-suite-skip.txt), and run in the release gate on the box
-# (tools/release_box_gate.sh):
-#   tests/test_dashboard_api.py   asserts the usage query's own CPU time under 1 s; a hosted runner takes 2.9 s
-#   tests/test_proxy_engines.py   asserts a parse under 2 ms per 300 lines; a hosted runner takes 5.6 ms
-#   tests/test_logbuf.py          the slow-subscriber test needs the writer to outrun the reader, which a
-#                                 hosted runner's scheduling does not guarantee
-#   tests/test_gdn_prefill.py     padded-row tolerance set on the aarch64 box; x86 CPU torch is 2.4e-04 off
-#   tests/test_lfm2_moe_ref.py    test_chain_kept_in_part's 1e-5 tolerance fails on x86 CPU torch
 name: tests
 
 on:
@@ -61,7 +51,7 @@ jobs:
             'python tests/script_suite.py --all --timeout 900 --out results/suite/logs "$1" | tail -1 >> results/suite/RESULT' \
             _ {} < results/suite/FILES
           python - <<'PY'
-          import re, subprocess, sys
+          import re
           lines = open("results/suite/RESULT").read().splitlines()
           total = {"files": 0, "ok": 0, "fail": 0, "skipped": 0, "tests": 0}
           bad, skipped = [], []
@@ -75,19 +65,9 @@ jobs:
           print(" ".join(f"{k}={v}" for k, v in total.items()))
           for f in skipped:
               print("skipped", f)
-          # a file that failed beside three others runs once more alone, with a warning that names
-          # it: two tests race the clock under load (test_ledger's drain, test_proxy_gate's late
-          # frame). This retry goes away when both are fixed.
-          still = []
           for f in bad:
-              r = subprocess.run([sys.executable, "tests/script_suite.py", "--all", "--timeout", "900",
-                                  "--out", "results/suite/retry", f], capture_output=True, text=True)
-              if r.returncode == 0:
-                  print(f"::warning file={f}::{f} failed beside other files and passed alone")
-              else:
-                  still.append(f)
-                  print(f"::error file={f}::{f} failed or ran no test (results/suite/logs, results/suite/retry)")
-          raise SystemExit(1 if still or total["files"] == 0 else 0)
+              print(f"::error file={f}::{f} failed or ran no test (results/suite/logs)")
+          raise SystemExit(1 if bad or total["files"] == 0 else 0)
           PY
 
       - name: Keep the logs
