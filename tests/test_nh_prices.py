@@ -108,7 +108,7 @@ def test_every_nemotron_community_pack_ships_its_price_file():
     seen = []
     for p in sorted(glob.glob(os.path.join(ROOT, "models", "*", "community", "*.json"))):
         e = json.load(open(p))
-        if registry.community_engine(e) != "nemotron_h":
+        if registry.community_serves(e) != "profile":
             continue
         pf = os.path.join(ROOT, "ops", "prices", e["base_model"], "community", f"{e['id']}.dgx-spark.json")
         assert os.path.isfile(pf), f"{e['id']}: no price file {pf}"

@@ -175,6 +175,15 @@ SCHEMA = _obj({
                                                 "reserved_gib": _NUM0, "note": _NOTE})},
     "assets": {"type": "array", "items": _ASSET},
     "quality_source": _STR,
+    # ENG-409: the rules of the community packs this model is the base of (`community_bases` below)
+    "community_base": _obj({
+        "serves": {"enum": ["loader", "profile"]},
+        "loads": {"type": "object", "additionalProperties": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}}},
+        "drafters": {"type": "array", "items": _STR, "minItems": 1},
+        "assets": {"type": "object", "additionalProperties": _IDS},
+        "layers": {"type": "integer", "minimum": 1},
+        "hook": {"type": "string", "pattern": r"^engine\.models\.[a-z0-9_]+\.[a-z0-9_]+$"}},
+        required=("serves", "loads", "drafters", "hook")),
     "profiles": {"type": "array", "items": _PROFILE},
     "measurements": _obj({"build": _STR, "date": _STR, "method": _STR, "source": _STR,
                           "rows": {"type": "array", "items": _ROW}}),
@@ -221,23 +230,59 @@ COMMUNITY_SUPPORTED = ("exl3",)            # a format with a load path here; the
 # what the engine reads on each load path today: the standalone path is text only (ENG-271); the
 # overlay keeps the base checkpoint's vision tower; no path takes audio or video
 COMMUNITY_LOADS = {"standalone": ("text",), "overlay": ("text", "image")}
-# the base models a community pack loads on, each with its rules (another model's packs load only
-# through that model's own profiles, `profile`):
-#   engine    the loader of a standalone pack: "qwen38" the 27B family's (engine/loader.py) with the EXL3
-#             overlay; "nemotron_h" NemotronH's (engine/models/nemotron_h, ENG-377), whose profile is the
-#             nearest own profile's (`like`: its limits, its drafters LiLiCorr and the lookup, its assets)
-#             with the pack in its place
-#   loads     the load paths a pack may take and what each serves
-#   drafters  the `drafters` values an entry may name; on NemotronH the pack brings none of its own
-#             ("none") and drafts with the model's own
-#   layers    the layer count a pack's config must have (server/setup/community.py check_pack)
-COMMUNITY_BASE_RULES = {
-    "qwen3.8-27b": {"engine": "qwen38", "loads": COMMUNITY_LOADS, "drafters": ("tandem-exl3", "dflash2", "none")},
-    "nemotron-3.5-super-vl-120b-a12b": {"engine": "nemotron_h", "loads": {"standalone": ("text",)},
-                                        "drafters": ("none",), "layers": 88},
-}
-COMMUNITY_BASES = tuple(COMMUNITY_BASE_RULES)
 MODALITIES = ("text", "image", "audio", "video")
+# ENG-409: the base models a community pack loads on are the models whose model.yaml has a `community_base`
+# section, with its rules (another model's packs load only through that model's own profiles, `profile`):
+#   serves    "loader": the pack is the model (standalone) or an overlay on the base, through the base's
+#             loader; "profile": the pack takes the place of the base's nearest own profile (`like`: its
+#             limits, its drafters, its assets)
+#   loads     the load paths a pack may take and what each serves
+#   drafters  the `drafters` values an entry may name ("none": the pack brings none of its own)
+#   assets    by `drafters` (and "overlay" for that load path), the base's assets a pack reads besides its
+#             own folder ("loader" bases; a "profile" base's are its nearest profile's)
+#   layers    the layer count a pack's config must have
+#   hook      the family's module (engine/models/<pkg>/community.py) that writes the pack's weight profile
+#             (`env(m, c, folder)`) and checks the pack's files (`check_pack(m, c, folder, rules)`)
+_BASES: dict = {"key": None, "rules": {}}
+
+
+def community_bases(models_dir: str | None = None) -> dict:
+    """model id -> its `community_base` rules, read from models/*/model.yaml (kept until a file's mtime moves)."""
+    import yaml
+    d = models_dir or MODELS_DIR
+    paths = sorted(glob.glob(os.path.join(d, "*", "model.yaml")))
+    key = (d, tuple((p, os.path.getmtime(p)) for p in paths))
+    if _BASES["key"] != key:
+        found = []
+        for p in paths:
+            try:
+                with open(p) as fh:
+                    data = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("community_base"), dict):
+                found.append((int(data.get("order") or 0), os.path.basename(os.path.dirname(p)),
+                              data["community_base"]))
+        # in the models step's order (`order`, then the folder), as the registry lists the models
+        _BASES.update(key=key, rules={mid: r for _, mid, r in sorted(found, key=lambda x: x[:2])})
+    return _BASES["rules"]
+
+
+def community_rules(e: dict) -> dict | None:
+    """The rules of entry `e`'s base, None outside the community bases."""
+    return community_bases().get(e["base_model"])
+
+
+def community_serves(e: dict) -> str | None:
+    """How entry `e`'s base serves its packs ("loader" or "profile"), None outside the community bases."""
+    return (community_rules(e) or {}).get("serves")
+
+
+def community_hook(e: dict):
+    """The family module that writes entry `e`'s weight profile and checks its pack (its base's `hook`)."""
+    import importlib
+    rules = community_rules(e)
+    return importlib.import_module(rules["hook"]) if rules else None
 # the files under ~/.tandemllm/community/ that are not a pack's folder (community.py)
 _RESERVED_SUFFIXES = (".json", ".partial", ".env", ".tmp")
 _HTTPS = {"type": "string", "pattern": r"^https://[^\s\"'<>`]{1,400}$"}
@@ -476,6 +521,7 @@ def parse(data, path: str = "model.yaml", root: str | None = None) -> dict:
     m.setdefault("recommended", False)
     m["parallelism"] = dict(data["parallelism"], fixed=dict(data["parallelism"].get("fixed") or {}))
     m.pop("quality_source", None)
+    m.pop("community_base", None)      # the registry's own rules (community_bases), not the payload's
     return m
 
 
@@ -799,10 +845,6 @@ def asset_present(a: dict, repo: str | None = None, m: dict | None = None) -> bo
 
 # ---------------------------------------------------------------------- community packs
 COMMUNITY_PREFIX = "community/"
-# the base model's assets a community pack reads besides its own folder, by its drafters and its
-# load path (the K3 files are named after the BF16 drafter folders, which give the rest of each arm)
-_COMMUNITY_ASSETS = {"tandem-exl3": ["exl3-drafters-k3", "exl3-draft-head-k4", "nvfp4-drafters"],
-                     "dflash2": ["nvfp4-drafters"], "in-pack": [], "none": []}
 _SOCIAL_URL = (("x", "X", "https://x.com/{}"), ("huggingface", "Hugging Face", "https://huggingface.co/{}"),
                ("bluesky", "Bluesky", "https://bsky.app/profile/{}"), ("mastodon", "Mastodon", "{}"),
                ("website", "Website", "{}"))
@@ -824,18 +866,17 @@ def _like(m: dict, fmt: str, bpw: float) -> dict | None:
     return min(same, key=lambda p: (abs(p["bpw"] - bpw), p["bpw"])) if same else None
 
 
-def community_engine(e: dict) -> str | None:
-    """The loader of entry `e`'s base (COMMUNITY_BASE_RULES), None outside the community bases."""
-    return (COMMUNITY_BASE_RULES.get(e["base_model"]) or {}).get("engine")
-
-
 def community_assets(e: dict, m: dict | None = None) -> list[str]:
-    """The base model's assets a community pack reads besides its own folder: by its drafters and its load
-    path on the 27B; on NemotronH (`m` the base) its nearest profile's, which it drafts with."""
-    if community_engine(e) == "nemotron_h":
+    """The base model's assets a community pack reads besides its own folder: on a "loader" base by its
+    drafters and its load path (the base's `assets` rules); on a "profile" base (`m` the base) its nearest
+    profile's, which it drafts with."""
+    rules = community_rules(e) or {}
+    if rules.get("serves") == "profile":
         like = _like(m, e["format"], e["bpw"]) if m is not None else None
         return list(like["assets_required"]) if like else []
-    return _COMMUNITY_ASSETS[e["drafters"]] + (["base-fp8"] if e["load"] == "overlay" else [])
+    assets = rules.get("assets") or {}
+    return list(assets.get(e["drafters"]) or []) + (list(assets.get("overlay") or []) if e["load"] == "overlay"
+                                                    else [])
 
 
 def community_errors(data, slug: str | None, folder: str | None, models: dict[str, dict]) -> list[str]:
@@ -870,15 +911,15 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
             if p["format"] != e["format"] or p["bpw"] != e["bpw"]:
                 errs.append(f"$.format: {e['format']} {e['bpw']:g} bpw is not profile {own}'s "
                             f"{p['format']} {p['bpw']} bpw")
-    elif e["base_model"] not in COMMUNITY_BASES:
-        errs.append(f"$.base_model: community packs load on {', '.join(COMMUNITY_BASES)} only")
-    rules = COMMUNITY_BASE_RULES.get(e["base_model"]) if own is None else None
+    elif e["base_model"] not in community_bases():
+        errs.append(f"$.base_model: community packs load on {', '.join(community_bases())} only")
+    rules = community_rules(e) if own is None else None
     if rules is not None and e["load"] not in rules["loads"]:
         errs.append(f"$.load: {e['base_model']} packs load {', '.join(rules['loads'])} only")
     if rules is not None and e["drafters"] not in rules["drafters"]:
         errs.append(f"$.drafters: a {e['base_model']} pack takes {', '.join(rules['drafters'])}"
                     + (" (it drafts with the model's own drafters, from its nearest profile)"
-                       if rules["engine"] == "nemotron_h" else ""))
+                       if rules["serves"] == "profile" else ""))
     if own is None and e["format"] not in COMMUNITY_SUPPORTED:
         errs.append(f"$.format: TandemLLM has no load path for {e['format']} packs yet "
                     f"({', '.join(COMMUNITY_SUPPORTED)} only)")
@@ -911,7 +952,7 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append("$.verified: a verified entry says what was measured (build, device, date)")
     if v and not _date_ok(v["date"]):
         errs.append(f"$.verified.date: {v['date']!r} is not a date")
-    if m is not None and own is None and e["base_model"] in COMMUNITY_BASES:
+    if m is not None and own is None and e["base_model"] in community_bases():
         have = {a["id"] for a in m["assets"]}
         for a in community_assets(e, m):
             if a not in have:
@@ -921,7 +962,7 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         if e["format"] in COMMUNITY_SUPPORTED and like is None:
             errs.append(f"$.format: {e['base_model']} has no {e['format']} profile to estimate "
                         f"the memory from")
-        if like is not None and community_engine(e) == "nemotron_h" and \
+        if like is not None and community_serves(e) == "profile" and \
                 not os.path.isfile(os.path.join(ROOT, "ops", "profiles", like["id"] + ".env")):
             errs.append(f"$.format: no ops/profiles/{like['id']}.env, the profile a {e['base_model']} pack "
                         f"is served with")
@@ -957,7 +998,7 @@ def community_entry(e: dict, m: dict) -> dict:
         hf_url=f"https://huggingface.co/{e['hf']['repo']}/tree/{e['hf']['revision']}",
         memory={"weights_gib": like["weights_gib"],
                 "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" or
-                community_engine(e) == "nemotron_h" else 0.0,
+                community_serves(e) == "profile" else 0.0,
                 "like": like["id"]})
 
 

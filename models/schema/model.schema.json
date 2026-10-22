@@ -219,6 +219,64 @@
       },
       "type": "array"
     },
+    "community_base": {
+      "additionalProperties": false,
+      "properties": {
+        "assets": {
+          "additionalProperties": {
+            "items": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "drafters": {
+          "items": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "hook": {
+          "pattern": "^engine\\.models\\.[a-z0-9_]+\\.[a-z0-9_]+$",
+          "type": "string"
+        },
+        "layers": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "loads": {
+          "additionalProperties": {
+            "items": {
+              "enum": [
+                "text",
+                "image",
+                "audio",
+                "video"
+              ]
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "serves": {
+          "enum": [
+            "loader",
+            "profile"
+          ]
+        }
+      },
+      "required": [
+        "serves",
+        "loads",
+        "drafters",
+        "hook"
+      ],
+      "type": "object"
+    },
     "components": {
       "items": {
         "additionalProperties": false,

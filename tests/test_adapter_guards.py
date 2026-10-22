@@ -224,8 +224,6 @@ BASELINE = {
     "engine/config.py": 2, "engine/drafters/dflash2.py": 1, "engine/drafters/dspark.py": 1,
     # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new)
     "engine/methods/manifest.py": 13, "engine/settings.py": 16,
-    # ENG-409 moves these rows into models/<name>/model.yaml
-    "server/setup/community.py": 7, "server/setup/registry.py": 7,
     # the 27B's builder and side slots, the server's own by history (ENG-406 moves them into its package),
     # and the default --served-model name and two help texts
     "server/app.py": 8,
@@ -312,6 +310,22 @@ def test_every_adapter_has_the_contract():
     names = [m for a in REGISTRY.values() for m in a.model_types]
     assert len(names) == len(set(names)), "a model_type selects two adapters"
     return f"{len(REGISTRY)} adapters from {len(pkgs)} packages"
+
+
+def test_community_bases_are_their_familys():
+    """ENG-409: a model's community-pack rules are in its model.yaml, its profile and pack check in its family's
+    package (`hook`); the setup registry names no model."""
+    import importlib
+    from server.setup import registry
+    bases = registry.community_bases()
+    assert bases, "no community base"
+    pkgs = {a.package.split("/")[-1] if a.package else n for n, a in REGISTRY.items()}
+    for mid, rules in bases.items():
+        mod = importlib.import_module(rules["hook"])
+        assert callable(mod.env) and callable(mod.check_pack), mid
+        assert rules["hook"].split(".")[2] in pkgs, (mid, rules["hook"])
+        assert rules["serves"] in ("loader", "profile") and rules["drafters"], mid
+    return f"{len(bases)} bases: {sorted(bases)}"
 
 
 def test_family_knobs_live_in_their_package():

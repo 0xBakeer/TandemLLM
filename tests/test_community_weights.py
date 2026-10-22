@@ -643,7 +643,7 @@ def test_a_nemotron_pack():
         assert c["memory"] == {"weights_gib": 58.35, "drafters_gib": 1.32, "like": "nemotron-super-vl-exl3-4.0"}, c
         p = registry.profile(m, NH_PID)
         assert p["assets_required"] == ["nemotron-super-vl-lilicorr"] and p["vision"] is False, p
-        assert registry.community_engine(c) == "nemotron_h" and registry.community_engine(_entry()) == "qwen38"
+        assert registry.community_serves(c) == "profile" and registry.community_serves(_entry()) == "loader"
         sel = estimate.check(m, {"model": NH, "profile": NH_PID, "components": {"vision": True}})
         assert sel["components"].get("vision") is False, sel
         # what the check refuses on this base

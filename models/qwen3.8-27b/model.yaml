@@ -27,6 +27,20 @@ architecture: >-
   own, up to near ties.
 license: The model's license is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.
 icon: null
+# ENG-409: community packs on this base (server/setup/registry.py `community_bases`): the pack is the model or an
+# EXL3 overlay over the 27B, through the 27B's loader; the drafter assets each drafter choice reads (the K3 files
+# are named after the BF16 drafter folders, which give the rest of each arm), base-fp8 for the overlay
+community_base:
+  serves: loader
+  loads: {standalone: [text], overlay: [text, image]}
+  drafters: [tandem-exl3, dflash2, none]
+  assets:
+    tandem-exl3: [exl3-drafters-k3, exl3-draft-head-k4, nvfp4-drafters]
+    dflash2: [nvfp4-drafters]
+    in-pack: []
+    none: []
+    overlay: [base-fp8]
+  hook: engine.models.qwen3_5.community
 links:
   - {label: Base model, url: "https://huggingface.co/Qwen/Qwen3.8-27B-FP8"}
   - {label: NVFP4 weights, url: "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4"}
