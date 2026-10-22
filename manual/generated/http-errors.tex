@@ -25,6 +25,7 @@
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{setup\_\allowbreak{}mode} & any route but the dashboard, \texttt{/\allowbreak{}health}, \texttt{/\allowbreak{}v1/\allowbreak{}models} and \texttt{/\allowbreak{}v1/\allowbreak{}setup/\allowbreak{}*} on a box in setup mode (Retry-After: 60) \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{max\_\allowbreak{}inflight} & every backend for the model is at the \texttt{max\_\allowbreak{}inflight} you set (Retry-After: 1) \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{warming}, \texttt{loading}, \texttt{refused}, \texttt{failed}, \texttt{not\_\allowbreak{}loaded}, \texttt{busy\_\allowbreak{}decoding} & a decision request while the model loads, was refused memory, failed, or the engine kept decoding past the deadline \\
+\texttt{503}\newline with \texttt{Retry-After} & \texttt{engine\_\allowbreak{}failed} & a completion after the engine's CUDA context was lost: the sentence says so, the watchdog restarts the engine (Retry-After: 60) \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{provider\_\allowbreak{}unavailable} & the status responder while the engine is stopped, starting or held (code engine\_\textless{}state\textgreater{}) \\
 \texttt{504} & \texttt{upstream\_\allowbreak{}timeout}, \texttt{timeout} & a backend that sent no first byte in time; a Laya call past its deadline \\
 \texttt{529} & \texttt{overloaded\_\allowbreak{}error} & a decision request the runtime could not take \\
