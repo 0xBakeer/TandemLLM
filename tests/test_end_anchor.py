@@ -504,8 +504,9 @@ def test_after_an_end_resume_the_rows_are_a_sessions_and_a_cold_grid_clears_it()
     store = cache.StateStore(BIG, chunk=CH)
     d = tempfile.mkdtemp(prefix="qse-end-disk-")
     try:
-        t = disk_cache.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
-                                free_bytes=lambda p: 10 ** 15, settings={"admit_after": 1}).open()
+        from disk_tier_util import waiting
+        t = waiting(disk_cache.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
+                                        free_bytes=lambda p: 10 ** 15, settings={"admit_after": 1}).open())
         res = _state(store=store, disk=t)
         app.STATE["session_cache"] = False            # the prefix snapshots alone
         prompt = tokens(100, seed=60)

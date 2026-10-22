@@ -38,6 +38,7 @@ from server import diskcache, memlimits, metrics as M  # noqa: E402
 from server.conductor import schema  # noqa: E402
 from tools import contract_check  # noqa: E402
 from test_cache import fresh, tokens  # noqa: E402
+from disk_tier_util import waiting  # noqa: E402
 from test_disk_cache import CH, HUGE, Pos  # noqa: E402
 
 CONTRACT = os.path.join(ROOT, "docs", "contract", "conductor-v1")
@@ -65,8 +66,8 @@ class Cond:
 
 def _tier(d, **kw):
     kw.setdefault("settings", {"admit_after": 1})
-    return dc.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
-                       free_bytes=lambda p: HUGE, **kw).open()
+    return waiting(dc.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
+                               free_bytes=lambda p: HUGE, **kw).open())
 
 
 def _doc(**disk):
