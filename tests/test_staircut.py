@@ -453,6 +453,21 @@ def test_price_model():
     return "Flash-Next's file (provisional, learned); missing file logged once; classes, interpolation; the 27B's stair tables"
 
 
+def test_ornith_long_turns_take_the_plain_step():
+    """#110: Ornith's price file prices a backlog row the MTP head reads (prime) in every class, so a fresh
+    server's first long turn weighs it: at 112k and 220k tokens (no drafted round there beats the plain
+    step) the turn takes the plain step instead of paying 4.6 and 10.2 s to read the prompt into the head;
+    at 3.5k and 28k it drafts."""
+    path = os.path.join(ROOT, "ops", "prices", "ornith-1.5-122b", "ornith-1.5-122b-exl3-4.0.dgx-spark.json")
+    pm = PriceModel.load(path)
+    classes = [k for k in json.load(open(path)) if k.isdigit()]
+    assert classes and all(pm.prior(1, "prime", int(c)) for c in classes), classes
+    sc = StairCut(pm, siblings=False)
+    assert sc.turn(0, 3_500, 256.0) and sc.turn(32768, 11_377, 256.0)
+    assert not StairCut(pm, siblings=False).turn(131072, 87_717, 256.0)      # 112,068 tokens
+    assert not StairCut(pm, siblings=False).turn(262144, 109_443, 256.0)     # 220,038: priced as 131,072
+
+
 def test_no_price_constant_in_the_flashnext_package():
     hits = [p for p in glob.glob(os.path.join(ROOT, "engine", "models", "flashnext", "*.py"))
             if "V0 =" in open(p).read() or "STEP =" in open(p).read()]
