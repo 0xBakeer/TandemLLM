@@ -614,7 +614,8 @@ def test_10_page_check():
                            "--step", "click:#pause", "--step", "shot:after-pause"])
         took = time.monotonic() - t0
         steps = rep.get("steps") or [{}, {}, {}]
-        print(f"    timer page: {rep['verdict']} in {took:.1f} s; read {steps[2].get('value')}, "
+        print(f"    timer page: {rep['verdict']} in {took:.1f} s (Chrome up and the page loaded in "
+              f"{rep.get('start_seconds')} s, the steps {rep.get('seconds')} s); read {steps[2].get('value')}, "
               f"state {rep.get('state')}")
         assert code == 0 and rep["ok"], rep
         assert rep["steps"][2]["value"] in ("24:59", "24:58"), rep["steps"][2]
@@ -625,7 +626,9 @@ def test_10_page_check():
             assert os.path.getsize(os.path.join(os.getcwd(), w["shot"])) > 1000, w
         assert os.path.exists(os.path.join(d, "after-pause.png"))
         assert {c.get("id") for c in rep["controls"]} >= {"start", "pause", "name"}, rep["controls"]
-        assert took < 30, took                  # the keyring wait (25 s per launch) is gone
+        # the keyring wait (25 s at the first network request) is gone: the start and the first
+        # load of a page on 127.0.0.1 take a few seconds on a loaded runner, the whole check more
+        assert rep["start_seconds"] < 20, rep["start_seconds"]
 
         laya = FakeLaya(policy=lambda c, st: "failure")
         try:
@@ -657,6 +660,31 @@ def test_10_page_check():
     finally:
         srv.shutdown()
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_10b_chrome_starts_without_the_desktop_keyring():
+    """SRV-195: the two flags that end Chrome's 25 s keyring wait are on its command line."""
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def popen(args, **kw):
+        seen.append(args)
+        raise Stop
+    old, ld.subprocess.Popen = ld.subprocess.Popen, popen
+    old_find, ld.find_chrome = ld.find_chrome, lambda: "/bin/chrome"
+    try:
+        ld.Browser("about:blank", None, headless=True)
+        raise AssertionError("Chrome was not started")
+    except Stop:
+        pass
+    finally:
+        ld.subprocess.Popen, ld.find_chrome = old, old_find
+        for a in (seen[0] if seen else ()):
+            if a.startswith("--user-data-dir="):
+                shutil.rmtree(a.split("=", 1)[1], ignore_errors=True)
+    assert seen and "--password-store=basic" in seen[0] and "--use-mock-keychain" in seen[0], seen
 
 
 def _free_port():

@@ -796,9 +796,12 @@ class PageCheck:
 
     def __init__(self, url: str, widths: list[int], shots: str, cdp: str | None = None):
         self.url, self.widths, self.shots = url, widths, shots
+        t0 = time.monotonic()
         self.b = Browser(url, cdp, headless=True, width=widths[0], height=900,
                          watch=True, need_state=False)
         self.cdp = self.b.cdp
+        # Chrome's start and the first load: where a wait at the first network request shows
+        self.start_seconds = round(time.monotonic() - t0, 1)
 
     def size(self, width: int) -> None:
         mobile = width < 600
@@ -877,7 +880,7 @@ class PageCheck:
         return out
 
     def run(self, steps: list[str]) -> dict:
-        rep: dict = {"url": self.url, "steps": [], "widths": []}
+        rep: dict = {"url": self.url, "steps": [], "widths": [], "start_seconds": self.start_seconds}
         t0 = time.monotonic()
         self.size(self.widths[0])
         self.cdp.call("Page.reload")
