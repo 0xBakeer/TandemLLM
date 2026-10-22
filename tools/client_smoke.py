@@ -517,10 +517,12 @@ def main() -> int:
         # a streamed prefill past --prefill-heartbeat-s sends `: prefill done/total` comment
         # lines; a client must read the stream as before. Raw bytes here (the SDKs hide comments).
         import urllib.request
-        # the prompt has to prefill for longer than the server's heartbeat interval (5 s by
-        # default) or there is nothing to check: when the server's own prefill time (the finish
-        # chunk's timings.prompt_ms) was shorter and no comment came (Flint prefills 24k tokens in
-        # about 4 s), the prompt goes again at 2.5 and 6 times the length, within its window
+        # the server sends a comment between two prefill chunks once the prefill has run its
+        # heartbeat interval (5 s by default), so one is due only when the prefill ran past the
+        # interval by more than a chunk: when the server's own prefill time (the finish chunk's
+        # timings.prompt_ms) was under twice the interval and no comment came (Flint prefills
+        # 24k tokens in 4 to 5.6 s), the prompt goes again at 2.5 and 6 times the length, within
+        # its window
         window = int(s.window or 0) or 131072
         got, toks = {}, 0
         for toks in (24000, 60000, 144000):
@@ -542,7 +544,7 @@ def main() -> int:
             with urllib.request.urlopen(req, timeout=1800) as r:
                 got = read_heartbeat((raw.decode().rstrip("\r\n") for raw in r),
                                      clock=lambda: time.monotonic() - t0)
-            if got["comments"] or (got["prompt_ms"] or 0) >= HEARTBEAT_S * 1000 + 500:
+            if got["comments"] or (got["prompt_ms"] or 0) >= 2 * HEARTBEAT_S * 1000:
                 break                                # a heartbeat was due: this run decides
         s.check("prefill heartbeat: comments before the model's first token, the stream intact",
                 got.get("comments", 0) >= 1 and got.get("events", 0) >= 2 and got.get("done")
