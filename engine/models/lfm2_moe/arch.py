@@ -14,4 +14,7 @@ ARCH = register(Arch(
     manifest="engine.models.lfm2_moe.serving:manifest",
     rank=3,
     spec=ServeSpec(tool_format="pythonic"),      # LFM2's Pythonic call lists
+    # the row kernels, the packs, the expert loaders and the reference other families build on
+    shares=("engine/models/lfm2_moe/kernels.py", "engine/models/lfm2_moe/pack.py", "engine/models/lfm2_moe/load.py",
+            "engine/models/lfm2_moe/ref.py"),
 ))

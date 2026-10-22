@@ -107,18 +107,62 @@ def test_same_rows_is_frozen():
 
 # ------------------------------------------------------------------ 3: isolation
 
-#: v0.14.0's cross-family files: a file of one package that another adapter's manifest holds, and who
-#: holds it (ENG-408 declares them; until then this is the measured table)
-SHARED = {
-    "engine/models/lfm2_moe/kernels.py": {"lfm2_moe", "nemotron_h", "flint"},
-    "engine/models/lfm2_moe/pack.py": {"lfm2_moe", "nemotron_h"},
-    "engine/models/lfm2_moe/load.py": {"lfm2_moe", "flint"},
-    "engine/models/lfm2_moe/ref.py": {"lfm2_moe", "flint"},
-    "engine/models/flashnext/engine.py": {"qwen4_exp", "qwen3_5_moe"},
-    "engine/models/flashnext/load.py": {"qwen4_exp", "qwen3_5_moe"},
-    "engine/models/flashnext/ref.py": {"qwen4_exp", "qwen3_5_moe"},
-    "engine/models/flashnext/vision.py": {"qwen4_exp", "qwen3_5_moe"},
-}
+def _shared() -> dict:
+    """ENG-408: each shared library file (a provider's `shares`) and the families whose fingerprint it is
+    part of: the provider and every family that `uses` it."""
+    out = {}
+    for name, a in REGISTRY.items():
+        for f in a.shares:
+            out.setdefault(f, set()).add(name)
+    for name, a in REGISTRY.items():
+        for f in a.uses:
+            assert f in out, f"{name} uses {f}, which no family shares"
+            out[f].add(name)
+    return out
+
+
+def _imported_files(path: str) -> set:
+    """The files of engine/models/<pkg>/ a module imports (`from engine.models.X import y` names X/y.py
+    when y is a module, else X/__init__.py)."""
+    import ast
+    out = set()
+    for node in ast.walk(ast.parse(open(path, encoding="utf-8").read())):
+        mods = []
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("engine.models."):
+            mods = [(node.module, [a.name for a in node.names])]
+        elif isinstance(node, ast.Import):
+            mods = [(a.name, []) for a in node.names if a.name.startswith("engine.models.")]
+        for mod, names in mods:
+            parts = mod.split(".")[2:]
+            if len(parts) >= 2:
+                out.add(f"engine/models/{parts[0]}/{parts[1]}.py")
+            elif len(parts) == 1:
+                for n in names or ["__init__"]:
+                    f = f"engine/models/{parts[0]}/{n}.py"
+                    out.add(f if os.path.isfile(os.path.join(ROOT, f)) else f"engine/models/{parts[0]}/__init__.py")
+    return out
+
+
+def test_a_family_imports_only_what_it_declares():
+    pkg_of = {a.package.split("/")[-1]: n for n, a in REGISTRY.items() if a.package}
+    pkg_of.update({"qwen3_5": "qwen3_5"})
+    bad = []
+    for pkg, name in pkg_of.items():
+        for path in glob.glob(os.path.join(ROOT, "engine", "models", pkg, "*.py")):
+            for f in sorted(_imported_files(path)):
+                other = f.split("/")[2]
+                if other == pkg or other not in pkg_of:
+                    continue                      # its own package, or the shared types (adapter, state)
+                if f not in REGISTRY[name].uses:
+                    bad.append(f"{os.path.relpath(path, ROOT)} imports {f}, not in {name}'s uses")
+    assert not bad, bad
+    shared = _shared()
+    for f, holders in shared.items():
+        with open(os.path.join(ROOT, f), encoding="utf-8") as fh:
+            words = {w for _, w in lint_hits(fh.read())}
+        others = {REGISTRY[h].package.split("/")[-1] for h in holders if REGISTRY[h].package} - {f.split("/")[2]}
+        assert not words & {"flint"} and not any(o in words for o in others), (f, words)
+    return f"{sum(len(a.uses) for a in REGISTRY.values())} declared uses, {len(shared)} shared files"
 
 
 def test_one_package_moves_only_its_dependents():
@@ -131,7 +175,9 @@ def test_one_package_moves_only_its_dependents():
             holders[os.path.relpath(p, ROOT)].add(n)
     pkg_files = {p: h for p, h in holders.items() if p.startswith("engine/models/")}
     cross = {p: h for p, h in pkg_files.items() if len(h) > 1}
-    assert cross == SHARED, f"cross-family files differ from the table: {cross}"
+    shared = _shared()
+    undeclared = {p: h for p, h in cross.items() if shared.get(p) != h}
+    assert not undeclared, f"a manifest holds another package's file its entry does not declare: {undeclared}"
     with tempfile.TemporaryDirectory() as d:
         for sub in ("engine", "tools", "ops"):
             shutil.copytree(os.path.join(ROOT, sub), os.path.join(d, sub),
@@ -140,7 +186,7 @@ def test_one_package_moves_only_its_dependents():
         checked = 0
         own = {min(p for p, h in pkg_files.items() if h == {n}) for n in mans
                if any(h == {n} for h in pkg_files.values())}
-        for path in sorted(own | set(SHARED)):
+        for path in sorted(own | set(cross)):
             full = os.path.join(d, path)
             with open(full, "ab") as f:
                 f.write(b"\n# isolation probe\n")

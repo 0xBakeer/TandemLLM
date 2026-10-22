@@ -22,7 +22,7 @@ import importlib
 import os
 from dataclasses import dataclass, field
 
-from engine.models.adapter import ServeSpec
+from engine.models.adapter import EngineHooks, ServeSpec
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,14 @@ class Arch:
     spec: ServeSpec = field(default_factory=ServeSpec)
     # the family `--model` serves when it names no checkpoint directory (one family is)
     default: bool = False
+    # ENG-408: shared libraries. `shares`: files of this package other families build on (a change moves
+    # every dependent's fingerprint, on purpose: it can change their rows); `uses`: other packages' files
+    # this family builds on (each in its provider's `shares`). tests/test_adapter_guards.py holds the
+    # manifests and the imports to these.
+    shares: tuple = ()
+    uses: tuple = ()
+    # the launch options this family turns on in the shared kernels (engine/models/adapter.py)
+    hooks: EngineHooks = field(default_factory=EngineHooks)
 
     def _resolve(self, ref: str):
         mod, attr = ref.split(":")

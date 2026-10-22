@@ -12,4 +12,9 @@ ARCH = register(Arch(
     serve="engine.models.flashnext.serving:serve",
     manifest="engine.models.flashnext.serving:manifest",
     rank=1,
+    # the trunk the Qwen3.5 MoE family builds on: the engine, loader, reference and tower (in its rows), the
+    # config, pack index and adapter it extends
+    shares=("engine/models/flashnext/engine.py", "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py",
+            "engine/models/flashnext/vision.py", "engine/models/flashnext/config.py", "engine/models/flashnext/pack.py",
+            "engine/models/flashnext/ple.py", "engine/models/flashnext/serving.py"),
 ))

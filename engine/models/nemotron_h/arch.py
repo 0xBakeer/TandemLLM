@@ -13,4 +13,5 @@ ARCH = register(Arch(
     serve="engine.models.nemotron_h.serving:serve",
     manifest="engine.models.nemotron_h.serving:manifest",
     rank=2,
+    uses=("engine/models/lfm2_moe/kernels.py", "engine/models/lfm2_moe/pack.py"),
 ))

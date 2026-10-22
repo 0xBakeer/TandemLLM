@@ -61,6 +61,18 @@ class CostModel:
 
 
 @dataclass(frozen=True)
+class EngineHooks:
+    """Launch options a family turns on in the shared kernels it builds on (ENG-408): a shared kernel takes
+    an option as a plain argument and names no family; the family's engine passes it when its entry says
+    so (and its own knob does not turn it off)."""
+
+    # programmatic dependent launches of the Triton row kernels (`launch_pdl`, `griddepcontrol`)
+    pdl: bool = False
+    # a second CUDA stream beside the routed experts for the shared expert
+    side_stream: bool = False
+
+
+@dataclass(frozen=True)
 class ReasoningSpec:
     """How a family's model reasons (ENG-406), for the server's reasoning split, budget and thinking-off
     render. The default is a template that opens the reasoning block in the prompt and closes it for

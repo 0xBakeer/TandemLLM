@@ -120,11 +120,15 @@ class FlintEngine(FlintRef):
         self.exl3 = any(_is_exl3(w) for w in W.values())
         self.banks = {li: e.bank(self.device) for li, e in experts.items() if hasattr(e, "bank")} \
             if str(self.device).startswith("cuda") else {}
-        # SPD-145: the shared expert's stream (FLINT_SIDE_STREAM; None: one stream)
+        # SPD-145: the launch options Flint's entry turns on (engine/models/flint/arch.py `hooks`), each with its
+        # knob to turn it off: the shared expert's stream (FLINT_SIDE_STREAM; None: one stream) and programmatic
+        # dependent launches of the row kernels, Flint's and the shared ones it calls (FLINT_PDL)
+        from engine.models.flint.arch import ARCH
+        cuda = self.device.type == "cuda"
         self.side = torch.cuda.Stream(device=self.device) \
-            if self.device.type == "cuda" and _S.get("FLINT_SIDE_STREAM") == "1" else None
+            if cuda and ARCH.hooks.side_stream and _S.get("FLINT_SIDE_STREAM") == "1" else None
         self._sev: dict = {}
-        if self.device.type == "cuda" and _S.get("FLINT_PDL") == "1":
+        if cuda and ARCH.hooks.pdl and _S.get("FLINT_PDL") == "1":
             K.PDL = True
 
     # ------------------------------------------------------------------------- state
