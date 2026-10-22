@@ -2,7 +2,8 @@
 # through tests/script_suite.py in a clean process, CUDA hidden, four files at a time. The engine's
 # Python packages are the versions install.sh pins, with the CPU builds of torch and torchvision.
 # A file that ran no test fails; a file that prints `skipped: <why>` (a GPU kernel test) is listed;
-# a file that fails runs once more alone, and passes with a warning when it passes then.
+# a file that fails runs once more alone, and passes with a warning when it passes then (until the
+# two load-sensitive tests named at the retry are fixed).
 # The GPU tests in tests/gpu/ run on a DGX Spark (the run-gpu label).
 #
 # Left out here (.github/cpu-suite-skip.txt), and run in the release gate on the box
@@ -74,8 +75,9 @@ jobs:
           print(" ".join(f"{k}={v}" for k, v in total.items()))
           for f in skipped:
               print("skipped", f)
-          # a file that failed beside three others runs once more alone: two tests here race the
-          # clock under load (test_ledger's drain, test_proxy_gate's late frame)
+          # a file that failed beside three others runs once more alone, with a warning that names
+          # it: two tests race the clock under load (test_ledger's drain, test_proxy_gate's late
+          # frame). This retry goes away when both are fixed.
           still = []
           for f in bad:
               r = subprocess.run([sys.executable, "tests/script_suite.py", "--all", "--timeout", "900",
