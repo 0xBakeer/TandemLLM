@@ -123,6 +123,38 @@ class _Env:
         community._STATE.update(fetched=False, checked_at=None, error=None, note=None)
 
 
+def test_the_cli_commands():
+    """ENG-409: the module's CLI over the index in use: the index check, a weight profile written by the base's
+    family (each base: a "loader" one and a "profile" one), a pack check, and the refusals."""
+    import contextlib
+    import io
+    import tempfile
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert community.main(["--index", "--check"]) == 0
+    assert out.getvalue().count("ok   ") == 2, out.getvalue()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert community.main(["env", "community/no-such-pack"]) == 2
+        assert community.main(["check-pack", "community/no-such-pack"]) == 2
+    assert "no community entry" in err.getvalue()
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert community.main([]) == 2
+    for pid in ("community/thinkingcap-27b-kearuga-exl3-4.00", "community/nemotron-super-vl-exl3-3.5bpw"):
+        hit = community.find(pid)
+        assert hit is not None, pid
+        d = tempfile.mkdtemp()
+        dst = os.path.join(d, "profile.env")
+        assert community.main(["env", pid, "--out", dst]) == 0
+        text = open(dst).read()
+        assert text == community.env(*hit) and f"QSE_WEIGHTS='{pid}'" in text, pid
+        with contextlib.redirect_stdout(io.StringIO()) as o:
+            rc = community.main(["check-pack", pid, "--dir", d])
+        serves = registry.community_serves(hit[1])
+        assert (rc, serves) in ((0, "loader"), (1, "profile")), (pid, rc, serves, o.getvalue())
+    return "index, env and check-pack for both kinds of base"
+
+
 def test_the_first_entry():
     with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-"), QSE_COMMUNITY_URL="off"):
         m = _models()["qwen3.8-27b"]

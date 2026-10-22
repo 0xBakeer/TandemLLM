@@ -311,6 +311,28 @@ def test_every_adapter_has_the_contract():
     return f"{len(REGISTRY)} adapters from {len(pkgs)} packages"
 
 
+def test_a_knob_registered_twice_is_refused():
+    import importlib
+    from engine import settings
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "fam"))
+        with open(os.path.join(d, "fam", "knobs.py"), "w") as f:
+            f.write("KNOBS = {'PREFILL_CHUNK': ('1', 'engine/models/fam/x.py')}\n")
+        name = next(iter(settings.KNOBS))
+        with open(os.path.join(d, "fam", "knobs.py"), "w") as f:
+            f.write(f"KNOBS = {{{name!r}: ('1', 'engine/models/fam/x.py')}}\n")
+        try:
+            settings._family_knobs(d)
+        except ValueError as exc:
+            assert "registered twice" in str(exc)
+        else:
+            raise AssertionError("a knob in two tables must be refused")
+    for path in glob.glob(os.path.join(ROOT, "engine", "models", "*", "knobs.py")):
+        pkg = os.path.basename(os.path.dirname(path))
+        mod = importlib.import_module(f"engine.models.{pkg}.knobs")
+        assert all(settings.KNOBS[k] == v for k, v in mod.KNOBS.items()), pkg
+
+
 def test_community_bases_are_their_familys():
     """ENG-409: a model's community-pack rules are in its model.yaml, its profile and pack check in its family's
     package (`hook`); the setup registry names no model."""

@@ -104,6 +104,13 @@ def test_the_notes_show_a_real_tool_and_no_placeholder():
             assert "NAME" not in t and "KEY" not in t, (name, t)
 
 
+def test_the_block_reader_base_takes_nothing():
+    r = toolformats.BlockReader()
+    r.reset()
+    r.stream(None, 0)
+    assert r.takes("anything") is False and r.parse("x", None) is None
+
+
 def test_the_loop_guard_reads_the_open_calls_name():
     for name, fmt in _formats().items():
         text = fmt.forced_render("write_file", ARGS)
