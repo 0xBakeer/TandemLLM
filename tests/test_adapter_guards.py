@@ -169,7 +169,7 @@ BASELINE = {
     "server/conductor/classify.py": 6, "server/conductor/decisions.py": 2, "server/conductor/fake_decider.py": 1,
     "server/conductor/hook.py": 3, "server/conductor/libsearch.py": 1, "server/conductor/memory.py": 3,
     "server/conductor/memwriter.py": 1, "server/conductor/narrator.py": 2, "server/conductor/notes.py": 2,
-    "server/conductor/proposals.py": 1, "server/conductor/router.py": 15, "server/conductor/schema.py": 19,
+    "server/conductor/proposals.py": 1, "server/conductor/router.py": 15, "server/conductor/schema.py": 18,
     "server/conductor/shadow.py": 5, "server/metrics.py": 2, "proxy/harness.py": 5, "engine/shadow.py": 1,
     "server/setup/wren.py": 17,
     # the 27B's own config and drafters (engine/*.py is its package by history, ENG-221)
@@ -179,7 +179,7 @@ BASELINE = {
     # ENG-409 moves these rows into models/<name>/model.yaml
     "server/setup/community.py": 7, "server/setup/registry.py": 7,
     # ENG-406/407 take these to zero
-    "server/app.py": 28, "server/toolcall.py": 31, "server/compat.py": 1, "engine/grammar.py": 4,
+    "server/app.py": 22, "server/toolcall.py": 31, "server/compat.py": 1, "engine/grammar.py": 4,
     # the fake engine emulates each format's output for the tests
     "server/fake_engine.py": 4,
 }

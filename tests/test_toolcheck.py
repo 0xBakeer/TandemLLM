@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 import yaml  # noqa: E402
 
 from server import app, fake_engine  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 from server.conductor.monitor import Journal, Monitor, Policy, RequestEvent  # noqa: E402
 from server.conductor.monitor import policy as policy_mod  # noqa: E402
 from server.conductor.monitor.toolcheck import schema_problems, tool_history  # noqa: E402
@@ -590,7 +591,7 @@ def test_the_buffer_cut_drops_what_it_held():
 
 def _argkey(mon_mode: str = "on") -> Monitor:
     mon = serve(mon_mode)
-    app.STATE["tool_format"] = "argkey"         # Flint's adapter sets it (engine/models/flint)
+    app.STATE["spec"] = ServeSpec(tool_format="argkey")   # Flint's adapter names it (engine/models/flint)
     return mon
 
 

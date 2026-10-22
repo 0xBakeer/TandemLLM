@@ -10,4 +10,5 @@ ARCH = register(Arch(
     engine="engine.models.qwen3_5.adapter:Qwen38Engine",     # engine/model.py's, with the cold verbs
     manifest="engine.models.qwen3_5.adapter:manifest",
     rank=0,
+    default=True,
 ))

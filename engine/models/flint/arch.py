@@ -1,6 +1,7 @@
 """The flint family's entry in the model registry (engine/models/__init__.py discovers it, ENG-405)."""
 
 from engine.models import Arch, register
+from engine.models.adapter import ReasoningSpec, ServeSpec
 
 ARCH = register(Arch(
     name="flint",
@@ -12,4 +13,6 @@ ARCH = register(Arch(
     serve="engine.models.flint.serving:serve",
     manifest="engine.models.flint.serving:manifest",
     rank=5,
+    # the arg-key call form; the template opens no reasoning block, the model writes `<think>` when it reasons
+    spec=ServeSpec(tool_format="argkey", reasoning=ReasoningSpec(opens_itself=True)),
 ))

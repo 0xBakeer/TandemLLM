@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from engine import grammar as G  # noqa: E402
 from server import app  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 import test_compat as C  # noqa: E402
 
 PATTERNS = [
@@ -289,7 +290,7 @@ def test_the_handler_refuses_what_it_cannot_serve():
     assert head.startswith("HTTP/1.1 200"), "tool_choice none takes the tools out of the request"
     # SRV-619: a model whose calls are not the XML format keeps the 400 with tools
     C.serve()
-    app.STATE["tool_format"] = "pythonic"
+    app.STATE["spec"] = ServeSpec(tool_format="pythonic")
     head, raw = C.Req("/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}],
                                               "response_format": {"type": "json_object"},
                                               "tools": tools}).response()

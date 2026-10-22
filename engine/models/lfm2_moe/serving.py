@@ -8,7 +8,7 @@ drives every model through (the Flash-Next adapter's, engine/models/flashnext/se
   forward_block           a chain verify whose commit waits for `rollback_to` or the next call
 
 so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
-the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
+the reasoning split, the tool-call form the model writes (its `ServeSpec`), the live view -- is the
 server's code. A verified row is the decode step's row bit for bit (ENG-287), so greedy speculation
 writes the plain greedy text. `caps` says what is on.
 """
@@ -504,7 +504,6 @@ def serve(a, ctx) -> dict:
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "tool_format": "pythonic",
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),

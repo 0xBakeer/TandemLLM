@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from server import app  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 from server.toolcall import parse_tool_calls  # noqa: E402
 from test_toolcheck import Req, serve  # noqa: E402
 
@@ -71,7 +72,7 @@ def test_template_tool_call_round_trips_through_the_parser():
 
 def ask(text: str, stream: bool, think: bool = True) -> dict:
     serve("raw")
-    app.STATE["tool_format"] = "xml"
+    app.STATE["spec"] = ServeSpec(tool_format="xml")
     app.STATE["reasoning_format"] = "reasoning_content"
     body = {"messages": [{"role": "user", "content": text}], "stream": stream, "tools": TOOLS,
             "max_tokens": 2000, "chat_template_kwargs": {"enable_thinking": think}}

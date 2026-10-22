@@ -58,3 +58,24 @@ class CostModel:
         """The dashboard's `cache.snapshot_cost` row (contract 1.3 keys)."""
         return {"recurrent_bytes": int(self.parts.get("recurrent", 0)), "conv_bytes": int(self.parts.get("conv", 0)),
                 "kv_bytes_per_token": int(self.view_bytes_per_token)}
+
+
+@dataclass(frozen=True)
+class ReasoningSpec:
+    """How a family's model reasons (ENG-406), for the server's reasoning split, budget and thinking-off
+    render. The default is a template that opens the reasoning block in the prompt and closes it for
+    thinking off (`enable_thinking`)."""
+
+    # the model writes the opening `<think>` itself as its first token; its template opens none, so thinking
+    # off renders an empty block after the generation prompt and a budget counts from the model's opener
+    opens_itself: bool = False
+
+
+@dataclass(frozen=True)
+class ServeSpec:
+    """What a family tells the server about serving it (ENG-406, ENG-407): the form its model writes tool
+    calls in (a name the server's tool formats know, server/toolformats/) and how it reasons. The family's
+    `serve()` returns it as `serving["spec"]`; shared code reads it, never a model's name."""
+
+    tool_format: str = "xml"
+    reasoning: ReasoningSpec = field(default_factory=ReasoningSpec)

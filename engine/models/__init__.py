@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import importlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from engine.models.adapter import ServeSpec
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,11 @@ class Arch:
     manifest: str | None = None
     # the registry's order (architecture()'s message lists them so); a new family takes the default
     rank: int = 100
+    # ENG-406: what the server needs to know about serving the family's model: its tool-call form and
+    # how it reasons (engine/models/adapter.py)
+    spec: ServeSpec = field(default_factory=ServeSpec)
+    # the family `--model` serves when it names no checkpoint directory (one family is)
+    default: bool = False
 
     def _resolve(self, ref: str):
         mod, attr = ref.split(":")
@@ -75,6 +82,14 @@ def _discover() -> None:
     ordered = sorted(REGISTRY.values(), key=lambda a: (a.rank, a.name))
     REGISTRY.clear()
     REGISTRY.update((a.name, a) for a in ordered)
+
+
+def default_arch() -> Arch:
+    """The family a server without a checkpoint directory serves (its arch.py says `default=True`)."""
+    found = [a for a in REGISTRY.values() if a.default]
+    if len(found) != 1:
+        raise ValueError(f"exactly one registered family is the default, found {[a.name for a in found]}")
+    return found[0]
 
 
 def architecture(raw: dict) -> Arch:

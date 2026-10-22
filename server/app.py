@@ -62,6 +62,7 @@ from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCal
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
 from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
@@ -2404,7 +2405,7 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
-    fmt = STATE.get("tool_format")
+    fmt = _spec().tool_format
     # the checks read the model's own call format as the stream and the final parse do: an
     # arg-key or Pythonic call is a call here too, not a block that does not parse
     answer = rewrite_native(answer, fmt, eos=True)
@@ -2534,7 +2535,7 @@ def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
     m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
     if m:
         name = m.group(1)
-    elif STATE.get("tool_format") == "argkey":
+    elif _spec().tool_format == "argkey":
         m = re.match(r"\s*([^<\s]+)\s*<arg_key>", tbuf.open_text() or "")    # the arg-key form
         name = m.group(1) if m else None
     act = STATE.get("argloop", "on") == "on" and sup is not None and sup.mode == "on"
@@ -2649,6 +2650,16 @@ def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
         text = STATE["tok"].decode(ids, skip_special_tokens=True)
         outcome = "text" if _reasoning_head(text, in_think)[1].strip() else "empty"
     sup.finish(outcome, finish=finish, resume_ms=sup.resume_ms)
+
+
+#: a family that names no ServeSpec: the XML call form, a template that opens the reasoning block
+DEFAULT_SPEC = ServeSpec()
+
+
+def _spec() -> ServeSpec:
+    """ENG-406: what the served family says about its model (its `serve()`'s `serving["spec"]`): the tool-call
+    form and how it reasons. Every request path reads these through here, never a model's name."""
+    return STATE.get("spec") or DEFAULT_SPEC
 
 
 def _answer(ctx, start: int, extra, think) -> str:
@@ -5167,10 +5178,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # Qwen template's own thinking off renders it, so the answer starts at once
         close = (list(tok(CLOSE_THINK, add_special_tokens=False).input_ids)
                  if client.off and kwargs.get("add_generation_prompt") else [])
-        # SRV-685: a model that opens its own reasoning block (STATE["self_think"], no thinking switch in its
+        # SRV-685: a model that opens its own reasoning block (`ReasoningSpec.opens_itself`, no thinking switch in its
         # template) gets an empty block after the generation prompt, so it answers at once
         selfoff = (list(tok(OPEN_THINK + CLOSE_THINK, add_special_tokens=False).input_ids)
-                   if close and STATE.get("self_think") else [])
+                   if close and _spec().reasoning.opens_itself else [])
         seg = STATE.get("segments")
         if seg is None:
             enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
@@ -5698,7 +5709,7 @@ def _grammar_vocab(calls: bool = False) -> "grammar_mod.Vocab":
     more, on the first such request)."""
     key = "grammar_vocab_calls" if calls else "grammar_vocab"
     # SRV-689: the arg-key form's tags are the model's own ids too
-    marks = (grammar_mod.ARGKEY_MARKERS if STATE.get("tool_format") == "argkey"
+    marks = (grammar_mod.ARGKEY_MARKERS if _spec().tool_format == "argkey"
              else grammar_mod.CALL_MARKERS)
     v = STATE.get(key)
     if v is None:
@@ -7261,8 +7272,8 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "argkey"),
-                                           fmt=STATE.get("tool_format"))
+                                           xml_calls=_spec().tool_format not in ("pythonic", "argkey"),
+                                           fmt=_spec().tool_format)
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None
@@ -8145,7 +8156,7 @@ class Handler(BaseHTTPRequestHandler):
                     profile=plan.res.profile if plan is not None and plan.active else "",
                     cls=str((plan.row or {}).get("class_id") or "")
                     if plan is not None and plan.active else "",
-                    tool_format=str(STATE.get("tool_format") or ""))
+                    tool_format=str(_spec().tool_format or ""))
                 # one session for the router and the monitor: the router's key when it has one
                 sup = rec.sup = mon.begin(
                     mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,
@@ -8532,7 +8543,7 @@ class Handler(BaseHTTPRequestHandler):
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)
                         for x in (*more, ids))
-                elif STATE.get("self_think"):
+                elif _spec().reasoning.opens_itself:
                     # a model that opens its own block (Flint): the tokens after its opening `<think>`
                     o = usage_mod.special_id(tok, "<think>")
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
@@ -8615,9 +8626,9 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         ended = bool(ids) and ids[-1] in eos
-                        if STATE.get("tool_format") == "pythonic":
+                        if _spec().tool_format == "pythonic":
                             answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
-                        elif STATE.get("tool_format") == "argkey":
+                        elif _spec().tool_format == "argkey":
                             answer = rewrite_argkey(answer, eos=ended)
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
@@ -8678,7 +8689,7 @@ class Handler(BaseHTTPRequestHandler):
                                if d["lpr"] is not None else None)
                     if chat:
                         content, reasoning = split_full(d["text"], fmt, in_think=in_think,
-                                                        self_open=bool(STATE.get("self_think")))
+                                                        self_open=_spec().reasoning.opens_itself)
                         if plan is not None and plan.active:
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
@@ -8742,7 +8753,7 @@ class Handler(BaseHTTPRequestHandler):
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
             split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary,
-                              self_open=bool(STATE.get("self_think")))
+                              self_open=_spec().reasoning.opens_itself)
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
@@ -8757,13 +8768,13 @@ class Handler(BaseHTTPRequestHandler):
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
-                                   live=not any(stops), fmt=STATE.get("tool_format"))
+                                   live=not any(stops), fmt=_spec().tool_format)
                     if parse_calls else None)
             # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
             # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
             # a model that writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` (tool_format
             # argkey) is read by the buffer itself, so its string arguments stream as they are written
-            pyc = ({"pythonic": PythonicCalls}.get(STATE.get("tool_format"))
+            pyc = ({"pythonic": PythonicCalls}.get(_spec().tool_format)
                    if tbuf is not None else None)
             pyc = pyc() if pyc is not None else None
             rec.live_refs = (think, tbuf)
@@ -9599,9 +9610,9 @@ def _refused(plan, cid: str, calls: list) -> None:
 
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
     """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
-    the block (or the model opened it as its first words, STATE["self_think"]), the rest after it. A
+    the block (or the model opened it as its first words, `ReasoningSpec.opens_itself`), the rest after it. A
     block that never closed has no answer yet."""
-    if not in_think and not (STATE.get("self_think") and text.lstrip().startswith(OPEN_THINK)):
+    if not in_think and not (_spec().reasoning.opens_itself and text.lstrip().startswith(OPEN_THINK)):
         return "", text
     i = text.find("</think>")
     return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])
@@ -10446,9 +10457,9 @@ def _make_lenrouter(a, eng, max_len: int, corpus_from=None):
 def _arch_of(model: str | None):
     """The registered architecture of `--model` (engine/models `REGISTRY`); the 27B's when `--model`
     names no checkpoint directory (the 27B's snapshot is resolved later)."""
-    from engine.models import REGISTRY, architecture
+    from engine.models import architecture, default_arch
     if not model or not os.path.isfile(os.path.join(model, "config.json")):
-        return REGISTRY["qwen3_5"]
+        return default_arch()
     with open(os.path.join(model, "config.json")) as f:
         return architecture(json.load(f))
 
@@ -10540,7 +10551,8 @@ def _load(a) -> None:
                   "resident": None, "prefix_chunk": 0, "suffix_store": None}
     STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
                          if a.prompt_token_cache > 0 else None)
-    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], **m["serving"], **caches)
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], spec=_arch_of(a.model).spec,
+                   **m["serving"], **caches)
     led.mark("caches")
     print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
     # one warm request, so the first measured one is not paying for Triton autotuning; a drafter

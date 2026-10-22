@@ -199,7 +199,8 @@ def test_identity_note_once_and_replayed():
     a = owui("Who are you?")
     p1 = list(seen[-1])
     t1 = _prompt_text(seen)
-    assert "you are TandemLLM, running the Qwen3.8-27B model on the user's own machine" in t1
+    # ENG-406: the fake engine has no card, so the note names no model
+    assert "you are TandemLLM, running on the user's own machine" in t1
     assert t1.count("you are TandemLLM, running") == 1
     hist = [{"role": "user", "content": "Who are you?"},
             {"role": "assistant", "content": a["content"].split("</think>")[-1].strip()}]
@@ -223,8 +224,15 @@ def test_identity_note_absent_under_raw():
 
 
 def test_identity_model_name():
-    assert schema.identity_text().startswith(
-        "About you: you are TandemLLM, running the Qwen3.8-27B model on the user's own machine.")
+    # ENG-406: no model is the default; without a card or a name the note names none
+    was = schema.SERVED_NAME
+    schema.SERVED_NAME = None
+    try:
+        t = schema.identity_text()
+        assert t.startswith("About you: you are TandemLLM, running on the user's own machine."), t
+        assert "Qwen" not in t and "{model}" not in t
+    finally:
+        schema.SERVED_NAME = was
     os.environ["QWEN38_MODEL_NAME"] = "Qwen3.8-27B-FP8"
     try:
         assert "you are TandemLLM, running the Qwen3.8-27B-FP8 model" in schema.identity_text()
@@ -253,6 +261,32 @@ def test_identity_note_for_every_client():
         _, seen = serve("on")
         send()
         assert "you are TandemLLM, running" in _prompt_text(seen), client
+
+
+def test_identity_comes_from_every_profiles_card():
+    """ENG-406: each weight profile's identity is its card's label (models/<id>/card.json), and the
+    note names it."""
+    import glob
+    was = (os.environ.get("QSE_WEIGHTS"), schema.SERVED_NAME)
+    try:
+        profiles = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(ROOT, "ops", "profiles", "*.env"))
+                          if not os.path.basename(p).startswith("_"))
+        assert profiles
+        for name in profiles:
+            os.environ["QSE_WEIGHTS"] = name
+            label = app._identity_name()
+            assert label, f"{name}: no card names it"
+            schema.SERVED_NAME = label
+            assert f"running the {label} model" in schema.identity_text(), name
+        os.environ["QSE_WEIGHTS"] = "flint-exl3-4.0"
+        assert app._identity_name() == "Flint"
+    finally:
+        if was[0] is None:
+            os.environ.pop("QSE_WEIGHTS", None)
+        else:
+            os.environ["QSE_WEIGHTS"] = was[0]
+        schema.SERVED_NAME = was[1]
+    return f"{len(profiles)} profiles"
 
 
 def test_identity_names_the_served_pack_and_no_other_maker():

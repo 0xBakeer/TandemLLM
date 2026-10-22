@@ -1,6 +1,7 @@
 """The lfm2_moe family's entry in the model registry (engine/models/__init__.py discovers it, ENG-405)."""
 
 from engine.models import Arch, register
+from engine.models.adapter import ServeSpec
 
 ARCH = register(Arch(
     name="lfm2_moe",
@@ -12,4 +13,5 @@ ARCH = register(Arch(
     serve="engine.models.lfm2_moe.serving:serve",
     manifest="engine.models.lfm2_moe.serving:manifest",
     rank=3,
+    spec=ServeSpec(tool_format="pythonic"),      # LFM2's Pythonic call lists
 ))

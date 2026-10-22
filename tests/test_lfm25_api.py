@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from server import app  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 from test_toolcheck import Req, serve  # noqa: E402
 
 TOOLS = [{"type": "function", "function": {
@@ -44,7 +45,7 @@ def ask(text: str, stream: bool, fmt: str = "reasoning_content", tool_format: st
     """One chat request with tools on the fake engine: what the client holds."""
     serve("raw")
     if tool_format:
-        app.STATE["tool_format"] = tool_format
+        app.STATE["spec"] = ServeSpec(tool_format=tool_format)
     app.STATE["reasoning_format"] = fmt
     # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
     body = {"messages": [{"role": "user", "content": text}], "stream": stream, "tools": TOOLS,

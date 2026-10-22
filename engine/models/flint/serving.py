@@ -8,7 +8,7 @@ model through (LFM2's adapter, engine/models/lfm2_moe/serving.py, which this fol
   forward_block           a chain verify whose commit waits for `rollback_to` or the next call
 
 so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
-the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
+the reasoning split, the tool-call form the model writes (its `ServeSpec`), the live view -- is the
 server's code. A verified row is the decode step's row bit for bit (the load-time self-check), so greedy
 speculation writes the plain greedy text. The drafter is the lookup (the request's own text, --corpus and the
 server's suffix store) cut by StairCut, with an anchor backoff (FLINT_ANCHOR_BACKOFF): Flint has no draft
@@ -497,7 +497,7 @@ def serve(a, ctx) -> dict:
     """Recursive's Flint from a BF16 checkpoint or an EXL3 pack for the server (`--model <dir>`, the registry's
     `serve`; server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
     lookup cut by StairCut (`lookup_drafter`, FLINT_LOOKUP, gated by the load-time self-check). Tool calls in the
-    checkpoint's own format (`tool_format` "argkey", read and streamed by server/toolcall.py `ToolCallBuffer`)."""
+    checkpoint's own arg-key form (its `ServeSpec`, engine/models/flint/arch.py)."""
     from transformers import AutoTokenizer
 
     from engine.spec import Relax
@@ -521,9 +521,6 @@ def serve(a, ctx) -> dict:
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "tool_format": "argkey",
-                        # the template opens no reasoning block; the model writes `<think>` when it reasons
-                        "self_think": True,
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),

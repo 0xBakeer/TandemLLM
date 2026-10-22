@@ -1,5 +1,5 @@
 """SRV-683, SRV-687, SRV-688: the arg-key tool-call form (tool_format "argkey") and a model that opens its own reasoning block
-(STATE["self_think"]): a block rewritten into the JSON tier with the values as written and typed by the
+(ReasoningSpec.opens_itself): a block rewritten into the JSON tier with the values as written and typed by the
 schema, streamed in any piece sizes, a bad block left as text; the reasoning split in every format."""
 
 from __future__ import annotations

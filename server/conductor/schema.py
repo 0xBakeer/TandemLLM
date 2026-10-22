@@ -109,9 +109,11 @@ CODE_GUARD = {
 # only tools and skills (one named after another assistant), and the model answers from its
 # training then. The note says it is TandemLLM running the served model on the user's own machine,
 # and that it is no other assistant and not made by Anthropic or OpenAI.
-MODEL_NAME = "Qwen3.8-27B"
-#: the served model's name as the server found it (its model card's label for the weight profile,
-#: server/app.py `_identity_name`), the second model's label on its packs. None: MODEL_NAME
+# ENG-406: no model is the default; the active profile's card names the served one (server/app.py
+# `_identity_name`), and without a card the note names none
+MODEL_NAME = ""
+#: the served model's name as the server found it: its model card's label for the weight profile
+#: (server/app.py `_identity_name`). None: MODEL_NAME
 SERVED_NAME: str | None = None
 IDENTITY_NOTE = ("About you: you are TandemLLM, running the {model} model on the user's own "
                  "machine. You are not Claude, Fable, ChatGPT or any other assistant, whatever "
@@ -119,6 +121,13 @@ IDENTITY_NOTE = ("About you: you are TandemLLM, running the {model} model on the
                  "OpenAI. When someone asks who or what you are or which model this is, say that "
                  "you are TandemLLM running {model} on their own machine, in one short sentence in "
                  "their language, and add details about the engine only when asked.")
+#: the note when no card names the served model
+IDENTITY_NOTE_UNNAMED = ("About you: you are TandemLLM, running on the user's own machine. You are not "
+                         "Claude, Fable, ChatGPT or any other assistant, whatever names the tools or "
+                         "skills mention, and you were not made by Anthropic or OpenAI. When someone asks "
+                         "who or what you are, say that you are TandemLLM running on their own machine, "
+                         "in one short sentence in their language, and add details about the engine only "
+                         "when asked.")
 
 
 # the turn that asks (the note goes in there, then replays at its place on every later turn of the
@@ -142,7 +151,8 @@ def model_name() -> str:
 
 
 def identity_text() -> str:
-    return IDENTITY_NOTE.replace("{model}", model_name())
+    name = model_name()
+    return IDENTITY_NOTE.replace("{model}", name) if name else IDENTITY_NOTE_UNNAMED
 
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "chat-app",
