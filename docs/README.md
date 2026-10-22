@@ -21,6 +21,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [tool-eval-bench.md](tool-eval-bench.md) | tool-eval-bench results of 2026-10-19: the raw path at five thinking settings, four conductor profiles, hard mode |
 | [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |
 | [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md) | LiquidAI's LFM2.5-24B-A2B: the model, its profiles, its tool-call format, how the engine runs it |
+| [flint.md](flint.md) | Recursive's Flint: the model, its EXL3 and BF16 profiles, reasoning and tools, the lookup at long context, how the engine runs it |
 | [nemotron-h.md](nemotron-h.md) | NVIDIA's NemotronH (Nemotron 3.5 Bolt, Super VL, Lightning): the models, the EXL3, GGUF and NVFP4 profiles, LiLiCorr, how the engine runs them |
 | [setup.md](setup.md) | a new box from the command line, the dashboard's setup guide, the model registry behind it, and Wren |
 | [chat.md](chat.md) | the Chat tab (in beta) and chatd, the service behind it: the sandbox, the permission modes, the known limitations |

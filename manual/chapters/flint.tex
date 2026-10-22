@@ -1,0 +1,79 @@
+\chapter{Flint}\label{ch:flint}
+
+Recursive's Flint is a mixture-of-experts model for coding agents. About 2.5B of its 39.8B parameters run for each token, and a decode token reads 1.34~GB of our 4.0-bit EXL3 pack and 2.00~GB of the 6.0-bit one (\arith, from the headers). On one DGX Spark the engine decodes the 4.0 pack at 128.2 to 136.6~tok/s plain and up to 480.0~tok/s with the lookup (\measured, 2026-10-22). Its support ships in release 0.14.0. This chapter says what is different about it and what is measured; Chapter~\ref{ch:adding-model} describes the adapter path it came in through, and \code{docs/flint.md} has every row.
+
+\section{The model}\index{Flint}
+
+\begin{table}[htbp]
+\centering\small
+\caption{Flint.}\label{tab:flint-model}
+\begin{tabularx}{\linewidth}{@{}L{.22\linewidth}Y@{}}
+\toprule
+\hd{part} & \hd{Flint} \\
+\midrule
+layers & 49: 2 dense, 47 mixture-of-experts \\
+attention & 32 query heads, 4 KV heads of 128, q and k RMS-normed, a learned sink logit per query head \\
+sliding layers & 35, a window of 513 positions with rotary; a ring of 640 rows a layer \\
+full layers & 14, every position, no positional encoding; KV 28,672 bytes a token \\
+MLP & 256 experts a layer, 6 routed by sigmoid score with a bias, and 1 shared; dense SwiGLU in layers 0 and 1 \\
+vocabulary & 150,144 tokens, four end tokens \\
+context & 262,144 tokens \\
+draft layer & none \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\code{engine/models/flint} holds the family. It reads the configuration strictly, the BF16 checkpoint or our EXL3 packs. The reference forward (\code{ref.py}) is written from the published model description and checked against a plain transcription of it. Flint's router is sensitive to rounding: one BF16 rounding of the residual stream changes the chosen experts for 2~\% of tokens at layer 2 and for 46~\% at layer 46, and two BF16 forwards of the same weights differ by KL 0.034 (\measured, 8 rows of 1,024 tokens).
+
+\section{The packs}
+
+Every projection of a pack is at one rate: 4 bits with the head at 5, or 6 bits with the head at 8. exllamav3 1.6.2 converted them from the BF16 checkpoint at revision \code{2a247be0}, with a patch that adds the Flint architecture. The routed experts' SwiGLU activations reach 260,000 in the top layers, past fp16, so the packs store each routed expert's up projection divided by 128 (\code{quantization_config.expert_interm_div}), and the engine multiplies the routing weights back. The repositories \code{0xBakeer/TandemLLM-Flint-EXL3-4.0} (20.6~GB) and \code{-6.0} (30.5~GB) are public and pinned by commit; the BF16 profile reads \code{RecursiveSI/flint}.
+
+\begin{table}[htbp]
+\centering\small
+\caption[Flint's quality]{The packs against the BF16 checkpoint: the converter's \code{model_diff} on 50 rows of 2,048 tokens of held-out docs, and this engine on 8 rows of 1,024 tokens of the same docs. \measured, 2026-10-21 and 22.}\label{tab:flint-quality}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\hd{profile} & \hd{docs KL} & \hd{docs top-1} & \hd{engine KL} & \hd{engine top-1} \\
+\midrule
+\code{flint-exl3-4.0} & 0.194 & 79.7~\% & 0.160 & 80.5~\% \\
+\code{flint-exl3-6.0} & 0.070 & 90.8~\% & 0.052 & 91.6~\% \\
+\code{flint-bf16} (two BF16 forwards) & & & 0.034 & 92.9~\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Drafting}
+
+Flint has no draft layer. Every profile drafts with the lookup, cut by StairCut from the profile's price file (\code{ops/prices/flint/}), which holds the measured cost of a verify block by size and the plain step's cost for each context class. After a round with no draft, the next 1, 2, 4, then 8 rounds take the plain step without looking. A verify block reads the KV once, so the lookup pays more at long context.
+
+\begin{table}[htbp]
+\centering\small
+\caption[Flint's speed]{Decode through the server, tok/s: one fresh server a row, greedy, thinking off, 512 new tokens, one run a cell; the last column a 2,048-token game file. Every drafted text equals the plain one. \measured, 2026-10-22.}\label{tab:flint-speed}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+ & & \hd{prose} & \hd{code} & \hd{chat} & \hd{edit} & \hd{copy} & \hd{game} \\
+\midrule
+4.0 & plain & 136.6 & 133.2 & 133.3 & 128.2 & 128.2 & 129.3 \\
+ & lookup & 135.4 & 139.8 & 134.0 & 142.3 & 480.0 & 149.5 \\
+6.0 & plain & 98.4 & 97.2 & 97.1 & 94.3 & 94.3 & 95.0 \\
+ & lookup & 97.1 & 103.2 & 98.5 & 107.3 & 353.4 & 114.1 \\
+BF16 & plain & 42.6 & 42.4 & 42.4 & 41.9 & 41.9 & 41.9 \\
+ & lookup & 42.2 & 50.9 & 42.9 & 48.4 & 144.1 & 42.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On 4.0, decode falls with the context: 101.7~tok/s at 16k, 61.0 at 64k, 39.5 at 128k and 23.0 at 256k. At 128k a step spends 17.8 of its 25.3~ms reading 3.76~GB of keys and values at about 211~GB/s. Behind a 124,000-token prompt of code the lookup ran a copy ask at 79.5~tok/s against 41.3 plain and an edit ask at 129.7 against 42.4 (\measured).
+
+\section{Serving}
+
+Two slots, a window up to 262,144 tokens (131,072 for BF16). The model opens its own \code{<think>} block as its first token; thinking off puts an empty block after the generation prompt, and an effort level or a budget closes the block at its cap. Tools are called in Flint's own form, \code{<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>}, and written back the same way. Temperature 1.0, \code{top_k} 20 and \code{top_p} 0.95 come from its generation config. The decode step runs the shared expert on a second stream and its Triton kernels as programmatic dependents, with the same bits as one stream. A 4,096-token prompt reads at 5,375~tok/s on 4.0.
+
+\section{What is not measured}
+
+\begin{itemize}
+\item Sampled decoding, images (the model reads text) and repeat runs of the speed rows.
+\item tool-eval-bench beyond three scenarios and the held-out pack.
+\item A draft head. One we trained on the model's own outputs reached 21~\% depth-1 acceptance on held-out text; 1.4 times plain needs about 80~\% at 2k and 55~\% at 128k.
+\end{itemize}

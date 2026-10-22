@@ -2,6 +2,57 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.14.0, 2026-10-22
+
+0.14.0 adds Recursive's Flint, a mixture-of-experts model for coding agents, from our EXL3 packs at 4.0 and 6.0 bits a weight and from Recursive's BF16 checkpoint. It has no draft layer, so every profile drafts with the lookup. On one DGX Spark the 4.0 pack decodes at 128.2 to 136.6 tok/s plain and up to 480.0 with the lookup, 39.5 at a 128k context, and every drafted text is the plain run's. The release also keeps a resumed session's end anchor, serves a re-rendered tool call as the model wrote it, reads the KV heads as they are in every prompt attention, restarts an engine whose CUDA context was lost, and makes a release with one command. The other models write the same text as in 0.13.0 and keep their saved conversations.
+
+### Flint
+
+Flint has 49 layers (ENG-E16). 35 see a window of 513 positions with rotary and 14 see every position with no positional encoding; attention has 32 query heads, 4 KV heads and a learned sink per head. 47 layers have 256 routed experts, 6 a token by sigmoid score, and a shared expert. About 2.5B of its 39.8B parameters run for each token, and the context is 262,144 tokens.
+
+- The family, `engine/models/flint` (ENG-399). The reference forward is written from the published model description. A sliding layer keeps its keys in a ring of 640 rows and its attention reads two 512-key chunks; the sink is one more term in the softmax's denominator. The row kernels compute each row on its own, so a verify block's rows equal the decode step's bit for bit, and the load-time self-check compares 24 rows. A prompt chunk runs on the flash kernel over the 4 KV heads as they are, with the sink applied from the log-sum-exp in one pass; the routed experts run as one grouped GEMM over the chunk (SPD-144).
+- Three profiles. `flint-exl3-4.0` (the default) and `flint-exl3-6.0` read our packs: every projection at 4 or 6 bits, the head at 5 or 8. exllamav3 1.6.2 converted them from the BF16 checkpoint at revision 2a247be0, with a patch that adds the architecture. The routed experts' SwiGLU activations reach 260,000 in the top layers, past fp16, so the packs store each routed expert's up projection divided by 128 (`quantization_config.expert_interm_div`), and the engine multiplies the routing weights back (ENG-403). `flint-bf16` reads RecursiveSI/flint at that revision with a window of 131,072 tokens. The repositories `0xBakeer/TandemLLM-Flint-EXL3-4.0` and `-6.0` are public, pinned at a04d4b95 and 17e16040, and sit in [one collection](https://huggingface.co/collections/0xBakeer/tandemllm-flint-6ad9a9a5e0ebee0bb740826d) with the BF16 checkpoint. A download needs no token.
+- Against BF16, the converter's `model_diff` on 50 rows of 2,048 tokens of held-out docs: 4.0 KL 0.194, top-1 79.7 %; 6.0 KL 0.070, top-1 90.8 %. This engine on 8 rows of 1,024 tokens of the same docs: 4.0 0.160 and 80.5 %, 6.0 0.052 and 91.6 %. Flint's router is sensitive to rounding: two BF16 forwards of the same weights differ by KL 0.034 and agree on 92.9 % of top-1 on those rows.
+- Reasoning and tools (SRV-683, SRV-685). The model opens its own `<think>` block with its first token. Thinking off puts an empty block after the generation prompt, and an effort level or a budget closes the block at its cap, counted from the model's own `<think>`; the usage counts those tokens. Tool calls come in Flint's own form, `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>`, typed by the tool's schema and written back the same way.
+- Drafting (SPD-142). The lookup is cut by StairCut from each profile's price file, which holds the cost of a verify block by size and of the plain step for each context class; after a round with no draft, the next 1, 2, 4, then 8 rounds take the plain step without looking. The server captures the first class's verify graphs at start.
+- Decode (SPD-145). The shared expert runs on a second CUDA stream beside the router and the routed experts, and the step's Triton kernels launch as programmatic dependents (`FLINT_SIDE_STREAM`, `FLINT_PDL`, both on). The same kernels give the same bits: 4.0 went from 122.4 to 134.2 tok/s.
+- Measured on one DGX Spark on 2026-10-22: one fresh server a row, 512 greedy tokens (the game file 2,048), thinking off, one run a cell. Every drafted text is the plain run's.
+
+| tok/s | prose | code | chat | edit | copy | game file |
+|-|-|-|-|-|-|-|
+| `flint-exl3-4.0` plain | 136.6 | 133.2 | 133.3 | 128.2 | 128.2 | 129.3 |
+| `flint-exl3-4.0` lookup (the profile) | 135.4 | 139.8 | 134.0 | 142.3 | 480.0 | 149.5 |
+| `flint-exl3-6.0` plain | 98.4 | 97.2 | 97.1 | 94.3 | 94.3 | 95.0 |
+| `flint-exl3-6.0` lookup | 97.1 | 103.2 | 98.5 | 107.3 | 353.4 | 114.1 |
+| `flint-bf16` plain | 42.6 | 42.4 | 42.4 | 41.9 | 41.9 | 41.9 |
+| `flint-bf16` lookup | 42.2 | 50.9 | 42.9 | 48.4 | 144.1 | 42.5 |
+
+- Prose with the lookup runs 0.5 to 0.9 % under plain on 4.0 over three alternated pairs: it drafts 7 of 340 rounds, which cost about what they save, and a plain round carries 21 µs of host work for the drafter.
+- Long prompts on 4.0, in the engine: plain decode at 101.7 tok/s at 16k, 61.0 at 64k, 39.5 at 128k and 23.0 at 256k; at 128k a step spends 17.8 of its 25.3 ms reading the full layers' keys and values. Behind a 124,000-token prompt of code the lookup ran a copy ask at 79.5 tok/s against 41.3 plain and an edit ask at 129.7 against 42.4. A 4,096-token prompt reads at 5,375 tok/s on 4.0, 5,045 on 6.0 and 4,319 on BF16.
+- A start loads the 4.0 pack in about 9 s, 19.25 GiB; 6.0 takes 28.49 GiB, BF16 75.53. [docs/flint.md](docs/flint.md) has the checks and what is not measured, [models/flint/measurements/2026-10-22-summary.json](models/flint/measurements/2026-10-22-summary.json) the runs.
+
+### Caches
+
+- Flint's edits to shared files keep the other models' rows: LFM2's norm and attention-prep kernels take an opt-in programmatic launch, the tree drafter an opt-in lookup back-off, and `SAME_ROWS` names their new bytes as the old, so LFM2.5 and NemotronH adopt 0.13.0's saved conversations.
+- A turn resumed from a session snapshot keeps its end anchor (SRV-678). The restore cleared the resident prefix and took nothing of the prompt, so the next turn read again from the store's last grid line (21,782 tokens after a restore at 20,480). The prefix now takes the prompt up to the restore's line and captures from there.
+- End alignment serves a re-rendered tool call as the model wrote it (SRV-679). When the template writes a call back differently from the rows (a typed value, sorted keys, an escaped character), both are parsed; the same calls with the same text around them serve the rows' tokens. `QWEN38_END_ALIGN_CALLS=off` turns it off. Of Ornith's last 1,858 outputs with a tool call, 11 re-render differently and all 11 are accepted.
+- Prompt attention reads the KV heads as they are (SRV-673, SRV-681). Ornith's prompt chunks and MTP prime, LFM2.5's prompt chunks and NemotronH's MTP head repeated the cache per query head; they pass grouped heads to the flash kernel now, with the same bits. At 131k one layer's NemotronH MTP step went from 28.5 to 1.6 ms; a 179,678-token Ornith replay went from 23.2 to 38.3 tok/s.
+- Scratch turns never forward an image's key ids (SRV-669). The memory writer and the summary preparer could give back an end anchor at the ceiling and forward the key ids into the embedding, which left the CUDA context unusable. They hold the end now, and the prefill refuses an id outside the vocabulary.
+
+### Server and operations
+
+- A lost CUDA context fails `/health` (SRV-671). After a device-side assert every CUDA call fails until the process exits, and `/health` still answered ok. A request that fails with a CUDA error probes the context; then `/health` answers 500 with status `failed`, a completion gets a 503 of type `engine_failed`, and the watchdog restarts the engine after two checks.
+- `tools/release.sh` makes a release with one command (OPS-223): bump, preflight, the box gate (the CPU suite, the Setup Guide gate and a client smoke on the box), tag, push, the GitHub release and a verify of what was published. `--dry-run` runs every step but the three that publish.
+- The ops tests reap every hold they start (OPS-217), and the dashboard is on vite 8.3.3 (OPS-220).
+- The repository text names no other engine, pack or fork except where the proxy talks to one (OPS-219, OPS-225); LiLiCorr is written from its definition, with the same outputs bit for bit. [docs/conductor.md](docs/conductor.md) describes the conductor in one page.
+
+### Chat tab
+
+- chatd folds screenshots in blocks (SRV-676). Past 8 screenshots every new one turned an older one into a line, which changed a message 3 to 37 back and made the engine read every turn since again. The kept set now changes only at a fold point; on a replayed chat, 12 re-reads of 105,530 tokens became 1 of 48,129.
+- Plan mode on our engine keeps the chat's effort word and asks for high's reasoning cap as a budget, so the turn into plan mode does not change the prompt's head (SRV-663).
+- The run monitor steers a run stuck on the same files, then stops it (SRV-677): a streak of checks with no new outcome and edits on a few files gets one steering note, and as long again a stronger note and an interrupted run.
+- `tools/chat_fork.py` runs the live model from a recorded step of a conversation (SRV-667).
+
 ## 0.13.0, 2026-10-20
 
 0.13.0 adds Ornith AI's Ornith-1.5-122B, from our EXL3 pack at 4.0 bits a weight. It is a Qwen3.5 mixture-of-experts model that reads images and thinks before it answers, and it drafts with its own MTP layer. On one DGX Spark it decodes 37.2 to 38.4 tok/s plain and 85.3 to 124.8 with the MTP layer and the lookup, and every drafted text is the plain run's. The release also carries the conductor's third round of tool-eval-bench work, room for the caches on Ornith, fixes for long Chat-tab sessions and a test runner that counts what each file ran. The other models write the same text as in 0.12.2 and keep their saved conversations: Flash-Next's, LFM2.5's and NemotronH's fingerprints change, and their first start adopts 0.12.2's files.

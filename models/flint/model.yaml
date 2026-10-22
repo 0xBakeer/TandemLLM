@@ -20,6 +20,8 @@ icon: null
 links:
 - label: Model card
   url: https://huggingface.co/RecursiveSI/flint
+- label: Our EXL3 packs
+  url: https://huggingface.co/collections/0xBakeer/tandemllm-flint-6ad9a9a5e0ebee0bb740826d
 devices:
 - id: dgx-spark
   label: NVIDIA DGX Spark (128 GB unified memory)
@@ -75,7 +77,7 @@ profiles:
   weights_gib: 19.25
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-Flint-EXL3-4.0
-  hf_private: true
+  hf_private: false
   made_by:
     kind: ours
     name: 0xBakeer
@@ -94,7 +96,8 @@ profiles:
   assets_required: []
   note: 'Converted from the BF16 checkpoint (revision 2a247be0) by exllamav3 1.6.2 with our Flint architecture: every projection
     at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 133.5 to 134.2 tok/s (512 tokens) and 39.5 at a
-    128k context, prefill 5,375 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+    128k context, prefill 5,375 tok/s at 4,096 tokens.'
+  hf_revision: a04d4b957e27f490c1f940b3126c0e4b3e47ddb7
   max_window: 262144
 - id: flint-exl3-6.0
   label: EXL3 6.0 bpw
@@ -104,7 +107,7 @@ profiles:
   weights_gib: 28.49
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-Flint-EXL3-6.0
-  hf_private: true
+  hf_private: false
   made_by:
     kind: ours
     name: 0xBakeer
@@ -121,7 +124,8 @@ profiles:
       routing is sensitive to rounding)
   assets_required: []
   note: 'Every projection at 6 bits, head 8. Measured 2026-10-22: 28.49 GiB at load, plain decode 97.4 to 97.7 tok/s (512 tokens),
-    prefill 5,045 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+    prefill 5,045 tok/s at 4,096 tokens.'
+  hf_revision: 17e16040a25bd253ec96f7954feb57cbb996d6b7
   max_window: 262144
 - id: flint-bf16
   label: BF16 (Recursive)

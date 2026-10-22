@@ -43,9 +43,16 @@
 0.12.1 & 10-20 & the first community pack on Super VL, styles01's EXL3 3.5 bpw, text only; a request with images on a side slot; redirects kept in the port preview; eleven outside pull requests; \code{SECURITY.md} and a threat model \\
 0.12.2 & 10-20 & a Chat-tab run's tool results fit the room left and \code{read_file} reads by whole lines; the port preview streams; LFM2.5 adopts its 0.9.x to 0.11.1 conversations again \\
 0.13.0 & 10-20 & Ornith-1.5-122B on the Qwen3.5 MoE trunk, from our EXL3 4.0 pack, drafting with its MTP layer; the conductor's third tool-eval-bench round; room for Ornith's caches; \code{chatd} fixes for long sessions \\
+0.14.0 & 10-22 & Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint, drafting with the lookup; a resumed session keeps its end anchor; a re-rendered tool call served as written; prompt attention over the KV heads as they are; a lost CUDA context fails \code{/health}; \code{tools/release.sh} \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.14.0, Flint}\label{sec:changelog-0140}
+
+0.14.0 adds Recursive's Flint from our EXL3 packs at 4.0 and 6.0 bits a weight and from the BF16 checkpoint (Chapter~\ref{ch:flint}), on a new family, \code{engine/models/flint}: sliding-window layers on a ring, a learned sink per head, full layers without positional encoding, and a sigmoid router with a shared expert. Every profile drafts with the lookup, which StairCut cuts from a price file with a plain price for each context class. On a DGX Spark, one request, 512 greedy tokens, thinking off, one run each, the 4.0 pack decodes at 128.2 to 136.6~tok/s plain and up to 480.0 with the lookup, every drafted text the plain one.
+
+The other models write the same text as in 0.13.0 and keep their saved conversations: Flint's edits to shared files take the old paths unless Flint asks for the new ones, and \code{SAME_ROWS} names the new bytes as the old. A turn resumed from a session snapshot keeps its end anchor, end alignment serves a tool call the template wrote back differently as the model wrote it, and every prompt attention reads the KV heads as they are, where LFM2.5's prompt chunks, Ornith's and NemotronH's MTP head had repeated them per query head. After a lost CUDA context \code{/health} fails and the watchdog restarts the engine. In the Chat tab, screenshots fold in blocks, plan mode keeps the chat's effort word, and the run monitor steers a run that circles the same files, then stops it. \code{tools/release.sh} makes a release with one command.
 
 \section{0.13.0, Ornith-1.5-122B}\label{sec:changelog-0130}
 
