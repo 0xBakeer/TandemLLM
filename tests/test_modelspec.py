@@ -74,6 +74,19 @@ def test_thinking_off_renders_by_the_spec():
     return repr(own_off[-40:])
 
 
+def test_thinking_off_adds_the_spec_line_before_the_conversation():
+    """SRV-697: a spec with an off line has it before the conversation (after the client's system messages)
+    with thinking off, and nowhere with thinking on; a spec without one adds nothing."""
+    note = "Answer directly. Do not show your reasoning."
+    spec = ServeSpec(reasoning=ReasoningSpec(opens_itself=True, off_note=note, off_role="system"))
+    off, on = _prompt(spec, False), _prompt(spec, True)
+    assert note in off and note not in on, off[-200:]
+    assert off.index(note) < off.index("Say hi."), "the line comes before the user's message"
+    assert note not in _prompt(None, False)
+    flint = REGISTRY["flint"].spec.reasoning
+    assert flint.off_note and flint.off_role == "developer"
+
+
 def test_one_default_family():
     d = default_arch()
     assert sum(a.default for a in REGISTRY.values()) == 1 and app._arch_of(None) is d

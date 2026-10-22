@@ -5169,6 +5169,13 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         note = compat.directive(mode, name) if tools else None
         if note:
             messages = _with_directive(messages, note)
+        # SRV-697: thinking off, for a model whose spec has a line for it (it writes its reasoning into the
+        # answer otherwise): the line before the conversation, after the client's own system messages
+        rs = _spec().reasoning
+        if client.off and rs.off_note:
+            k = next((i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")),
+                     len(messages))
+            messages = list(messages[:k]) + [{"role": rs.off_role, "content": rs.off_note}] + list(messages[k:])
         # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it

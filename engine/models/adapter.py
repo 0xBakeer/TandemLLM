@@ -81,6 +81,11 @@ class ReasoningSpec:
     # the model writes the opening `<think>` itself as its first token; its template opens none, so thinking
     # off renders an empty block after the generation prompt and a budget counts from the model's opener
     opens_itself: bool = False
+    # SRV-697: with thinking off, a message the server adds before the conversation (`off_role`, after the
+    # client's own system messages) for a model that otherwise writes its reasoning into the answer; None:
+    # nothing added
+    off_note: str | None = None
+    off_role: str = "developer"
 
 
 @dataclass(frozen=True)
