@@ -5697,11 +5697,14 @@ def _grammar_vocab(calls: bool = False) -> "grammar_mod.Vocab":
     vocabulary of a calls-or-document constraint, the call markers' own ids allowed (built once
     more, on the first such request)."""
     key = "grammar_vocab_calls" if calls else "grammar_vocab"
+    # SRV-689: the arg-key form's tags are the model's own ids too
+    marks = (grammar_mod.ARGKEY_MARKERS if STATE.get("tool_format") == "argkey"
+             else grammar_mod.CALL_MARKERS)
     v = STATE.get(key)
     if v is None:
         v = STATE[key] = grammar_mod.Vocab.from_tokenizer(
             STATE["tok"], STATE["engine"].cfg.vocab_size,
-            markers=grammar_mod.CALL_MARKERS if calls else ())
+            markers=marks if calls else ())
     return v
 
 
@@ -7258,7 +7261,8 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "argkey"))
+                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "argkey"),
+                                           fmt=STATE.get("tool_format"))
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None

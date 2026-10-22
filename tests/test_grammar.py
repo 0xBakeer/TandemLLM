@@ -446,6 +446,42 @@ def test_the_tool_call_language():
             f"many=False: one call")
 
 
+def test_the_tool_call_language_in_the_argkey_form():
+    """SRV-689: tool_choice's calls in Flint's arg-key form, the values exactly as written; the
+    form's tags may be the model's own ids, and the calls parse back to the arguments."""
+    from server.toolcall import ToolCallBuffer, argkey_calls
+    pat, typed = G.tool_call_regex(TOOLS, ["read_file", "set", "now"], fmt="argkey")
+    assert typed == {"set": {"n", "tags"}}
+    d = G.compile_regex(pat)
+    ok = ["<tool_call>read_file<arg_key>path</arg_key><arg_value> /etc/hosts\n</arg_value></tool_call>",
+          "<tool_call>set<arg_key>n</arg_key><arg_value>3</arg_value><arg_key>mode</arg_key>"
+          "<arg_value>b</arg_value></tool_call>\n<tool_call>now</tool_call>",
+          '<tool_call>set\n<arg_key>n</arg_key>\n<arg_value>-2</arg_value>\n<arg_key>tags</arg_key>'
+          '<arg_value>["x", "y"]</arg_value>\n</tool_call>',
+          "<tool_call>read_file<arg_key>path</arg_key><arg_value>a </arg b</arg_value></tool_call>"]
+    bad = ["I will.<tool_call>read_file<arg_key>path</arg_key><arg_value>/x</arg_value></tool_call>",
+           "<tool_call>write_file</tool_call>",
+           "<tool_call>set<arg_key>mode</arg_key><arg_value>a</arg_value></tool_call>",
+           "<tool_call>set<arg_key>n</arg_key><arg_value>three</arg_value></tool_call>",
+           "<tool_call>read_file<arg_key>path</arg_key><arg_value>/x</arg_value><arg_key>mode"
+           "</arg_key><arg_value>a</arg_value></tool_call>",
+           "<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n</parameter>\n</function>\n"
+           "</tool_call>", ""]
+    for t in ok:
+        assert d.accept[d.walk(0, t.encode())], t
+    for t in bad:
+        assert not d.accept[d.walk(0, t.encode())], t
+    b = ToolCallBuffer(types={"set": {"n": frozenset({"integer"})}}, fmt="argkey")
+    b.feed(ok[0] + ok[1])
+    b.finish(eos=True)
+    got = [(x["function"]["name"], json.loads(x["function"]["arguments"])) for x in b.calls]
+    assert got == [("read_file", {"path": " /etc/hosts\n"}), ("set", {"n": 3, "mode": "b"}),
+                   ("now", {})], got
+    assert argkey_calls("now") == [{"name": "now", "arguments": {}}]
+    assert set(G.ARGKEY_MARKERS) >= {"<tool_call>", "</tool_call>", "<arg_key>", "</arg_value>"}
+    return f"{len(ok)} calls in, {len(bad)} out (the XML form among them); values exact"
+
+
 # an enum only: the random model, free to add digits to an integer, never stops writing one
 PICK = [{"type": "function", "function": {"name": "pick", "parameters": {
             "type": "object", "properties": {"color": {"enum": ["red", "green"]}},

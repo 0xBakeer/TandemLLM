@@ -414,14 +414,14 @@ def constraint_field(body: dict) -> str:
     return "structured_outputs" if body.get("structured_outputs") is not None else "response_format"
 
 
-def tool_constraint(body: dict) -> tuple[str, dict] | None:
+def tool_constraint(body: dict, fmt: str | None = None) -> tuple[str, dict] | None:
     """`tool_choice` required or a named function, enforced -- the answer (after the
     reasoning) as tool calls only, in the model's own format: an allowed function (the named one,
     or any tool for required), the schema's parameters with the required ones present, and typed
     values. One call, unless the request says `parallel_tool_calls: true`: a model forced to call
     when it meant to answer in words otherwise opens call after call (37 in the run).
     Returns (regex, the parameters written as JSON literals per function), or None for auto and
-    none."""
+    none. `fmt`: the server's tool_format ("argkey": the arg-key form, SRV-689)."""
     from engine import grammar
     mode, name = tool_choice(body)
     if mode not in ("required", "named") or not body.get("tools"):
@@ -429,7 +429,7 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
     allowed = [name] if mode == "named" else tool_names(body)
     try:
         return grammar.tool_call_regex(body["tools"], allowed,
-                                       many=body.get("parallel_tool_calls") is True)
+                                       many=body.get("parallel_tool_calls") is True, fmt=fmt)
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"tool_choice {mode}: {exc}")
 
@@ -446,7 +446,8 @@ class Answer(NamedTuple):
     parts: tuple[str, str] | None = None
 
 
-def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> Answer | None:
+def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True,
+                      fmt: str | None = None) -> Answer | None:
     """The constraint on the answer (after the reasoning), or None.
 
     `tool_choice` required or named: the calls (`tool_constraint`), a document asked for beside
@@ -456,13 +457,14 @@ def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> 
     `parallel_tool_calls` is false) or the document alone, the branch the model's own first answer
     token picks (a call's start: the calls; anything else: the document), so an agent loop that asks for its
     final answer as JSON keeps its tools. `xml_calls` false (a model whose calls are not the XML
-    format, `--tool-format pythonic`): the 400 as before.
+    format, `--tool-format pythonic`): the 400 as before. `fmt` "argkey": tool_choice's calls in the
+    arg-key form, its markers the model's own ids (`calls`, SRV-689).
     """
     from engine import grammar
     doc = structured_pattern(body)
-    forced = tool_constraint(body) if chat else None
+    forced = tool_constraint(body, fmt) if chat else None
     if forced is not None:
-        return Answer(forced[0], "tool_choice", forced[1] or None, False)
+        return Answer(forced[0], "tool_choice", forced[1] or None, fmt == "argkey")
     if doc is None:
         return None
     if not chat or not body.get("tools") or tool_choice(body)[0] == "none":
