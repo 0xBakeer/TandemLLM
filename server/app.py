@@ -52,8 +52,8 @@ from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
-    CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
-    answer_stops, drop_stray_close, opens_think, split_full,
+    CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, OffClose, Reasoning, StopStrings, StrayClose,
+    answer_stops, drop_stray_close, off_full, off_split, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
 from server import toolformats  # noqa: E402  (ENG-407 the forms a model writes calls in)
@@ -5186,9 +5186,14 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # answer otherwise): the line before the conversation, after the client's own system messages
         rs = _spec().reasoning
         if client.off and rs.off_note:
-            k = next((i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")),
-                     len(messages))
-            messages = list(messages[:k]) + [{"role": rs.off_role, "content": rs.off_note}] + list(messages[k:])
+            if _spec().prompt.system_first:
+                # #93: a template that reads one system prompt first (and refuses another role there):
+                # the line ends that system prompt
+                messages = _with_directive(messages, rs.off_note)
+            else:
+                k = next((i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")),
+                         len(messages))
+                messages = list(messages[:k]) + [{"role": rs.off_role, "content": rs.off_note}] + list(messages[k:])
         # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it
@@ -8574,12 +8579,20 @@ class Handler(BaseHTTPRequestHandler):
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)
                         for x in (*more, ids))
-                elif _spec().reasoning.opens_itself:
-                    # a model that opens its own block (Flint): the tokens after its opening `<think>`
+                elif _spec().reasoning.opens_itself or client.off:
+                    # a model that opens its own block (Flint), or reasons with thinking off (#93): the
+                    # tokens after its opening `<think>`; with thinking off and no streaming, also the
+                    # working-out before a lone `</think>` the answer moved to the reasoning field
                     o = usage_mod.special_id(tok, "<think>")
-                    rec.reasoning_tokens = sum(usage_mod.reasoning_count(
-                        list(x)[1:], usage_mod.special_id(tok, "</think>"), think.end_text)
-                        for x in (*more, ids) if len(x) and o is not None and int(x[0]) == o)
+                    c = usage_mod.special_id(tok, "</think>")
+                    n_ = 0
+                    for x in (*more, ids):
+                        if len(x) and o is not None and int(x[0]) == o:
+                            n_ += usage_mod.reasoning_count(list(x)[1:], c, think.end_text)
+                        elif (client.off and not stream and len(x)
+                              and off_split(tok.decode(list(x), skip_special_tokens=False)) is not None):
+                            n_ += usage_mod.reasoning_count(list(x), c, think.end_text)
+                    rec.reasoning_tokens = n_
                 if (prefill and cached_ids is None and not micro
                         and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
@@ -8719,8 +8732,13 @@ class Handler(BaseHTTPRequestHandler):
                     entries = (lp_mod.emitted(d["lpr"].entries, d["ids"], eos)
                                if d["lpr"] is not None else None)
                     if chat:
-                        content, reasoning = split_full(d["text"], fmt, in_think=in_think,
-                                                        self_open=_spec().reasoning.opens_itself)
+                        # #93: thinking off, reasoning the model wrote anyway goes to its field: a lone
+                        # `</think>` before the answer, or a block it opened at its start
+                        off_mode = bool(client.off) and not in_think
+                        moved = off_full(d["text"], fmt) if off_mode else None
+                        content, reasoning = moved if moved is not None else split_full(
+                            d["text"], fmt, in_think=in_think,
+                            self_open=_spec().reasoning.opens_itself or off_mode)
                         if plan is not None and plan.active:
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
@@ -8783,8 +8801,11 @@ class Handler(BaseHTTPRequestHandler):
             # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
+            off_mode = bool(client.off) and not in_think
             split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary,
-                              self_open=_spec().reasoning.opens_itself)
+                              self_open=_spec().reasoning.opens_itself or off_mode)
+            # #93: thinking off, the model's own lone `</think>` before its answer is not sent
+            offc = [OffClose() if off_mode else None]
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
@@ -8876,6 +8897,10 @@ class Handler(BaseHTTPRequestHandler):
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if offc[0] is not None and field == "content" and not split.in_think:
+                        piece = offc[0].push(piece)      # #93: the lone tag of a thinking-off answer
+                        if not piece:
+                            continue
                     if stray[0] is not None and field == "content" and not split.in_think:
                         piece = stray[0].push(piece)     # SRV-187: no bare `</think>` line
                         if not piece:
@@ -9127,6 +9152,11 @@ class Handler(BaseHTTPRequestHandler):
                         send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if offc[0] is not None:
+                    oc, offc[0] = offc[0], None
+                    send([("content", oc.finish())])
+                    if oc.dropped:
+                        print(f"[think-off] {cid}: the answer's own `</think>` was not sent (#93)", flush=True)
                 if stray[0] is not None:
                     sc, stray[0] = stray[0], None
                     send([("content", sc.finish())])

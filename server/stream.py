@@ -514,6 +514,87 @@ class StrayClose:
         return h
 
 
+FENCE = "```"
+
+
+def off_split(text: str) -> tuple[str, str] | None:
+    """#93: with thinking off, a model that reasons anyway may write its working-out and then a lone
+    `</think>` before the answer (Ornith on long contest problems). `(reasoning, answer)` when the text's
+    FIRST `</think>` comes before any code fence and after no `<think>` of its own; None otherwise, and
+    the text stays as written (a block the model opened at its start is `split_full`'s `self_open`
+    case; a tag inside code or later in an answer is the answer's)."""
+    i = text.find(CLOSE_THINK)
+    if i < 0 or text.lstrip().startswith(OPEN_THINK):
+        return None
+    head = text[:i]
+    if FENCE in head or OPEN_THINK in head:
+        return None
+    return head.rstrip("\n"), text[i + len(CLOSE_THINK):].lstrip("\n")
+
+
+def off_full(text: str, fmt: str) -> tuple[str, str | None] | None:
+    """`off_split` as a non-streamed answer's `(content, reasoning_content)` in the request's format:
+    the reasoning in its own field (`reasoning_content`), as a closed block at the content's start
+    (`tags`), or both; None when the text has no such tag."""
+    sp = off_split(text)
+    if sp is None:
+        return None
+    reasoning, answer = sp
+    tagged = OPEN_THINK + "\n" + reasoning + "\n" + CLOSE_THINK + "\n\n" + answer
+    if fmt == "tags":
+        return tagged, None
+    if fmt == "both":
+        return tagged, reasoning
+    return answer, reasoning
+
+
+class OffClose:
+    """#93, streaming: with thinking off, the first `</think>` the model writes before any code fence
+    (and after no `<think>` of its own) is dropped with the blank lines after it. The text before it has
+    already gone out as the answer, so only the tag goes. A tag after a fence, a second one, or one after
+    a `<think>` stays as written. Only a tail that could still become the tag is held back."""
+
+    def __init__(self):
+        self.done = False           # the tag went, or a fence or a `<think>` came first: pass all
+        self.pending = ""
+        self.seen = ""              # the last two characters sent, for a fence across pieces
+        self.lead = False           # blank lines right after the dropped tag go too
+        self.dropped = 0
+
+    def push(self, piece: str) -> str:
+        if self.lead:
+            piece = piece.lstrip("\n")
+            if not piece:
+                return ""
+            self.lead = False
+        if self.done:
+            return piece
+        buf, self.pending = self.pending + piece, ""
+        look = self.seen + buf
+        i = buf.find(CLOSE_THINK)
+        fence = look.find(FENCE)
+        opened = look.find(OPEN_THINK)
+        first = min([x - len(self.seen) for x in (fence, opened) if x >= 0], default=None)
+        if i >= 0 and (first is None or i < first):
+            self.done, self.dropped = True, 1
+            rest = buf[i + len(CLOSE_THINK):].lstrip("\n")
+            self.lead = not rest
+            return buf[:i] + rest
+        if first is not None:
+            self.done = True
+            return buf
+        hold = max(_tag_prefix_len(buf), next((k for k in (2, 1) if len(buf) >= k and FENCE.startswith(buf[-k:])), 0),
+                   next((k for k in range(min(len(buf), len(OPEN_THINK) - 1), 0, -1)
+                         if OPEN_THINK.startswith(buf[-k:])), 0))
+        out, self.pending = (buf[:len(buf) - hold], buf[len(buf) - hold:]) if hold else (buf, "")
+        self.seen = (self.seen + out)[-2:]
+        return out
+
+    def finish(self) -> str:
+        rest, self.pending = self.pending, ""
+        return rest
+
+
 def drop_stray_close(text: str, fmt: str = "reasoning_content", in_think: bool = False
                      ) -> tuple[str, int]:
     """A non-streamed answer's content through `StrayClose`: (text, tags dropped). In `tags` and
