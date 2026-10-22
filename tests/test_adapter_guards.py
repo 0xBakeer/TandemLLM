@@ -245,8 +245,11 @@ def lint_hits(src: str) -> list[tuple[int, str]]:
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     out, prev = [], None
     skip = (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.NL)
+    fmid = getattr(tokenize, "FSTRING_MIDDLE", None)       # 3.12+: an f-string's text is its own token
     for i, t in enumerate(toks):
-        if t.type == tokenize.STRING:
+        if fmid is not None and t.type == fmid:
+            prev = t
+        elif t.type == tokenize.STRING:
             nxt = toks[i + 1] if i + 1 < len(toks) else None
             if (prev is None or prev.type in skip) and (nxt is None or nxt.type in skip + (tokenize.ENDMARKER,)):
                 prev = t

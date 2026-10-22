@@ -121,8 +121,18 @@ def test_the_padded_rows_contribute_nothing_to_the_output():
     o2, S2 = gdn.chunk_gated_delta_rule(z(q), z(k), z(v), z(g), z(beta), S0, chunk_size=CHUNK)
     do = (o1.float() - o2[:, :T].float()).abs().max().item()
     ds = (S1 - S2).abs().max().item()
-    check("test_the_padded_rows_contribute_nothing_to_the_output", do == 0.0 and ds == 0.0,
-          f"output {do:.1e}, final state {ds:.1e} over {pad} padded rows")
+    # OPS-231: exact on aarch64; x86 CPU torch differs by 2.4e-4 of max |o| 0.048 and 2.6e-3 of max |S| 0.62.
+    # The bound is 2 % of each; padded rows that moved the state (a gate of -0.05 there, or junk rows with
+    # beta 0.5) move it by 0.47 and 0.061, checked below to clear the bound by 4 times or more
+    bo = 0.02 * o1.float().abs().max().item()
+    bs = 0.02 * S1.abs().max().item()
+    junk = lambda x, fill: torch.cat([x, torch.full_like(x[:, :pad], fill)], dim=1)  # noqa: E731
+    _, S3 = gdn.chunk_gated_delta_rule(junk(q, 0.1), junk(k, 0.3), junk(v, 0.3), z(g), junk(beta, 0.5), S0,
+                                       chunk_size=CHUNK)
+    moved = (S1 - S3).abs().max().item()
+    check("test_the_padded_rows_contribute_nothing_to_the_output", do <= bo and ds <= bs and moved > 4 * bs,
+          f"output {do:.1e} (bound {bo:.1e}), final state {ds:.1e} (bound {bs:.1e}) over {pad} padded rows; "
+          f"junk padded rows move it by {moved:.2e}")
 
 
 def test_the_decay_mask_is_lower_inclusive_and_attn_is_strictly_lower():
