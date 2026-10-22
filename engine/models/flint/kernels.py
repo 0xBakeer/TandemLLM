@@ -435,6 +435,18 @@ def router_reference(logits, bias, k: int, eps: float, scale: float = 1.0):
 FLASH = None
 
 
+if HAVE_TRITON:
+
+    @triton.jit
+    def _sink_scale(O, s_ot, s_oh, F, s_fh, Y, HQ: tl.constexpr, D: tl.constexpr):
+        t = tl.program_id(0)
+        h = tl.program_id(1)
+        d = tl.arange(0, D)
+        o = tl.load(O + t * s_ot + h * s_oh + d).to(tl.float32)
+        f = tl.load(F + h * s_fh + t)
+        tl.store(Y + (t * HQ + h) * D + d, (o * f).to(tl.bfloat16))
+
+
 def prompt_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: int, sink: torch.Tensor,
                      window: int = 0) -> torch.Tensor:
     """A prompt chunk's attention. q [T, Hq, D] bf16 of positions [start + S - T, start + S) where k / v
@@ -452,6 +464,12 @@ def prompt_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
                 window_size_right=0 if window else -1)
             FLASH = True
             f = torch.sigmoid(lse[0].float() - sink.float()[:, None])           # [Hq, T] = 1 / (1 + e^(sink - lse))
+            if HAVE_TRITON:
+                # SPD-144: bf16(fp32(o) * f) in one pass (the torch expression's bits: one fp32 product, one rounding)
+                o = out[0]
+                y = torch.empty(T, HQ, D, dtype=q.dtype, device=q.device)
+                _sink_scale[(T, HQ)](o, o.stride(0), o.stride(1), f, f.stride(0), y, HQ=HQ, D=D, num_warps=1)
+                return y
             return (out[0].float() * f.transpose(0, 1)[:, :, None]).to(q.dtype)
         except (RuntimeError, TypeError):
             FLASH = False

@@ -44,6 +44,11 @@ from engine.models.lfm2_moe import kernels as LK
 
 #: rows a prompt chunk takes (the caches' anchor grid)
 PREFILL_CHUNK = 4096
+#: SPD-144: pairs a group GEMM item takes in a prompt chunk (tools/fn_prefill_kernels.moe_grouped; 32 or 64):
+#: Flint's 256 experts of 512 columns take ~96 pairs each at 4,096 rows, 64 a item ran 6 % faster (2026-10-22)
+PREFILL_GROUP_ROWS = 64
+#: SPD-144: the shared expert of a prompt chunk on the engine's second stream (with FLINT_SIDE_STREAM)
+PREFILL_SIDE = True
 #: rows up to which a projection runs on the row-invariant kernels (their limit, the verify width)
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
@@ -568,6 +573,18 @@ class FlintEngine(FlintRef):
             out = self._attn_chunk(n, li, st, pos)
             h, n = add_rms(h, out, self.W[p + "post_attention_layernorm.weight"], eps)
             if c.is_moe(li):
+                side = None
+                if self.side is not None and dev.type == "cuda" and c.shared_expert_intermediate_size and PREFILL_SIDE:
+                    # SPD-144: the shared expert's projections (the tensor cores) on the second stream beside the
+                    # routed experts' trellis GEMMs; the same kernels, the same bits
+                    side = self._side_events(li)
+                    side[0].record()
+                    self.side.wait_event(side[0])
+                    with torch.cuda.stream(self.side):
+                        sx = self._glu_chunk(n, p + "mlp.shared_expert.", c.shared_expert_intermediate_size)
+                        side[1].record()
+                    n.record_stream(self.side)
+                    sx.record_stream(torch.cuda.current_stream())
                 logits = F.linear(n, self._gate[li]).float()
                 if dev.type == "cuda":
                     ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps,
@@ -579,17 +596,26 @@ class FlintEngine(FlintRef):
                     yd = self._moe_nvfp4_chunk(n, ids, self.banks[li])
                 elif li in self.banks:
                     from tools import fn_prefill_kernels as PK
-                    yd = PK.moe_grouped(n, ids, self.banks[li])
+                    yd = PK.moe_grouped(n, ids, self.banks[li], rows=PREFILL_GROUP_ROWS)
                 else:
                     yd = self._moe_bf16_chunk(n, ids, li)
                 m = FK.moe_combine(yd, ids, wts) if dev.type == "cuda" else LK.combine_reference(yd, ids, wts)
                 if c.shared_expert_intermediate_size:
-                    m = m + self._glu_chunk(n, p + "mlp.shared_expert.", c.shared_expert_intermediate_size)
+                    if side is not None:
+                        torch.cuda.current_stream().wait_event(side[1])
+                    else:
+                        sx = self._glu_chunk(n, p + "mlp.shared_expert.", c.shared_expert_intermediate_size)
+                    m = (m, sx)
             else:
                 m = self._glu_chunk(n, p + "mlp.", c.intermediate_size)
             nxt = self.W[self.pre(li + 1) + "input_layernorm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["norm.weight"]
-            h, n = add_rms(h, m, nxt, eps)
+            if isinstance(m, tuple):
+                # h + bf16(m + shared): add2_rms is the bits of add_rms(h, m + shared) (SPD-144: one pass less)
+                h, n = K.add2_rms(h, m[0], m[1], nxt, eps) if dev.type == "cuda" \
+                    else add_rms(h, m[0] + m[1], nxt, eps)
+            else:
+                h, n = add_rms(h, m, nxt, eps)
         st.length = L + T
         self.prompt_hidden = n
         self.prompt_hidden_pre = h            # the last layer's output before the final norm (a draft head's input)
@@ -599,7 +625,9 @@ class FlintEngine(FlintRef):
 
     def _glu_chunk(self, n, p, I):
         gu = self._fused(n, p, "gate_up", ("gate_proj", "up_proj"))
-        return self.lin(F.silu(gu[:, :I]) * gu[:, I:], self.W[p + "down_proj.weight"])
+        # kernels.glu_act: the bits of F.silu(g) * u in bf16, one pass (SPD-144)
+        a = K.glu_act(gu, I) if gu.is_cuda and gu.stride(1) == 1 else F.silu(gu[:, :I]) * gu[:, I:]
+        return self.lin(a, self.W[p + "down_proj.weight"])
 
     def _attn_chunk(self, n, li, st, pos):
         """Attention of a prompt chunk: q|k|v, the prep kernel (norms, rotary on a sliding layer), then
