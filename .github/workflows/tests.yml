@@ -1,0 +1,78 @@
+# The CPU test suite (CONTRIBUTING.md) on every pull request and push to main: each tests/test_*.py
+# through tests/script_suite.py in a clean process, CUDA hidden, four files at a time. The engine's
+# Python packages are the versions install.sh pins, with the CPU builds of torch and torchvision.
+# A file that ran no test fails; a file that prints `skipped: <why>` (a GPU kernel test) is listed.
+# The GPU tests in tests/gpu/ run on a DGX Spark (the run-gpu label).
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    name: cpu suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the engine's packages (CPU builds)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0 torchvision==0.28.0
+          python -m pip install numpy==2.3.5 safetensors==0.8.0 tokenizers==0.22.2 transformers==5.12.1 \
+            huggingface-hub==1.30.0 pyyaml==6.0.1 pillow==11.3.0 jinja2==3.1.6 regex==2026.9.3 \
+            pyarrow==25.0.1 triton==3.7.1 cryptography psutil pytest
+          python -m pip install --no-deps -e .
+
+      - name: Run the CPU suite
+        env:
+          SUITE_JOBS: "4"
+        run: |
+          mkdir -p results/suite
+          ls tests/test_*.py > results/suite/FILES
+          xargs -P "$SUITE_JOBS" -I{} sh -c \
+            'python tests/script_suite.py --all --timeout 900 --out results/suite/logs "$1" | tail -1 >> results/suite/RESULT' \
+            _ {} < results/suite/FILES
+          python - <<'PY'
+          import re
+          lines = open("results/suite/RESULT").read().splitlines()
+          total = {"files": 0, "ok": 0, "fail": 0, "skipped": 0, "tests": 0}
+          bad, skipped = [], []
+          for line in lines:
+              for k, v in re.findall(r"(\w+)=(\d+)", line):
+                  total[k] += int(v)
+              if "fail=1" in line:
+                  bad += line.split(" -- ")[1].split()
+              if "skipped=1" in line:
+                  skipped += line.split("skipped: ")[1].split()
+          print(" ".join(f"{k}={v}" for k, v in total.items()))
+          for f in skipped:
+              print("skipped", f)
+          for f in bad:
+              print(f"::error file={f}::{f} failed or ran no test (results/suite/logs)")
+          raise SystemExit(1 if bad or total["files"] == 0 else 0)
+          PY
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: cpu-suite-logs
+          path: results/suite
+          retention-days: 7

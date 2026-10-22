@@ -1,0 +1,61 @@
+name: Performance
+description: TandemLLM is slower, or uses more memory, than it should.
+labels: [perf, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A number is only useful with its conditions. docs/measurement.md says how TandemLLM
+        measures: tok/s = (completion tokens - 1) / (end-to-end seconds - time to first token),
+        one request at a time unless you say otherwise. Write each number with its prompt size,
+        output size, thinking on or off, temperature and the number of requests.
+
+  - type: input
+    id: version
+    attributes:
+      label: TandemLLM version
+      placeholder: 0.14.0
+    validations:
+      required: true
+
+  - type: input
+    id: profile
+    attributes:
+      label: Profile
+      placeholder: flint-exl3-4.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options: [NVIDIA DGX Spark, NVIDIA RTX PRO 6000, Another GPU or machine]
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: What you measured
+      description: Each number with its conditions on the same line.
+      placeholder: |
+        decode 41.2 tok/s, prompt 256 tokens, output 256 tokens, thinking off, temperature 0, 20 requests one at a time
+        time to first token 0.31 s (median of the same 20 requests)
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and why
+      description: A number from the model card or an earlier version, and where it comes from.
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: How you measured
+      description: The command or script, and the parallel requests if any.
+      render: text

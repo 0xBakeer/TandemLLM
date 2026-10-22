@@ -1,0 +1,22 @@
+# Adds area labels to a pull request from the paths it changes (.github/labeler.yml). It runs on
+# pull_request_target so that pull requests from forks can be labeled; it never checks out or runs
+# the pull request's code.
+name: labeler
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Label by path
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          sync-labels: false

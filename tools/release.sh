@@ -7,7 +7,8 @@
 #   bash tools/release.sh X.Y.Z --only verify                            one section (read-only for verify)
 #   bash tools/release.sh X.Y.Z --only bump                              write X.Y.Z into the version lines
 #
-# Sections (--only takes a comma-separated list; the default is preflight,gate,tag,push,release,verify):
+# Sections (--only takes a comma-separated list; the default is
+# preflight,gate,tag,push,release,milestone,verify):
 #
 #   bump       VERSION, install.sh's default tag, the manual's \version, and the lines that point at the
 #              previous tag (the install commands and --ref defaults of README.md, docs/setup.md and the
@@ -32,6 +33,8 @@
 #   push       HEAD as origin's main and the tag, no force
 #   release    one GitHub release, "TandemLLM X.Y.Z", the notes file, latest. CI's manual workflow
 #              attaches the PDF on the tag push; when it created a bare release first, this edits that one.
+#   milestone  the GitHub milestone vX.Y.Z is closed when it is open, and the next patch's, vX.Y.(Z+1),
+#              is created when it is missing (CONTRIBUTING.md: a milestone is a release)
 #   verify     read-only, against what is published: the tag on origin (and the local tag's commit), main
 #              containing it, the release's title, draft state and latest flag, CI's manual PDF (waits up
 #              to --asset-wait minutes), README.md, install.sh and VERSION at the tag (each body saved to a
@@ -40,11 +43,11 @@
 #              weight packs' README.md and config.json
 #
 # --dry-run runs preflight, gate and verify (verify only lists its checks while the tag is not on origin)
-# and prints the tag, push and release commands without running them. Exit 0 when every section run
-# passed. Bash 3.2 (macOS) compatible: no associative arrays, no empty-array expansion under set -u.
+# and prints the tag, push, release and milestone commands without running them. Exit 0 when every
+# section run passed. Bash 3.2 (macOS) compatible: no associative arrays, no empty-array expansion under set -u.
 set -euo pipefail
 
-usage() { sed -n '2,52p' "$0"; }
+usage() { sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d'; }
 
 VERSION=""; NOTES=""; BOX="${RELEASE_BOX:-}"; BOX_PY="${RELEASE_BOX_PY:-python3}"
 BOX_PYTHONPATH="${RELEASE_BOX_PYTHONPATH:-}"; SMOKE_BASE="http://127.0.0.1:8000/v1"; SKIP=""; ONLY=""
@@ -89,7 +92,7 @@ pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAILS=$((FAILS + 1)); }
 die() { echo "STOP: $*" >&2; exit 1; }
 want() {                         # want SECTION: in --only, or in the default list
-    local list="${ONLY:-preflight,gate,tag,push,release,verify}"
+    local list="${ONLY:-preflight,gate,tag,push,release,milestone,verify}"
     case ",$list," in *",$1,"*) return 0 ;; *) return 1 ;; esac
 }
 skipped() { case ",$SKIP," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
@@ -320,7 +323,7 @@ if want preflight; then
     elif want release; then
         fail "--notes FILE is needed for the release section"
     fi
-    if want release || want verify; then
+    if want release || want milestone || want verify; then
         gh auth status -h github.com > /dev/null 2>&1 && pass "gh is logged in" || fail "gh is not logged in (gh auth login)"
     fi
     check_hf "$PREV" HEAD
@@ -388,6 +391,30 @@ if want release; then
         run gh release create "$TAG" -R "$GH_REPO" --verify-tag --latest --title "TandemLLM $VERSION" --notes-file "$NOTES"
     fi
     say "CI's manual workflow attaches $ASSET when its build on the tag ends"
+fi
+
+# ------------------------------------------------------------------------------------------- milestone
+if want milestone; then
+    say "== milestone"
+    IFS=. read -r M1 M2 M3 <<EOF
+$VERSION
+EOF
+    NEXT="v$M1.$M2.$((M3 + 1))"
+    gh api "repos/$GH_REPO/milestones?state=all&per_page=100" \
+        -q '.[] | "\(.number) \(.state) \(.title)"' > "$WORK/milestones" || die "reading $GH_REPO's milestones"
+    line="$(awk -v t="$TAG" '$3 == t' "$WORK/milestones" | head -1)"
+    if [ -z "$line" ]; then
+        say "no milestone $TAG on $GH_REPO: nothing to close"
+    elif [ "$(echo "$line" | cut -d' ' -f2)" = open ]; then
+        run gh api -X PATCH "repos/$GH_REPO/milestones/$(echo "$line" | cut -d' ' -f1)" -f state=closed
+    else
+        say "milestone $TAG is already closed"
+    fi
+    if awk -v t="$NEXT" '$3 == t { f = 1 } END { exit !f }' "$WORK/milestones"; then
+        say "milestone $NEXT exists"
+    else
+        run gh api -X POST "repos/$GH_REPO/milestones" -f title="$NEXT" -f description="Next patch release."
+    fi
 fi
 
 # ---------------------------------------------------------------------------------------------- verify

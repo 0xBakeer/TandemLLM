@@ -1,7 +1,7 @@
 name: Add a community weight pack
 description: A quantised or fine-tuned pack of a TandemLLM model that you would like listed in the setup guide.
 title: 'community: <name of the pack>'
-labels: [community-weights]
+labels: [feature, quant/community, needs-triage]
 body:
   - type: markdown
     attributes:
