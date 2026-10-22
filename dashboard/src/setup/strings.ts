@@ -218,6 +218,8 @@ export const S = {
   slotsBelow: (min: number) => `At least ${min} ${min === 1 ? 'chat' : 'chats'}.`,
   slotsAtMax: (max: number) => `${max} is the most the engine runs at once.`,
   nextRefused: (why: string) => `Next stays on this step. ${why}`,
+  finishWaiting: 'Finish and install waits: the review plan is still checking the box.',
+  finishPlanFailed: 'Finish and install waits: the plan check did not answer. Retry on the review page asks the server again.',
   window: 'Longest conversation',
   windowWhat: 'The most tokens one chat can hold. Memory is only used as a chat grows, so a long window costs nothing until it is used.',
   sideWindow: 'Longest conversation in the extra chats',
@@ -516,6 +518,20 @@ export function joinAnd(xs: string[]): string {
 function lower(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1);
 }
+
+/** The simple mode of the Setup Guide (src/setup/simple.ts): the three short pages. */
+export const SIMPLE = {
+  switchLabel: 'Setup guide mode',
+  simple: 'Simple',
+  advanced: 'Advanced',
+  modeNoteSimple: 'Three short pages, sensible answers already in.',
+  modeNoteAdvanced: 'The full eight steps, exactly as before.',
+  settingsTitle: 'Settings',
+  settingsIntro: 'All good defaults are already set. The model’s full window, as many chats at it as the box carries, the deciders and the cache where the model offers them. Open a title to look at anything; you never have to.',
+  showAll: 'Show every option',
+  stepSettings: 'Settings',
+  of3: (n: number) => `Step ${String(n)} of 3`,
+};
 
 /** Wren's own words for the sources it answered from. */
 export function sourceLabel(path: string, title: string): string {

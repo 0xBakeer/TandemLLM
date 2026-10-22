@@ -3,11 +3,18 @@
 // 262,144-token window, its KV and the slot's measured fixed part; 8 fit the mock box, 9 do not). Minus, plus, typing and the arrow keys
 // move the memory bar at once; above 3 is a quiet note; a count that does not fit, or one the
 // engine does not take, says why next to the field and beside Next, which refuses it.
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setSlots, setupMock } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'drives the mock (POST /__mock/setup)');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const VL = 'nemotron-3.5-super-vl-120b-a12b';
 const field = (page: Page) => page.locator('[data-field="parallelism.slots"]');

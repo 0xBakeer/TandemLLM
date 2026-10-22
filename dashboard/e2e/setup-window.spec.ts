@@ -2,11 +2,18 @@
 // holds 1,048,576 tokens on a 4,096 step; three chats of 262,144 by default, the pool off). − and +
 // walk 8k ... 1M, the field takes any number of tokens, and a value the model does not take stays as
 // typed with the model's real limit while Next refuses it. The bar follows every change.
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setupMock, setWindow } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'drives the mock (POST /__mock/setup)');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const VL = 'nemotron-3.5-super-vl-120b-a12b';
 const win = (page: Page) => page.locator('#pf-win-in');

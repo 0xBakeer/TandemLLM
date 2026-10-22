@@ -1,9 +1,19 @@
 // QA VIS-79 (VIS-78): the setup wizard at #/setup against the mock, desktop and 390 px. @mock
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, noHorizontalOverflow } from './helpers';
 import { open, setupMock, setSlots, setWindow } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
+
+// every test here drives the ADVANCED wizard — the step rail, Next/Previous agreement,
+// the Review budget gate. A fresh context therefore asks for advanced explicitly: the
+// guide's default for a new browser is the simple flow.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 768;
 const MODEL = 'qwen3.8-27b';
@@ -291,6 +301,8 @@ test('390 px: no sideways scroll, a compact bar, Step n of 8, 44 px targets', as
 
 test('reduced motion: Wren is still and the steps render', async ({ browser }) => {
   const ctx = await browser.newContext({ reducedMotion: 'reduce', viewport: { width: 1440, height: 900 } });
+  // the fresh context starts at the guide's default mode — this test walks the ADVANCED
+  await ctx.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
   const page = await ctx.newPage();
   await page.goto(`./#/setup/${MODEL}/components`);
   await expect(page.locator('.comp').first()).toBeVisible();
