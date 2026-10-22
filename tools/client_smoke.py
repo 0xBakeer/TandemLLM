@@ -171,13 +171,16 @@ class Smoke:
         print(f"      ({time.time() - t0:.1f} s)", flush=True)
 
     # ---------------------------------------------------------------- transports
-    @staticmethod
-    def _greedy(kw: dict) -> dict:
+    #: --sampling card: the tool checks decode at the server's default sampling (the card's), to measure
+    #: how often a model's calls fail a client's validation in practice; the gate keeps greedy
+    card_sampling = False
+
+    def _greedy(self, kw: dict) -> dict:
         """The smoke checks the server's behaviour, not the model's luck: a request with tools
         decodes greedily unless the check (or a captured body) names its own temperature. At its
         card's temperature 1.0, Flint 4.0 named a wrong argument or an unoffered tool in about 2
         of 8 opencode asks (2026-10-22), which says nothing about the server."""
-        if kw.get("tools") and "temperature" not in kw:
+        if kw.get("tools") and "temperature" not in kw and not self.card_sampling:
             kw = dict(kw, temperature=0)
         return kw
 
@@ -260,11 +263,15 @@ def main() -> int:
     ap.add_argument("--x-tandem", default="", choices=("", "raw", "shadow", "on"),
                     help="send X-Tandem with every request (raw: the raw path of a conductor "
                          "server) and check the response says the same mode")
+    ap.add_argument("--sampling", default="greedy", choices=("greedy", "card"),
+                    help="the tool checks' sampling: greedy (the gate's) or the server's default (card): "
+                         "a measurement of how often the model's calls fail validation, not a gate")
     ap.add_argument("--x-tandem-profile", default="",
                     help="send X-Tandem-Profile with every request: the checks under a conductor "
                          "profile (coding: what opencode gets), not the raw path")
     a = ap.parse_args()
     s = Smoke(a.base, a.key, a.model, a.x_tandem, a.x_tandem_profile)
+    s.card_sampling = a.sampling == "card"
     if a.x_tandem:
         r = s.client.chat.completions.with_raw_response.create(
             model=s.model, max_tokens=4, messages=[{"role": "user", "content": "Say ok."}],
