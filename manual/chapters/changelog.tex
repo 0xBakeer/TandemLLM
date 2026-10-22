@@ -44,9 +44,18 @@
 0.12.2 & 10-20 & a Chat-tab run's tool results fit the room left and \code{read_file} reads by whole lines; the port preview streams; LFM2.5 adopts its 0.9.x to 0.11.1 conversations again \\
 0.13.0 & 10-20 & Ornith-1.5-122B on the Qwen3.5 MoE trunk, from our EXL3 4.0 pack, drafting with its MTP layer; the conductor's third tool-eval-bench round; room for Ornith's caches; \code{chatd} fixes for long sessions \\
 0.14.0 & 10-22 & Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint, drafting with the lookup; a resumed session keeps its end anchor; a re-rendered tool call served as written; prompt attention over the KV heads as they are; a lost CUDA context fails \code{/health}; \code{tools/release.sh} \\
+0.14.1 & 10-22 & a call's argument names matched to the offered tool's schema; a call to a tool not offered mapped to one that is; Flint answers directly with thinking off; Flint's e4m3 KV cache, off by default; model families behind adapters \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.14.1, adapters}\label{sec:changelog-0141}
+
+0.14.1 matches a tool call's argument names to the offered tool's schema before the call leaves the server, on both paths and in every tool-call form, so Flint's \code{read} with \code{path} reaches opencode as \code{filePath}. A call to a tool the request did not offer goes to the offered tool of its kind; a search or a listing with no such tool becomes a quoted \code{grep} or \code{ls} for the client's bash tool, and a write never becomes a shell command. Through opencode's checks at Flint 4.0's card sampling, 8 runs an arm, the checks passed went from 28 and 29 of 32 to 32 of 32 (\measured).
+
+With thinking off, Flint's prompt gets one line before the conversation that asks it to answer directly: greedy, it wrote its reasoning into the answer on 2 of 10 hard asks instead of 8, and the median answer took 185 tokens instead of 582. \code{FLINT_KV_FP8=1} keeps Flint's full layers' keys and values in e4m3; it changes the output, so it is off by default (Chapter~\ref{ch:flint} gives its cost).
+
+Each model family now registers itself in its own package and declares how it is served: its tool-call form, its reasoning, where system messages may stand, the files others build on and its kernel launch options. Guards hold v0.14.0's fingerprints, and shared code names no model (Chapter~\ref{ch:adding-model}). The other models write the same text as in 0.14.0 and keep their saved conversations; Flint's fingerprint moves once, so its saved prompt-cache entries from 0.14.0 are rebuilt once.
 
 \section{0.14.0, Flint}\label{sec:changelog-0140}
 

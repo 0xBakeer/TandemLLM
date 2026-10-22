@@ -31,7 +31,9 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.14.0 adds Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint,
+# The engine release. v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
+# answer directly with thinking off and puts the model families behind adapters;
+# v0.14.0 adds Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint,
 # drafting with the lookup; v0.13.0 adds Ornith-1.5-122B from our EXL3 4.0 pack, drafting with its MTP layer;
 # v0.12.2 fits a Chat-tab run's tool results to the window, streams the port preview and
 # lets LFM2.5 adopt its 0.9.x to 0.11.1 conversations again;

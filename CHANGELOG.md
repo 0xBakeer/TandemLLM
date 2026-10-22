@@ -2,6 +2,36 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.14.1, 2026-10-22
+
+0.14.1 fixes how Flint's tool calls reach a client and how it answers with thinking off, and moves model code behind adapters. A call's argument names are matched to the offered tool's schema, so Flint's `read` with `path` reaches opencode as `filePath`. A call to a tool the request did not offer goes to the offered tool of its kind. With thinking off, Flint answers without writing its reasoning into the answer. Flint can keep its full layers' keys and values in e4m3, off by default. Each model family now registers itself and declares how it is served, and shared code names no model. The other models write the same text as in 0.14.0 and keep their saved conversations. Flint's fingerprint moves once, so its saved prompt-cache entries from 0.14.0 are rebuilt once.
+
+### Tool calls
+
+- Argument names are matched to the tool's schema before a call leaves the server (SRV-691), on both paths and in every tool-call form. A name is kept when the schema has it. Otherwise it is matched by case, `_` and `-`, then by a small synonym table: a path for the schema's one path-like parameter, `query` / `pattern` / `regex`, `cmd` / `command`, `content` / `text` / `contents`. A rename happens only when exactly one parameter is the target and the call has not set it. A value is never changed, except to take its target's JSON type. A stream renames a key as soon as it is decided, so the streamed call and the parsed one agree. The journal records each rename (ARGS, RENAME). Through opencode's checks at Flint 4.0's card sampling, 8 runs an arm: calls the client refused fell from 4 to 0 under the conductor and from 2 to 0 raw, and the checks passed went from 28 and 29 of 32 to 32 of 32.
+- A call to a tool the request did not offer (SRV-693) goes to the one offered tool of its kind when its arguments then name that tool's required parameters. A search or a listing with no such tool becomes a quoted `grep` or `ls` for the client's bash tool. A write, edit or delete never becomes a shell command. Anything else goes out as written, and the conductor's C4 asks for it again with the offered list.
+- The conductor's call checks read the calls as the client receives them, after the renames (SRV-691).
+- `tools/client_smoke.py --sampling card` runs the tool checks at the server's default sampling (SRV-692). The release gate stays greedy.
+
+### Flint
+
+- With thinking off, Flint's prompt gets one line before the conversation: "Answer directly. Do not show your reasoning." (SRV-697). Before, Flint wrote its reasoning into the answer on 8 of 10 hard asks greedy and 15 of 20 at its card's sampling, with a median of 582 and 534 tokens. With the line it did so on 2 of 10 and 2 of 20, with a median of 185 and 107 tokens. Thinking on is unchanged.
+- Flint's requests keep system and developer messages where they stand, with their own role, since its template renders them in place. The 27B's rule (one system prompt first) is now the default family setting, unchanged for the other models.
+- `FLINT_KV_FP8=1` keeps the 14 full layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 16,416 bytes a token instead of 28,672 (SPD-150). This changes the output, so it is off by default. On 4.0 against the exact cache, the last 1,024 tokens of a 32,768-token source file read at KL 0.070, 93.8 % top-1 agreement and perplexity 7.465 against 7.165. At 122,880 tokens the numbers are KL 0.050, 95.7 % and 4.132 against 4.053. Plain decode runs at 79.4 tok/s against 60.6 at 64k, 57.1 against 39.3 at 128k and 36.6 against 23.05 at 256k. Prompt reading is 5 to 12 % slower. [docs/flint.md](docs/flint.md) has the table.
+
+### Model adapters
+
+- Each family registers itself in its package's `arch.py` and keeps its own knobs in `knobs.py` (ENG-405). Adding a model edits no shared file.
+- A family's `ServeSpec` says what the server needs: the tool-call form, how the model opens and turns off its reasoning, and where system messages may stand (ENG-406). The identity note names the model from the profile's card and has no default model.
+- The tool-call forms (XML, Pythonic, arg-key) sit behind one `ToolFormat` interface in `server/toolformats/`, held to one contract by `tests/test_toolformats.py` (ENG-407). `engine/grammar.py` is back to its 0.13 bytes.
+- A family declares which of its files others build on and which it uses from others, and kernel launch options come through `EngineHooks` (ENG-408). A change to a shared file moves exactly the declared dependents' fingerprints.
+- Community-pack rules live in each base model's `model.yaml`, and its profile writer and pack check live in its family (ENG-409). The 27B's builder, drafter stack and side slots moved from `server/app.py` into `engine/models/qwen3_5/serving.py` (ENG-406, ENG-410).
+- Guards hold this (ENG-404). They check v0.14.0's fingerprints as goldens with only Flint allowed to move, and they freeze `SAME_ROWS`. They also check that a change in one package moves only the adapters that hold it, and lint the shared modules for model names. [docs/adding-a-model.md](docs/adding-a-model.md) says what a family declares.
+
+### Tests and CI
+
+- The CPU job on GitHub runs every test file, and a failure fails it (OPS-231). Timing tests bound CPU time against a reference measured in the same run, and the two fp32 references bound their error in ulps. The slow-subscriber test gates its reader, and the drain test waits for its signal handler. The gate's fake engine runs in a process of its own. A test server binds before its port is read (`--port 0` works), and helpers that need a port up front take one from a locked counter.
+
 ## 0.14.0, 2026-10-22
 
 0.14.0 adds Recursive's Flint, a mixture-of-experts model for coding agents, from our EXL3 packs at 4.0 and 6.0 bits a weight and from Recursive's BF16 checkpoint. It has no draft layer, so every profile drafts with the lookup. On one DGX Spark the 4.0 pack decodes at 128.2 to 136.6 tok/s plain and up to 480.0 with the lookup, 39.5 at a 128k context, and every drafted text is the plain run's. The release also keeps a resumed session's end anchor, serves a re-rendered tool call as the model wrote it, reads the KV heads as they are in every prompt attention, restarts an engine whose CUDA context was lost, and makes a release with one command. The other models write the same text as in 0.13.0 and keep their saved conversations.
