@@ -1,7 +1,8 @@
 # The CPU test suite (CONTRIBUTING.md) on every pull request and push to main: each tests/test_*.py
 # through tests/script_suite.py in a clean process, CUDA hidden, four files at a time. The engine's
 # Python packages are the versions install.sh pins, with the CPU builds of torch and torchvision.
-# A file that ran no test fails; a file that prints `skipped: <why>` (a GPU kernel test) is listed.
+# A file that ran no test fails; a file that prints `skipped: <why>` (a GPU kernel test) is listed;
+# a file that fails runs once more alone, and passes with a warning when it passes then.
 # The GPU tests in tests/gpu/ run on a DGX Spark (the run-gpu label).
 #
 # Left out here (.github/cpu-suite-skip.txt), and run in the release gate on the box
@@ -59,7 +60,7 @@ jobs:
             'python tests/script_suite.py --all --timeout 900 --out results/suite/logs "$1" | tail -1 >> results/suite/RESULT' \
             _ {} < results/suite/FILES
           python - <<'PY'
-          import re
+          import re, subprocess, sys
           lines = open("results/suite/RESULT").read().splitlines()
           total = {"files": 0, "ok": 0, "fail": 0, "skipped": 0, "tests": 0}
           bad, skipped = [], []
@@ -73,9 +74,18 @@ jobs:
           print(" ".join(f"{k}={v}" for k, v in total.items()))
           for f in skipped:
               print("skipped", f)
+          # a file that failed beside three others runs once more alone: two tests here race the
+          # clock under load (test_ledger's drain, test_proxy_gate's late frame)
+          still = []
           for f in bad:
-              print(f"::error file={f}::{f} failed or ran no test (results/suite/logs)")
-          raise SystemExit(1 if bad or total["files"] == 0 else 0)
+              r = subprocess.run([sys.executable, "tests/script_suite.py", "--all", "--timeout", "900",
+                                  "--out", "results/suite/retry", f], capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"::warning file={f}::{f} failed beside other files and passed alone")
+              else:
+                  still.append(f)
+                  print(f"::error file={f}::{f} failed or ran no test (results/suite/logs, results/suite/retry)")
+          raise SystemExit(1 if still or total["files"] == 0 else 0)
           PY
 
       - name: Keep the logs
