@@ -1719,6 +1719,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 pen.commit([tok])
             if drafter is not None:
                 drafter.observe([tok])
+            if think is not None:
+                # a model that opens its own reasoning block (Flint) writes `<think>` as its first token:
+                # unobserved, the budget never saw the block open and never closed it
+                think.observe([tok])
             yield tok
             if tok in eos:
                 return
@@ -8514,6 +8518,12 @@ class Handler(BaseHTTPRequestHandler):
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)
                         for x in (*more, ids))
+                elif STATE.get("self_think"):
+                    # a model that opens its own block (Flint): the tokens after its opening `<think>`
+                    o = usage_mod.special_id(tok, "<think>")
+                    rec.reasoning_tokens = sum(usage_mod.reasoning_count(
+                        list(x)[1:], usage_mod.special_id(tok, "</think>"), think.end_text)
+                        for x in (*more, ids) if len(x) and o is not None and int(x[0]) == o)
                 if (prefill and cached_ids is None and not micro
                         and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
