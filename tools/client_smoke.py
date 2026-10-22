@@ -65,6 +65,10 @@ FILLER = ("The river valley holds a small town whose mills once ground grain for
           "today the old buildings host workshops, a library and a market on Saturdays. ")
 
 
+#: the server's --prefill-heartbeat-s default: a streamed prefill this long sends its first comment
+HEARTBEAT_S = 5.0
+
+
 def filler(tokens: int) -> str:
     """About `tokens` tokens of prose, numbered so no two lines repeat."""
     n = max(1, tokens // 37)                     # 37 tokens a line, measured on the served tokenizer
@@ -88,15 +92,17 @@ def _steps_only(ev: dict) -> bool:
     return True
 
 
-def read_heartbeat(lines) -> dict:
+def read_heartbeat(lines, clock=None) -> dict:
     """The prefill heartbeat check's reading of a raw SSE stream, line by line (no line ends).
     `: ...` comments are keep-alives: before the first event, or after events that carry only
     TandemLLM's step lines (S1's progress lines open the stream while the prefill runs); never
     after the model's first token, which comes after the prefill, and never inside an event
     (between its data line and the blank line that ends it). Every data line is JSON and the
-    stream ends in [DONE]."""
+    stream ends in [DONE]. `clock`: called when the model's first token arrives (`first`);
+    `prompt_ms` is the server's own prefill time (the finish chunk's `timings`)."""
     comments, events, done, bad = 0, 0, False, []
     spoken = in_event = False
+    first = prompt_ms = None
     for line in lines:
         if not line:
             in_event = False
@@ -117,10 +123,16 @@ def read_heartbeat(lines) -> dict:
                 bad.append(f"not JSON {line[:60]!r}")
                 continue
             events += 1
-            spoken = spoken or not _steps_only(ev)
+            t = ev.get("timings") if isinstance(ev, dict) else None
+            if isinstance(t, dict) and t.get("prompt_ms") is not None:
+                prompt_ms = t["prompt_ms"]
+            if not spoken and not _steps_only(ev):
+                spoken = True
+                first = clock() if clock is not None else None
         else:
             bad.append(f"unexpected line {line[:60]!r}")
-    return {"comments": comments, "events": events, "done": done, "problems": bad}
+    return {"comments": comments, "events": events, "done": done, "problems": bad, "first": first,
+            "prompt_ms": prompt_ms}
 
 
 class Smoke:
@@ -133,7 +145,14 @@ class Smoke:
                         **({"X-Tandem-Profile": profile} if profile else {})}
         self.client = openai.OpenAI(base_url=base, api_key=key or "none", timeout=1800,
                                     max_retries=0, default_headers=self.headers or None)
-        self.model = model or self.client.models.list().data[0].id
+        models = self.client.models.list().data
+        self.model = model or models[0].id
+        # the served window (`/v1/models` tandem.context_length): what a long prompt may hold
+        self.window = None
+        for m in models:
+            t = (getattr(m, "model_extra", None) or {}).get("tandem") or {}
+            if m.id == self.model and isinstance(t, dict):
+                self.window = t.get("context_length")
         self.results: list[dict] = []
         self.last_profile: str | None = None       # X-Tandem-Profile of the last streamed answer
         self.last_mode: str | None = None          # its X-Tandem: on, shadow or raw
@@ -152,6 +171,16 @@ class Smoke:
         print(f"      ({time.time() - t0:.1f} s)", flush=True)
 
     # ---------------------------------------------------------------- transports
+    @staticmethod
+    def _greedy(kw: dict) -> dict:
+        """The smoke checks the server's behaviour, not the model's luck: a request with tools
+        decodes greedily unless the check (or a captured body) names its own temperature. At its
+        card's temperature 1.0, Flint 4.0 named a wrong argument or an unoffered tool in about 2
+        of 8 opencode asks (2026-10-22), which says nothing about the server."""
+        if kw.get("tools") and "temperature" not in kw:
+            kw = dict(kw, temperature=0)
+        return kw
+
     def stream(self, **kw):
         """(content, reasoning, calls [(index, id, name, args-text, n_arg_chunks)], finish,
         usage, problems) of one streamed request, read as a client reads the deltas."""
@@ -159,7 +188,7 @@ class Smoke:
         calls: dict[int, dict] = {}
         usage_chunks = 0
         raw = self.client.chat.completions.with_raw_response.create(model=self.model, stream=True,
-                                                                    **kw)
+                                                                    **self._greedy(kw))
         self.last_profile = raw.headers.get("x-tandem-profile")
         self.last_mode = raw.headers.get("x-tandem")
         for ch in raw.parse():
@@ -189,7 +218,7 @@ class Smoke:
         return content, reasoning, out, finish, usage, problems
 
     def once(self, **kw):
-        r = self.client.chat.completions.create(model=self.model, **kw)
+        r = self.client.chat.completions.create(model=self.model, **self._greedy(kw))
         c = r.choices[0]
         calls = [(i, t.id, t.function.name, t.function.arguments, 1)
                  for i, t in enumerate(c.message.tool_calls or [])]
@@ -409,14 +438,16 @@ def main() -> int:
 
     @add("sdk: n=2")
     def _():
+        # greedy asked for: a profile's default may be its card's sampling (Flint: temperature 1.0),
+        # and sampled choices differ by design
         r = s.client.chat.completions.create(
-            model=s.model, n=2, max_tokens=32, extra_body=OFF,
+            model=s.model, n=2, max_tokens=32, temperature=0, extra_body=OFF,
             messages=[{"role": "user", "content": "Name one colour."}])
         s.check("sdk: n=2 greedy: two identical choices", len(r.choices) == 2 and
                 r.choices[0].message.content == r.choices[1].message.content,
                 answers=[c.message.content for c in r.choices])
         r = s.client.chat.completions.create(
-            model=s.model, n=2, max_tokens=1024, tools=WEATHER, extra_body=OFF,
+            model=s.model, n=2, max_tokens=1024, tools=WEATHER, temperature=0, extra_body=OFF,
             messages=[{"role": "user", "content": "Weather in Paris for 2 days?"}])
         calls = [[(0, t.id, t.function.name, t.function.arguments, 1)
                   for t in c.message.tool_calls or []] for c in r.choices]
@@ -486,24 +517,38 @@ def main() -> int:
         # a streamed prefill past --prefill-heartbeat-s sends `: prefill done/total` comment
         # lines; a client must read the stream as before. Raw bytes here (the SDKs hide comments).
         import urllib.request
-        body = {"model": s.model, "stream": True, "max_tokens": 32,
-                "stream_options": {"include_usage": True},
-                # a first line of its own, so no cached prefix (the long-prompt checks' filler)
-                # shortens the prefill below the heartbeat's 5 s
-                "messages": [{"role": "user", "content": f"Run {time.time_ns()}.\n" + filler(24000)
-                              + "\n\nSay ok."}]}
-        body.update(OFF)
-        req = urllib.request.Request(a.base.rstrip("/") + "/chat/completions",
-                                     data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": f"Bearer {a.key or 'none'}",
-                                              **s.headers})
-        with urllib.request.urlopen(req, timeout=1800) as r:
-            got = read_heartbeat(raw.decode().rstrip("\r\n") for raw in r)
+        # the prompt has to prefill for longer than the server's heartbeat interval (5 s by
+        # default) or there is nothing to check: when the server's own prefill time (the finish
+        # chunk's timings.prompt_ms) was shorter and no comment came (Flint prefills 24k tokens in
+        # about 4 s), the prompt goes again at 2.5 and 6 times the length, within its window
+        window = int(s.window or 0) or 131072
+        got, toks = {}, 0
+        for toks in (24000, 60000, 144000):
+            if toks + 1024 > window:
+                break
+            body = {"model": s.model, "stream": True, "max_tokens": 32,
+                    "stream_options": {"include_usage": True},
+                    # a first line of its own, so no cached prefix (the long-prompt checks'
+                    # filler) shortens the prefill below the heartbeat's interval
+                    "messages": [{"role": "user", "content": f"Run {time.time_ns()}.\n"
+                                  + filler(toks) + "\n\nSay ok."}]}
+            body.update(OFF)
+            req = urllib.request.Request(a.base.rstrip("/") + "/chat/completions",
+                                         data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json",
+                                                  "Authorization": f"Bearer {a.key or 'none'}",
+                                                  **s.headers})
+            t0 = time.monotonic()
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                got = read_heartbeat((raw.decode().rstrip("\r\n") for raw in r),
+                                     clock=lambda: time.monotonic() - t0)
+            if got["comments"] or (got["prompt_ms"] or 0) >= HEARTBEAT_S * 1000 + 500:
+                break                                # a heartbeat was due: this run decides
         s.check("prefill heartbeat: comments before the model's first token, the stream intact",
-                got["comments"] >= 1 and got["events"] >= 2 and got["done"]
-                and not got["problems"], comments=got["comments"], events=got["events"],
-                problems=got["problems"][:3])
+                got.get("comments", 0) >= 1 and got.get("events", 0) >= 2 and got.get("done")
+                and not got.get("problems"), comments=got.get("comments"),
+                events=got.get("events"), problems=(got.get("problems") or [])[:3],
+                prompt=toks, prefill_ms=got.get("prompt_ms"), first_s=round(got.get("first") or 0, 1))
 
     only = [x for x in a.only.split(",") if x]
     for name, fn in checks:
