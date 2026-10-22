@@ -474,15 +474,14 @@ class Workspace:
                         if time.monotonic() > deadline:
                             out.append(f"{self.show(p)}: <grep stopped at the {GREP_BUDGET_S}s "
                                        f"budget — partial results>")
-                            return out          # a wedged regex cannot hold the run thread
+                            return out          # the budget is checked per chunk: a wedged
+                                                    # regex can overrun it by one chunk at most
                         if skip:                # the rest of an over-window line: drop it,
-                            m = None            # but the count keeps walking — a boundary passed
-                            for m in _GREP_EOL.finditer(buf):
-                                pass
-                            if not m:
-                                buf = ""        # nothing kept: the buffer cannot grow
-                                held = False
-                                continue
+                            m = _GREP_EOL.search(buf)   # but the count keeps walking: the long
+                            if not m:                   # line ends at the FIRST boundary in the
+                                buf = ""                # buffer — lines past it belong to the
+                                held = False            # walk, not to the skip, so the rest of
+                                continue                # the chunk is never swallowed
                             n += 1
                             buf = buf[m.end():]
                             skip = False

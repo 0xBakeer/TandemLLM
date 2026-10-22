@@ -84,6 +84,22 @@ def test_the_newline_less_dump_is_scanned_in_bounds():
     assert len(h) == 1 and took < 5.0
 
 
+def test_long_lines_in_bulk_keep_every_number():
+    # the skip of an over-window line ends at the FIRST boundary in the buffer: a
+    # skip that ran to the buffer's LAST boundary swallowed whole lines sitting
+    # between the long line and the chunk end — 60 lines of 200 KB answered 28
+    # of 60 and numbered the rest wrong
+    d = tempfile.mkdtemp(prefix="grep-long-")
+    os.makedirs(d + "/uploads", exist_ok=True)
+    with open(d + "/uploads/longlines.txt", "w") as f:
+        for i in range(1, 61):
+            f.write("needle%d " % i + "x" * (200_000 - 9) + "\n")
+    ws = Workspace(d)
+    h = ws.grep("^needle", "/workspace/uploads/longlines.txt")
+    nums = sorted(int(line.split(":")[1]) for line in h)
+    assert nums == list(range(1, 61)), "expected all 60 lines with their true numbers, got %r" % nums[:10]
+
+
 def test_the_giant_line_keeps_line_number_1():
     h = WS.grep("NEEDLE-IN-DUMP", "/workspace/uploads/dump.bin")
     assert len(h) == 1 and ":1:" in h[0]
