@@ -139,24 +139,28 @@ def test_config():
 
 
 def test_ref_equals_plain_description():
-    """The reference (blocks, caches, a tree) equals the plain fp32 forward, past the window."""
+    """The reference (blocks, caches, a tree) equals the plain forward, past the window. Both run in
+    fp64: in fp32 the gap depends on the CPU's fp32 kernels (5e-6 on most, 2e-4 once on a CI
+    runner), in fp64 what is left is the reference's fp32 norms and softmax, under 1.1e-6 on every
+    CPU tried. A cached key 0.1 % off moves a logit by 2e-3, a window one row short by 1.2."""
     cfg = config_from_dict(TINY, "tiny")
-    W = _random_weights(cfg)
+    W = {k: v.double() for k, v in _random_weights(cfg).items()}
     ids = torch.randint(4, 256, (40,), generator=torch.Generator().manual_seed(1))
     want = plain_forward(TINY, W, ids)
-    ref = FlintRef(cfg, W)
+    ref = FlintRef(cfg, W, dtype=torch.float64)
     st = ref.new_state(64)
     got = torch.cat([ref.prefill(ids[:23], st), ref.prefill(ids[23:30], st)] +
                     [ref.decode(int(t), st) for t in ids[30:]])
-    assert (got - want).abs().max() < 1e-4, (got - want).abs().max()
+    assert (got - want).abs().max() < 1e-5, (got - want).abs().max()
     # a tree block: rows 1 and 2 both children of row 0; row 2's logits equal the chain [0, 2]'s
     st2 = ref.new_state(64)
     ref.prefill(ids[:30], st2)
     lt = ref.rows(torch.tensor([int(ids[30]), 7, int(ids[31])]), [-1, 0, 0], st2)
-    assert (lt[2] - want[31]).abs().max() < 1e-4
+    assert (lt[2] - want[31]).abs().max() < 1e-5, (lt[2] - want[31]).abs().max()
     ref.commit(st2, [0, 2])
     assert st2.length == 32
-    assert (ref.decode(int(ids[32]), st2)[0] - want[32]).abs().max() < 1e-4
+    d = (ref.decode(int(ids[32]), st2)[0] - want[32]).abs().max()
+    assert d < 1e-5, d
 
 
 def test_kernels_twins():

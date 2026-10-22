@@ -170,7 +170,12 @@ def test_prefill_and_decode_match_transformers():
 
 
 def test_verify_tree_equals_sequential_decode():
-    cfg, W, ref = tiny()
+    """A tree block's rows equal the decode of each row's path. In fp64: in fp32 a block of 6 rows
+    sums its matmuls in another order than one row (9.8e-6 on an x86 CPU against logits up to 17),
+    in fp64 the two are equal to the fp32 logits' last bit; a row read on its sibling's path is
+    off by 20."""
+    cfg, W, _ = tiny()
+    ref = Lfm2MoeRef(cfg, {k: v.double() for k, v in W.items()}, dtype=torch.float64)
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     tokens = torch.tensor([7, 19, 23, 44, 31, 60])
@@ -183,7 +188,8 @@ def test_verify_tree_equals_sequential_decode():
         s2 = copy.deepcopy(snap)
         for r in path:
             want = ref.decode(int(tokens[r]), s2)
-        assert (lg[row] - want[0]).abs().max().item() < 1e-5, row
+        d = (lg[row] - want[0]).abs().max().item()
+        assert d < 1e-5, (row, d)
 
 
 def test_commit_of_a_path_continues_exactly():
