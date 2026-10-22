@@ -146,7 +146,7 @@ IDENTITY_ASK = (
 
 
 def model_name() -> str:
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     return (_S.get("MODEL_NAME") or "").strip() or SERVED_NAME or MODEL_NAME
 
 

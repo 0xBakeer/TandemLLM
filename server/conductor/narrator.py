@@ -65,7 +65,7 @@ from __future__ import annotations
 import re
 import time
 
-from engine.settings import SETTINGS as _S
+from server.knobs import SETTINGS as _S
 
 MAX_WORDS = 14
 MAX_TOKENS = 24

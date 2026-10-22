@@ -55,7 +55,7 @@ from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
 from server.conductor.classify import ASKING, PARENT, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
-from engine.settings import SETTINGS as _S
+from server.knobs import SETTINGS as _S
 
 #: FX5: Open WebUI's live working directory at the end of `run_command`'s description
 #: (open_webui/utils/tools.py), and what the turn's note says instead (`Router._client_cwd`)

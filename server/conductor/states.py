@@ -274,7 +274,7 @@ def status_clients(spec: str | None = None) -> frozenset:
     """`QWEN38_STATUS_CLIENTS` (`kind,kind`): the client kinds that get the lines said before the
     first generated token as `status` events (`StatusBar`)."""
     if spec is None:
-        from engine.settings import SETTINGS as _S
+        from server.knobs import SETTINGS as _S
         spec = _S.get("STATUS_CLIENTS")
     return frozenset(k.strip() for k in (spec or "").split(",") if k.strip())
 

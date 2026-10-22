@@ -124,7 +124,7 @@ def request_url(headers) -> str | None:
             return (headers.get(name) or "").split(",")[0].strip()
         except Exception:                                          # noqa: BLE001
             return ""
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     fixed = _S.get("TANDEM_URL").strip().rstrip("/")
     if fixed:
         return fixed                       # SRV-163: the operator's address for the notes
@@ -140,7 +140,7 @@ def scratch_for(url: str | None) -> str:
     (FX15: the conversation's own folder, so a `.tandem` the user or another conversation left is
     never the one the testing package creates, marks and deletes; `.tandem/session` without a
     token)."""
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     want = _S.get("TANDEM_SCRATCH").strip() or SCRATCH_SESSION
     if "{token}" in want:
         m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
