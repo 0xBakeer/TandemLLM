@@ -130,7 +130,7 @@ class PackIndex:
     cfg: FlintConfig
     tensors: dict[str, TensorInfo]
     files: dict[str, int]                       # shard file -> size on disk
-    quant: dict = field(default_factory=dict)   # exllamav3's quantization_config ({} for BF16)
+    quant: dict = field(default_factory=dict)   # the EXL3 pack's quantization_config ({} for BF16)
     formats: dict = field(default_factory=dict)  # projection base -> "bf16" | "exl3" (after audit)
     notes: list[str] = field(default_factory=list)
 

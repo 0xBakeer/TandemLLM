@@ -88,7 +88,7 @@ profiles:
     top1_pct: 80.48
     ppl: 31.647
     date: '2026-10-22'
-    source: this engine against exllamav3's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
+    source: this engine against the converter's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
       job, BF16 ppl 29.88); two BF16 forwards of the same weights differ by KL 0.034 / top-1 92.9 % on these rows (Flint's
       routing is sensitive to rounding)
   assets_required: []
@@ -116,7 +116,7 @@ profiles:
     top1_pct: 91.56
     ppl: 30.066
     date: '2026-10-22'
-    source: this engine against exllamav3's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
+    source: this engine against the converter's forward of the BF16 checkpoint (8 held-out rows of 1,024 tokens from the conversion
       job, BF16 ppl 29.88); two BF16 forwards of the same weights differ by KL 0.034 / top-1 92.9 % on these rows (Flint's
       routing is sensitive to rounding)
   assets_required: []
@@ -142,7 +142,7 @@ profiles:
     top1_pct: 100.0
     ppl: 29.79
     date: '2026-10-22'
-    source: 'the reference; this engine''s ppl on the same 8 rows (exllamav3''s BF16 forward: 29.88)'
+    source: 'the reference; this engine''s ppl on the same 8 rows (the converter''s BF16 forward: 29.88)'
   assets_required: []
   note: 'Recursive''s BF16 checkpoint as published (RecursiveSI/flint at revision 2a247be0), the reference the packs
     are measured against. Measured 2026-10-22: 75.53 GiB at load, plain decode 42.3 to 42.5 tok/s (512 tokens), prefill
