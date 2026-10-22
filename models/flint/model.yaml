@@ -418,8 +418,8 @@ components:
 - id: kv_fp8
   label: Long-context cache (FP8)
   group: features
-  what: Keeps the conversation's keys and values in half the bytes, so long contexts decode faster, but the answers are no
-    longer exactly the model's own.
+  what: 'Keeps the conversation in about half the memory, so long chats run faster: at 128k tokens 57 instead of 39 tok/s. The
+    answers change a little (KL 0.05 at 120k tokens); off keeps the exact model.'
   default: false
   required: false
   memory_gib: 0.0
