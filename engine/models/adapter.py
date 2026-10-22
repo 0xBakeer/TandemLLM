@@ -89,6 +89,16 @@ class ReasoningSpec:
 
 
 @dataclass(frozen=True)
+class PromptSpec:
+    """How a family's chat template takes the conversation's messages (SRV-697 follow-up)."""
+
+    # the template renders one system prompt, first: a `developer` message is read as `system`, a leading run
+    # of them is joined into one, and one after the conversation began is refused (400). False: the template
+    # renders system and developer messages where they stand, with their own role
+    system_first: bool = True
+
+
+@dataclass(frozen=True)
 class ServeSpec:
     """What a family tells the server about serving it (ENG-406, ENG-407): the form its model writes tool
     calls in (a name the server's tool formats know, server/toolformats/) and how it reasons. The family's
@@ -96,3 +106,4 @@ class ServeSpec:
 
     tool_format: str = "xml"
     reasoning: ReasoningSpec = field(default_factory=ReasoningSpec)
+    prompt: PromptSpec = field(default_factory=PromptSpec)

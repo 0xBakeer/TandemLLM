@@ -39,9 +39,9 @@ def test_every_family_has_a_spec():
     for name, a in REGISTRY.items():
         assert isinstance(a.spec, ServeSpec) and isinstance(a.spec.reasoning, ReasoningSpec), name
         assert a.spec.tool_format and a.spec.tool_format == a.spec.tool_format.strip(), name
-    own = {n: (a.spec.tool_format, a.spec.reasoning.opens_itself) for n, a in REGISTRY.items()
-           if a.spec != ServeSpec()}
-    assert own == {"flint": ("argkey", True), "lfm2_moe": ("pythonic", False)}, own
+    own = {n: (a.spec.tool_format, a.spec.reasoning.opens_itself, a.spec.prompt.system_first)
+           for n, a in REGISTRY.items() if a.spec != ServeSpec()}
+    assert own == {"flint": ("argkey", True, False), "lfm2_moe": ("pythonic", False, True)}, own
     return f"{len(REGISTRY)} families, {len(own)} with their own spec"
 
 
@@ -85,6 +85,24 @@ def test_thinking_off_adds_the_spec_line_before_the_conversation():
     assert note not in _prompt(None, False)
     flint = REGISTRY["flint"].spec.reasoning
     assert flint.off_note and flint.off_role == "developer"
+
+
+def test_where_system_messages_may_stand():
+    """A family whose template reads one system prompt first (the default, the 27B's): developer read as
+    system, a leading run joined, one later refused. A family whose template takes them where they stand
+    (Flint): kept in place with their role."""
+    from server import compat
+    msgs = [{"role": "system", "content": "A"}, {"role": "developer", "content": "B"},
+            {"role": "user", "content": "hi"}, {"role": "developer", "content": "C"}]
+    try:
+        compat.messages({"messages": msgs})
+    except compat.Refusal as exc:
+        assert "must come before the conversation" in str(exc.body())
+    else:
+        raise AssertionError("the default refuses a developer message after the conversation began")
+    assert compat.messages({"messages": msgs[:3]}) == [{"role": "system", "content": "A\n\nB"},
+                                                       {"role": "user", "content": "hi"}]
+    assert compat.messages({"messages": msgs}, system_first=False) == msgs
 
 
 def test_one_default_family():

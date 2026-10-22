@@ -90,13 +90,15 @@ def _is_tool_response(content) -> bool:
     return t.startswith("<tool_response>") and t.endswith("</tool_response>")
 
 
-def messages(body: dict) -> list:
+def messages(body: dict, system_first: bool = True) -> list:
     """SRV-167 (UT1, 2026-10-06): the message list as the chat template can render it, or a 400
     that names it. Empty or missing messages, an unknown role, a list without a user message (only
     a system prompt) and a system message after the first used to reach the template, which
     raised, and the client got `500 internal_error` with the exception's text (and retried, as
     OpenAI clients do on a 5xx). Returns the list with `developer` read as `system` and a leading
-    run of system messages joined into one (the template renders one system message, first)."""
+    run of system messages joined into one (the template renders one system message, first).
+    `system_first` False (the family's PromptSpec: a template that renders them where they stand):
+    system and developer messages keep their place and role."""
     msgs = body.get("messages")
     if msgs is None:
         raise Refusal("messages", "messages is required")
@@ -117,7 +119,7 @@ def messages(body: dict) -> list:
                           f"messages[{i}].content must be a string or a list of parts")
         if content is None and role not in ("assistant",):
             raise Refusal(f"messages[{i}].content", f"messages[{i}].content is required")
-        if role in ("system", "developer"):
+        if role in ("system", "developer") and system_first:
             if any(o.get("role") != "system" for o in out):
                 raise Refusal(f"messages[{i}]",
                               f"messages[{i}]: a {role} message must come before the "
@@ -165,14 +167,15 @@ def prompt(body: dict) -> None:
         raise Refusal("prompt", "prompt must be a non-empty string")
 
 
-def request_shape(body: dict, chat: bool) -> None:
+def request_shape(body: dict, chat: bool, system_first: bool = True) -> None:
     """The request's own shape, before anything reads it: the messages (rewritten in place:
-    `developer` as `system`, the leading system prompts as one) or the prompt, and the output
-    limit. A Refusal names the field."""
+    `developer` as `system`, the leading system prompts as one, unless the family's template takes
+    them where they stand: `system_first`) or the prompt, and the output limit. A Refusal names the
+    field."""
     if not isinstance(body, dict):
         raise Refusal("body", "the request body must be a JSON object")
     if chat:
-        body["messages"] = messages(body)
+        body["messages"] = messages(body, system_first=system_first)
     else:
         prompt(body)
     max_tokens(body)

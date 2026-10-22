@@ -7253,7 +7253,7 @@ class Handler(BaseHTTPRequestHandler):
         # and the output limit -- so a malformed request is the client's 400 naming the field,
         # never a 500 with the chat template's exception text (which clients retry)
         try:
-            compat.request_shape(body, chat)
+            compat.request_shape(body, chat, system_first=_spec().prompt.system_first)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
         # SRV-477: `--reasoning-effort none|off`, thinking off for a request that says nothing
