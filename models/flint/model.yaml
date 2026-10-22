@@ -93,8 +93,8 @@ profiles:
       routing is sensitive to rounding)
   assets_required: []
   note: 'Converted from the BF16 checkpoint (revision 2a247be0) by exllamav3 1.6.2 with our Flint architecture: every projection
-    at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 133.5 to 134.2 tok/s (512 tokens), prefill 4,623 tok/s
-    at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+    at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 133.5 to 134.2 tok/s (512 tokens) and 39.5 at a
+    128k context, prefill 5,375 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
   max_window: 262144
 - id: flint-exl3-6.0
   label: EXL3 6.0 bpw
@@ -121,7 +121,7 @@ profiles:
       routing is sensitive to rounding)
   assets_required: []
   note: 'Every projection at 6 bits, head 8. Measured 2026-10-22: 28.49 GiB at load, plain decode 97.4 to 97.7 tok/s (512 tokens),
-    prefill 4,462 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+    prefill 5,045 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
   max_window: 262144
 - id: flint-bf16
   label: BF16 (Recursive)
@@ -144,8 +144,10 @@ profiles:
     date: '2026-10-22'
     source: 'the reference; this engine''s ppl on the same 8 rows (exllamav3''s BF16 forward: 29.88)'
   assets_required: []
-  note: 'Recursive''s BF16 checkpoint as published. Measured 2026-10-22: 75.53 GiB at load, plain decode 42.3 to 42.5 tok/s (512 tokens).
-    Its window stays at 131,072 tokens so the chat sandbox keeps room beside it.'
+  note: 'Recursive''s BF16 checkpoint as published (RecursiveSI/flint at revision 2a247be0), the reference the packs
+    are measured against. Measured 2026-10-22: 75.53 GiB at load, plain decode 42.3 to 42.5 tok/s (512 tokens), prefill
+    4,319 tok/s at 4,096 tokens, a copy ask 144.1 tok/s with the lookup. Its window stays at 131,072 tokens so the chat
+    sandbox keeps room beside it.'
   max_window: 131072
   hf_revision: 2a247be0c0aec895ccb0ac7ca92229ec6df37288
 measurements:
