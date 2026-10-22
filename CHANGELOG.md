@@ -21,6 +21,21 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
   - To turn it on in the Setup Guide, pick Flint, go to the Tools step and switch on "Long-context cache (FP8)" under Features, then finish Review and Install. The switch shows the cost and the gain, and the memory bar counts the smaller cache.
   - To turn it on from the command line, add `QWEN38_FLINT_KV_FP8=1` at the end of `~/TandemLLM/run/ops/serve.env` and run `~/TandemLLM/bin/tandem restart`. `/health` then shows `"kv_cache": "e4m3"` under `weights`. To turn it off, delete the line and restart, or switch it off in the Setup Guide.
 
+- tool-eval-bench on Flint's three profiles: bench 2.8.1.dev13 (commit f2e368b), seed 42, temperature 0, one run a row (n=1), the Setup Guide's Flint defaults (one slot, effort medium by default, FP8 cache off), BF16 at a 131,072-token window, 2026-10-22. Score, then the time the row took. Raw rows send `X-Tandem: raw`; `bench-pk` is a test profile we do not ship. Hard mode at n=1 varies a lot between runs, so we claim no ranking between the sizes. [docs/flint.md](docs/flint.md#tool-calls) has the chart and [models/flint/measurements/2026-10-22-tool-eval-bench.json](models/flint/measurements/2026-10-22-tool-eval-bench.json) every row.
+
+| row | EXL3 4.0 | EXL3 6.0 | BF16 |
+|-|-|-|-|
+| **full suite, 69 scenarios** | | | |
+| raw, thinking off | 75 (2 min) | 76 (3.1 min) | 76 (4.7 min) |
+| raw, thinking xhigh | 85 (4.7 min) | 86 (11 min) | 86 (21.5 min) |
+| conductor, `bench-pk` | 81 (5.1 min) | 86 (8.9 min) | 83 (16.8 min) |
+| conductor, `tools` | 83 (4.1 min) | 86 (6.3 min) | 84 (15.3 min) |
+| **hard mode, 28 scenarios** | | | |
+| raw, thinking off | 36 (1.8 min) | 41 (2 min) | 41 (4.3 min) |
+| raw, thinking xhigh | 71 (5.5 min) | 61 (8.6 min) | 62 (19.9 min) |
+| conductor, `bench-pk` | 73 (3.5 min) | 61 (5.8 min) | 57 (12.8 min) |
+| conductor, `tools` | 80 (2.2 min) | 54 (4.4 min) | 70 (12.8 min) |
+
 ### Model adapters
 
 - Each family registers itself in its package's `arch.py` and keeps its own knobs in `knobs.py` (ENG-405). Adding a model edits no shared file.
