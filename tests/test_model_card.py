@@ -93,6 +93,21 @@ def test_the_super_vl_card_reads_images_with_the_tower_loaded():
     return "the three Super VL packs: vision with the tower; Bolt: none"
 
 
+def test_every_weight_profile_has_its_card():
+    """OPS-224: the Flint profiles served without a card.json, so `/v1/models` said no thinking and
+    the identity note named the default model. Every weight profile (ops/profiles/<name>.env) is
+    covered by one card's `packs`."""
+    import glob
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    names = [os.path.basename(p)[:-4] for p in glob.glob(os.path.join(root, "ops", "profiles", "*.env"))
+             if not os.path.basename(p).startswith("_")]
+    missing = [n for n in names if model_card.find(n) is None]
+    assert names and not missing, missing
+    c = model_card.card(_facts(pack="flint-exl3-4.0", max_len=262144))
+    assert c["label"] == "Flint" and c["capabilities"]["thinking"] and c["capabilities"]["tools"], c
+    return f"{len(names)} profiles, each with its card"
+
+
 def test_annotate_leaves_proxy_models_their_own_card():
     entries = [{"id": "TandemLLM", "object": "model"},
                {"id": "openai/gpt", "tandem": {"backend": "openai", "context_length": 128000}}]

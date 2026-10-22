@@ -1,0 +1,14 @@
+{
+  "model": "flint",
+  "label": "Flint",
+  "packs": ["flint-*"],
+  "context_limit": 262144,
+  "max_output": 32768,
+  "capabilities": {
+    "thinking": true,
+    "tools": true,
+    "vision": false,
+    "structured": true,
+    "parallel_tool_calls": true
+  }
+}
