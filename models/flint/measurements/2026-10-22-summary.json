@@ -1,5 +1,5 @@
 {
- "build": "flint branch (0.13.0 + batches A-C + Flint, SPD-145 decode), not released",
+ "build": "0.14.0 (the flint branch's measurements, SPD-144/145 decode and prefill)",
  "date": "2026-10-22",
  "device": "dgx-spark",
  "method": "tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block, SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack and FLINT_ANCHOR_BACKOFF=8 and FLINT_LOOK_BACKOFF=8; the first class's verify graphs captured at start; every drafted text the plain run's",

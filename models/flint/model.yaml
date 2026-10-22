@@ -155,7 +155,7 @@ profiles:
   max_window: 131072
   hf_revision: 2a247be0c0aec895ccb0ac7ca92229ec6df37288
 measurements:
-  build: flint
+  build: 0.14.0
   date: '2026-10-22'
   method: tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block,
     SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack, FLINT_ANCHOR_BACKOFF=8 and
@@ -163,7 +163,7 @@ measurements:
   source: models/flint/measurements/2026-10-22-summary.json
   rows:
   - profile: flint-exl3-4.0
-    build: flint
+    build: 0.14.0
     date: '2026-10-22'
     comparable: true
     note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 142.28 /
@@ -192,7 +192,7 @@ measurements:
     ttft_s: {}
     lossless: null
   - profile: flint-exl3-6.0
-    build: flint
+    build: 0.14.0
     date: '2026-10-22'
     comparable: true
     note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 107.27 /
@@ -221,7 +221,7 @@ measurements:
     ttft_s: {}
     lossless: null
   - profile: flint-bf16
-    build: flint
+    build: 0.14.0
     date: '2026-10-22'
     comparable: true
     note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 48.36 /
