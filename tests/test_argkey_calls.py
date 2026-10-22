@@ -10,8 +10,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.stream import Reasoning, split_full  # noqa: E402
-from server.toolcall import (ArgKeyCalls, ToolCallBuffer, argkey_calls, call_format, diagnose,  # noqa: E402
-                             parse_tool_calls, rewrite_argkey)
+from server.toolcall import ToolCallBuffer, call_format, diagnose, parse_tool_calls  # noqa: E402
+from server.toolformats.argkey import ArgKeyCalls, argkey_calls, rewrite_argkey  # noqa: E402
 
 TEXT = ("Sure.<tool_call>write_file<arg_key>path</arg_key><arg_value>/a b.txt</arg_value><arg_key>content</arg_key>"
         "<arg_value>x\n  y\n</arg_value><arg_key>n</arg_key><arg_value>3</arg_value></tool_call><tool_call>get_time"

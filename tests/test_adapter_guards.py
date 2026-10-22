@@ -36,10 +36,11 @@ sys.path.insert(0, ROOT)
 from engine.methods import manifest as mf  # noqa: E402
 from engine.models import REGISTRY  # noqa: E402
 
-#: v0.14.0 (7c682ab0), raw bytes, extra {}: the 27B's v2 (skip NOT_ARITHMETIC, then the tier's) and each
-#: adapter's fp4
-GOLDEN_V2 = ("cdf30d24bd7bf217b4a93012be8082e7013d80f36fdd2367d7f87fce1f773b1f",
-             "683e6e8864925f8664e97a3ea54bd3a760a3835ea497665a3f85da619fc1f15c")
+#: v0.14.0 (7c682ab0), extra {}: the 27B's v2 (skip NOT_ARITHMETIC, then the tier's) read through SAME_ROWS
+#: (the bytes every release since 0.7.2 adopts under; engine/grammar.py's 0.14.0 and pre-0.14.0 bytes both
+#: count as 0.9's), and each adapter's fp4 on its raw bytes
+GOLDEN_V2 = ("9ac3d8a94c8a91990b83b3674d94f2f95a50e07441e56cafbe8e6f5d8d5c2a3d",
+             "36852358bfa9287407ae56fe4dabc7a90936528619a3ca9da36dc5bcb560a7dc")
 GOLDEN_FP4 = {
     "qwen3_5": "5d57bf7b7e57f24a561d9e316da3a5c89ce78841bffb2741836045df03f5752f",
     "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
@@ -86,8 +87,9 @@ def test_goldens_hold():
         raise _skip("the manifests import torch")
     from engine import disk_cache as dc
     from engine import spill as sp
-    assert (dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC), dc.fingerprint(ROOT, {})) == GOLDEN_V2, \
-        "the 27B's v2 moved"
+    v2 = (dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=mf.SAME_ROWS),
+          dc.fingerprint(ROOT, {}, same=mf.SAME_ROWS))
+    assert v2 == GOLDEN_V2, f"the 27B's v2 moved: {v2}"
     moved = {}
     for name in REGISTRY:
         got = mf.fingerprint(ROOT, _manifest(name), {})
@@ -178,8 +180,9 @@ BASELINE = {
     "engine/methods/manifest.py": 13, "engine/settings.py": 16,
     # ENG-409 moves these rows into models/<name>/model.yaml
     "server/setup/community.py": 7, "server/setup/registry.py": 7,
-    # ENG-406/407 take these to zero
-    "server/app.py": 22, "server/toolcall.py": 31, "server/compat.py": 1, "engine/grammar.py": 4,
+    # the 27B's builder and side slots, the server's own by history (ENG-406 moves them into its package),
+    # and the default --served-model name and two help texts
+    "server/app.py": 8,
     # the fake engine emulates each format's output for the tests
     "server/fake_engine.py": 4,
 }

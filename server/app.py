@@ -56,8 +56,9 @@ from server.stream import (  # noqa: E402
     answer_stops, drop_stray_close, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, rewrite_argkey, rewrite_native, rewrite_pythonic, schema_types,
+from server import toolformats  # noqa: E402  (ENG-407 the forms a model writes calls in)
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_native, schema_types,
                              strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
@@ -2405,7 +2406,7 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
-    fmt = _spec().tool_format
+    fmt = _tool_format()
     # the checks read the model's own call format as the stream and the final parse do: an
     # arg-key or Pythonic call is a call here too, not a block that does not parse
     answer = rewrite_native(answer, fmt, eos=True)
@@ -2531,13 +2532,7 @@ def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
     never close, which opencode runs as an `invalid` tool and answers with the parse error, so
     the model's next step comes at once, with the note. That is what the token limit gave too,
     63,000 tokens later. False (logged only): `--argloop log`, or no acting monitor."""
-    name = None
-    m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
-    if m:
-        name = m.group(1)
-    elif _spec().tool_format == "argkey":
-        m = re.match(r"\s*([^<\s]+)\s*<arg_key>", tbuf.open_text() or "")    # the arg-key form
-        name = m.group(1) if m else None
+    name = _tool_format().open_call_name(tbuf.open_text() or "")
     act = STATE.get("argloop", "on") == "on" and sup is not None and sup.mode == "on"
     v.detail["streamed"] = bool(tbuf.open_streamed)
     print(f"[argloop] {cid} {'stopped' if act else 'would stop'} {name or '?'}: "
@@ -2654,6 +2649,11 @@ def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
 
 #: a family that names no ServeSpec: the XML call form, a template that opens the reasoning block
 DEFAULT_SPEC = ServeSpec()
+
+
+def _tool_format() -> "toolformats.ToolFormat":
+    """ENG-407: the form the served model writes tool calls in (server/toolformats)."""
+    return toolformats.get(_spec().tool_format)
 
 
 def _spec() -> ServeSpec:
@@ -5702,20 +5702,18 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
 
 
-def _grammar_vocab(calls: bool = False) -> "grammar_mod.Vocab":
+def _grammar_vocab(markers: tuple = ()) -> "grammar_mod.Vocab":
     """Every token as bytes, for the constraint masks: built on the first constrained
-    request (half a second over 248k tokens) and kept. `calls`: SRV-619, the
-    vocabulary of a calls-or-document constraint, the call markers' own ids allowed (built once
-    more, on the first such request)."""
-    key = "grammar_vocab_calls" if calls else "grammar_vocab"
-    # SRV-689: the arg-key form's tags are the model's own ids too
-    marks = (grammar_mod.ARGKEY_MARKERS if _spec().tool_format == "argkey"
-             else grammar_mod.CALL_MARKERS)
+    request (half a second over 248k tokens) and kept, one a set of `markers`: the tags a
+    constraint lets the model write as its own ids (SRV-619 a calls-or-document constraint's
+    call markers, SRV-689 a form's own tags; built once more, on the first such request)."""
+    markers = tuple(markers)
+    key = ("grammar_vocab" if not markers else "grammar_vocab_calls" if markers == grammar_mod.CALL_MARKERS
+           else "grammar_vocab_" + "".join(markers))
     v = STATE.get(key)
     if v is None:
         v = STATE[key] = grammar_mod.Vocab.from_tokenizer(
-            STATE["tok"], STATE["engine"].cfg.vocab_size,
-            markers=marks if calls else ())
+            STATE["tok"], STATE["engine"].cfg.vocab_size, markers=markers)
     return v
 
 
@@ -7272,15 +7270,14 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=_spec().tool_format not in ("pythonic", "argkey"),
-                                           fmt=_spec().tool_format)
+                                           xml_calls=_tool_format().joins_documents, fmt=_tool_format())
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None
             tool_types = ac.types if ac is not None else None
             # compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
-            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(calls=ac.calls),
+            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(ac.markers),
                                             parts=ac.parts)
                     if pattern else None)
         except compat.Refusal as exc:
@@ -8626,10 +8623,7 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         ended = bool(ids) and ids[-1] in eos
-                        if _spec().tool_format == "pythonic":
-                            answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
-                        elif _spec().tool_format == "argkey":
-                            answer = rewrite_argkey(answer, eos=ended)
+                        answer = rewrite_native(answer, _tool_format(), eos=ended)  # SRV-425
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -8768,15 +8762,11 @@ class Handler(BaseHTTPRequestHandler):
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
-                                   live=not any(stops), fmt=_spec().tool_format)
+                                   live=not any(stops), fmt=_tool_format())
                     if parse_calls else None)
-            # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
-            # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
-            # a model that writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` (tool_format
-            # argkey) is read by the buffer itself, so its string arguments stream as they are written
-            pyc = ({"pythonic": PythonicCalls}.get(_spec().tool_format)
-                   if tbuf is not None else None)
-            pyc = pyc() if pyc is not None else None
+            # SRV-425: a form whose blocks are rewritten into the buffer's JSON tier as they arrive has a
+            # stream rewriter; a form the buffer reads in place (its reader) streams its arguments as written
+            pyc = _tool_format().stream_rewriter() if tbuf is not None else None
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off

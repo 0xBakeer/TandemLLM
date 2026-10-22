@@ -86,12 +86,11 @@ checks may repair it, have the model write it again, or let it out as content af
 answer again, and a block the token limit cut is kept in `cut_block`, not in the content.
 `answer_items()` reads a whole answer into the same items, for the checks at the end token.
 
-**A model's own form.** With `fmt="argkey"` (the server's tool_format for Flint) the buffer reads
-`<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>` itself: the name goes out
-with the first argument's opener, a string value streams exactly as written (the form's values are
-not trimmed), a typed one at its closer, and a block that is not the form stays the text it was.
-The whole-answer paths read it after `rewrite_native()`. Pythonic blocks are rewritten before the
-buffer (`PythonicCalls`).
+**A model's own form.** A family names the form its model writes calls in (its `ServeSpec`); the form's
+`ToolFormat` (server/toolformats) does what is particular to it, and this module calls it, never
+naming one: a buffer given a format hands the blocks its reader takes to that reader, which streams
+them in place (exactly as written when the form's values are), a whole answer goes through
+`rewrite_native()`, `diagnose()` and `call_format()` ask the format.
 """
 
 from __future__ import annotations
@@ -420,10 +419,10 @@ def strip_blocks(text: str) -> str:
     return text[:k] if k >= 0 else text
 
 
-def diagnose(inner: str, fmt: str | None = None) -> str:
+def diagnose(inner: str, fmt=None) -> str:
     """Why a block does not parse, in one line a model can act on (the hidden reminder quotes
-    it). Only called for a block `_parse_one` refused. `fmt` is the model's own call format
-    (the server's tool_format; "argkey" reads the arg-key form). The line never holds a
+    it). Only called for a block `_parse_one` refused. `fmt` is the model's own form (a
+    `ToolFormat` or its name; its `diagnose` reads a block of that form). The line never holds a
     placeholder such as a NAME the model could copy into its next call."""
     s = inner.strip()
     if not s:
@@ -434,8 +433,9 @@ def diagnose(inner: str, fmt: str | None = None) -> str:
         except ValueError as exc:
             return f"the JSON in the tool call does not parse ({exc})"
         return "the JSON in the tool call is not a call: it needs a name and its arguments"
-    if fmt == "argkey":
-        return _argkey_diagnose(inner)
+    own = _format(fmt).diagnose(inner) if fmt else None
+    if own:
+        return own
     m = _FUNC_OPEN.search(inner)
     if m is None:
         if "<function" in inner:
@@ -636,9 +636,10 @@ class ToolCallBuffer:
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
                  hold: bool = False, live: bool = True, fmt: str | None = None):
         self.calls: list[dict] = []
-        # the model's own call format (the server's tool_format): "argkey" reads and streams the
-        # arg-key form natively (`_stream_argkey`, `_parse`), its values exact as written
-        self.fmt = fmt
+        # the model's own form (a `ToolFormat`, server/toolformats): its reader reads and streams a
+        # block of that form in place (`_parse`, `_stream_open`)
+        self.fmt = _format(fmt) if fmt is not None else None
+        self._reader = self.fmt.buffer_reader() if self.fmt is not None else None
         self.hold = bool(hold)
         # `live=False`: no call streams its arguments as they are written; each goes out whole
         # when its block closes (the end-of-stream sweep). The server passes it for a request
@@ -687,20 +688,19 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
-        self._ak: bool | None = None      # the open block is in the arg-key form (None: not yet read)
-        self._ak_name: str | None = None  # its tool's name, until the first argument's opener
+        self._native: bool | None = None  # the open block is read by the format's reader (None: not yet)
+        self._exact = False               # the open block's values stream exactly as written
         # `(perf_counter, kind, name)` at a block's open, a function's name and a block's
         # close -- once per call, never per piece -- for the live view; the newest 16 are kept
         self.events: list[tuple] = []
 
     def _parse(self, inner: str) -> list[dict] | None:
-        """A closed block's calls: `_parse_one`, and in the arg-key format (`fmt`) its own form
-        first, as `argkey_calls` reads it (a JSON or XML block still parses as one)."""
-        if self.fmt == "argkey" and inner.lstrip()[:1] not in ("{", "["):
-            got = argkey_calls(inner)
+        """A closed block's calls: the format's own reading first (`fmt`), then `_parse_one` (a
+        JSON or XML block still parses as one)."""
+        if self._reader is not None:
+            got = self._reader.parse(inner, self.types)
             if got is not None:
-                name, args = got[0]["name"], got[0]["arguments"]
-                return [_call(name, _typed(name, args, self.types))]
+                return got
         return _parse_one(inner, self.types)
 
     def _event(self, kind: str, name) -> None:
@@ -899,92 +899,17 @@ class ToolCallBuffer:
             self._delta_args('"')
         self._in_param = False
 
-    def _stream_argkey(self, limit: int) -> None:
-        """`_stream_open` for a block in the arg-key form: the tool's name, then
-        `<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>` per argument, read as `argkey_calls`
-        reads them. A string value streams exactly as written (no trimming: the parse keeps it
-        so); a typed one is held to its closer. Anything the form does not allow stops the
-        stream, and the closer's parse decides what the client gets (`_credit_streamed`)."""
-        ak, av, ak_end, av_end = "<arg_key>", "<arg_value>", "</arg_key>", "</arg_value>"
-        while True:
-            if self._hold or self._done_params:
-                return
-            rest = self._buf[self._pos:limit]
-            if self._stream_name is None and self._ak_name is None:
-                if self._streamed:
-                    self._done_params = True                 # one call a block
-                    return
-                lt = rest.find("<")
-                if lt < 0:
-                    return                                   # the name is still being written
-                tail = rest[lt:]
-                if _is_prefix_of(tail, ak) or _is_prefix_of(tail, CLOSE):
-                    return                                   # a tag still being written
-                name = rest[:lt].strip()
-                if not tail.startswith(ak) or not name or "\n" in name:
-                    self._done_params = True                 # not this form: the parse decides
-                    return
-                self._pos += lt
-                # the name goes out with the first argument's opener, once the block has shown
-                # it is the form: a block that is not goes out whole as the text it was
-                self._ak_name = name
-                continue
-            if not self._in_param:
-                stripped = rest.lstrip(_WS)
-                lead = len(rest) - len(stripped)
-                if not stripped:
-                    self._pos += lead
-                    return
-                if not stripped.startswith(ak):
-                    # the next key or the block's closer may still be on its way
-                    if not (_is_prefix_of(stripped, ak) or _is_prefix_of(stripped, CLOSE)):
-                        self._done_params = True
-                    return
-                k = stripped.find(ak_end)
-                if k < 0:
-                    return                                   # the key is still being written
-                after = stripped[k + len(ak_end):]
-                val = after.lstrip(_WS)
-                if not val.startswith(av):
-                    if val and not _is_prefix_of(val, av):
-                        self._done_params = True
-                    return
-                if self._stream_name is None:
-                    name, self._ak_name = self._ak_name, None
-                    if not self._start_function(name):
-                        return
-                self._pos += lead + len(stripped) - len(val) + len(av)
-                self._open_param(stripped[len(ak):k].strip())
-                continue
-            lt = rest.find("<")
-            if lt < 0:
-                self._pos += len(rest)
-                self._value(rest)
-                return
-            tail = rest[lt:]
-            if _is_prefix_of(tail, av_end):
-                self._pos += lt
-                self._value(rest[:lt])
-                return
-            if tail.startswith(av_end):
-                self._value(rest[:lt])
-                self._close_param(exact=True)
-                self._pos += lt + len(av_end)
-                continue
-            self._pos += lt + 1
-            self._value(rest[:lt + 1])
-
     def _stream_open(self, limit: int) -> None:
         """Consume the open block as far as it is safe, vending argument deltas."""
-        if self.fmt == "argkey" and self._ak is None and not self._hold:
+        if self._reader is not None and self._native is None and not self._hold:
             head = self._buf[self._pos:limit].lstrip(_WS)
             if not head:
                 return
-            # the arg-key form begins with the tool's name; a `<function=` or JSON block is read
-            # by the machine below as in every other format
-            self._ak = head[0] not in "<{["
-        if self._ak:
-            self._stream_argkey(limit)
+            # the model's own form, read by its format (server/toolformats); a block it does not take is
+            # read by the machine below as in the default form
+            self._native = self._reader.takes(head)
+        if self._native:
+            self._reader.stream(self, limit)
             return
         while True:
             if self._hold:
@@ -1081,8 +1006,8 @@ class ToolCallBuffer:
     def _emit_value(self, text: str) -> None:
         if not text:
             return
-        if self._ak:
-            self._delta_args(_esc(text))              # the arg-key form: exact, as written
+        if self._exact:
+            self._delta_args(_esc(text))              # a form whose values are exact, as written
             return
         out = []
         for ch in text:
@@ -1200,7 +1125,9 @@ class ToolCallBuffer:
                 self._pending_ws = ""
                 self._first_param = True
                 self._done_params = False
-                self._ak, self._ak_name = None, None
+                self._native, self._exact = None, False
+                if self._reader is not None:
+                    self._reader.reset()
                 self._kinds, self._tval = None, ""
                 if not self.live:
                     self._hold = True        # this block goes out at closure, whole, or as text
@@ -1307,280 +1234,20 @@ class ToolCallBuffer:
         return left, deltas
 
 
-# ------------------------------------------------------------------------- Pythonic tool calls (SRV-425)
-# LiquidAI's LFM2 models write their calls as a Python list of calls between two tokens of their own:
-#
-#     <|tool_call_start|>[get_weather(city='Berlin', days=3), search(q="a, b")]<|tool_call_end|>
-#
-# `PythonicCalls` turns each such block into this module's own JSON tier, `<tool_call>[{"name": ...,
-# "arguments": {...}}, ...]</tool_call>`, as the text arrives, so everything above (the stream machine,
-# the holds of the conductor's checks, `answer_items`, `parse_tool_calls`) reads it as it reads any call.
-# A value is a Python literal (`ast.literal_eval`: strings, numbers, lists, dicts, tuples, True / False /
-# None, and the JSON spellings true / false / null), never evaluated code; a block that is not a list of
-# calls with keyword arguments only goes out as the text it was (the honest fallback, as for XML).
-PY_OPEN = "<|tool_call_start|>"
-PY_CLOSE = "<|tool_call_end|>"
-_PY_NAMES = {"true": True, "false": False, "null": None, "none": None}
+def _format(fmt):
+    """A tool-call format, its name or None (the default form), as a `ToolFormat` (server/toolformats)."""
+    from server import toolformats
+    return toolformats.resolve(fmt)
 
 
-def _py_value(node):
-    import ast
-    if isinstance(node, ast.Name) and node.id.lower() in _PY_NAMES:
-        return _PY_NAMES[node.id.lower()]
-    if isinstance(node, (ast.List, ast.Tuple)):
-        return [_py_value(x) for x in node.elts]
-    if isinstance(node, ast.Dict):
-        if any(k is None for k in node.keys):
-            raise ValueError("a ** inside a dict")
-        return {_py_value(k): _py_value(v) for k, v in zip(node.keys, node.values)}
-    v = ast.literal_eval(node)
-    if isinstance(v, (set, bytes, complex)):
-        raise ValueError(f"{type(v).__name__} is not a JSON value")
-    return v
-
-
-def _py_name(node) -> str:
-    import ast
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return _py_name(node.value) + "." + node.attr
-    raise ValueError("a call's name must be a name")
-
-
-def pythonic_calls(inner: str) -> list[dict] | None:
-    """The calls of one block's inner text, [{"name", "arguments"}], or None if it is not a list of
-    calls (or one call) with keyword arguments only."""
-    import ast
-    s = inner.strip()
-    if not s:
-        return None
-    try:
-        node = ast.parse(s, mode="eval").body
-    except SyntaxError:
-        return None
-    items = node.elts if isinstance(node, (ast.List, ast.Tuple)) else [node]
-    out = []
-    try:
-        for it in items:
-            if not isinstance(it, ast.Call) or it.args or any(k.arg is None for k in it.keywords):
-                return None
-            out.append({"name": _py_name(it.func), "arguments": {k.arg: _py_value(k.value) for k in it.keywords}})
-    except (ValueError, TypeError, SyntaxError):
-        return None
-    return out or None
-
-
-def pythonic_block(inner: str) -> str | None:
-    """One Pythonic block as this module's JSON tier, or None when it does not parse."""
-    calls = pythonic_calls(inner)
-    if calls is None:
-        return None
-    return OPEN + json.dumps(calls, ensure_ascii=False) + CLOSE
-
-
-class PythonicCalls:
-    """The stream's rewrite of Pythonic blocks (above): `feed(piece)` returns the text to pass on, a
-    block's opener and what follows it held until its closer; `finish(eos)` the rest -- an open block
-    that parses is a call when the generation ended (EOS), and text otherwise (a block the token limit
-    or a stop string cut stays content, as for XML)."""
-
-    def __init__(self):
-        self._buf = ""
-        self._open = False
-        self.blocks = 0          # blocks rewritten
-        self.bad = 0             # blocks released as text
-
-    def feed(self, piece: str) -> str:
-        self._buf += piece
-        out = ""
-        while True:
-            if not self._open:
-                i = self._buf.find(PY_OPEN)
-                if i < 0:
-                    k = len(self._buf)
-                    # keep a tail that could still become the opener
-                    for n in range(min(len(PY_OPEN) - 1, len(self._buf)), 0, -1):
-                        if PY_OPEN.startswith(self._buf[-n:]):
-                            k = len(self._buf) - n
-                            break
-                    out += self._buf[:k]
-                    self._buf = self._buf[k:]
-                    return out
-                out += self._buf[:i]
-                self._buf = self._buf[i + len(PY_OPEN):]
-                self._open = True
-            j = self._buf.find(PY_CLOSE)
-            if j < 0:
-                return out
-            out += self._close(self._buf[:j], closed=True)
-            self._buf = self._buf[j + len(PY_CLOSE):]
-            self._open = False
-
-    def _close(self, inner: str, closed: bool) -> str:
-        got = pythonic_block(inner)
-        if got is None:
-            self.bad += 1
-            return PY_OPEN + inner + (PY_CLOSE if closed else "")
-        self.blocks += 1
-        return got
-
-    def finish(self, eos: bool = False) -> str:
-        buf, self._buf = self._buf, ""
-        if not self._open:
-            return buf
-        self._open = False
-        if eos:
-            return self._close(buf, closed=False)
-        self.bad += 1
-        return PY_OPEN + buf
-
-
-def rewrite_pythonic(text: str, eos: bool = False) -> str:
-    """A whole answer with its Pythonic blocks rewritten (the non-streamed path)."""
-    p = PythonicCalls()
-    return p.feed(text) + p.finish(eos=eos)
-
-
-# The arg-key form of a call (tool_format "argkey", e.g. Flint's chat template): `<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...
-# </tool_call>`, a string value as written and any other value as JSON. A block is rewritten into this module's
-# JSON tier with every value as the text the model wrote, so `_typed` turns the values a schema types into JSON
-# values and a string stays exactly as written (no trimming); a block that does not read as one call goes out as
-# the text it was.
-_ARGKEY_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
-
-
-def argkey_calls(inner: str) -> list[dict] | None:
-    """The call of one arg-key block's inner text, [{"name", "arguments"}], or None if it is not one."""
-    i = inner.find("<arg_key>")
-    name = (inner if i < 0 else inner[:i]).strip()
-    if not name or "<" in name or "\n" in name:
-        return None
-    rest = "" if i < 0 else inner[i:]
-    args: dict = {}
-    pos = 0
-    for m in _ARGKEY_ARG.finditer(rest):
-        if rest[pos:m.start()].strip():
-            return None
-        args[m.group(1).strip()] = m.group(2)
-        pos = m.end()
-    if rest[pos:].strip():
-        return None
-    return [{"name": name, "arguments": args}]
-
-
-def argkey_block(inner: str) -> str | None:
-    calls = argkey_calls(inner)
-    if calls is None:
-        return None
-    return OPEN + json.dumps(calls, ensure_ascii=False) + CLOSE
-
-
-class ArgKeyCalls(PythonicCalls):
-    """The stream's rewrite of arg-key blocks (above): PythonicCalls' machine on the `<tool_call>` tags."""
-
-    OPEN_TAG, CLOSE_TAG = OPEN, CLOSE
-
-    def feed(self, piece: str) -> str:
-        self._buf += piece
-        out = ""
-        while True:
-            if not self._open:
-                i = self._buf.find(OPEN)
-                if i < 0:
-                    k = len(self._buf)
-                    for n in range(min(len(OPEN) - 1, len(self._buf)), 0, -1):
-                        if OPEN.startswith(self._buf[-n:]):
-                            k = len(self._buf) - n
-                            break
-                    out += self._buf[:k]
-                    self._buf = self._buf[k:]
-                    return out
-                out += self._buf[:i]
-                self._buf = self._buf[i + len(OPEN):]
-                self._open = True
-            j = self._buf.find(CLOSE)
-            if j < 0:
-                return out
-            out += self._close(self._buf[:j], closed=True)
-            self._buf = self._buf[j + len(CLOSE):]
-            self._open = False
-
-    def _close(self, inner: str, closed: bool) -> str:
-        got = argkey_block(inner)
-        if got is None:
-            self.bad += 1
-            return OPEN + inner + (CLOSE if closed else "")
-        self.blocks += 1
-        return got
-
-    def finish(self, eos: bool = False) -> str:
-        buf, self._buf = self._buf, ""
-        if not self._open:
-            return buf
-        self._open = False
-        if eos:
-            return self._close(buf, closed=False)
-        self.bad += 1
-        return OPEN + buf
-
-
-def _argkey_diagnose(inner: str) -> str:
-    """`diagnose` for an arg-key block `argkey_calls` refused."""
-    i = inner.find("<arg_key>")
-    name = (inner if i < 0 else inner[:i]).strip()
-    if not name:
-        return "the block does not begin with the tool's name"
-    if "<" in name or "\n" in name:
-        return "the tool's name is not followed by its first <arg_key>"
-    rest = inner[i:]
-    pos = 0
-    for m in re.finditer(r"<arg_key>", rest):
-        if m.start() < pos:
-            continue
-        k = rest.find("</arg_key>", m.end())
-        if k < 0:
-            return "an <arg_key> has no </arg_key>"
-        key = rest[m.end():k].strip()
-        v = rest.find("<arg_value>", k)
-        if v < 0 or rest[k + len("</arg_key>"):v].strip():
-            return f"argument '{key}' has no <arg_value> after its </arg_key>"
-        e = rest.find("</arg_value>", v)
-        if e < 0:
-            return f"argument '{key}' has no </arg_value>"
-        pos = e + len("</arg_value>")
-    return "there is text between the arguments that is not an argument"
-
-
-def call_format(fmt: str | None, name: str, key: str | None = None) -> str:
-    """How one call is written in the model's own format (`fmt`, the server's tool_format), shown
-    with a tool the request offers (`name`) and one of its arguments (`key`): the hidden
+def call_format(fmt, name: str, key: str | None = None) -> str:
+    """How one call is written in the model's own form (`fmt`: a `ToolFormat`, its name, or None for the
+    default), shown with a tool the request offers (`name`) and one of its arguments (`key`): the hidden
     reminder's format line. It holds no placeholder the model could copy as a name or a key."""
-    if fmt == "argkey":
-        args = (f"then each argument as <arg_key>{key}</arg_key> (with that argument's own "
-                f"name), <arg_value>, its value, </arg_value>, " if key else "")
-        return f"<tool_call>{name}, {args}then </tool_call>"
-    if fmt == "pythonic":
-        args = (f", each argument a keyword argument such as {key}= (with that argument's own "
-                f"name) with its value as a Python literal" if key else "")
-        return f"{PY_OPEN}, a Python list holding the call to {name}{args}, then {PY_CLOSE}"
-    args = (f"each argument as <parameter={key}> (with that argument's own name), its value, "
-            f"</parameter>, " if key else "")
-    return f"<tool_call>, <function={name}>, {args}</function>, </tool_call>"
+    return _format(fmt).example(name, key)
 
 
-def rewrite_native(text: str, fmt: str | None, eos: bool = False) -> str:
-    """`text` with the blocks of the model's own call format (`fmt`) in this module's JSON tier,
-    as the stream's rewrite (`PythonicCalls`, `ArgKeyCalls`) and the final parse read them; the
-    text as it is for the default format."""
-    if fmt == "pythonic":
-        return rewrite_pythonic(text, eos=eos)
-    if fmt == "argkey":
-        return rewrite_argkey(text, eos=eos)
-    return text
-
-
-def rewrite_argkey(text: str, eos: bool = False) -> str:
-    """A whole answer with its arg-key blocks rewritten (the non-streamed path)."""
-    p = ArgKeyCalls()
-    return p.feed(text) + p.finish(eos=eos)
+def rewrite_native(text: str, fmt, eos: bool = False) -> str:
+    """`text` with the blocks of the model's own form (`fmt`) in this module's JSON tier, as the stream's
+    rewrite and the final parse read them; the text as it is for the default form."""
+    return _format(fmt).rewrite(text, eos=eos)

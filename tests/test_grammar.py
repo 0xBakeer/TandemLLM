@@ -450,8 +450,10 @@ def test_the_tool_call_language():
 def test_the_tool_call_language_in_the_argkey_form():
     """SRV-689: tool_choice's calls in Flint's arg-key form, the values exactly as written; the
     form's tags may be the model's own ids, and the calls parse back to the arguments."""
-    from server.toolcall import ToolCallBuffer, argkey_calls
-    pat, typed = G.tool_call_regex(TOOLS, ["read_file", "set", "now"], fmt="argkey")
+    from server.toolcall import ToolCallBuffer
+    from server.toolformats import argkey
+    from server.toolformats.argkey import argkey_calls
+    pat, typed = argkey.forced_regex(TOOLS, ["read_file", "set", "now"])
     assert typed == {"set": {"n", "tags"}}
     d = G.compile_regex(pat)
     ok = ["<tool_call>read_file<arg_key>path</arg_key><arg_value> /etc/hosts\n</arg_value></tool_call>",
@@ -479,7 +481,7 @@ def test_the_tool_call_language_in_the_argkey_form():
     assert got == [("read_file", {"path": " /etc/hosts\n"}), ("set", {"n": 3, "mode": "b"}),
                    ("now", {})], got
     assert argkey_calls("now") == [{"name": "now", "arguments": {}}]
-    assert set(G.ARGKEY_MARKERS) >= {"<tool_call>", "</tool_call>", "<arg_key>", "</arg_value>"}
+    assert set(argkey.MARKERS) >= {"<tool_call>", "</tool_call>", "<arg_key>", "</arg_value>"}
     return f"{len(ok)} calls in, {len(bad)} out (the XML form among them); values exact"
 
 

@@ -916,14 +916,10 @@ PARAM_TEXT = avoiding("</parameter>")
 _S = r"[ \t\n\r]{0,8}"
 
 
-#: the arg-key form's value text (tool_format "argkey", Flint): anything without its closer
-ARG_TEXT = avoiding("</arg_value>")
-
-
-def _xml_value(schema: dict, text: str = PARAM_TEXT) -> tuple[str, bool]:
+def _xml_value(schema: dict) -> tuple[str, bool]:
     """(the value's regex inside `<parameter=K>...</parameter>`, whether it is a JSON literal).
-    A string is free text without the closer (`text`; or one of its enum values); anything else
-    is the JSON the template writes for it."""
+    A string is free text without the closer (or one of its enum values); anything else is the
+    JSON the template writes for it."""
     t = schema.get("type") if isinstance(schema, dict) else None
     if isinstance(schema, dict) and "enum" in schema and all(isinstance(v, str)
                                                              for v in schema["enum"]):
@@ -934,14 +930,12 @@ def _xml_value(schema: dict, text: str = PARAM_TEXT) -> tuple[str, bool]:
                                                               or "const" in schema):
         if isinstance(schema, dict) and t == "string" and "pattern" in schema:
             return f"(?:{schema['pattern']})", False
-        return text, False
+        return PARAM_TEXT, False
     return schema_regex(schema), True
 
 
 #: SRV-619: the call markers a tool-call branch writes as the model's own ids
 CALL_MARKERS = ("<tool_call>", "</tool_call>")
-#: SRV-689: the arg-key form's markers, its own ids too
-ARGKEY_MARKERS = CALL_MARKERS + ("<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>")
 
 
 def calls_or_document(calls: str, document: str) -> str:
@@ -951,40 +945,22 @@ def calls_or_document(calls: str, document: str) -> str:
     return f"(?:{calls})|(?:{document})"
 
 
-def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True,
-                    fmt: str | None = None) -> tuple[str, dict[str, set[str]]]:
+def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True
+                    ) -> tuple[str, dict[str, set[str]]]:
     """The answer as tool calls only, in the model's own XML format: `<tool_call>`, a function of
     `allowed`, the schema's parameters in declared order (the required ones present, no others),
     `</function></tool_call>`; `many`: further calls may follow (parallel calls). Whitespace between
     the tags is bounded (`_S`). Returns the regex and, per function, the parameters whose values
-    are JSON literals (to be returned typed). `fmt` "argkey" (SRV-689): the arg-key form,
-    `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`, a string value
-    exactly as written."""
+    are JSON literals (to be returned typed)."""
     by_name = {}
     for t in tools:
         fn = t.get("function") if isinstance(t, dict) else None
         if isinstance(fn, dict) and isinstance(fn.get("name"), str):
             by_name[fn["name"]] = fn.get("parameters") or {}
     calls, typed = [], {}
-    argkey = fmt == "argkey"
     for name in allowed:
         params = by_name.get(name, {})
         props = params.get("properties") if isinstance(params, dict) else None
-        if argkey:
-            if not props:
-                body = rf"(?:{_S}<arg_key>[^<>\n]+</arg_key>{_S}<arg_value>{ARG_TEXT}</arg_value>)*"
-            else:
-                required = set(params.get("required", []))
-                members = []
-                for k in props:
-                    value, is_json = _xml_value(props[k], ARG_TEXT)
-                    if is_json:
-                        typed.setdefault(name, set()).add(k)
-                    m = rf"{_S}<arg_key>{literal(k)}</arg_key>{_S}<arg_value>{value}</arg_value>"
-                    members.append(m if k in required else f"(?:{m})?")
-                body = "".join(members)
-            calls.append(rf"<tool_call>{_S}{literal(name)}{body}{_S}</tool_call>")
-            continue
         if not props:
             body = rf"(?:{_S}<parameter=[^>\n]+>{PARAM_TEXT}</parameter>)*"
         else:

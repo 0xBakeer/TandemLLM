@@ -45,7 +45,8 @@ KEYS_27B = {"engine", "tok", "drafter", "k", "device", "tree", "sampled_tree", "
             "queue_timeout", "draining", "cfg_eos", "think_budget", "think_stall", "reasoning_effort",
             "answer_reserve", "pen_spec", "temperature", "top_p", "top_k", "pattern_stop", "argloop",
             "state_store", "session_cache", "prefix_cache", "session_trim", "resident", "prefill_heartbeat",
-            "prefix_chunk", "response_cache", "suffix_store", "suffix_scope", "usage_default"}
+            "prefix_chunk", "response_cache", "suffix_store", "suffix_scope", "usage_default",
+            "spec"}   # ENG-406: every family's ServeSpec
 
 
 class _Eng:
@@ -76,7 +77,8 @@ def _run(caps, argv, serving, registry_builder: bool):
         return {"engine": eng, "tok": FakeTokenizer(), "drafter": None, "path": "/nonexistent", "device": "cpu",
                 "cfg": "cfg", "w": "w", "serving": serving, "describe": "stub,"}
 
-    arch = types.SimpleNamespace(serve_builder=lambda: build if registry_builder else None)
+    from engine.models.adapter import ServeSpec
+    arch = types.SimpleNamespace(serve_builder=lambda: build if registry_builder else None, spec=ServeSpec())
     saved_state = dict(app.STATE)
     patches = {"_arch_of": lambda m: arch, "_build_qwen3_5": build,
                "generate_stream": lambda *a, **k: iter(()), "_warm_prefill": lambda *a, **k: None,
