@@ -1,5 +1,5 @@
 {
- "_note": "opencode 1.18.32's built-in tool schemas (descriptions dropped) as it sends them, plus two chrome-devtools MCP tools of the same session shape; ",
+ "_note": "opencode 1.18.34's built-in tool schemas (all ten) (descriptions dropped) as it sends them, plus two chrome-devtools MCP tools of the same session shape; ",
  "tools": [
   {
    "type": "function",
@@ -156,9 +156,6 @@
      "$schema": "https://json-schema.org/draft/2020-12/schema",
      "type": "object",
      "properties": {
-      "description": {
-       "type": "string"
-      },
       "prompt": {
        "type": "string"
       },
@@ -213,6 +210,36 @@
      },
      "required": [
       "todos"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "webfetch",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "url": {
+       "type": "string"
+      },
+      "format": {
+       "type": "string",
+       "enum": [
+        "text",
+        "markdown",
+        "html"
+       ],
+       "default": "markdown"
+      },
+      "timeout": {
+       "type": "number"
+      }
+     },
+     "required": [
+      "url"
      ]
     }
    }
