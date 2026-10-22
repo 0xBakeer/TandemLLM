@@ -224,9 +224,8 @@ BASELINE = {
     "engine/config.py": 2, "engine/drafters/dflash2.py": 1, "engine/drafters/dspark.py": 1,
     # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new)
     "engine/methods/manifest.py": 13, "engine/settings.py": 16,
-    # the 27B's builder and side slots, the server's own by history (ENG-406 moves them into its package),
-    # and the default --served-model name and two help texts
-    "server/app.py": 8,
+    # the default --served-model name, the API's own since 0.1 (clients address it)
+    "server/app.py": 1,
     # the fake engine emulates each format's output for the tests
     "server/fake_engine.py": 4,
 }

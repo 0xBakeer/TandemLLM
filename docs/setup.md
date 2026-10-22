@@ -19,7 +19,7 @@ bash install.sh --setup --yes
 
 The installer prints the addresses when it finishes, and the dashboard opens on the Setup Guide by itself while the box is in setup mode.
 
-On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no model of Qwen's, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
+On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no served model, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
 
 The installer writes the marker `run/setup-pending` (with the host to bind). While it exists, a plain `ops/start.sh` (the reboot's, the watchdog's) starts setup mode again. The install job removes it before it starts the configured engine, and puts it back if that engine does not come up. Setup mode does not start chatd; the configured engine's start does, so the Chat tab works once the guide is done.
 

@@ -8,6 +8,7 @@ ARCH = register(Arch(
     model_types=("qwen3_5", "qwen3_5_text"),
     config="engine.config:load_config",
     engine="engine.models.qwen3_5.adapter:Qwen38Engine",     # engine/model.py's, with the cold verbs
+    serve="engine.models.qwen3_5.serving:serve",
     manifest="engine.models.qwen3_5.adapter:manifest",
     rank=0,
     default=True,

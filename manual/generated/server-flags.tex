@@ -123,7 +123,7 @@
 \texttt{-{}-vision} & \texttt{on} & load the checkpoint's vision tower (0.92 GB bf16) and accept image\_url parts in chat requests; off refuses them with a 400. One of: on, off. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}mb} & \texttt{20} & largest image a request may send or link, after base64 decoding. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}decode-\allowbreak{}pixels} & \texttt{64000000} & largest canvas an image may declare, checked before its pixels are decoded; the processor then resizes to its own limits. \\
-\texttt{-{}-image-\allowbreak{}max-\allowbreak{}pixels} & \texttt{0} & the processor's resize target cap in pixels (0: the checkpoint's preprocessor\_config.json, 16,777,216 for Qwen3.8 = 16,384 rows an image). \\
+\texttt{-{}-image-\allowbreak{}max-\allowbreak{}pixels} & \texttt{0} & the processor's resize target cap in pixels (0: the checkpoint's preprocessor\_config.json, e.g. 16,777,216 = 16,384 rows an image). \\
 \texttt{-{}-image-\allowbreak{}backend} & \texttt{torchvision (QSE\_\allowbreak{}IMAGE\_\allowbreak{}BACKEND)} & the image processor's backend, pinned so the patches do not depend on what is installed (the two differ by up to two 8-bit levels after a resize). torchvision (the default, what every served measurement ran) needs torchvision ... One of: torchvision, pil. \\
 \texttt{-{}-max-\allowbreak{}images} & \texttt{16} & images one request may send. \\
 \texttt{-{}-max-\allowbreak{}image-\allowbreak{}rows} & \texttt{65536} & prompt rows all of a request's images may take together (one row per 2x2 block of 16-pixel patches; a 1024x1024 image is 1024 rows). \\
@@ -141,7 +141,7 @@
 \texttt{-{}-trust-\allowbreak{}loopback} & \texttt{on (-{}-no-\allowbreak{}trust-\allowbreak{}loopback turns it off)} & a request from loopback with no X-Forwarded-For / X-Real-IP header (the box's own watchdog, row3, gate, soak) needs no token for /metrics, the full /health and the cache routes once an admin password or metrics token is set. \\
 \texttt{-{}-dashboard-\allowbreak{}login} & \texttt{off (QSE\_\allowbreak{}DASHBOARD\_\allowbreak{}LOGIN)} & on, with an admin password (QSE\_ADMIN\_TOKEN) set: /v1/dashboard/* needs the admin token or a session too (the page has no sign-in screen yet). off, the default: the dashboard's read API answers without a token. One of: on, off. \\
 \texttt{-{}-dashboard-\allowbreak{}dir} & \texttt{none} & where the dashboard's built files are (default: dashboard/dist in this repository); /dashboard/ serves them, or a placeholder when missing. \\
-\texttt{-{}-setup} & \texttt{off (a switch)} & setup mode (docs/setup.md, \texttt{ops/\allowbreak{}start.sh -{}-setup}): no model of Qwen's is loaded; the dashboard, /v1/setup/* and Wren, the setup guide's assistant, alone. \\
+\texttt{-{}-setup} & \texttt{off (a switch)} & setup mode (docs/setup.md, \texttt{ops/\allowbreak{}start.sh -{}-setup}): no served model is loaded; the dashboard, /v1/setup/* and Wren, the setup guide's assistant, alone. \\
 \texttt{-{}-fake-\allowbreak{}engine} & \texttt{off (a switch)} & the e2e: no weights, no GPU, a deterministic CPU token source (server/fake\_engine.py) behind the real handler, auth, ledger, metrics and logs. \\
 \texttt{-{}-fake-\allowbreak{}tps} & \texttt{200} & with -\kern0pt-fake-engine: tokens a second it writes. \\
 \texttt{-{}-fake-\allowbreak{}prefill-\allowbreak{}tps} & \texttt{0} & with -\kern0pt-fake-engine: the prefill rate of a FAKE\_SLOW\_PREFILL prompt (0 = 2,000 tokens a second). \\

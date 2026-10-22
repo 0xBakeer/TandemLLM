@@ -1,8 +1,7 @@
 """SRV-341: one loader for every model (server/app.py `_load`), no GPU.
 
-The model's builder is the one its registry entry names (`Arch.serve`; the 27B's is the server's own
-`_build_qwen3_5`). Everything after it is the shared loader, run for real on the server's argument
-defaults:
+The model's builder is the one its registry entry names (`Arch.serve`; every family has one since ENG-406).
+Everything after it is the shared loader, run for real on the server's argument defaults:
 
   * an engine whose capabilities hold no caches and no side slots (Flash-Next today) gets the request
     path's state with every cache off and is told so, `--parallel` falls back to one slot, its
@@ -78,9 +77,9 @@ def _run(caps, argv, serving, registry_builder: bool):
                 "cfg": "cfg", "w": "w", "serving": serving, "describe": "stub,"}
 
     from engine.models.adapter import ServeSpec
-    arch = types.SimpleNamespace(serve_builder=lambda: build if registry_builder else None, spec=ServeSpec())
+    arch = types.SimpleNamespace(serve_builder=lambda: build, spec=ServeSpec(), name="toy")
     saved_state = dict(app.STATE)
-    patches = {"_arch_of": lambda m: arch, "_build_qwen3_5": build,
+    patches = {"_arch_of": lambda m: arch,
                "generate_stream": lambda *a, **k: iter(()), "_warm_prefill": lambda *a, **k: None,
                "_build_side_slots": lambda *a: calls.append(a)}
     saved = {k: getattr(app, k) for k in patches}

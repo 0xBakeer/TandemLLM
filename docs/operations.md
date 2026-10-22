@@ -71,7 +71,7 @@ Every line runs its script through `bash`, as the scripts call each other: a cop
 
 ## Setup mode and the setup guide
 
-The dashboard's `#/setup` page installs a configuration from the browser ([setup.md](setup.md)). On a new box, `install.sh --setup` or `ops/start.sh --setup` starts setup mode: `server/app.py --setup` with the dashboard and Wren, the guide's small assistant, and no model of Qwen's. It binds 127.0.0.1 unless `--host` says otherwise, and `/health` answers `"mode": "setup"`, which the watchdog takes as healthy. While `run/setup-pending` exists, every start, the reboot's included, comes back in setup mode.
+The dashboard's `#/setup` page installs a configuration from the browser ([setup.md](setup.md)). On a new box, `install.sh --setup` or `ops/start.sh --setup` starts setup mode: `server/app.py --setup` with the dashboard and Wren, the guide's small assistant, and no served model. It binds 127.0.0.1 unless `--host` says otherwise, and `/health` answers `"mode": "setup"`, which the watchdog takes as healthy. While `run/setup-pending` exists, every start, the reboot's included, comes back in setup mode.
 
 The guide's install writes `run/setup.env`, which `ops/serve.env` reads last (after the weight profile), and switches through `ops/use-profile.sh`. It never edits `ops/serve.env`. A box whose `serve.env` was copied before the setup guide needs the overlay's last lines from the repository's `ops/serve.env`, or the guide refuses to install (`no_overlay_hook`). Reset level 2 removes the overlay; the other reset levels remove caches, weights or history ([setup.md](setup.md), "Reset").
 
