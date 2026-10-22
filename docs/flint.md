@@ -72,6 +72,28 @@ Long prompts, 4.0, in the engine, 64 greedy tokens at each point:
 
 At 128k a decode step spends 17.8 of its 25.3 ms in the 14 full layers' attention: it reads 3.76 GB of keys and values at about 211 GB/s. A 4,096-token chunk at 128k spends 1,424 of its 2,180 ms there, on the flash kernel at about 87 TFLOPS. A 4,096-token prompt reads at 5,375 tok/s on 4.0, 5,045 on 6.0 and 4,319 on BF16.
 
+## The e4m3 KV cache (`FLINT_KV_FP8`, off)
+
+With `FLINT_KV_FP8=1` the 14 full layers keep each key and value as e4m3 codes with one fp32 scale a (head, token): 16,416 bytes a token instead of 28,672. The output is no longer the exact model's. The knob is off by default, and the exactness checks hold only with it off. The manifest names it `flint-kvfp8`, so its cache entries are never read by the exact cache.
+
+Cost, 4.0, against the exact cache (`tools/flint_check.py kvfp8`). Each prompt is teacher-forced through 16-row verify blocks:
+
+| prompt | KL mean | KL median | top-1 agree | perplexity, exact / e4m3 |
+|-|-|-|-|-|
+| converter bundle, from token 128 | 0.050 | 0.009 | 92.4 % | 26.99 / 26.94 |
+| 32,768 tokens of one source file, last 1,024 | 0.070 | 0.005 | 93.8 % | 7.165 / 7.465 |
+| 122,880 tokens of the same file, last 1,024 | 0.050 | 0.002 | 95.7 % | 4.053 / 4.132 |
+
+Speed, 4.0, in the engine, 64 greedy tokens at each point:
+
+| context | 64k | 128k | 256k |
+|-|-|-|-|
+| plain decode, exact cache, tok/s | 60.6 | 39.3 | 23.05 |
+| plain decode, e4m3 cache, tok/s | 79.4 | 57.1 | 36.6 |
+| prompt reading from the start, exact / e4m3, tok/s | 3,532 / 3,368 | 2,741 / 2,554 | 1,848 / 1,634 |
+
+Decode reads 57 % of the bytes and runs 31 to 59 % faster. Prompt reading is 5 to 12 % slower, since every chunk decodes the cached rows to BF16. The state for a 263,168-token window drops from 26.5 to 23.0 GiB. We ran each row once. We also tried per-channel key factors (powers of two, exact on the scores) on the same prompts. They helped some rows and hurt others, and the medians did not move, so we do not ship them.
+
 ## Drafting
 
 Flint has no draft layer, so the drafter is the lookup alone: a continuation of the request's own text, the corpus and the suffix store, cut by StairCut from the profile's price file (`ops/prices/flint/`). The price file holds the measured cost of a verify block by size for each context class, and the plain step's cost for each class. After a round with no draft, the next 1, 2, 4, then 8 rounds take the plain step without looking (`FLINT_ANCHOR_BACKOFF`, `FLINT_LOOK_BACKOFF`). A verify block reads the KV once, so the lookup pays more at long context: behind a 124,000-token prompt of code, 4.0 ran a copy ask at 79.5 tok/s against 41.3 plain and an edit ask at 129.7 against 42.4, with the same text.
@@ -82,7 +104,6 @@ Verify blocks of 1 / 2 / 4 / 8 / 16 rows on 4.0, ms: 7.84 / 9.71 / 13.13 / 17.93
 
 - A draft head. A head we trained on the model's own outputs reached 21 % depth-1 acceptance on held-out text; StairCut's prices say it needs about 80 % for 1.4 times plain at 2k and 55 % at 128k.
 - NVFP4. Our round-to-nearest NVFP4 pack lost KL 0.63 against BF16, too much to ship.
-- A quantized KV cache.
 
 ## Checks
 

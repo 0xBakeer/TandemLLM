@@ -70,6 +70,10 @@ On 4.0, decode falls with the context: 101.7~tok/s at 16k, 61.0 at 64k, 39.5 at 
 
 Two slots, a window up to 262,144 tokens (131,072 for BF16). The model opens its own \code{<think>} block as its first token; thinking off puts an empty block after the generation prompt, and an effort level or a budget closes the block at its cap. Tools are called in Flint's own form, \code{<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>}, and written back the same way. Temperature 1.0, \code{top_k} 20 and \code{top_p} 0.95 come from its generation config. The decode step runs the shared expert on a second stream and its Triton kernels as programmatic dependents, with the same bits as one stream. A 4,096-token prompt reads at 5,375~tok/s on 4.0.
 
+\section{The e4m3 KV cache}
+
+\code{FLINT_KV_FP8=1} keeps the 14 full layers' keys and values as e4m3 codes with one fp32 scale a (head, token), 16,416 bytes a token instead of 28,672. The output is no longer the exact model's, so the knob is off by default and the exactness checks hold only with it off. On 4.0, against the exact cache, the last 1,024 tokens of a 32,768-token source file read at KL 0.070 (median 0.005), 93.8~\% top-1 agreement and perplexity 7.165 against 7.465; at 122,880 tokens, KL 0.050, 95.7~\% and 4.053 against 4.132. Plain decode runs at 79.4~tok/s against 60.6 at 64k, 57.1 against 39.3 at 128k and 36.6 against 23.05 at 256k; prompt reading is 5 to 12~\% slower (\measured, one run a row).
+
 \section{What is not measured}
 
 \begin{itemize}
