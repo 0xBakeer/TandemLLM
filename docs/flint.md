@@ -102,7 +102,9 @@ Speed, 4.0, in the engine, 64 greedy tokens at each point:
 | plain decode, e4m3 cache, tok/s | 79.4 | 57.1 | 36.6 |
 | prompt reading from the start, exact / e4m3, tok/s | 3,532 / 3,368 | 2,741 / 2,554 | 1,848 / 1,634 |
 
-Decode reads about half the bytes and runs 31 to 59 % faster. Prompt reading is 5 to 12 % slower, since every chunk decodes the cached rows to BF16. The state for a 263,168-token window drops from 26.5 to 23.0 GiB. We ran each row once. We also tried per-channel key factors (powers of two, exact on the scores) on the same prompts. They helped some rows and hurt others, and the medians did not move, so we do not ship them.
+On 6.0 the 122,880-token row reads KL 0.047, 95.2 % top-1 agreement and perplexity 4.062 / 4.097, and plain decode goes from 52.0 to 66.1 tok/s at 64k and from 35.4 to 50.1 at 128k.
+
+On 4.0, decode reads about half the bytes and runs 31 to 59 % faster. Prompt reading is 5 to 12 % slower, since every chunk decodes the cached rows to BF16. The state for a 263,168-token window drops from 26.5 to 23.0 GiB. We ran each row once. We also tried per-channel key factors (powers of two, exact on the scores) on the same prompts. They helped some rows and hurt others, and the medians did not move, so we do not ship them.
 
 ## Drafting
 
