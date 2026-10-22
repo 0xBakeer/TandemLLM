@@ -36,11 +36,8 @@ LAUNCH = ("import sys, runpy; sys.modules['triton'] = None; sys.modules['triton.
 
 
 def _port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    from ports import free_port
+    return free_port()                 # OPS-231: no two tests get one port
 
 
 def _start(port, ledger, home=None, extra=(), env_extra=None, admin=ADMIN):

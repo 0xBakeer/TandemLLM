@@ -659,11 +659,8 @@ def test_10_page_check():
 
 
 def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    from ports import free_port
+    return free_port()                 # OPS-231: no two tests get one port
 
 
 if __name__ == "__main__":

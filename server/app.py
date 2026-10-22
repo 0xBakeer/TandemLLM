@@ -11060,6 +11060,10 @@ def _serve(a, led) -> None:
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
     else:
         print("[ledger] off", flush=True)
+    # OPS-231: bound here, before the port is read anywhere: `--port 0` takes a free port from the kernel and
+    # the listening line names it (a test's free port picked first and bound later raced the other tests)
+    httpd = EngineServer((a.host, a.port), Handler)
+    a.port = httpd.server_address[1]
     STATE["port"] = a.port
     root = conductor_root(a)
     if root is not None and getattr(a, "conductor_defaults", "builtin") == "shipped":
@@ -11182,7 +11186,7 @@ def _serve(a, led) -> None:
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
-    serve_until_drained(EngineServer((a.host, a.port), Handler))
+    serve_until_drained(httpd)
 
 
 class SetupHandler(Handler):

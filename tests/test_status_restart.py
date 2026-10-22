@@ -52,9 +52,8 @@ LINUX = platform.system() == "Linux"
 
 
 def _port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    from ports import free_port
+    return free_port()                 # OPS-231: no two tests get one port
 
 
 def _get(url: str, accept: str | None = None, timeout: float = 5):

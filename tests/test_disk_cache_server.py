@@ -380,13 +380,12 @@ def test_the_served_loop_writes_the_head_and_a_restart_reads_it_with_the_same_te
 # ------------------------------------------------------------------ over HTTP (the fake engine)
 
 def test_the_routes_on_the_fake_engine():
-    from test_conductor_e2e import PROXY, _call, _port, _server, _wait
+    from test_conductor_e2e import PROXY, _call, _server, _wait
     root = tempfile.mkdtemp(prefix="qse-disk-http-")
-    port = _port()
-    proc, _ = _server(port, os.path.join(root, "conductor"),
+    proc, _ = _server(None, os.path.join(root, "conductor"),
                       extra=("--disk-cache", os.path.join(root, "disk")))
     try:
-        _wait(port, proc)
+        port = _wait(None, proc)
         st, _, got = _call(port, "GET", "/v1/conductor/memory/disk")
         assert st == 200 and got["running"] is False, got        # the fake engine runs none
         _check(got, "memory-disk")
