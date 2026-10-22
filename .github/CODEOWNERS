@@ -1,0 +1,7 @@
+# Reviewers by path. The last matching line wins.
+# An area with its own reviewers gets a line below the default, for example:
+#   /engine/kernels/     @0xBakeer @kernel-reviewer
+#   /dashboard/          @0xBakeer @dashboard-reviewer
+#   /models/*/community/ @0xBakeer @community-reviewer
+
+*       @0xBakeer

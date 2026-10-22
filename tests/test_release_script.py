@@ -1,7 +1,8 @@
 """tools/release.sh (OPS-223) on a scratch repository with a local bare remote: no network, no GitHub, no
 box. bump writes the version into the pointer lines and leaves the prose; preflight passes on the bumped
 tree and names what is missing on the old one; a dry run prints the tag and push commands and changes no
-ref. Under /bin/bash where it is bash 3.2 (macOS), else the bash on PATH.
+ref; the milestone section closes vX.Y.Z and opens the next patch through a stand-in gh. Under
+/bin/bash where it is bash 3.2 (macOS), else the bash on PATH.
 
 Run: python tests/test_release_script.py
 """
@@ -137,6 +138,59 @@ def test_a_trailer_stops_the_preflight():
         _git(work, "commit", "-q", "-m", "Release 1.2.4\n\nCo-Authored-By: Someone <someone@example.invalid>")
         r = _release(work, "1.2.4", "--only", "preflight")
         assert r.returncode != 0 and "carries a co-author or session line" in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+FAKE_GH = """#!/bin/sh
+# a stand-in for gh: the milestone list from $FAKE_GH_LIST, every call logged to $FAKE_GH_LOG
+echo "$*" >> "$FAKE_GH_LOG"
+case "$*" in
+    *"milestones?state=all"*) cat "$FAKE_GH_LIST" ;;
+esac
+"""
+
+
+def _milestone_run(work, listing, *args):
+    d = os.path.dirname(work)
+    bin_dir, log, lst = os.path.join(d, "bin"), os.path.join(d, "gh.log"), os.path.join(d, "milestones")
+    os.makedirs(bin_dir, exist_ok=True)
+    with open(os.path.join(bin_dir, "gh"), "w") as fh:
+        fh.write(FAKE_GH)
+    os.chmod(os.path.join(bin_dir, "gh"), 0o755)
+    with open(lst, "w") as fh:
+        fh.write(listing)
+    open(log, "w").close()
+    env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"], FAKE_GH_LOG=log, FAKE_GH_LIST=lst)
+    r = subprocess.run([BASH, os.path.join(work, "tools", "release.sh"), "1.2.4", "--only", "milestone",
+                        "--repo", "o/r", *args], cwd=work, capture_output=True, text=True, env=env, timeout=60)
+    with open(log) as fh:
+        return r, fh.read().splitlines()
+
+
+def test_the_milestone_section_closes_the_release_and_opens_the_next_patch():
+    d, work = _repo()
+    try:
+        listing = "3 open v1.2.4\n4 open v1.3.0\n5 open Later\n1 closed Nemotron community packs\n"
+        r, calls = _milestone_run(work, listing, "--dry-run")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "+ gh api -X PATCH repos/o/r/milestones/3 -f state=closed" in r.stdout, r.stdout
+        assert "+ gh api -X POST repos/o/r/milestones -f title=v1.2.5" in r.stdout, r.stdout
+        assert all("-X" not in c for c in calls), ("a dry run changed a milestone", calls)
+
+        r, calls = _milestone_run(work, listing)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "api -X PATCH repos/o/r/milestones/3 -f state=closed" in calls, calls
+        assert any(c.startswith("api -X POST repos/o/r/milestones -f title=v1.2.5") for c in calls), calls
+
+        r, calls = _milestone_run(work, "3 closed v1.2.4\n6 open v1.2.5\n")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "already closed" in r.stdout and "milestone v1.2.5 exists" in r.stdout, r.stdout
+        assert all("-X" not in c for c in calls), calls
+
+        r, calls = _milestone_run(work, "")
+        assert r.returncode == 0 and "nothing to close" in r.stdout, r.stdout
+        assert any("title=v1.2.5" in c for c in calls), calls
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

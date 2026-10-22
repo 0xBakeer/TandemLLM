@@ -25,9 +25,11 @@ tools/exl3/smoke.sh
 tools/exl3/spark_check.sh
 tools/exl3/spend.py
 tools/exl3/summarize.py
+tools/gh_labels.sh
 tools/proxy_e2e.sh
 tools/proxy_engines_check.sh
 tools/release.sh
 tools/release_box_gate.sh
 tools/release_gate_setup.sh
+tools/teb_batch.sh
 tools/vis8_gate.sh

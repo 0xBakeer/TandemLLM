@@ -1,0 +1,24 @@
+name: Docs
+description: A page in the docs or the manual is wrong or lacks something.
+labels: [docs, needs-triage]
+body:
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: The file and section, or a link.
+      placeholder: docs/setup.md, "Profiles"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+
+  - type: textarea
+    id: fix
+    attributes:
+      label: What it should say

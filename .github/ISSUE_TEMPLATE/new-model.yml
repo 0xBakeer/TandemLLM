@@ -1,0 +1,55 @@
+name: New model support
+description: A model that TandemLLM does not run yet.
+title: 'model: <name of the model>'
+labels: [feature, models/new, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        docs/adding-a-model.md says what a new model needs. I add a model when its weights are
+        open and its license lets us publish a quantised pack.
+
+  - type: input
+    id: hf
+    attributes:
+      label: Hugging Face repository
+      placeholder: owner/model
+    validations:
+      required: true
+
+  - type: input
+    id: license
+    attributes:
+      label: License
+      placeholder: Apache-2.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Architecture
+      description: Dense or mixture of experts, and the attention type. Link the config or the paper.
+    validations:
+      required: true
+
+  - type: input
+    id: sizes
+    attributes:
+      label: Sizes
+      description: Total and active parameters.
+      placeholder: 39.8B total, 2.5B active, 80 GB in BF16
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this model
+      description: What it does better for you than the models TandemLLM runs now.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware you would run it on
+      options: [NVIDIA DGX Spark, NVIDIA RTX PRO 6000, Another GPU or machine]
