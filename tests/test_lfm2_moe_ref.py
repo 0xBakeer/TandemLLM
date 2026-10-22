@@ -197,10 +197,14 @@ def test_commit_of_a_path_continues_exactly():
     for t in (7, 19, 44):
         ref.decode(t, alone)
     assert st.length == alone.length
+    eps = torch.finfo(torch.float32).eps
     for li in st.conv:
-        assert torch.allclose(st.conv[li], alone.conv[li], atol=1e-6)
+        # OPS-231: the rows' conv inputs come from projections summed in another order than one row's
+        bound = 4 * eps * cfg.hidden_size * max(1.0, alone.conv[li].abs().max().item())
+        assert (st.conv[li] - alone.conv[li]).abs().max().item() <= bound, li
     a, b = ref.decode(5, st), ref.decode(5, alone)
-    assert (a - b).abs().max().item() < 1e-5
+    d = (a - b).abs().max().item()
+    assert d <= _fp32_bound(cfg, a), (d, _fp32_bound(cfg, a))
 
 
 def test_chain_kept_in_part():

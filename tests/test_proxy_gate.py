@@ -194,9 +194,11 @@ def test_one_late_frame_old_gate_fails_new_gate_retries():
         assert rc == 0 and s["verdict"] == "PASS", (s, log[-1500:])
         assert s["retried"] == 1 and s["loopback"] is True, s
         r2 = [r for r in rep["rows"] if r["i"] == 2][0]
-        assert r2["tries"] == 2 and abs(r2["decode_rel"]) <= 0.02, r2
+        # the late frame is on try 1 only; a loaded runner may land a later try past 2 % as well, which
+        # the gate retries again (OPS-231): what matters is a retry and a pass within the tries
+        assert r2["tries"] >= 2 and abs(r2["decode_rel"]) <= 0.02, r2
         assert "try 1: decode" in log, log[-1500:]
-        return (f"new gate PASS on the retry (request 2 at {r2['decode_rel']:+.1%} on try 2), "
+        return (f"new gate PASS on the retry (request 2 at {r2['decode_rel']:+.1%} on try {r2['tries']}), "
                 f"median {s['decode_rel_median']:.2%}")
 
     return (_settled({2: (1,)}, old, "--tol-one", "0.02", "--repeats", "1") + "; "
