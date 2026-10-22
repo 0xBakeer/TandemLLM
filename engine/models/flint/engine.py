@@ -37,6 +37,7 @@ import torch
 import torch.nn.functional as F
 
 from engine import capture_lock
+from engine.settings import SETTINGS as _S
 from engine.models.flint import kernels as K
 from engine.models.flint.ref import FlintRef, FlintState
 from engine.models.lfm2_moe import kernels as LK
@@ -114,6 +115,12 @@ class FlintEngine(FlintRef):
         self.exl3 = any(_is_exl3(w) for w in W.values())
         self.banks = {li: e.bank(self.device) for li, e in experts.items() if hasattr(e, "bank")} \
             if str(self.device).startswith("cuda") else {}
+        # SPD-145: the shared expert's stream (FLINT_SIDE_STREAM; None: one stream)
+        self.side = torch.cuda.Stream(device=self.device) \
+            if self.device.type == "cuda" and _S.get("FLINT_SIDE_STREAM") == "1" else None
+        self._sev: dict = {}
+        if self.device.type == "cuda" and _S.get("FLINT_PDL") == "1":
+            K.PDL = True
 
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None, paged: bool = False) -> FlintState:
@@ -199,6 +206,16 @@ class FlintEngine(FlintRef):
         ascending expert id, plus the shared expert."""
         from tools import fn_kernels as FK
         c = self.cfg
+        side = None
+        if self.side is not None and n.is_cuda and c.shared_expert_intermediate_size:
+            # the shared expert on a second stream beside the router and the routed experts (the same
+            # kernels on the same inputs: the bits do not change, the two read the memory at once)
+            side = self._side_events(li)
+            side[0].record()
+            self.side.wait_event(side[0])
+            with torch.cuda.stream(self.side):
+                sx = self.glu_rows(n, self.pre(li) + "mlp.shared_expert.", c.shared_expert_intermediate_size)
+                side[1].record()
         g16 = self._gate16.get(li)
         logits = FK.gemv(n, g16) if g16 is not None else LK.linear_rows(n, self._gate[li], f32=True)
         ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps, scale=c.route_scale)
@@ -214,10 +231,19 @@ class FlintEngine(FlintRef):
         m = FK.moe_combine(yd, ids, wts) if self.device.type == "cuda" else LK.combine_reference(yd, ids, wts)
         if c.shared_expert_intermediate_size:
             # the shared expert's output beside the routed sum: the caller adds both in one launch (add2_rms)
+            if side is not None:
+                torch.cuda.current_stream().wait_event(side[1])
+                return m, sx
             return m, self.glu_rows(n, self.pre(li) + "mlp.shared_expert.", c.shared_expert_intermediate_size)
         return m
 
     route_trace = None
+
+    def _side_events(self, li: int) -> tuple:
+        ev = self._sev.get(li)
+        if ev is None:
+            ev = self._sev[li] = (torch.cuda.Event(), torch.cuda.Event())
+        return ev
 
     @property
     def _order1(self):
@@ -335,7 +361,7 @@ class FlintEngine(FlintRef):
         one = len(parts) == 1
         tok = parts[0][1]["d"]["tok"] if one else torch.cat([rb["d"]["tok"] for _, rb, _, _ in parts])
         h = self.W["embed_tokens.weight"].index_select(0, tok)
-        h, n = LK.add_rms(h, None, self.W["layers.0.input_layernorm.weight"], eps)
+        h, n = LK.add_rms(h, None, self.W["layers.0.input_layernorm.weight"], eps, pdl=K.PDL)
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
             a = p + "self_attn."
@@ -347,16 +373,17 @@ class FlintEngine(FlintRef):
                 q = LK.qk_prep(qkv[r], d["pos"] if rope else d["zero"], d["rslot"] if sliding else d["slot"],
                                self.W[a + "q_norm.weight"], self.W[a + "k_norm.weight"],
                                self.rope_cos if rope else self.id_cos, self.rope_sin if rope else self.id_sin,
-                               st.k[li], st.v[li], c.num_attention_heads, c.num_key_value_heads, eps)
+                               st.k[li], st.v[li], c.num_attention_heads, c.num_key_value_heads, eps, pdl=K.PDL)
                 K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, self._sink[li],
                             window=c.sliding_window if sliding else 0, ring=self.ring,
                             bufs=rb["attn"].setdefault("sw" if sliding else ns, {}), out=o[r])
             out = self.lin(o.view(R, -1), self.W[a + "o_proj.weight"])
-            h, n = LK.add_rms(h, out, self.W[p + "post_attention_layernorm.weight"], eps)
+            h, n = LK.add_rms(h, out, self.W[p + "post_attention_layernorm.weight"], eps, pdl=K.PDL)
             m = self.moe_rows(n, li) if c.is_moe(li) else self.glu_rows(n, p + "mlp.", c.intermediate_size)
             nxt = self.W[self.pre(li + 1) + "input_layernorm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["norm.weight"]
-            h, n = K.add2_rms(h, m[0], m[1], nxt, eps) if isinstance(m, tuple) else LK.add_rms(h, m, nxt, eps)
+            h, n = K.add2_rms(h, m[0], m[1], nxt, eps) if isinstance(m, tuple) \
+                else LK.add_rms(h, m, nxt, eps, pdl=K.PDL)
         if one:
             rb = parts[0][1]
             rb["hidden"].copy_(n)

@@ -31,6 +31,12 @@ if HAVE_TRITON:
     import triton
     import triton.language as tl
 
+    from engine.models.lfm2_moe.kernels import _pdl_enter
+
+#: SPD-145: the decode kernels launch as programmatic dependents (each waits for its predecessor, then lets
+#: its successor launch at once: no launch gap, the next projection's weights stream early); the engine sets it
+PDL = False
+
 #: chunks a sliding layer's row reads: its window of W <= CHUNK + 1 keys spans at most two CHUNK-aligned chunks
 SW_CHUNKS = 2
 
@@ -41,13 +47,16 @@ if HAVE_TRITON:
     def _attn_split(Q, K, V, CTL, ANCT, PM, PL, PACC, s_kh, s_kn, s_vh, s_vn, WIN, RING,
                     SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr, HK: tl.constexpr,
                     BM: tl.constexpr, BN: tl.constexpr, CHUNK_: tl.constexpr, NA: tl.constexpr, NS: tl.constexpr,
-                    SLIDING: tl.constexpr, DOT32_: tl.constexpr):
+                    SLIDING: tl.constexpr, DOT32_: tl.constexpr, PDL: tl.constexpr = False):
         # CTL[t] = (visible keys n = pos + 1, block start L): key c < L is cache position c, c >= L the
         # row's ancestor at depth c - L (ANCT[t, c - L], a cache slot = its position); a sliding layer
         # sees c >= n - WIN only and reads slot % RING
-        t = tl.program_id(0)
-        kvh = tl.program_id(1)
-        sp = tl.program_id(2)
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        t = tl.program_id(0) + z
+        kvh = tl.program_id(1) + z
+        sp = tl.program_id(2) + z
         n = tl.load(CTL + t * 2)
         L = tl.load(CTL + t * 2 + 1)
         rows = tl.arange(0, BM)
@@ -98,9 +107,12 @@ if HAVE_TRITON:
 
     @triton.jit
     def _attn_combine(PM, PL, PACC, SINK, OUT, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr,
-                      HK: tl.constexpr, BM: tl.constexpr, NS: tl.constexpr):
-        t = tl.program_id(0)
-        qh = tl.program_id(1)
+                      HK: tl.constexpr, BM: tl.constexpr, NS: tl.constexpr, PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        t = tl.program_id(0) + z
+        qh = tl.program_id(1) + z
         kvh = qh // REP
         r = qh % REP
         od = tl.arange(0, D)
@@ -119,8 +131,12 @@ if HAVE_TRITON:
         tl.store(OUT + (t * HQ + qh) * D + od, o.to(tl.bfloat16))
 
     @triton.jit
-    def _router(LOG, s_log, BIAS, IDS, WTS, eps, scale, E: tl.constexpr, KK: tl.constexpr, BIASED: tl.constexpr):
-        r = tl.program_id(0)
+    def _router(LOG, s_log, BIAS, IDS, WTS, eps, scale, E: tl.constexpr, KK: tl.constexpr, BIASED: tl.constexpr,
+                PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        r = tl.program_id(0) + z
         o = tl.arange(0, E)
         lb = tl.load(LOG + r * s_log + o).to(tl.bfloat16).to(tl.float32)
         s = 1.0 / (1.0 + tl.exp(-lb))
@@ -146,9 +162,12 @@ if HAVE_TRITON:
 if HAVE_TRITON:
 
     @triton.jit
-    def _glu_act(GU, s_gu, A, s_a, I: tl.constexpr, BLOCK: tl.constexpr):
-        r = tl.program_id(0)
-        c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    def _glu_act(GU, s_gu, A, s_a, I: tl.constexpr, BLOCK: tl.constexpr, PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        r = tl.program_id(0) + z
+        c = (tl.program_id(1) + z) * BLOCK + tl.arange(0, BLOCK)
         m = c < I
         g = tl.load(GU + r * s_gu + c, mask=m, other=0.0).to(tl.float32)
         u = tl.load(GU + r * s_gu + I + c, mask=m, other=0.0).to(tl.float32)
@@ -156,8 +175,11 @@ if HAVE_TRITON:
         tl.store(A + r * s_a + c, (sg * u).to(tl.bfloat16), mask=m)
 
     @triton.jit
-    def _add2_rms(H_IN, D1, D2, H_OUT, N_OUT, W, eps, N: tl.constexpr, BLOCK: tl.constexpr):
-        r = tl.program_id(0)
+    def _add2_rms(H_IN, D1, D2, H_OUT, N_OUT, W, eps, N: tl.constexpr, BLOCK: tl.constexpr, PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        r = tl.program_id(0) + z
         o = tl.arange(0, BLOCK)
         m = o < N
         d = (tl.load(D1 + r * N + o, mask=m, other=0.0).to(tl.float32)
@@ -306,7 +328,8 @@ def glu_act(gu: torch.Tensor, I: int, out: torch.Tensor | None = None) -> torch.
         out = torch.empty(M, I, dtype=torch.bfloat16, device=gu.device)
     if not gu.is_cuda:
         return out.copy_(glu_act_reference(gu, I))
-    _glu_act[(M, triton.cdiv(I, 1024))](gu, gu.stride(0), out, out.stride(0), I=I, BLOCK=1024, num_warps=4)
+    _glu_act[(M, triton.cdiv(I, 1024))](gu, gu.stride(0), out, out.stride(0), I=I, BLOCK=1024, PDL=PDL, launch_pdl=PDL,
+                                        num_warps=4)
     return out
 
 
@@ -321,7 +344,8 @@ def add2_rms(h: torch.Tensor, d1: torch.Tensor, d2: torch.Tensor, w: torch.Tenso
         from engine.models.lfm2_moe.kernels import add_rms_reference
         return add_rms_reference(h, (d1.float() + d2.float()).to(torch.bfloat16), w, eps)
     hn, nn = torch.empty_like(h), torch.empty_like(h)
-    _add2_rms[(M,)](h, d1, d2, hn, nn, w, eps, N=N, BLOCK=triton.next_power_of_2(N), num_warps=4)
+    _add2_rms[(M,)](h, d1, d2, hn, nn, w, eps, N=N, BLOCK=triton.next_power_of_2(N), PDL=PDL, launch_pdl=PDL,
+                    num_warps=4)
     return hn, nn
 
 
@@ -361,8 +385,9 @@ def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Te
     _attn_split[(M, HK, ns)](q, kc, vc, ctl, anc, pm, pl, pacc, kc.stride(0), kc.stride(1), vc.stride(0),
                              vc.stride(1), int(window), int(max(ring, 1)), SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ,
                              HK=HK, BM=BM, BN=32, CHUNK_=CHUNK, NA=anc.shape[1], NS=ns, SLIDING=sliding,
-                             DOT32_=DOT32, num_warps=4, num_stages=2)
-    _attn_combine[(M, HQ)](pm, pl, pacc, sink, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ns, num_warps=1)
+                             DOT32_=DOT32, PDL=PDL, launch_pdl=PDL, num_warps=4, num_stages=2)
+    _attn_combine[(M, HQ)](pm, pl, pacc, sink, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ns, PDL=PDL, launch_pdl=PDL,
+                           num_warps=1)
     return out
 
 
@@ -394,7 +419,7 @@ def router(logits: torch.Tensor, bias: torch.Tensor | None, k: int, eps: float, 
         ids = torch.empty(M, k, dtype=torch.int32, device=logits.device)
         wts = torch.empty(M, k, dtype=torch.float32, device=logits.device)
     _router[(M,)](logits, logits.stride(0), bias if bias is not None else logits, ids, wts, float(eps), float(scale), E=E, KK=k,
-                  BIASED=bias is not None, num_warps=1)
+                  BIASED=bias is not None, PDL=PDL, launch_pdl=PDL, num_warps=1)
     return ids, wts
 
 

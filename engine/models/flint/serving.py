@@ -181,12 +181,28 @@ class FlintServing:
     def manifest(self) -> Manifest:
         return manifest()
 
+    #: SPD-145: the verify widths captured at start (the anchor and up to 16 drafted rows), first class
+    PRECAPTURE_WIDTHS = range(2, 18)
+
     def precapture(self, drafter) -> int | None:
-        """The decode graph of the first class, after the server's warm-up (whose rows are nobody's)."""
+        """After the server's warm-up (whose rows are nobody's): with a drafter, the first class's verify
+        graphs of every width a round drafts, captured now and not in the first requests (SPD-145: a fresh
+        server's first prose ask drafted 2.4 % below plain while it captured three widths, ~50 ms each)."""
         if self.dg is None:
             self.dg = DecodeGraph(self.fn, self.st, self.slot)
         self.kv.length = 0
-        return len(self.dg.graphs)
+        if drafter is None or not self.fn.device.type == "cuda":
+            return len(self.dg.graphs)
+        from engine.models.flint.engine import VerifyGraph
+        n = 0
+        for M in self.PRECAPTURE_WIDTHS:
+            ns = K.class_of(M, self.st.cap)
+            if (M, ns) not in self.vgraphs:
+                g = VerifyGraph(self.fn, self.st, M, ns, self.fn._key(self.slot, M))
+                g.capture()
+                self.vgraphs[(M, ns)] = g
+                n += 1
+        return n
 
     def draft_heads(self) -> dict:
         """The draft heads this model carries, by name: none (the checkpoint has no draft layer)."""
