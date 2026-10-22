@@ -425,8 +425,10 @@ SIDE_SLOT_CONST = int(0.5 * (1 << 30))
 
 
 def profile_of(path: str) -> str:
-    """The weight profile a checkpoint is served as: the running one (QSE_WEIGHTS), else flint-<dir>."""
-    return os.environ.get("QSE_WEIGHTS") or "flint-" + os.path.basename(os.path.normpath(path))
+    """The weight profile a checkpoint is served as: the running one (QSE_WEIGHTS), else the directory's name,
+    with a flint- prefix when it has none."""
+    name = os.path.basename(os.path.normpath(path))
+    return os.environ.get("QSE_WEIGHTS") or (name if name.startswith("flint-") else "flint-" + name)
 
 
 def prices(path: str, log=print) -> PriceModel:
