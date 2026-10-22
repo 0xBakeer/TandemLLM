@@ -519,17 +519,25 @@ FENCE = "```"
 
 def off_split(text: str) -> tuple[str, str] | None:
     """#93: with thinking off, a model that reasons anyway may write its working-out and then a lone
-    `</think>` before the answer (Ornith on long contest problems). `(reasoning, answer)` when the text's
-    FIRST `</think>` comes before any code fence and after no `<think>` of its own; None otherwise, and
-    the text stays as written (a block the model opened at its start is `split_full`'s `self_open`
-    case; a tag inside code or later in an answer is the answer's)."""
-    i = text.find(CLOSE_THINK)
-    if i < 0 or text.lstrip().startswith(OPEN_THINK):
+    `</think>` before the answer (Ornith on long contest problems, its working-out code blocks and all).
+    `(reasoning, answer)` at the FIRST `</think>` that stands alone on its line outside a code block, when
+    no `<think>` of the model's own came before it; None otherwise, and the text stays as written: a tag
+    inside a code block or in a line of text is the answer's, and a block the model opened at its start
+    is `split_full`'s `self_open` case."""
+    if CLOSE_THINK not in text or text.lstrip().startswith(OPEN_THINK):
         return None
-    head = text[:i]
-    if FENCE in head or OPEN_THINK in head:
-        return None
-    return head.rstrip("\n"), text[i + len(CLOSE_THINK):].lstrip("\n")
+    pos, fence = 0, False
+    for line in text.split("\n"):
+        s = line.strip(" \t")
+        if s.startswith(FENCE):
+            fence = not fence
+        elif not fence:
+            if OPEN_THINK in s:
+                return None
+            if s == CLOSE_THINK:
+                return text[:pos].rstrip("\n"), text[pos + len(line) + 1:].lstrip("\n")
+        pos += len(line) + 1
+    return None
 
 
 def off_full(text: str, fmt: str) -> tuple[str, str | None] | None:
@@ -549,50 +557,35 @@ def off_full(text: str, fmt: str) -> tuple[str, str | None] | None:
 
 
 class OffClose:
-    """#93, streaming: with thinking off, the first `</think>` the model writes before any code fence
-    (and after no `<think>` of its own) is dropped with the blank lines after it. The text before it has
-    already gone out as the answer, so only the tag goes. A tag after a fence, a second one, or one after
-    a `<think>` stays as written. Only a tail that could still become the tag is held back."""
+    """#93, streaming: with thinking off, the first `</think>` the model writes alone on its line outside a
+    code block (and after no `<think>` of its own) is dropped with its newline. The text before it has
+    already gone out as the answer, so only the tag goes; every later tag passes as written. The line
+    rules are `StrayClose`'s (defined below), so only a line start that can still become the tag waits."""
 
     def __init__(self):
-        self.done = False           # the tag went, or a fence or a `<think>` came first: pass all
-        self.pending = ""
-        self.seen = ""              # the last two characters sent, for a fence across pieces
-        self.lead = False           # blank lines right after the dropped tag go too
+        self.f = None
         self.dropped = 0
 
     def push(self, piece: str) -> str:
-        if self.lead:
-            piece = piece.lstrip("\n")
-            if not piece:
-                return ""
-            self.lead = False
-        if self.done:
+        if self.f is None:
+            self.f = StrayClose()
+        if self.dropped:
             return piece
-        buf, self.pending = self.pending + piece, ""
-        look = self.seen + buf
-        i = buf.find(CLOSE_THINK)
-        fence = look.find(FENCE)
-        opened = look.find(OPEN_THINK)
-        first = min([x - len(self.seen) for x in (fence, opened) if x >= 0], default=None)
-        if i >= 0 and (first is None or i < first):
-            self.done, self.dropped = True, 1
-            rest = buf[i + len(CLOSE_THINK):].lstrip("\n")
-            self.lead = not rest
-            return buf[:i] + rest
-        if first is not None:
-            self.done = True
-            return buf
-        hold = max(_tag_prefix_len(buf), next((k for k in (2, 1) if len(buf) >= k and FENCE.startswith(buf[-k:])), 0),
-                   next((k for k in range(min(len(buf), len(OPEN_THINK) - 1), 0, -1)
-                         if OPEN_THINK.startswith(buf[-k:])), 0))
-        out, self.pending = (buf[:len(buf) - hold], buf[len(buf) - hold:]) if hold else (buf, "")
-        self.seen = (self.seen + out)[-2:]
-        return out
+        out = []
+        for i, ch in enumerate(piece):
+            out.append(self.f.push(ch))
+            if self.f.dropped:
+                self.dropped = 1
+                out.append(piece[i + 1:])
+                break
+        return "".join(out)
 
     def finish(self) -> str:
-        rest, self.pending = self.pending, ""
-        return rest
+        if self.dropped or self.f is None:
+            return ""
+        tail = self.f.finish()
+        self.dropped = self.f.dropped
+        return tail
 
 
 def drop_stray_close(text: str, fmt: str = "reasoning_content", in_think: bool = False

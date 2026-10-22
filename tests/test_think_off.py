@@ -1,13 +1,14 @@
 """#93: with thinking off, reasoning the model writes anyway goes to its field (Ornith on long contest
 problems: its working-out, a lone `</think>`, then the answer; or a block it opens at its start).
 
-  1  the rule: only the FIRST `</think>`, and only before any code fence and after no `<think>` of the
-     model's own, splits; a tag inside code, a second one, or one later in an answer stays as written
+  1  the rule: only the FIRST `</think>` alone on its line outside a code block, after no `<think>` of the
+     model's own, splits (the working-out's own code blocks before it included, as Ornith writes them); a
+     tag inside a code block or in a line of text, and every later one, stays as written
                                                             test_the_rule
   2  the formats: `reasoning_content` moves the working-out to its field, `tags` closes it as a block at
      the content's start, `both` does both                  test_the_formats
-  3  streaming: the text before the tag has gone out, so only the tag (and the blank lines after it) is
-     dropped, in any piece size; a fence or a `<think>` first keeps it    test_the_stream_filter
+  3  streaming: the text before the tag has gone out, so only the tag line is dropped, in any piece
+     size; a tag in a code block or in a line of text, and every later one, passes    test_the_stream_filter
   4  the server, raw and conductor, streamed and not: the tester's shapes (a lone `</think>`, an empty
      pair, a block opened at the start), a call after the split still parses, usage counts the moved
      text as reasoning tokens, and thinking on is untouched     test_the_server
@@ -32,14 +33,18 @@ from server.stream import OffClose, off_full, off_split  # noqa: E402
 WORK = "Let me analyze this.\nWe need X.\nSo X = 5.\n"
 LONE = WORK + "</think>\n\nThe answer is 5."
 FENCED = "Here is the code:\n```python\nprint('</think>')\n```\nDone."
+INCODE = "Here is the code:\n```\n</think>\n```\nDone."
+WORKED = "Try it:\n```python\nx = 1\n```\nThat checks out.\n</think>\n\nThe answer is 1."
 LATER = "Use this:\n```\nx\n```\nand then </think> stays."
 
 
 def test_the_rule():
     assert off_split(LONE) == (WORK.rstrip("\n"), "The answer is 5.")
-    assert off_split(FENCED) is None and off_split(LATER) is None
+    assert off_split(FENCED) is None and off_split(LATER) is None and off_split(INCODE) is None
+    assert off_split(WORKED) == ("Try it:\n```python\nx = 1\n```\nThat checks out.", "The answer is 1.")
     assert off_split("<think>\nhmm\n</think>\n\nok") is None             # the self-open block's case
-    assert off_split("a <think> b </think> c") is None                  # its own pair: as written
+    assert off_split("a <think> b </think> c") is None                  # not alone on a line
+    assert off_split("plan\n<think>\nmore\n</think>\nok") is None       # its own pair: as written
     two = LONE + "\n```\nprint('</think>')\n```"
     assert off_split(two) == (WORK.rstrip("\n"), "The answer is 5.\n```\nprint('</think>')\n```")
     assert off_split("no tags at all") is None
@@ -63,12 +68,12 @@ def _stream(text, size):
 
 def test_the_stream_filter():
     for size in (1, 2, 3, 7, 1000):
-        assert _stream(LONE, size) == (WORK + "The answer is 5.", 1), size
-        assert _stream(FENCED, size) == (FENCED, 0), size
-        assert _stream(LATER, size) == (LATER, 0), size
-        twice = LONE + " and </think> again"
-        assert _stream(twice, size) == (WORK + "The answer is 5. and </think> again", 1), size
-        assert _stream("a <think> b </think> c", size) == ("a <think> b </think> c", 0), size
+        assert _stream(LONE, size) == (WORK + "\nThe answer is 5.", 1), size
+        assert _stream(WORKED, size) == (WORKED.replace("</think>\n", ""), 1), size
+        for keep in (FENCED, LATER, INCODE, "a <think> b </think> c"):
+            assert _stream(keep, size) == (keep, 0), (size, keep)
+        twice = LONE + "\n</think>\nagain"
+        assert _stream(twice, size) == (WORK + "\nThe answer is 5.\n</think>\nagain", 1), size
 
 
 def _ask(text, stream, fmt="reasoning_content", thinking=False, tools=None, mode="raw"):
