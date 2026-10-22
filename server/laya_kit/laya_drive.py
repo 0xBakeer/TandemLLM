@@ -550,12 +550,11 @@ class Browser:
             if chrome is None:
                 raise SystemExit("no Chrome or Chromium found (set CHROME=...); or start one with "
                                  "--remote-debugging-port=9222 and pass --cdp http://127.0.0.1:9222")
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
             self.tmp = tempfile.mkdtemp(prefix="laya-drive-chrome-")
+            # OPS-231: Chrome picks its own debugging port (0) and writes it to DevToolsActivePort; a
+            # port picked here first and bound by Chrome later could be taken in between by another process
             self.proc = subprocess.Popen(
-                [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={self.tmp}",
+                [chrome, "--remote-debugging-port=0", f"--user-data-dir={self.tmp}",
                  "--no-first-run", "--no-default-browser-check", f"--window-size={width},{height}",
                  # Linux without unprivileged user namespaces (Ubuntu 23.10+) has no sandbox for
                  # it; Playwright starts Chromium the same way there
@@ -570,12 +569,29 @@ class Browser:
                  "--password-store=basic", "--use-mock-keychain",
                  *(["--headless=new"] if headless else []), "about:blank"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_spawn_kw())
-            cdp = f"http://127.0.0.1:{port}"
         try:
+            if cdp is None:
+                cdp = f"http://127.0.0.1:{self._active_port(chrome)}"
             self._attach(cdp, url, keys, chrome if self.proc is not None else None)
         except BaseException:
             self.close()                   # a page that never came up: its Chrome goes too
             raise
+
+    def _active_port(self, chrome: str) -> int:
+        """The debugging port the Chrome this started chose, from DevToolsActivePort in its profile."""
+        f = os.path.join(self.tmp, "DevToolsActivePort")
+        for _ in range(300):
+            try:
+                with open(f) as fh:
+                    first = fh.readline().strip()
+                if first.isdigit():
+                    return int(first)
+            except OSError:
+                pass
+            if self.proc.poll() is not None:
+                raise SystemExit(f"Chrome exited at its start ({self.proc.returncode}): {chrome}")
+            time.sleep(0.1)
+        raise SystemExit(f"Chrome wrote no debugging port in 30 s: {chrome}")
 
     def _attach(self, cdp: str, url: str, keys, chrome) -> None:
         target = None

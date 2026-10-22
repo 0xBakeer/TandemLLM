@@ -613,7 +613,8 @@ def test_10_page_check():
                            "--step", "expect:document.getElementById('name').value === 'Ada'",
                            "--step", "click:#pause", "--step", "shot:after-pause"])
         took = time.monotonic() - t0
-        print(f"    timer page: {rep['verdict']} in {took:.1f} s; read {rep['steps'][2]['value']}, "
+        steps = rep.get("steps") or [{}, {}, {}]
+        print(f"    timer page: {rep['verdict']} in {took:.1f} s; read {steps[2].get('value')}, "
               f"state {rep.get('state')}")
         assert code == 0 and rep["ok"], rep
         assert rep["steps"][2]["value"] in ("24:59", "24:58"), rep["steps"][2]
