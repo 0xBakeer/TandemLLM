@@ -351,12 +351,37 @@ def cmd_prices(a) -> None:
     stair = json.load(open(a.stair))
     bench = json.load(open(a.bench))
     plain = bench["graph"]["ms_token"]
-    out = {}
+    meas = {}
     for ctx, rows in stair["rows"].items():
         cls = K.CHUNK * K.class_of(int(ctx) + 16, int(a.max_len))
-        out[str(cls)] = {"chain": {str(r): v["ms"] for r, v in rows.items()}, "plain": {"1": plain}}
-    lo = min(out, key=int)
-    out = {("0" if k == lo else k): v for k, v in out.items()}
+        meas[cls] = {int(r): v["ms"] for r, v in rows.items()}
+    # the plain step of a class: its one-row verify scaled by the bench's plain/one-row ratio at the lowest class
+    # (the decode step reads the same KV as a one-row block; one plain price for every class put a 128k step at
+    # the 2k step's 7.4 ms against 23.9); every class from the lowest measured one up gets a row, the ones between
+    # two measured classes interpolated in log context, past the last the last
+    lo = min(meas)
+    ratio = plain / meas[lo][1]
+    ks = sorted(meas)
+    out = {}
+    import math
+    for n in K.classes(int(a.max_len)):
+        cls = K.CHUNK * n
+        if cls < ks[0]:
+            continue
+        if cls in meas:
+            tbl = meas[cls]
+        elif cls > ks[-1]:
+            # past the last measured class: its prices plus the extra KV a row block reads once (the 14 full
+            # layers' bytes a token at the measured bus rate)
+            extra = (cls - ks[-1]) / 2 * a.kv_bytes / (a.bus_gbs * 1e9) * 1e3
+            tbl = {r: round(v + extra, 3) for r, v in meas[ks[-1]].items()}
+        else:
+            a0 = max(k for k in ks if k < cls)
+            b0 = min(k for k in ks if k > cls)
+            w = (math.log(cls) - math.log(a0)) / (math.log(b0) - math.log(a0))
+            tbl = {r: round(meas[a0][r] + w * (meas[b0][r] - meas[a0][r]), 3) for r in meas[a0]}
+        out["0" if cls == lo else str(cls)] = {"chain": {str(r): v for r, v in sorted(tbl.items())},
+                                               "plain": {"1": round(tbl[1] * ratio, 3)}}
     out["step_ms"] = round(max(0.1, (stair["rows"][max(stair["rows"], key=int)]["16"]["ms"]
                                      - stair["rows"][max(stair["rows"], key=int)]["15"]["ms"])), 2)
     out["measured"] = (f"tools/flint_check.py staircase and bench on {os.path.basename(a.stair)}, "
@@ -414,6 +439,8 @@ def main() -> None:
     pr.add_argument("--bench", required=True)
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
+    pr.add_argument("--kv-bytes", type=int, default=28672, help="KV bytes a token (past the last measured class)")
+    pr.add_argument("--bus-gbs", type=float, default=210.0, help="the KV read rate (128k decode on 4.0: 211 GB/s)")
     a = ap.parse_args()
     {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "bundle": cmd_bundle,
      "mkbundle": cmd_mkbundle,
