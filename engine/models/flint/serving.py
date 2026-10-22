@@ -521,12 +521,14 @@ def serve(a, ctx) -> dict:
             ctx.log("[server] Flint self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
     fmt = "exl3" if info["exl3"] else "bf16"
+    # SPD-150: which cache the full layers keep, so a box can see FLINT_KV_FP8 took effect (/health's weights)
+    kv = "e4m3" if srv.fn.kv_fp8 else "bf16"
     describe = (f"Flint {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
-                f"{'lookup + StairCut' if drafter is not None else 'none'}, max_len {a.max_len:,},")
+                f"{'lookup + StairCut' if drafter is not None else 'none'}, KV cache {kv}, max_len {a.max_len:,},")
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"]}}}
+                                         "self_check": info["self_check"], "kv_cache": kv}}}

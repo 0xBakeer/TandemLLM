@@ -1226,6 +1226,8 @@ export interface SetupComponent {
   note: string | null;
   /** 1.0+: SetupAsset ids that must be on disk for it to load */
   assets: string[];
+  /** the KV bytes a token while it is on, in place of parallelism.kv_bytes_per_token (Flint's e4m3 cache) */
+  kv_bytes_per_token?: number | null;
 }
 
 /** A field of the methods and advanced steps. */

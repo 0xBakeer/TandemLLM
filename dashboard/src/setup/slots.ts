@@ -5,7 +5,7 @@
 // so the stepper and the bar can never disagree.
 
 import type { SetupModel, SetupSelection } from '../api/types';
-import { estimateLoose, GIB, KV_TYPICAL_TOKENS, overBy } from './estimate';
+import { estimateLoose, GIB, KV_TYPICAL_TOKENS, kvBytes, overBy } from './estimate';
 import { ENGINE_MAX_SLOTS } from './fields';
 import { S } from './strings';
 
@@ -57,8 +57,9 @@ export function chatCost(m: SetupModel, sel: SetupSelection): ChatCost {
   const p = m.parallelism;
   const side = Math.min(sel.side_window ?? sel.window, sel.window);
   const fill = p.typical_fill_tokens ?? KV_TYPICAL_TOKENS;
-  const full = (side * p.kv_bytes_per_token) / GIB;
-  const typical = (Math.min(side, fill) * p.kv_bytes_per_token) / GIB;
+  const kvb = kvBytes(m, sel);
+  const full = (side * kvb) / GIB;
+  const typical = (Math.min(side, fill) * kvb) / GIB;
   const c = p.side_slot_const_gib;
   return { now: c + (sel.kv_pool ? typical : full), full: c + full, window: side };
 }

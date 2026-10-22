@@ -140,13 +140,20 @@ export function categoryOf(m: SetupModel, id: string): PartCategory {
 
 const thousands = (n: number) => n.toLocaleString('en-US');
 
+/** The KV bytes a token: a component that is on and keeps the cache in fewer bytes says how many (Flint's e4m3
+ *  cache), else the model's (server/setup/estimate.py kv_bytes). */
+export function kvBytes(m: SetupModel, sel: SetupSelection): number {
+  for (const c of m.components) if (c.kv_bytes_per_token && sel.components?.[c.id]) return c.kv_bytes_per_token;
+  return m.parallelism.kv_bytes_per_token;
+}
+
 /** The estimate of a selection (checked first, as the server does). */
 export function estimate(m: SetupModel, selection: SetupSelection, availableGb: number | null = null): SetupEstimate {
   const sel = checkSelection(m, selection);
   const p = m.parallelism;
   const prof = profileOf(m, sel.profile);
   const dev = deviceOf(m, sel);
-  const kvb = p.kv_bytes_per_token;
+  const kvb = kvBytes(m, sel);
   const fill = p.typical_fill_tokens ?? KV_TYPICAL_TOKENS;
   const { slots, window } = sel;
   const side = sel.side_window;

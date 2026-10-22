@@ -17,7 +17,9 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - With thinking off, Flint's prompt gets one line before the conversation: "Answer directly. Do not show your reasoning." (SRV-697). Before, Flint wrote its reasoning into the answer on 8 of 10 hard asks greedy and 15 of 20 at its card's sampling, with a median of 582 and 534 tokens. With the line it did so on 2 of 10 and 2 of 20, with a median of 185 and 107 tokens. Thinking on is unchanged.
 - Flint's requests keep system and developer messages where they stand, with their own role, since its template renders them in place. The 27B's rule (one system prompt first) is now the default family setting, unchanged for the other models.
-- `FLINT_KV_FP8=1` keeps the 14 full layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 16,416 bytes a token instead of 28,672 (SPD-150). This changes the output, so it is off by default. On 4.0 against the exact cache, the last 1,024 tokens of a 32,768-token source file read at KL 0.070, 93.8 % top-1 agreement and perplexity 7.465 against 7.165. At 122,880 tokens the numbers are KL 0.050, 95.7 % and 4.132 against 4.053. Plain decode runs at 79.4 tok/s against 60.6 at 64k, 57.1 against 39.3 at 128k and 36.6 against 23.05 at 256k. Prompt reading is 5 to 12 % slower. [docs/flint.md](docs/flint.md) has the table.
+- `FLINT_KV_FP8=1` keeps the 14 full layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 14,784 bytes a token instead of 28,672 (SPD-150). This changes the output, so it is off by default. On 4.0 against the exact cache, the last 1,024 tokens of a 32,768-token source file read at KL 0.070, 93.8 % top-1 agreement and perplexity 7.465 against 7.165. At 122,880 tokens the numbers are KL 0.050, 95.7 % and 4.132 against 4.053. Plain decode runs at 79.4 tok/s against 60.6 at 64k, 57.1 against 39.3 at 128k and 36.6 against 23.05 at 256k. Prompt reading is 5 to 12 % slower. [docs/flint.md](docs/flint.md) has the table.
+  - To turn it on in the Setup Guide, pick Flint, go to the Tools step and switch on "Long-context cache (FP8)" under Features, then finish Review and Install. The switch shows the cost and the gain, and the memory bar counts the smaller cache.
+  - To turn it on from the command line, add `QWEN38_FLINT_KV_FP8=1` at the end of `~/TandemLLM/run/ops/serve.env` and run `~/TandemLLM/bin/tandem restart`. `/health` then shows `"kv_cache": "e4m3"` under `weights`. To turn it off, delete the line and restart, or switch it off in the Setup Guide.
 
 ### Model adapters
 
@@ -30,7 +32,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ### Tests and CI
 
-- The CPU job on GitHub runs every test file, and a failure fails it (OPS-231). Timing tests bound CPU time against a reference measured in the same run, and the two fp32 references bound their error in ulps. The slow-subscriber test gates its reader, and the drain test waits for its signal handler. The gate's fake engine runs in a process of its own. A test server binds before its port is read (`--port 0` works), and helpers that need a port up front take one from a locked counter.
+- The CPU job on GitHub runs every test file, and a failure fails it (OPS-231). Timing tests bound CPU time against a reference measured in the same run, the two fp32 references bound their error in ulps, and the padded-row check bounds its difference by 2 % of the largest value, a quarter of what padded rows that move the state change. The shared-module lint reads f-strings the same on every Python. The slow-subscriber test gates its reader, and the drain test waits for its signal handler. The gate's fake engine runs in a process of its own. A test server binds before its port is read (`--port 0` works), and helpers that need a port up front take one from a locked counter.
 
 ## 0.14.0, 2026-10-22
 

@@ -544,6 +544,194 @@
     },
     "fixed": {}
    }
+  },
+  "flint": {
+   "id": "flint",
+   "profiles": [
+    {
+     "id": "flint-exl3-4.0",
+     "label": "EXL3 4.0 bpw",
+     "weights_gib": 19.25,
+     "drafters_gib": 0.0,
+     "recommended": true,
+     "max_window": 262144
+    },
+    {
+     "id": "flint-exl3-6.0",
+     "label": "EXL3 6.0 bpw",
+     "weights_gib": 28.49,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "flint-bf16",
+     "label": "BF16 (Recursive)",
+     "weights_gib": 75.53,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gib": 1.0,
+      "kind": "fixed",
+      "source": "measured 2026-10-22 at load (4.0 pack, the lookup drafter): the engine 0.98, the drafters 0.05, the warm-up 0.02 GiB beyond the weights (server [memory] line)"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 1.5,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gib": 4.0,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Conductor",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": true,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.16,
+     "memory_max_gib": 2.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 14784
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 1,
+     "default": 1
+    },
+    "window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 262144,
+     "step": 4096
+    },
+    "side_window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 65536,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 28672,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
+   }
   }
  },
  "cases": [
@@ -6341,6 +6529,178 @@
     "room_gb": 19.17,
     "notes": [
      "About 524,288 tokens of conversation fit in all, 262,144 a slot when all 2 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flint, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "flint",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 45.0,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 19.25,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.0,
+      "kind": "kv",
+      "worst_gb": 7.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 28672,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.0,
+    "room_gb": 68.63,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flint, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "flint",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 41.61,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 19.25,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.61,
+      "kind": "kv",
+      "worst_gb": 3.61
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 14784,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.61,
+    "room_gb": 68.63,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
    }
   }

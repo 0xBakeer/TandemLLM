@@ -153,7 +153,13 @@ _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "w
                    # serve.env key -> {"on": value, "off": value}; checked in _cross (the keys are
                    # upper case, which the conductor's validator does not take as map keys)
                    "knobs": {"type": "object"},
-                   "assets": _IDS, "docs": _STR, "note": _NOTE})
+                   "assets": _IDS, "docs": _STR, "note": _NOTE,
+                   # the KV bytes a token while it is on (a cache kept in fewer bytes), in place of
+                   # parallelism.kv_bytes_per_token; optional
+                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1}},
+                  required=("id", "label", "group", "what", "default", "required", "memory_gib",
+                            "memory_max_gib", "elastic", "disk_gb", "depends_on", "conflicts", "knobs",
+                            "assets", "docs", "note"))
 _FIELD = _obj({"id": _ID, "label": _STR, "what": _STR, "type": {"enum": list(FIELD_TYPES)},
                "options": {"type": "array", "items": _obj({"value": _STR, "label": _STR})},
                "min": _NUM, "max": _NUM, "pattern": _STR,

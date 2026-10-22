@@ -415,6 +415,31 @@ components:
   assets: []
   docs: docs/caches.md
   note: null
+- id: kv_fp8
+  label: Long-context cache (FP8)
+  group: features
+  what: Keeps the conversation's keys and values in half the bytes, so long contexts decode faster, but the answers are no
+    longer exactly the model's own.
+  default: false
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    QWEN38_FLINT_KV_FP8:
+      'on': '1'
+      'off': '0'
+  assets: []
+  docs: docs/flint.md
+  note: 'Off by default: off keeps the exact model. On (SPD-150, measured on 4.0, 2026-10-22), the 14 full layers keep e4m3
+    codes, 14,784 bytes a token instead of 28,672; plain decode at 128k goes from 39.3 to 57.1 tok/s (64k 60.6 to 79.4, 256k
+    23.05 to 36.6), prompt reading is 5 to 12 % slower, and the output changes: KL 0.050 against the exact cache at 120k
+    tokens, 95.7 % top-1 agreement. Turn it on here (Tools, Features), or put QWEN38_FLINT_KV_FP8=1 at the end of
+    ~/TandemLLM/run/ops/serve.env and run ~/TandemLLM/bin/tandem restart; /health then shows weights.kv_cache e4m3.'
+  kv_bytes_per_token: 14784
 parallelism:
   slots:
     min: 1

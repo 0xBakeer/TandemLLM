@@ -188,12 +188,21 @@ def _r(x: float) -> float:
     return round(x, 2) + 0.0          # never -0.0
 
 
+def kv_bytes(m: dict, sel: dict) -> int:
+    """The KV bytes a token: a component that is on and keeps the cache in fewer bytes says how many
+    (Flint's e4m3 cache), else the model's."""
+    for c in m["components"]:
+        if c.get("kv_bytes_per_token") and sel["components"].get(c["id"]):
+            return int(c["kv_bytes_per_token"])
+    return int(m["parallelism"]["kv_bytes_per_token"])
+
+
 def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
     """The estimate of a checked selection (`check`), in the shape of `SetupEstimate`."""
     p = m["parallelism"]
     prof = registry.profile(m, sel["profile"])
     dev = next(d for d in m["devices"] if d["id"] == sel["device"])
-    kvb = int(p["kv_bytes_per_token"])
+    kvb = kv_bytes(m, sel)
     fill = int(p["typical_fill_tokens"])
     slots, window, side = sel["slots"], sel["window"], sel["side_window"]
     parts = [{"id": "os", "label": "The OS and other programs", "gb": dev["reserved_gib"],

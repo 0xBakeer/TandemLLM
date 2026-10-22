@@ -27,6 +27,8 @@ The test matrix:
      score buffer grows with the window; the context that fits is capped at the profile's largest
      window; 6.05 fits no window and says by how much; a window above a profile's largest is a 422;
      the fixture holds a case per pack at 131,072 and 262,144     test_flash_next_packs
+ 10  SPD-150, Flint's e4m3 cache: the fixture holds Flint with the cache off and on, so the page's copy
+     counts the component's 14,784 KV bytes a token as the server does   test_the_fixture
 
 Run: python tests/test_setup_estimate.py            (--write regenerates the fixture)
 """
@@ -55,6 +57,10 @@ def _m() -> dict:
 
 def _fn() -> dict:
     return registry.get("qwen3.8-flash-next")
+
+
+def _fl() -> dict:
+    return registry.get("flint")
 
 
 def _est(**kw) -> dict:
@@ -243,7 +249,11 @@ def _cases() -> list[dict]:
             out.append({"name": f"Flash-Next {p['id']}, window {w:,}",
                         "selection": {"model": f["id"], "profile": p["id"], "window": w}})
     out.append({"name": "Flash-Next, two slots (measured up to one)", "selection": {"model": f["id"], "slots": 2}})
-    models = {m["id"]: m, f["id"]: f}
+    fl = _fl()
+    for on in (False, True):
+        out.append({"name": f"Flint, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
+                    "selection": {"model": fl["id"], "components": {"kv_fp8": on}}})
+    models = {m["id"]: m, f["id"]: f, fl["id"]: fl}
     for c in out:
         mm = models[c["selection"].get("model", m["id"])] if c["selection"].get("model") in models else m
         try:
@@ -267,6 +277,10 @@ def _formula_model(m: dict) -> dict:
     for k, keep in FORMULA_KEYS.items():
         v = json.loads(json.dumps(m[k]))
         out[k] = [{f: x[f] for f in keep} for x in v] if keep else v
+    # SPD-150: a component's own KV bytes a token, where it has them
+    for x, src in zip(out["components"], m["components"]):
+        if src.get("kv_bytes_per_token"):
+            x["kv_bytes_per_token"] = src["kv_bytes_per_token"]
     # SRV-337's profile keys, where a profile has them (a 27B profile has none)
     for x, src in zip(out["profiles"], m["profiles"]):
         x.update({k: src[k] for k in ("max_window", "table", "components_gib") if k in src})
@@ -285,7 +299,7 @@ def _fixture() -> dict:
                      "every `error` case with that status and code. `model` is the part of the "
                      "model payload (GET /v1/setup/models/{id}) the formula reads. Regenerate with "
                      "python tests/test_setup_estimate.py --write after a registry change.",
-            "model": _formula_model(m), "models": {_fn()["id"]: _formula_model(_fn())}, "cases": _cases()}
+            "model": _formula_model(m), "models": {x["id"]: _formula_model(x) for x in (_fn(), _fl())}, "cases": _cases()}
 
 
 def test_the_fixture():

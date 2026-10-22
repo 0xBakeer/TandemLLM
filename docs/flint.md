@@ -74,7 +74,17 @@ At 128k a decode step spends 17.8 of its 25.3 ms in the 14 full layers' attentio
 
 ## The e4m3 KV cache (`FLINT_KV_FP8`, off)
 
-With `FLINT_KV_FP8=1` the 14 full layers keep each key and value as e4m3 codes with one fp32 scale a (head, token): 16,416 bytes a token instead of 28,672. The output is no longer the exact model's. The knob is off by default, and the exactness checks hold only with it off. The manifest names it `flint-kvfp8`, so its cache entries are never read by the exact cache.
+With `FLINT_KV_FP8=1` the 14 full layers keep each key and value as e4m3 codes with one fp32 scale a (head, token): 14,784 bytes a token instead of 28,672. The output is no longer the exact model's. The knob is off by default, and the exactness checks hold only with it off. The manifest names it `flint-kvfp8`, so its cache entries are never read by the exact cache.
+
+To turn it on in the Setup Guide (the dashboard's `#/setup`), pick Flint, go to the Tools step and switch on "Long-context cache (FP8)" under Features. Then finish Review and Install, which restarts the engine. To turn it off, switch it off there and install again.
+
+To turn it on from the command line, add this line at the end of `~/TandemLLM/run/ops/serve.env`:
+
+```
+QWEN38_FLINT_KV_FP8=1
+```
+
+Then run `~/TandemLLM/bin/tandem restart`. Check that it took: `curl -s localhost:8000/health` shows `"kv_cache": "e4m3"` under `weights`, and the engine log's load line says `KV cache e4m3`. To turn it off, delete the line and run `tandem restart` again; `/health` then shows `"kv_cache": "bf16"`. Use one way or the other: a line in serve.env wins over the Setup Guide's switch.
 
 Cost, 4.0, against the exact cache (`tools/flint_check.py kvfp8`). Each prompt is teacher-forced through 16-row verify blocks:
 
@@ -92,7 +102,7 @@ Speed, 4.0, in the engine, 64 greedy tokens at each point:
 | plain decode, e4m3 cache, tok/s | 79.4 | 57.1 | 36.6 |
 | prompt reading from the start, exact / e4m3, tok/s | 3,532 / 3,368 | 2,741 / 2,554 | 1,848 / 1,634 |
 
-Decode reads 57 % of the bytes and runs 31 to 59 % faster. Prompt reading is 5 to 12 % slower, since every chunk decodes the cached rows to BF16. The state for a 263,168-token window drops from 26.5 to 23.0 GiB. We ran each row once. We also tried per-channel key factors (powers of two, exact on the scores) on the same prompts. They helped some rows and hurt others, and the medians did not move, so we do not ship them.
+Decode reads about half the bytes and runs 31 to 59 % faster. Prompt reading is 5 to 12 % slower, since every chunk decodes the cached rows to BF16. The state for a 263,168-token window drops from 26.5 to 23.0 GiB. We ran each row once. We also tried per-channel key factors (powers of two, exact on the scores) on the same prompts. They helped some rows and hurt others, and the medians did not move, so we do not ship them.
 
 ## Drafting
 

@@ -80,7 +80,7 @@
           ]
         },
         "weights": {
-          "description": "the weight profile (ops/profiles/<name>.env): name, format, weights, hf_repo, drafters, draft_head, sample_nucleus; hf_revision (a branch of the repo) and max_window (the registry's largest window for the profile, null when it fits none; VIS-95) only where the profile has them; optional",
+          "description": "the weight profile (ops/profiles/<name>.env): name, format, weights, hf_repo, drafters, draft_head, sample_nucleus; kv_cache (Flint: bf16, or e4m3 with FLINT_KV_FP8), hf_revision (a branch of the repo) and max_window (the registry's largest window for the profile, null when it fits none; VIS-95) only where the profile has them; optional",
           "type": [
             "object",
             "null"
