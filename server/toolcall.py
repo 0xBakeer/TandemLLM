@@ -100,6 +100,8 @@ import re
 import time
 import uuid
 
+from server import callrepair
+
 OPEN = "<tool_call>"
 CLOSE = "</tool_call>"
 _BLOCK = re.compile(re.escape(OPEN) + r"(.*?)" + re.escape(CLOSE), re.S)
@@ -634,8 +636,15 @@ class ToolCallBuffer:
     """
 
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
-                 hold: bool = False, live: bool = True, fmt: str | None = None):
+                 hold: bool = False, live: bool = True, fmt: str | None = None,
+                 schemas: dict | None = None):
         self.calls: list[dict] = []
+        # SRV-691: the offered tools' parameters ({name: schema}); a call's argument names are matched to
+        # them (server/callrepair.py), on the stream as each key is decided and at the block's closer;
+        # `repairs` collects (tool, from, to)
+        self.schemas = schemas or {}
+        self.repairs: list = []
+        self._used: set = set()
         # the model's own form (a `ToolFormat`, server/toolformats): its reader reads and streams a
         # block of that form in place (`_parse`, `_stream_open`)
         self.fmt = _format(fmt) if fmt is not None else None
@@ -697,11 +706,19 @@ class ToolCallBuffer:
     def _parse(self, inner: str) -> list[dict] | None:
         """A closed block's calls: the format's own reading first (`fmt`), then `_parse_one` (a
         JSON or XML block still parses as one)."""
-        if self._reader is not None:
-            got = self._reader.parse(inner, self.types)
-            if got is not None:
-                return got
-        return _parse_one(inner, self.types)
+        got = self._reader.parse(inner, self.types) if self._reader is not None else None
+        if got is None:
+            got = _parse_one(inner, self.types)
+        if got and self.schemas:
+            # SRV-691: a call that streamed live keeps the names it streamed (the same rule decided them)
+            fixed = []
+            for c in got:
+                c2, r = callrepair.repair_call(c, self.schemas, gate=not self._block_streamed, types=self.types)
+                fixed.append(c2)
+                if not self._block_streamed:
+                    self.repairs += r
+            got = fixed
+        return got
 
     def _event(self, kind: str, name) -> None:
         self.events.append((time.perf_counter(), kind, name))
@@ -853,6 +870,10 @@ class ToolCallBuffer:
         if self.max_calls is not None and self._next_index >= self.max_calls:
             self._hold = True                            # over the cap: never streamed
             return False
+        if self.schemas and name not in self.schemas:
+            # SRV-693: a tool the request did not offer is mapped on the whole call, at its closer
+            self._hold = True
+            return False
         if name == self._previous_name():
             # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
             # repeat -- but a repeat already streamed cannot be taken back, so streaming
@@ -862,6 +883,7 @@ class ToolCallBuffer:
             self._hold = True
             return False
         self._stream_name = name
+        self._used = set()
         self._event("name", name)
         self._stream_index = self.take_index()
         self._block_streamed = True
@@ -880,6 +902,12 @@ class ToolCallBuffer:
         self._in_param = True
         self._value_started = False
         self._pending_ws = ""
+        to = (callrepair.rename_key(key, self.schemas.get(self._stream_name), self._used)
+              if self.schemas else None)
+        if to is not None:
+            self.repairs.append({"kind": "argument", "tool": self._stream_name, "from": key, "to": to})  # SRV-691
+            key = to
+        self._used.add(key)
         self._kinds = _kinds_of(self.types, self._stream_name).get(key)
         self._tval = ""
         lead_sep = "{" if self._first_param else ", "

@@ -549,6 +549,16 @@ class Supervisor:
                     return act
         return self._decide("SP2", ev, room)
 
+    def note_repairs(self, renamed: list) -> None:
+        """SRV-691, SRV-693: the tools and argument names the server matched to the offered tools, one
+        journal row each: {kind, tool, from, to}."""
+        for e in renamed:
+            tool_map = e.get("kind") == "tool"
+            self.journal.write(dict(self._base("SP3"), task="ARGS", rule="tool_names" if tool_map else "argument_names",
+                                    tier=0, mode="act", decision="MAP" if tool_map else "RENAME",
+                                    reason=f"{'map' if tool_map else 'rename'}({e['from']}->{e['to']})",
+                                    detail=dict(e), client=self.req.client, profile=self.req.profile))
+
     def check_answer(self, items: list[dict], final: bool = False, room=None,
                      pos: int | None = None) -> Action | None:
         """SP3: every call and every block that does not parse of the answer that ended, before

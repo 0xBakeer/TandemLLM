@@ -341,6 +341,9 @@ def _call_format(sup, block: str) -> str:
     "schema": dict(_MODE, description="the arguments against the tool's JSON schema (required "
                                       "keys, types): at most this mode"),
     "schema_text": dict(_TEXT, description="the reminder for a schema problem: {name}, {problem}"),
+    "unknown_text": dict(_TEXT, description="SRV-693: the reminder for a call to a tool the request did not "
+                                            "offer (and the server could not map): {name}, {tools} (the "
+                                            "offered ones); absent: such a call goes out as written"),
     "cut": {"enum": ["content", "give_up"],
             "description": "a call the token limit cut: content (as without the checks) or "
                            "GIVE_UP (nothing of half a call goes out); a call the client's own "
@@ -380,6 +383,15 @@ def malformed_call(ev, task, sup):
             return Action(REPAIR_CALL, reason=f"repair({', '.join(got[1])})",
                           detail={"arguments": same[0]["function"]["arguments"],
                                   "fixed": got[1]})
+    names = list(getattr(sup, "tool_names", None) or ())
+    if ev.name and names and ev.name not in names and task.get("unknown_text"):
+        # SRV-693: a tool the request did not offer, which the server could not map to an offered one
+        if done >= task["regenerations"]:
+            return Action(PASS, reason=f"fallback(regenerations={done})", detail={"name": ev.name})
+        return Action(REGENERATE_CALL, reason=f"unknown_tool({ev.name})",
+                      text=task["unknown_text"].replace("{name}", ev.name)
+                      .replace("{tools}", ", ".join(names[:24])),
+                      detail={"name": ev.name, "act": done + 1})
     if task["schema"] == "off" or ev.schema is None:
         return None
     problems = schema_problems(ev.arguments, ev.schema)

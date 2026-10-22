@@ -57,6 +57,7 @@ from server.stream import (  # noqa: E402
 )
 from engine.tree import DraftTree  # noqa: E402
 from server import toolformats  # noqa: E402  (ENG-407 the forms a model writes calls in)
+from server import callrepair  # noqa: E402  (SRV-691 argument names matched to the schema)
 from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
                              answer_items, parse_tool_calls, rewrite_native, schema_types,
                              strip_blocks)
@@ -2649,6 +2650,17 @@ def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
 
 #: a family that names no ServeSpec: the XML call form, a template that opens the reasoning block
 DEFAULT_SPEC = ServeSpec()
+
+
+def _call_repairs(cid: str, sup, renamed: list) -> None:
+    """SRV-691, SRV-693: the tools and argument names a request's calls had matched to the offered tools, in
+    the log and, under the conductor, in its journal: {kind, tool, from, to} each."""
+    if not renamed:
+        return
+    print(f"[call-repair] {cid} " + "; ".join(f"{e['kind']} {e['tool']}: {e['from']} -> {e['to']}" for e in renamed),
+          flush=True)
+    if sup is not None:
+        sup.note_repairs(renamed)
 
 
 def _tool_format() -> "toolformats.ToolFormat":
@@ -7591,6 +7603,8 @@ class Handler(BaseHTTPRequestHandler):
             for fname, keys in (tool_types or {}).items():
                 typed.setdefault(fname, {}).update({k: JSON_ANY for k in keys})
             tool_types = typed or None
+        # SRV-691: the offered tools' parameters, which a call's argument names are matched to
+        tool_schemas = callrepair.schemas_of(body.get("tools")) if parse_calls and body.get("tools") else {}
 
         # S1: a client's side request goes ahead of a waiting turn when it is short, and after
         # every waiting turn when it is not (the module's WAITERS)
@@ -8638,6 +8652,9 @@ class Handler(BaseHTTPRequestHandler):
                             if sup is not None and last_choice and not sup.checked and calls:
                                 # shadow: an answer cut short is still checked, and journaled
                                 sup.check_answer(calls, final=True)
+                        if calls and tool_schemas:
+                            calls, renamed = callrepair.repair_calls(calls, tool_schemas, tool_types)
+                            _call_repairs(cid, sup, renamed)
                         if refuse_calls and calls:
                             _refused(plan, cid, calls)
                             calls = []
@@ -8762,7 +8779,7 @@ class Handler(BaseHTTPRequestHandler):
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
-                                   live=not any(stops), fmt=_tool_format())
+                                   live=not any(stops), fmt=_tool_format(), schemas=tool_schemas)
                     if parse_calls else None)
             # SRV-425: a form whose blocks are rewritten into the buffer's JSON tier as they arrive has a
             # stream rewriter; a form the buffer reads in place (its reader) streams its arguments as written
@@ -9154,6 +9171,7 @@ class Handler(BaseHTTPRequestHandler):
                                    **(lp_take() if lpr is not None else NO_LP)))
                     if left or sweep:
                         w.flush()
+                    _call_repairs(cid, sup, tbuf.repairs)
                     if tbuf.calls and finish == "stop":
                         finish = "tool_calls"
                     if tbuf.calls:

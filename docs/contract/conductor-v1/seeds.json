@@ -585,6 +585,7 @@
     "repair": true,
     "schema": "shadow",
     "schema_text": "Your call to {name} was not run: {problem}. Write it again with the arguments its schema asks for.",
+    "unknown_text": "Your call to {name} was not run: this request offers no tool by that name. Use one of these tools: {tools}.",
     "cut": "give_up"
    },
    "C3": {
@@ -5615,6 +5616,11 @@
            "type": "string",
            "minLength": 1,
            "description": "the reminder for a schema problem: {name}, {problem}"
+          },
+          "unknown_text": {
+           "type": "string",
+           "minLength": 1,
+           "description": "SRV-693: the reminder for a call to a tool the request did not offer (and the server could not map): {name}, {tools} (the offered ones); absent: such a call goes out as written"
           },
           "cut": {
            "enum": [
