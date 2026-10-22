@@ -45,6 +45,52 @@
    "1": 7.456
   }
  },
- "step_ms": 0.27,
- "measured": "tools/flint_check.py staircase and bench on stair-4.0-f5.json, bench-4.0-f5.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut drafts and learns them online."
+ "131072": {
+  "chain": {
+   "1": 16.266,
+   "2": 19.24,
+   "3": 21.669,
+   "4": 23.589,
+   "5": 25.81,
+   "6": 28.046,
+   "7": 30.825,
+   "8": 33.392,
+   "9": 35.936,
+   "10": 38.108,
+   "11": 40.191,
+   "12": 43.601,
+   "13": 46.174,
+   "14": 48.846,
+   "15": 51.97,
+   "16": 52.931
+  },
+  "plain": {
+   "1": 7.456
+  }
+ },
+ "262144": {
+  "chain": {
+   "1": 25.12,
+   "2": 28.553,
+   "3": 31.442,
+   "4": 34.56,
+   "5": 37.856,
+   "6": 40.948,
+   "7": 44.385,
+   "8": 48.37,
+   "9": 52.345,
+   "10": 55.608,
+   "11": 61.431,
+   "12": 66.283,
+   "13": 69.847,
+   "14": 74.868,
+   "15": 79.818,
+   "16": 83.433
+  },
+  "plain": {
+   "1": 7.456
+  }
+ },
+ "step_ms": 3.62,
+ "measured": "tools/flint_check.py staircase and bench on stair-4.0-all.json, bench-4.0-f5.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut drafts and learns them online."
 }
