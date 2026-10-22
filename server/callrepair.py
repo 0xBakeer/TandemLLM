@@ -153,8 +153,9 @@ _TOOLS = (frozenset({"grep", "search", "rg", "ripgrep", "grepsearch", "searchfil
 
 
 def _shell_of(group, args: dict) -> str | None:
-    """The bash command for a search or a listing the client has no tool for (SRV-693): every value quoted,
-    none invented; None when the call has no pattern (a search) or is another kind of tool."""
+    """The bash command for a search or a listing the client has no tool for (SRV-693): read-only only (grep,
+    ls; never a write, a delete or a redirection), every value quoted, none invented; None when the call has
+    no pattern (a search) or is any other kind of tool, which C4 has written again."""
     import shlex
     pick = {_norm(k): v for k, v in args.items() if isinstance(v, (str, int, float))}
     if "grep" in group:

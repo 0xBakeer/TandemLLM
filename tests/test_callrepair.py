@@ -130,6 +130,15 @@ def test_a_tool_the_request_did_not_offer():
     c2, ev = CR.repair_call({"function": {"name": "grep", "arguments": json.dumps(
         {"pattern": "it's", "path": "src", "include": "*.py"})}}, only_bash)
     assert json.loads(c2["function"]["arguments"])["command"] == "grep -rn --include='*.py' -- 'it'\"'\"'s' src", c2
+    # read-only only: a write-like or delete-like tool never becomes bash, even when bash is offered
+    for name, args in (("write_file", {"path": "/a", "content": "x"}), ("delete_file", {"path": "/a"}),
+                       ("edit_file", {"path": "/a", "old": "x", "new": "y"})):
+        call = {"function": {"name": name, "arguments": json.dumps(args)}}
+        assert CR.repair_call(call, only_bash) == (call, []), name          # C4 writes it again
+    # a shell tool by another name is the client's shell with the model's own command, nothing composed
+    got, ev = CR.repair_call({"function": {"name": "run_command", "arguments": json.dumps({"cmd": "make test"})}},
+                             only_bash)
+    assert got["function"]["name"] == "bash" and json.loads(got["function"]["arguments"]) == {"command": "make test"}
     # nothing to map to: as written
     for name, args, schemas in (("grep", {"pattern": "x"}, {"read": READ}),              # no bash
                                 ("grep", {"path": "src"}, only_bash),                    # no pattern
