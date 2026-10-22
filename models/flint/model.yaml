@@ -93,8 +93,8 @@ profiles:
       routing is sensitive to rounding)
   assets_required: []
   note: 'Converted from the BF16 checkpoint (revision 2a247be0) by exllamav3 1.6.2 with our Flint architecture: every projection
-    at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 121.9 to 124.1 tok/s, prefill 4,652 tok/s at 4,096
-    tokens. Not published yet: the weights directory is filled by hand.'
+    at 4 bits, head 5. Measured 2026-10-22: 19.25 GiB at load, plain decode 133.5 to 134.2 tok/s (512 tokens), prefill 4,623 tok/s
+    at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
   max_window: 262144
 - id: flint-exl3-6.0
   label: EXL3 6.0 bpw
@@ -120,8 +120,8 @@ profiles:
       job, BF16 ppl 29.88); two BF16 forwards of the same weights differ by KL 0.034 / top-1 92.9 % on these rows (Flint's
       routing is sensitive to rounding)
   assets_required: []
-  note: 'Every projection at 6 bits, head 8. Measured 2026-10-22: 28.49 GiB at load, plain decode 90.8 to 91.7 tok/s, prefill
-    4,463 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
+  note: 'Every projection at 6 bits, head 8. Measured 2026-10-22: 28.49 GiB at load, plain decode 97.4 to 97.7 tok/s (512 tokens),
+    prefill 4,462 tok/s at 4,096 tokens. Not published yet: the weights directory is filled by hand.'
   max_window: 262144
 - id: flint-bf16
   label: BF16 (Recursive)
@@ -144,7 +144,7 @@ profiles:
     date: '2026-10-22'
     source: 'the reference; this engine''s ppl on the same 8 rows (exllamav3''s BF16 forward: 29.88)'
   assets_required: []
-  note: 'Recursive''s BF16 checkpoint as published. Measured 2026-10-22: 75.53 GiB at load, plain decode 40.4 to 40.8 tok/s.
+  note: 'Recursive''s BF16 checkpoint as published. Measured 2026-10-22: 75.53 GiB at load, plain decode 42.3 to 42.5 tok/s (512 tokens).
     Its window stays at 131,072 tokens so the chat sandbox keeps room beside it.'
   max_window: 131072
   hf_revision: 2a247be0c0aec895ccb0ac7ca92229ec6df37288
@@ -152,36 +152,36 @@ measurements:
   build: flint
   date: '2026-10-22'
   method: tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block,
-    SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack and FLINT_ANCHOR_BACKOFF=8;
-    every drafted text the plain run's
+    SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack, FLINT_ANCHOR_BACKOFF=8 and
+    FLINT_LOOK_BACKOFF=8, the first class's verify graphs captured at start; every drafted text the plain run's
   source: models/flint/measurements/2026-10-22-summary.json
   rows:
   - profile: flint-exl3-4.0
     build: flint
     date: '2026-10-22'
     comparable: true
-    note: The lookup cut by StairCut, anchor backoff 8, the price file; edit / copy asks 134.67 / 410.68 tok/s, a 2,048-token
-      game file 134.01; plain prose / chat / code / edit / copy 125.22 / 122.70 / 122.47 / 118.38 / 118.43 and the game file
-      119.34; every text the plain run's.
+    note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 142.28 /
+      480.01 tok/s, a 2,048-token game file 149.48; plain prose / chat / code / edit / copy 136.55 / 133.34 / 133.17 / 128.24 /
+      128.25 and the game file 129.34; every text the plain run's.
     cells:
       greedy_512:
         prose:
-        - 117.1
-        - 117.1
-        - 8.63
+        - 135.44
+        - 135.44
+        - 7.43
         - 1.01
         - 1
         chat:
-        - 123.52
-        - 123.52
-        - 8.58
-        - 1.06
+        - 133.98
+        - 133.98
+        - 7.82
+        - 1.05
         - 1
         code:
-        - 121.42
-        - 121.42
-        - 9.22
-        - 1.12
+        - 139.76
+        - 139.76
+        - 7.93
+        - 1.11
         - 1
     ttft_s: {}
     lossless: null
@@ -189,28 +189,57 @@ measurements:
     build: flint
     date: '2026-10-22'
     comparable: true
-    note: The lookup cut by StairCut, anchor backoff 8, the price file; edit / copy asks 99.46 / 289.54 tok/s, a 2,048-token
-      game file 105.29; plain prose / chat / code / edit / copy 91.86 / 90.71 / 90.75 / 88.24 / 88.26 and the game file 88.83;
-      every text the plain run's.
+    note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 107.27 /
+      353.42 tok/s, a 2,048-token game file 114.12; plain prose / chat / code / edit / copy 98.38 / 97.12 / 97.20 / 94.30 / 94.26
+      and the game file 94.96; every text the plain run's.
     cells:
       greedy_512:
         prose:
-        - 90.28
-        - 90.28
-        - 11.19
+        - 97.14
+        - 97.14
+        - 10.38
         - 1.01
         - 1
         chat:
-        - 92.33
-        - 92.33
-        - 11.7
-        - 1.08
+        - 98.5
+        - 98.5
+        - 10.88
+        - 1.07
         - 1
         code:
-        - 92.75
-        - 92.75
-        - 12.29
+        - 103.18
+        - 103.18
+        - 11.03
         - 1.14
+        - 1
+    ttft_s: {}
+    lossless: null
+  - profile: flint-bf16
+    build: flint
+    date: '2026-10-22'
+    comparable: true
+    note: The lookup cut by StairCut, anchor and lookup backoff 8, the price file; edit / copy asks 48.36 /
+      144.10 tok/s, a 2,048-token game file 42.46; plain prose / chat / code / edit / copy 42.61 / 42.43 / 42.43 / 41.85 / 41.86
+      and the game file 41.93; every text the plain run's.
+    cells:
+      greedy_512:
+        prose:
+        - 42.19
+        - 42.19
+        - 23.88
+        - 1.01
+        - 1
+        chat:
+        - 42.91
+        - 42.91
+        - 24.86
+        - 1.07
+        - 1
+        code:
+        - 50.86
+        - 50.86
+        - 25.84
+        - 1.32
         - 1
     ttft_s: {}
     lossless: null
