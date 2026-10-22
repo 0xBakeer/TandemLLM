@@ -491,7 +491,7 @@ export class MockConductor {
     const texts: Record<string, string> = {
       E1: 'You ended your turn without a tool call or an answer. Continue the task now with the next tool call.',
       D1: '\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n',
-      C4: 'Your tool call was not run: the <function=NAME> opener is malformed. Write the tool call again, complete, in the same format.',
+      C4: 'Your tool call was not run: the function opener is malformed. Write the tool call again, complete, in the same format: <tool_call>, <function=bash>, each argument as <parameter=command> (with that argument\'s own name), its value, </parameter>, </function>, </tool_call>.',
       C3: 'You ran `bash` with these arguments 2 times and got the same result each time (first line: RESULT: FAIL <- (a) summer island colour differs by 3.5 > 1.0). This call was not run. Do something different.',
     };
     let id = 0;

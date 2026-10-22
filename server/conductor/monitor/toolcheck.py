@@ -302,11 +302,30 @@ def _nth(texts: list, n: int) -> str:
     return texts[min(n, len(texts) - 1)]
 
 
+def _call_format(sup, block: str) -> str:
+    """C4's format line: a call in the model's own format, shown with a tool the request offers
+    -- the one the block names, else the first -- and one of its arguments (a required one
+    first). Never a placeholder name the model could copy into its next call."""
+    names = list(sup.tool_names or ())
+    if not names:
+        return toolcall.call_format(sup.req.tool_format or None, "the tool's name")
+    name = next((n for n in sorted(names, key=len, reverse=True)
+                 if re.search(r"(?<![\w.-])" + re.escape(n) + r"(?![\w.-])", block or "")),
+                names[0])
+    schema = sup._tool_meta()[2].get(name) or {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    req = [k for k in schema.get("required") or () if isinstance(k, str) and k in props]
+    keys = req + [k for k in props if k not in req]
+    return toolcall.call_format(sup.req.tool_format or None, name, keys[0] if keys else None)
+
+
 # ------------------------------------------------------------------ C4: malformed
 
 @register("malformed_call", "SP3", params={
     "texts": dict(_TEXTS, description="the reminder after a block that does not parse; {error} "
-                                      "is the parser's reason"),
+                                      "is the parser's reason, {format} how a call is written in "
+                                      "the model's own format, shown with a tool the request "
+                                      "offers (toolcall.call_format)"),
     "regenerations": dict(_COUNT, description="regenerations a request may spend on unreadable "
                                               "calls; then the block goes out as content, as "
                                               "without the checks"),
@@ -344,7 +363,8 @@ def malformed_call(ev, task, sup):
             return Action(PASS, reason=f"fallback(regenerations={done})",
                           detail={"error": ev.error})
         return Action(REGENERATE_CALL, reason=f"unreadable({ev.error})",
-                      text=_nth(task["texts"], done).replace("{error}", ev.error),
+                      text=_nth(task["texts"], done).replace("{error}", ev.error)
+                      .replace("{format}", _call_format(sup, ev.block)),
                       detail={"error": ev.error, "act": done + 1})
     if ev.block and task["repair"]:
         # it parsed, but without a parameter whose closer never came: close it and keep it

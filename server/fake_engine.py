@@ -62,6 +62,9 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`
                   (SRV-425; the server reads it when `STATE["tool_format"]` is "pythonic", as the
                   LFM2.5 adapter sets it); FAKE_PYTHONIC_BAD the block's list never closes
+    FAKE_ARGKEY     with `tools`: a sentence, then Flint's arg-key call to the first tool, a path and a
+                  three-line content (`tool_format` "argkey", as the Flint adapter sets it);
+                  FAKE_ARGKEY_BAD a block whose argument has no <arg_value>
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
@@ -281,6 +284,13 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         answer = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/tmp/mario.html\n"
                   "</parameter>\n<parameter=content>\n" + head + "const LEVEL = [\n"
                   + row * 3000)
+    if tools and "FAKE_ARGKEY" in user:
+        # Flint's arg-key form (tool_format "argkey"): a string argument of three lines
+        args = ("<arg_key>filePath</arg_key><arg_value>/tmp/notes.txt</arg_value><arg_key>content</arg_key>"
+                "<arg_value>line one\nline two\nline three\n</arg_value>")
+        if "FAKE_ARGKEY_BAD" in user:
+            args = "<arg_key>filePath</arg_key>/tmp/notes.txt"
+        answer = "Let me write it.<tool_call>" + tools[0] + args + "</tool_call>"
     if tools and "FAKE_PYTHONIC" in user:
         inner = f"[{tools[0]}(city='Berlin', days=3" + ("" if "FAKE_PYTHONIC_BAD" in user else ")]")
         answer = "Let me look that up.<|tool_call_start|>" + inner + "<|tool_call_end|>"

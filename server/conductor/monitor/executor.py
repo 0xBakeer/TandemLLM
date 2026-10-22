@@ -577,7 +577,7 @@ class Supervisor:
                                    schema=schemas.get(fn["name"]), final=final)
             else:
                 blk = it["bad"] if "bad" in it else it.get("cut", "")
-                ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk), cut="cut" in it,
+                ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk, self.req.tool_format or None), cut="cut" in it,
                                    stopped=bool(it.get("stop")), final=final)
             i += 1
             for task in tasks:

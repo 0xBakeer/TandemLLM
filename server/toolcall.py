@@ -85,6 +85,13 @@ checks may repair it, have the model write it again, or let it out as content af
 (`fallback()`). `cut()` drops everything held when the model is asked to write the calls of an
 answer again, and a block the token limit cut is kept in `cut_block`, not in the content.
 `answer_items()` reads a whole answer into the same items, for the checks at the end token.
+
+**A model's own form.** With `fmt="argkey"` (the server's tool_format for Flint) the buffer reads
+`<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>` itself: the name goes out
+with the first argument's opener, a string value streams exactly as written (the form's values are
+not trimmed), a typed one at its closer, and a block that is not the form stays the text it was.
+The whole-answer paths read it after `rewrite_native()`. Pythonic blocks are rewritten before the
+buffer (`PythonicCalls`).
 """
 
 from __future__ import annotations
@@ -413,9 +420,11 @@ def strip_blocks(text: str) -> str:
     return text[:k] if k >= 0 else text
 
 
-def diagnose(inner: str) -> str:
+def diagnose(inner: str, fmt: str | None = None) -> str:
     """Why a block does not parse, in one line a model can act on (the hidden reminder quotes
-    it). Only called for a block `_parse_one` refused."""
+    it). Only called for a block `_parse_one` refused. `fmt` is the model's own call format
+    (the server's tool_format; "argkey" reads the arg-key form). The line never holds a
+    placeholder such as a NAME the model could copy into its next call."""
     s = inner.strip()
     if not s:
         return "the tool call block is empty"
@@ -425,13 +434,15 @@ def diagnose(inner: str) -> str:
         except ValueError as exc:
             return f"the JSON in the tool call does not parse ({exc})"
         return "the JSON in the tool call is not a call: it needs a name and its arguments"
+    if fmt == "argkey":
+        return _argkey_diagnose(inner)
     m = _FUNC_OPEN.search(inner)
     if m is None:
         if "<function" in inner:
-            return "the <function=NAME> opener is malformed"
-        return "the block has no <function=NAME> opener"
+            return "the function opener is malformed"
+        return "the block has no function opener"
     if not _tag_name(m):
-        return "the <function=...> opener has no name"
+        return "the function opener has no tool name"
     rest = inner[m.end():]
     for pm in _PARAM_OPEN.finditer(rest):
         if rest.find(PARAM_CLOSE, pm.end()) < 0:
@@ -623,8 +634,11 @@ class ToolCallBuffer:
     """
 
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
-                 hold: bool = False, live: bool = True):
+                 hold: bool = False, live: bool = True, fmt: str | None = None):
         self.calls: list[dict] = []
+        # the model's own call format (the server's tool_format): "argkey" reads and streams the
+        # arg-key form natively (`_stream_argkey`, `_parse`), its values exact as written
+        self.fmt = fmt
         self.hold = bool(hold)
         # `live=False`: no call streams its arguments as they are written; each goes out whole
         # when its block closes (the end-of-stream sweep). The server passes it for a request
@@ -673,9 +687,21 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
+        self._ak: bool | None = None      # the open block is in the arg-key form (None: not yet read)
+        self._ak_name: str | None = None  # its tool's name, until the first argument's opener
         # `(perf_counter, kind, name)` at a block's open, a function's name and a block's
         # close -- once per call, never per piece -- for the live view; the newest 16 are kept
         self.events: list[tuple] = []
+
+    def _parse(self, inner: str) -> list[dict] | None:
+        """A closed block's calls: `_parse_one`, and in the arg-key format (`fmt`) its own form
+        first, as `argkey_calls` reads it (a JSON or XML block still parses as one)."""
+        if self.fmt == "argkey" and inner.lstrip()[:1] not in ("{", "["):
+            got = argkey_calls(inner)
+            if got is not None:
+                name, args = got[0]["name"], got[0]["arguments"]
+                return [_call(name, _typed(name, args, self.types))]
+        return _parse_one(inner, self.types)
 
     def _event(self, kind: str, name) -> None:
         self.events.append((time.perf_counter(), kind, name))
@@ -821,8 +847,145 @@ class ToolCallBuffer:
         self._first_param = True
         self._kinds, self._tval = None, ""
 
+    def _start_function(self, name: str) -> bool:
+        """A function's name is complete: its first delta (id, name), or False when it is not
+        streamed (over the cap, or an echo) and goes out at closure instead."""
+        if self.max_calls is not None and self._next_index >= self.max_calls:
+            self._hold = True                            # over the cap: never streamed
+            return False
+        if name == self._previous_name():
+            # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
+            # repeat -- but a repeat already streamed cannot be taken back, so streaming
+            # delivered two and JSON one. A function whose name repeats the call before it
+            # is not streamed live: it goes out at closure, through the end-of-stream
+            # sweep, if `_add` keeps it at all.
+            self._hold = True
+            return False
+        self._stream_name = name
+        self._event("name", name)
+        self._stream_index = self.take_index()
+        self._block_streamed = True
+        self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
+                               "name": name, "args": ""})
+        self._deltas.append({"index": self._stream_index,
+                             "id": self._streamed[-1]["id"], "type": "function",
+                             "function": {"name": name, "arguments": ""}})
+        return True
+
+    def _open_param(self, key: str) -> None:
+        """A parameter's opener: the key's delta. A typed value is short (a number, a flag, a
+        small list) and must be read whole before it can be written as JSON: it is held to its
+        closer. A string value streams as it is written (a whole-file `content` is thousands of
+        tokens)."""
+        self._in_param = True
+        self._value_started = False
+        self._pending_ws = ""
+        self._kinds = _kinds_of(self.types, self._stream_name).get(key)
+        self._tval = ""
+        lead_sep = "{" if self._first_param else ", "
+        self._first_param = False
+        self._delta_args(lead_sep + json.dumps(key)
+                         + (": " if self._kinds is not None else ': "'))
+
+    def _close_param(self, exact: bool = False) -> None:
+        """A parameter's closer: a typed value as the JSON value `_typed` makes of it (trimmed as
+        the collector trims, or `exact` as the arg-key form reads it), a string's closing quote."""
+        self._pending_ws = ""
+        if self._kinds is not None:
+            raw = self._tval if exact else _TRIM.match(self._tval).group(1)
+            self._delta_args(json.dumps(convert(raw, self._kinds)))
+            self._kinds, self._tval = None, ""
+        else:
+            self._delta_args('"')
+        self._in_param = False
+
+    def _stream_argkey(self, limit: int) -> None:
+        """`_stream_open` for a block in the arg-key form: the tool's name, then
+        `<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>` per argument, read as `argkey_calls`
+        reads them. A string value streams exactly as written (no trimming: the parse keeps it
+        so); a typed one is held to its closer. Anything the form does not allow stops the
+        stream, and the closer's parse decides what the client gets (`_credit_streamed`)."""
+        ak, av, ak_end, av_end = "<arg_key>", "<arg_value>", "</arg_key>", "</arg_value>"
+        while True:
+            if self._hold or self._done_params:
+                return
+            rest = self._buf[self._pos:limit]
+            if self._stream_name is None and self._ak_name is None:
+                if self._streamed:
+                    self._done_params = True                 # one call a block
+                    return
+                lt = rest.find("<")
+                if lt < 0:
+                    return                                   # the name is still being written
+                tail = rest[lt:]
+                if _is_prefix_of(tail, ak) or _is_prefix_of(tail, CLOSE):
+                    return                                   # a tag still being written
+                name = rest[:lt].strip()
+                if not tail.startswith(ak) or not name or "\n" in name:
+                    self._done_params = True                 # not this form: the parse decides
+                    return
+                self._pos += lt
+                # the name goes out with the first argument's opener, once the block has shown
+                # it is the form: a block that is not goes out whole as the text it was
+                self._ak_name = name
+                continue
+            if not self._in_param:
+                stripped = rest.lstrip(_WS)
+                lead = len(rest) - len(stripped)
+                if not stripped:
+                    self._pos += lead
+                    return
+                if not stripped.startswith(ak):
+                    # the next key or the block's closer may still be on its way
+                    if not (_is_prefix_of(stripped, ak) or _is_prefix_of(stripped, CLOSE)):
+                        self._done_params = True
+                    return
+                k = stripped.find(ak_end)
+                if k < 0:
+                    return                                   # the key is still being written
+                after = stripped[k + len(ak_end):]
+                val = after.lstrip(_WS)
+                if not val.startswith(av):
+                    if val and not _is_prefix_of(val, av):
+                        self._done_params = True
+                    return
+                if self._stream_name is None:
+                    name, self._ak_name = self._ak_name, None
+                    if not self._start_function(name):
+                        return
+                self._pos += lead + len(stripped) - len(val) + len(av)
+                self._open_param(stripped[len(ak):k].strip())
+                continue
+            lt = rest.find("<")
+            if lt < 0:
+                self._pos += len(rest)
+                self._value(rest)
+                return
+            tail = rest[lt:]
+            if _is_prefix_of(tail, av_end):
+                self._pos += lt
+                self._value(rest[:lt])
+                return
+            if tail.startswith(av_end):
+                self._value(rest[:lt])
+                self._close_param(exact=True)
+                self._pos += lt + len(av_end)
+                continue
+            self._pos += lt + 1
+            self._value(rest[:lt + 1])
+
     def _stream_open(self, limit: int) -> None:
         """Consume the open block as far as it is safe, vending argument deltas."""
+        if self.fmt == "argkey" and self._ak is None and not self._hold:
+            head = self._buf[self._pos:limit].lstrip(_WS)
+            if not head:
+                return
+            # the arg-key form begins with the tool's name; a `<function=` or JSON block is read
+            # by the machine below as in every other format
+            self._ak = head[0] not in "<{["
+        if self._ak:
+            self._stream_argkey(limit)
+            return
         while True:
             if self._hold:
                 return
@@ -846,26 +1009,8 @@ class ToolCallBuffer:
                 if not name:
                     self._done_params = True
                     return
-                if self.max_calls is not None and self._next_index >= self.max_calls:
-                    self._hold = True                            # over the cap: never streamed
+                if not self._start_function(name):
                     return
-                if name == self._previous_name():
-                    # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
-                    # repeat -- but a repeat already streamed cannot be taken back, so streaming
-                    # delivered two and JSON one. A function whose name repeats the call before it
-                    # is not streamed live: it goes out at closure, through the end-of-stream
-                    # sweep, if `_add` keeps it at all.
-                    self._hold = True
-                    return
-                self._stream_name = name
-                self._event("name", name)
-                self._stream_index = self.take_index()
-                self._block_streamed = True
-                self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
-                                       "name": name, "args": ""})
-                self._deltas.append({"index": self._stream_index,
-                                     "id": self._streamed[-1]["id"], "type": "function",
-                                     "function": {"name": name, "arguments": ""}})
                 continue
             if self._done_params:
                 return
@@ -881,18 +1026,7 @@ class ToolCallBuffer:
                 if tag is not None:
                     key, k = tag
                     self._pos += lead + k
-                    self._in_param = True
-                    self._value_started = False
-                    self._pending_ws = ""
-                    # A typed value is short (a number, a flag, a small list) and must be read whole
-                    # before it can be written as JSON: it is held to its closer. A string value
-                    # streams as it is written (a whole-file `content` is thousands of tokens).
-                    self._kinds = _kinds_of(self.types, self._stream_name).get(key)
-                    self._tval = ""
-                    lead_sep = "{" if self._first_param else ", "
-                    self._first_param = False
-                    self._delta_args(lead_sep + json.dumps(key)
-                                     + (": " if self._kinds is not None else ': "'))
+                    self._open_param(key)
                     continue
                 if stripped.startswith("</function>"):
                     self._pos += lead + len("</function>")
@@ -931,15 +1065,7 @@ class ToolCallBuffer:
                 return
             if tail.startswith("</parameter>"):
                 self._value(rest[:lt])
-                self._pending_ws = ""
-                if self._kinds is not None:
-                    # the collector's trim, then the same conversion `_typed` applies
-                    self._delta_args(json.dumps(convert(_TRIM.match(self._tval).group(1),
-                                                        self._kinds)))
-                    self._kinds, self._tval = None, ""
-                else:
-                    self._delta_args('"')
-                self._in_param = False
+                self._close_param()          # the collector's trim, then `_typed`'s conversion
                 self._pos += lt + len("</parameter>")
                 continue
             self._pos += lt + 1
@@ -954,6 +1080,9 @@ class ToolCallBuffer:
 
     def _emit_value(self, text: str) -> None:
         if not text:
+            return
+        if self._ak:
+            self._delta_args(_esc(text))              # the arg-key form: exact, as written
             return
         out = []
         for ch in text:
@@ -1071,6 +1200,7 @@ class ToolCallBuffer:
                 self._pending_ws = ""
                 self._first_param = True
                 self._done_params = False
+                self._ak, self._ak_name = None, None
                 self._kinds, self._tval = None, ""
                 if not self.live:
                     self._hold = True        # this block goes out at closure, whole, or as text
@@ -1084,7 +1214,7 @@ class ToolCallBuffer:
             inner = self._buf[:j]
             self._buf = self._buf[j + len(CLOSE):]
             self._open = False
-            parsed = _parse_one(inner, self.types)
+            parsed = self._parse(inner)
             self._event("close", [c["function"]["name"] for c in parsed] if parsed else None)
             if parsed:
                 self._credit_streamed(parsed)
@@ -1144,7 +1274,7 @@ class ToolCallBuffer:
             if not self.hold:
                 self._stream_open(len(self._buf))
                 self._block_ends()
-            parsed = _parse_one(self._buf, self.types)
+            parsed = self._parse(self._buf)
             if parsed:
                 self._buf, self._open = "", False
                 self._event("close", [c["function"]["name"] for c in parsed])
@@ -1393,6 +1523,61 @@ class ArgKeyCalls(PythonicCalls):
             return self._close(buf, closed=False)
         self.bad += 1
         return OPEN + buf
+
+
+def _argkey_diagnose(inner: str) -> str:
+    """`diagnose` for an arg-key block `argkey_calls` refused."""
+    i = inner.find("<arg_key>")
+    name = (inner if i < 0 else inner[:i]).strip()
+    if not name:
+        return "the block does not begin with the tool's name"
+    if "<" in name or "\n" in name:
+        return "the tool's name is not followed by its first <arg_key>"
+    rest = inner[i:]
+    pos = 0
+    for m in re.finditer(r"<arg_key>", rest):
+        if m.start() < pos:
+            continue
+        k = rest.find("</arg_key>", m.end())
+        if k < 0:
+            return "an <arg_key> has no </arg_key>"
+        key = rest[m.end():k].strip()
+        v = rest.find("<arg_value>", k)
+        if v < 0 or rest[k + len("</arg_key>"):v].strip():
+            return f"argument '{key}' has no <arg_value> after its </arg_key>"
+        e = rest.find("</arg_value>", v)
+        if e < 0:
+            return f"argument '{key}' has no </arg_value>"
+        pos = e + len("</arg_value>")
+    return "there is text between the arguments that is not an argument"
+
+
+def call_format(fmt: str | None, name: str, key: str | None = None) -> str:
+    """How one call is written in the model's own format (`fmt`, the server's tool_format), shown
+    with a tool the request offers (`name`) and one of its arguments (`key`): the hidden
+    reminder's format line. It holds no placeholder the model could copy as a name or a key."""
+    if fmt == "argkey":
+        args = (f"then each argument as <arg_key>{key}</arg_key> (with that argument's own "
+                f"name), <arg_value>, its value, </arg_value>, " if key else "")
+        return f"<tool_call>{name}, {args}then </tool_call>"
+    if fmt == "pythonic":
+        args = (f", each argument a keyword argument such as {key}= (with that argument's own "
+                f"name) with its value as a Python literal" if key else "")
+        return f"{PY_OPEN}, a Python list holding the call to {name}{args}, then {PY_CLOSE}"
+    args = (f"each argument as <parameter={key}> (with that argument's own name), its value, "
+            f"</parameter>, " if key else "")
+    return f"<tool_call>, <function={name}>, {args}</function>, </tool_call>"
+
+
+def rewrite_native(text: str, fmt: str | None, eos: bool = False) -> str:
+    """`text` with the blocks of the model's own call format (`fmt`) in this module's JSON tier,
+    as the stream's rewrite (`PythonicCalls`, `ArgKeyCalls`) and the final parse read them; the
+    text as it is for the default format."""
+    if fmt == "pythonic":
+        return rewrite_pythonic(text, eos=eos)
+    if fmt == "argkey":
+        return rewrite_argkey(text, eos=eos)
+    return text
 
 
 def rewrite_argkey(text: str, eos: bool = False) -> str:

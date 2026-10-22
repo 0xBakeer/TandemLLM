@@ -126,8 +126,8 @@ tasks:
     rule: malformed_call
     mode: act
     texts:
-      - "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: <tool_call>, <function=NAME>, one <parameter=KEY>value</parameter> per argument, </function>, </tool_call>."
-      - "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: <tool_call>, <function=NAME>, <parameter=KEY>value</parameter> for every argument, </function>, </tool_call>."
+      - "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: {format}."
+      - "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: {format}."
     regenerations: 2
     repair: true
     schema: shadow

@@ -56,8 +56,8 @@ from server.stream import (  # noqa: E402
     answer_stops, drop_stray_close, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ArgKeyCalls, PythonicCalls, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, rewrite_argkey, rewrite_pythonic, schema_types,
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_argkey, rewrite_native, rewrite_pythonic, schema_types,
                              strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
@@ -2404,6 +2404,10 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
+    fmt = STATE.get("tool_format")
+    # the checks read the model's own call format as the stream and the final parse do: an
+    # arg-key or Pythonic call is a call here too, not a block that does not parse
+    answer = rewrite_native(answer, fmt, eos=True)
     calls = ""
     sup.lift_ids = None
     if (not answer.strip() and getattr(sup.req, "tools_offered", False)
@@ -2414,7 +2418,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
                                   think.end_id if think is not None else None)
             if ids:
                 sup.lift_ids = ids
-                calls = STATE["tok"].decode(ids, skip_special_tokens=False)
+                calls = rewrite_native(STATE["tok"].decode(ids, skip_special_tokens=False), fmt,
+                                       eos=True)
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
     # the block's tokens before the end token (`extra`) reach the client after this returns: the
@@ -2529,6 +2534,9 @@ def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
     m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
     if m:
         name = m.group(1)
+    elif STATE.get("tool_format") == "argkey":
+        m = re.match(r"\s*([^<\s]+)\s*<arg_key>", tbuf.open_text() or "")    # the arg-key form
+        name = m.group(1) if m else None
     act = STATE.get("argloop", "on") == "on" and sup is not None and sup.mode == "on"
     v.detail["streamed"] = bool(tbuf.open_streamed)
     print(f"[argloop] {cid} {'stopped' if act else 'would stop'} {name or '?'}: "
@@ -8132,7 +8140,8 @@ class Handler(BaseHTTPRequestHandler):
                     constrained=gram is not None,
                     profile=plan.res.profile if plan is not None and plan.active else "",
                     cls=str((plan.row or {}).get("class_id") or "")
-                    if plan is not None and plan.active else "")
+                    if plan is not None and plan.active else "",
+                    tool_format=str(STATE.get("tool_format") or ""))
                 # one session for the router and the monitor: the router's key when it has one
                 sup = rec.sup = mon.begin(
                     mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,
@@ -8744,13 +8753,13 @@ class Handler(BaseHTTPRequestHandler):
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
-                                   live=not any(stops))
+                                   live=not any(stops), fmt=STATE.get("tool_format"))
                     if parse_calls else None)
             # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
             # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
             # a model that writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` (tool_format
-            # argkey): the same rewrite into the buffer's JSON tier (`ArgKeyCalls`)
-            pyc = ({"pythonic": PythonicCalls, "argkey": ArgKeyCalls}.get(STATE.get("tool_format"))
+            # argkey) is read by the buffer itself, so its string arguments stream as they are written
+            pyc = ({"pythonic": PythonicCalls}.get(STATE.get("tool_format"))
                    if tbuf is not None else None)
             pyc = pyc() if pyc is not None else None
             rec.live_refs = (think, tbuf)

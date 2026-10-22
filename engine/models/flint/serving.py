@@ -496,7 +496,7 @@ def serve(a, ctx) -> dict:
     """Recursive's Flint from a BF16 checkpoint or an EXL3 pack for the server (`--model <dir>`, the registry's
     `serve`; server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
     lookup cut by StairCut (`lookup_drafter`, FLINT_LOOKUP, gated by the load-time self-check). Tool calls in the
-    checkpoint's own format (`tool_format` "argkey", server/toolcall.py `ArgKeyCalls`)."""
+    checkpoint's own format (`tool_format` "argkey", read and streamed by server/toolcall.py `ToolCallBuffer`)."""
     from transformers import AutoTokenizer
 
     from engine.spec import Relax
