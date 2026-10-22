@@ -541,13 +541,30 @@ class Supervisor:
         if (not ev.inside and ev.answer and self._at["SP3"] and self.req.tools_offered
                 and self.req.n == 1):
             from server.toolcall import answer_items
-            items = answer_items(ev.answer, self.tool_names or None, eos=True,
-                                 types=self.tool_types)
+            items = self.as_sent(answer_items(ev.answer, self.tool_names or None, eos=True,
+                                              types=self.tool_types))
             if items:
                 act = self.check_answer(items, room=room, pos=ev.pos)
                 if act is not None:
                     return act
         return self._decide("SP2", ev, room)
+
+    def as_sent(self, items: list, events: list | None = None) -> list:
+        """SRV-691: the calls of `items` as the server sends them, their tools and argument names matched to
+        the offered ones (server/callrepair.py), so the checks judge what the client gets; the changes are
+        added to `events` when given (the release journals them)."""
+        from server import callrepair
+        schemas = self._tool_meta()[2]
+        if not schemas:
+            return items
+        out = []
+        for it in items:
+            if "function" in it:
+                it, ev = callrepair.repair_call(it, schemas, types=self.tool_types)
+                if events is not None:
+                    events += ev
+            out.append(it)
+        return out
 
     def note_repairs(self, renamed: list) -> None:
         """SRV-691, SRV-693: the tools and argument names the server matched to the offered tools, one

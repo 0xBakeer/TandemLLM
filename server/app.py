@@ -2606,7 +2606,8 @@ def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list,
     if cuts:
         k = max(cuts)                 # every earlier segment is inside the last one's prefix
         answer = strip_blocks(answer[:k]) + answer[k:]
-    items = answer_items(answer, names, eos=eos, types=types)
+    renamed: list = []
+    items = sup.as_sent(answer_items(answer, names, eos=eos, types=types), renamed)
     if stopped:
         items = [dict(it, stop=True) if "cut" in it else it for it in items]
     if not sup.checked and items:
@@ -2614,6 +2615,7 @@ def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list,
     content, calls = parse_tool_calls(answer, names=names, eos=eos, types=types)
     if sup.gave_up:
         return strip_blocks(content), []
+    _call_repairs(sup.req.request_id, sup, renamed)
     out = []
     for it in items:
         if "function" in it:
