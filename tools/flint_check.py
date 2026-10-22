@@ -307,12 +307,15 @@ def _kl_rows(p_logits: torch.Tensor, q_logits: torch.Tensor, tgt: torch.Tensor) 
 def cmd_kvfp8(a) -> None:
     """FLINT_KV_FP8 against the exact cache, one engine with both states: each bundle row prefilled to
     `--start` tokens, the rest teacher-forced through `--block`-row verify blocks that read the cache (the
-    path decode and drafting take); then one long prompt of held-out text to `--long` tokens, its last
-    `--tail` tokens teacher-forced the same way. KL, top-1 and perplexity of the e4m3 cache against the bf16."""
+    path decode and drafting take); then a long prompt at each `--long` length (comma separated), its last
+    `--tail` tokens teacher-forced the same way: held-out text repeated, or with `--long-file` the first tokens of
+    one text that does not repeat. KL, top-1 and perplexity of the e4m3 cache against the bf16, each over the
+    rows that have a next token."""
     from safetensors.torch import load_file
     from engine.models.flint.engine import ROWS_MAX
     from transformers import AutoTokenizer
-    idx, eng, info = _engine(a.model, max(a.max_len, a.long + 64))
+    longest = max(int(x) for x in str(a.long).split(","))
+    idx, eng, info = _engine(a.model, max(a.max_len, longest + 64))
     c = eng.cfg
 
     def state(fp8: bool):
@@ -320,7 +323,7 @@ def cmd_kvfp8(a) -> None:
         if fp8 and eng._kst is None:
             eng._kst = torch.zeros(c.num_key_value_heads, ROWS_MAX + 1, c.head_dim, dtype=eng.dtype, device=eng.device)
             eng._vst = torch.zeros_like(eng._kst)
-        return eng.new_state(max(a.max_len, a.long + 64))
+        return eng.new_state(max(a.max_len, longest + 64))
     d = load_file(os.path.join(a.bundle, "input_ids.safetensors"))
     ids = d["input_ids"] if "input_ids" in d else torch.cat([d[f"tensor.{i}"] for i in range(len(d))])
     ids = ids.view(-1, ids.shape[-1])
@@ -335,14 +338,22 @@ def cmd_kvfp8(a) -> None:
     print(json.dumps({"bundle": res["bundle"]}), flush=True)
     tok = AutoTokenizer.from_pretrained(a.model)
     root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench")
-    text = "\n\n".join(open(os.path.join(root, f)).read() for f in ("heldout_prose.txt", "heldout_code.txt", "calib.txt"))
-    base = tok(text, add_special_tokens=False)["input_ids"]
-    lid = torch.tensor((base * (a.long // len(base) + 1))[:a.long])
-    s0 = a.long - a.tail
-    p = _teacher(eng, state(False), lid, s0, a.block)
-    q = _teacher(eng, state(True), lid, s0, a.block)
-    res["long"] = {"tokens": a.long, "tail": a.tail, **_kl_rows(p, q, lid[s0 + 1:].long())}
-    print(json.dumps({"long": res["long"]}), flush=True)
+    if a.long_file:
+        # one long text that does not repeat (a source file): the prompt is its first `long` tokens
+        base = tok(open(a.long_file).read(), add_special_tokens=False)["input_ids"]
+    else:
+        text = "\n\n".join(open(os.path.join(root, f)).read() for f in ("heldout_prose.txt", "heldout_code.txt",
+                                                                          "calib.txt"))
+        base = tok(text, add_special_tokens=False)["input_ids"]
+    for n in [int(x) for x in str(a.long).split(",")]:
+        if a.long_file and n > len(base):
+            raise SystemExit(f"{a.long_file}: {len(base)} tokens, fewer than {n}")
+        lid = torch.tensor((base * (n // len(base) + 1))[:n])
+        s0 = n - a.tail
+        p = _teacher(eng, state(False), lid, s0, a.block)
+        q = _teacher(eng, state(True), lid, s0, a.block)
+        res.setdefault("long", {})[str(n)] = {"tokens": n, "tail": a.tail, **_kl_rows(p[:-1], q[:-1], lid[s0 + 1:].long())}
+        print(json.dumps({"long": {str(n): res["long"][str(n)]}}), flush=True)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 
@@ -500,7 +511,8 @@ def main() -> None:
     kv.add_argument("--bundle", required=True)
     kv.add_argument("--start", type=int, default=128)
     kv.add_argument("--block", type=int, default=16)
-    kv.add_argument("--long", type=int, default=65536)
+    kv.add_argument("--long", default="65536", help="prompt lengths, comma separated")
+    kv.add_argument("--long-file", default="", help="a long text that does not repeat (the prompt's source)")
     kv.add_argument("--tail", type=int, default=512)
     kv.add_argument("--max-len", type=int, default=8192)
     kv.add_argument("--json")
