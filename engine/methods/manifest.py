@@ -118,6 +118,17 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "fc05d2ea1ebaa234e26b4385f115e590de7404b68ffc17d0b1d212066b826277",
              ("engine/models/nemotron_h/gguf.py", "4dde9b6bb626cccc0521533313f31a848b31894430d4f84fe1b5abfb02705d96"):
              "0af3421c894d88be3b1dc657ec629a4c2853586e51ef71c33f51c02e6f87a91b",
+             # ENG-399, SPD-142/145: Flint's edits to shared files leave every other model's rows as they were:
+             # LFM2's add_rms and qk_prep take an opt-in programmatic launch (off unless a caller passes it), the
+             # tree drafter an opt-in lookup back-off (0 unless set), the settings and the arch table new keys
+             ("engine/models/lfm2_moe/kernels.py", "d2f45d58cecc6b99a0dfa8fc6f86c914544644b345bc51a0e861dc2d45665afd"):
+             "8f2e42e559a134a9992729497524b6fa5d57f6cb08378e56ed3d0b4fa8f02dea",
+             ("engine/methods/mtp_drafter.py", "8033612434e1e2576247bff40def9056fb570eef082515c005eaeaa19e78afad"):
+             "4f577dc55c73388034a9563c6d0596b01213a79d0b863768094762dcdd93a546",
+             ("engine/settings.py", "dbe32ab2408eb7c93fbadfec657ff86529b1b5d1e9430d69ba9f1ad21aeb5442"):
+             "eb49205d754b25cc481e6bb4dca13164d60bed85e2c5dae187b9b56af8a0224b",
+             ("engine/models/__init__.py", "9ba29c2a5e7f55baca11bfab71433b27371d8dbdb06dae40aee9e529421c2926"):
+             "c5fa4cb7441e29bff12eff553cb80874b945d8ac0f32da2bcb828fe7a7fea3ab",
              ("engine/models/nemotron_h/gguf_load.py", "cd515152dfbb7216fecae20d2f38b3bc3c21cb789a755d04d052be9d3f0136af"):
              "2e6b8c98a0cc24c93a1a6f11b343590502120b50318064bc392733637f470805",
              ("engine/models/nemotron_h/ref.py", "9543b02c3e1ba3d0e1292b3742d3b738c145f91ea361e99e1155f18cfeb3d864"):

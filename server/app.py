@@ -1719,9 +1719,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 pen.commit([tok])
             if drafter is not None:
                 drafter.observe([tok])
-            if think is not None:
+            if think is not None and not think.inside:
                 # a model that opens its own reasoning block (Flint) writes `<think>` as its first token:
-                # unobserved, the budget never saw the block open and never closed it
+                # unobserved, the budget never saw the block open and never closed it (a block the prompt
+                # opened counts from the second token, as before)
                 think.observe([tok])
             yield tok
             if tok in eos:
