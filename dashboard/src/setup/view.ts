@@ -980,7 +980,7 @@ export class QseSetup extends LightElement {
       </div>
       <div class="slots-say" id="pf-slots-say">
         ${err ? html`<p class="slots-err" role="alert" data-slots-error>${err}</p>` : nothing}
-        <p class="slots-cost" data-slots-cost>${S.slotsCost(v.cost.now, v.cost.full, v.cost.window)}</p>
+        ${r.max > 1 ? html`<p class="slots-cost" data-slots-cost>${S.slotsCost(v.cost.now, v.cost.full, v.cost.window)}</p>` : nothing}
         ${v.untested && !typedBad ? html`<p class="slots-note" data-slots-untested>${S.slotsUntested(r.measured)}</p>` : nothing}
         ${m.parallelism.slots.engine_max_reason ? html`<p class="slots-note" data-slots-engine>${m.parallelism.slots.engine_max_reason}</p>` : nothing}
       </div>
