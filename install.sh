@@ -31,7 +31,8 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.13.0 adds Ornith-1.5-122B from our EXL3 4.0 pack, drafting with its MTP layer;
+# The engine release. v0.14.0 adds Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint,
+# drafting with the lookup; v0.13.0 adds Ornith-1.5-122B from our EXL3 4.0 pack, drafting with its MTP layer;
 # v0.12.2 fits a Chat-tab run's tool results to the window, streams the port preview and
 # lets LFM2.5 adopt its 0.9.x to 0.11.1 conversations again;
 # v0.12.1 serves the first community pack on Nemotron 3.5 Super VL and takes a request with
@@ -54,7 +55,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.13.0}"
+TANDEM_REF="${TANDEM_REF:-v0.14.0}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
