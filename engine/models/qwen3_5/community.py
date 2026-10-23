@@ -35,12 +35,37 @@ def env(m: dict, c: dict, d: str) -> str:
         # no drafter: start.sh's model flags in place of the 27B's drafter flags
         lines.append('QSE_ENGINE_FLAGS="' + ("--model ${QSE_WEIGHTS_DIR} " if c["load"] == "standalone"
                                              else "") + '--drafter none"')
+    lines += _parallel(m)
     lines += ["QWEN38_SAMPLE_NUCLEUS=1",
               f"VISION={'on' if c['modalities']['image'] else 'off'}",
               # SPD-167: a text-only pack's limit, which setup.env cannot turn back on (ops/serve.env)
               *([] if c['modalities']['image'] else ["QSE_PACK_VISION=off"]),
               f'QSE_DISK_CACHE="${{HOME}}/.qwen38-spark-engine/cache/disk-community-{c["id"]}"']
     return "\n".join(lines) + "\n"
+
+
+def _parallel(m: dict) -> list[str]:
+    """SPD-165: the base's parallel requests as its Setup Guide defaults them (models/<base>/model.yaml
+    `parallelism`: the slots, the side window, the KV pool, the admission floor and the fixed keys), so a
+    pack switched in with ops/use-profile.sh serves several chats at once without the guide. A box's
+    run/setup.env, read after the profile, still decides. Measured 2026-10-23 on the ThinkingCap pack:
+    one request alone at 4 slots + the pool decoded prose at 38.4 tok/s against 37.4 at 1 slot and read
+    8K at 867 against 855 tok/s; 2 and 4 at once came to 50.1 and 58.6 tok/s in total against a queue."""
+    p = m.get("parallelism") or {}
+    k = p.get("knobs") or {}
+    if not k:
+        return []
+    slots = int(p["slots"]["default"])
+    cap = p["slots"].get("engine_max")
+    if cap:
+        slots = min(slots, int(cap))
+    out = [f"# SPD-165: parallel requests at the base's Setup Guide defaults (models/{m['id']}/model.yaml)",
+           f"{k['slots']}={slots}",
+           f"{k['side_window']}={int(p['side_window']['default'])}",
+           f"{k['kv_pool']}={'on' if p.get('kv_pool', {}).get('default') else 'off'}",
+           f"{k['floor_gb']}={p['floor_gb']['default']:g}"]
+    out += [f"{key}={val}" for key, val in (p.get("fixed") or {}).items()]
+    return out
 
 
 def check_pack(m: dict, c: dict, folder: str, rules: dict) -> list[str]:

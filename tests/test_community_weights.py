@@ -918,3 +918,21 @@ def test_spd167_a_text_only_pack_keeps_vision_off_under_a_setup_guide_overlay():
         assert o["VISION"] == "on" and o["QSE_PACK_VISION"] == "<unset>", o
         o = _resolve(community.env(m, registry.community_entry(oc, m)), keys, setup_env="VISION='off'\n")
         assert o["VISION"] == "off", o
+
+
+def test_spd165_a_27b_pack_serves_its_bases_parallel_defaults():
+    """ops/use-profile.sh community/<id> on the 27B writes the Setup Guide's parallel defaults (4 slots, the
+    KV pool, the side window, the floor, the fixed keys); a box's setup.env still wins."""
+    with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-"), QSE_COMMUNITY_URL="off"):
+        m = _models()["qwen3.8-27b"]
+        c = m["community"][0]
+        p = m["parallelism"]
+        keys = ("QSE_PARALLEL", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL", "QSE_PARALLEL_FLOOR_GB", "QSE_SIDE_GRAPHS",
+                "QSE_SIDE_SLOT_CONST_GB", "QSE_KV_HARD_FLOOR_GB", "QSE_BARRIER_IDLE_OWNER")
+        e = _resolve(community.env(m, c), keys)
+        assert e["QSE_PARALLEL"] == str(min(p["slots"]["default"], p["slots"]["engine_max"])) == "4", e
+        assert e["QSE_SIDE_MAX_LEN"] == str(p["side_window"]["default"]) and e["QSE_KV_POOL"] == "on", e
+        assert e["QSE_PARALLEL_FLOOR_GB"] == f"{p['floor_gb']['default']:g}", e
+        assert all(e[k] == v for k, v in p["fixed"].items()), e
+        o = _resolve(community.env(m, c), keys, setup_env="QSE_PARALLEL='1'\n")
+        assert o["QSE_PARALLEL"] == "1", o
