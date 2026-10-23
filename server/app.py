@@ -1448,6 +1448,10 @@ def _run_draft_round(meet) -> None:
     for r in reqs:
         by.setdefault(id(r.drafter.module.w), []).append(r)        # one checkpoint, one group
     for group in by.values():
+        # SPD-157: in slot order, whatever order the slots arrived in: a packed draft's graphs are kept
+        # per ordered set of drafters (draft_graph.py `_PACKED`), and with 8 slots the arrival order
+        # made almost every round a new set, so a capture where a replay was meant
+        group.sort(key=lambda r: r.slot)
         per = max(1, meet.max_rows // max(1, group[0].rows))
         for k in range(0, len(group), per):
             part = group[k:k + per]
