@@ -131,6 +131,10 @@ class RoundPlanner:
             t_old = self._best(E, ctx, curves, None)[0]
             if t_new != t_old:
                 k = f"joint{E}"
+                a, b = self.snap["tails"].get(E, 0.0), cand["tails"].get(E, 0.0)
+                if a and abs(b - a) / a >= self.move:       # the round's rest moved
+                    moved = True
+                    break
                 for T in (t_old, t_new):         # a price behind either decision
                     a, b = old.prices(E * T, k, ctx)[-1], new.prices(E * T, k, ctx)[-1]
                     if a and abs(b - a) / a >= self.move:

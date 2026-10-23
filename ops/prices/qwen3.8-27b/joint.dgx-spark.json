@@ -99,5 +99,13 @@
   }
  },
  "measured": "2026-10-23 13:00-13:40 CEST, DGX Spark, ThinkingCap-Qwen3.8-27B Kearuga EXL3 4.00 pack, spd-e5 55a4b9c8",
- "how": "tools/verify_curve.py --joint 2,4,8 --joint-rows 4,8,16,32 --contexts 1024,4096,16384 --reps 8: joint pass + commit of E spine trees of T rows, median; joint{E} from the joint graphs at bucket T (QWEN38_JOINT_GRAPHS, JOINT_GDN, GDN_AB, WY at 32 rows), joint{E}-eager the eager joint pass; rows = E x T"
+ "how": "tools/verify_curve.py --joint 2,4,8 --joint-rows 4,8,16,32 --contexts 1024,4096,16384 --reps 8: joint pass + commit of E spine trees of T rows, median; joint{E} from the joint graphs at bucket T (QWEN38_JOINT_GRAPHS, JOINT_GDN, GDN_AB, WY at 32 rows), joint{E}-eager the eager joint pass; rows = E x T",
+ "overhead_ms": {
+  "2": 25.3,
+  "3": 35.0,
+  "4": 44.1,
+  "5": 57.5,
+  "8": 80.4
+ },
+ "overhead_how": "the rest of a round (round start to the next, less the pass), median of the round log at C2/C4/C8 (raw/rounds-shadow.jsonl, 2026-10-23 13:04)"
 }

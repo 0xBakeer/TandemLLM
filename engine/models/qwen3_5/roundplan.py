@@ -42,10 +42,20 @@ def planner_for(eng, max_rows: int) -> RoundPlanner | None:
     if rp is None:
         path = PRICES or os.path.join(os.path.dirname(__file__), "..", "..", "..", "ops", "prices",
                                       "qwen3.8-27b", "joint.dgx-spark.json")
-        pm = PriceModel.load(os.path.normpath(path))
+        path = os.path.normpath(path)
+        pm = PriceModel.load(path)
         cap = int(max_rows)
         rp = _PLANNERS[key] = RoundPlanner(pm, buckets=BUCKETS, cap=lambda E, c=cap: c)
         rp.mode = MODE
+        # the rest of a round by E (the packed draft and the slots' tails) from the file, followed online
+        try:
+            import json
+            with open(path) as f:
+                over = json.load(f).get("overhead_ms") or {}
+        except (OSError, ValueError):
+            over = {}
+        rp.tails.update({int(k): float(v) for k, v in over.items()})
+        rp.snap = rp._freeze()
         from engine.models.qwen3_5 import joint_graphs as JG
 
         def force(T):
