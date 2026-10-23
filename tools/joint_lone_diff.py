@@ -38,6 +38,8 @@ def _clone(x):
         return x.detach().clone()
     if isinstance(x, (tuple, list)):
         return type(x)(_clone(v) for v in x)
+    if isinstance(x, dict):
+        return {k: _clone(v) for k, v in x.items()}
     return x
 
 
@@ -55,7 +57,19 @@ def _same(a, b):
             ok &= s
             worst = max(worst, d)
         return ok, worst
-    return a == b, 0.0 if a == b else float("nan")
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False, float("nan")
+        return _same([a[k] for k in sorted(a, key=str)], [b[k] for k in sorted(b, key=str)])
+    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
+        return False, float("nan")
+    if hasattr(a, "__dict__") and hasattr(b, "__dict__") and type(a) is type(b):
+        return _same(vars(a), vars(b))
+    try:
+        eq = bool(a == b)
+    except (RuntimeError, ValueError, TypeError):
+        eq = a is b
+    return eq, 0.0 if eq else float("nan")
 
 
 def _recorded(gen, log):
