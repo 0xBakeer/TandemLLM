@@ -6128,21 +6128,14 @@ def _proxy_backends() -> list | None:
         return None
 
 
-class BodyError(Exception):
-    """The request's framing is unreadable or too big: a 400/413 with this code and message.
-    The body behind it was not read, so the connection closes (handle_one_request)."""
+# The framing -- BodyError, the body cap, the Content-Length spine, the chunked parser --
+# lives in server/http_body.py, stdlib-only, shared with proxy/app.py: the two servers
+# carried it line for line and a fix had to land twice. The cap stays a per-request
+# lookup through the module global (QSE_MAX_BODY_MB at import), and the answer is
+# written with the body either read to its end or the connection closed.
+from server import http_body                                   # noqa: E402
 
-    def __init__(self, code: int, type_: str, message: str):
-        super().__init__(message)
-        self.code, self.type, self.message = code, type_, message
-
-
-# The most bytes one request body may hold. The engine is an open route and every POST body is
-# read before any auth (do_POST -> _read), so this is the amplification ceiling, not a size a
-# legitimate request approaches: a 20 MiB image (`--image-max-mb`) is 27 MiB base64'd and the
-# vision route takes several. Looked up per request through the module global, so a test or an
-# embedder can set it; QSE_MAX_BODY_MB overrides at import.
-MAX_BODY_BYTES = int(os.environ.get("QSE_MAX_BODY_MB", 512)) * (1 << 20)
+BodyError = http_body.BodyError
 
 # The socket timeout of one connection, seconds (2026-10-17, the timeout half of the
 # unbounded-read issue). socketserver's BaseRequestHandler.setup applies it to the connection
@@ -6304,19 +6297,12 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _read_body(self) -> bytes:
-        """The request's body, consumed whole or not at all. An answer written with the body
-        still unread is a desync one request away: every path out of here has read to the end
+        """The request's body, consumed whole or not at all -- server/http_body.py owns
+        the framing, shared with proxy/app.py. An answer written with the body still
+        unread is a desync one request away: every path out of here has read to the end
         of the framing, and BodyError (or handle_one_request) closes the connection."""
         try:
-            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-                body = self._read_chunked()      # Transfer-Encoding outranks Content-Length
-            else:
-                try:
-                    n = self._content_length()
-                except BodyError:
-                    self.close_connection = True  # the promised bytes, if they ever come,
-                    raise                        # would be read as the next request
-                body = self.rfile.read(n)
+            body = http_body.read_body(self.rfile, self.headers)
         except TimeoutError:
             # the stalled mid-body client of the timeout issue: headers, a promise, a few
             # bytes, silence. The framing is unfinished, so the connection closes; a
@@ -6325,59 +6311,11 @@ class Handler(BaseHTTPRequestHandler):
             # thread is free after Handler.timeout seconds instead of forever.
             self.close_connection = True
             raise BodyError(408, "timeout", "the request body stopped arriving") from None
+        except BodyError:
+            self.close_connection = True  # the promised bytes, if they ever come,
+            raise                        # would be read as the next request
         self._body_done = True
         return body
-
-    def _content_length(self) -> int:
-        """The promised body size, validated before a single byte of it is read. This header
-        is the client's and it sizes a pre-auth allocation: 4294967296 was once a
-        multi-GB read on a handler thread, and -1 was rfile.read(-1) -- read-until-EOF, a
-        permanently hung thread on a keep-alive connection."""
-        raw = self.headers.get("Content-Length")
-        if raw is None or not raw.strip():
-            return 0                             # an absent header is no body, as before
-        try:
-            n = int(raw)
-        except ValueError:
-            raise BodyError(400, "invalid_request_error",
-                            "Content-Length: not a number") from None
-        if n < 0:
-            raise BodyError(400, "invalid_request_error", "Content-Length: negative")
-        if n > MAX_BODY_BYTES:
-            raise BodyError(413, "too_large",
-                            f"a request body is at most {MAX_BODY_BYTES} bytes")
-        return n
-
-    def _read_chunked(self) -> bytes:
-        """A chunked body, RFC 9112 7.1: size line, that many bytes, CRLF, until the zero
-        chunk, then the trailers to their empty line. A framing error mid-stream leaves the
-        stream at an unknown offset, and only a closed connection says so."""
-        out = bytearray()
-        while True:
-            line = self.rfile.readline(64)
-            try:
-                size = int(line.split(b";", 1)[0].strip(), 16)   # chunk-size, extensions cut
-            except ValueError:
-                raise BodyError(400, "invalid_request_error", "transfer-encoding: bad chunk "
-                                                              "size") from None
-            if size < 0:
-                raise BodyError(400, "invalid_request_error", "transfer-encoding: negative "
-                                                              "chunk size")
-            if size == 0:
-                while True:
-                    t = self.rfile.readline(1024)                # the trailers, to a blank line
-                    if not t or t in (b"\r\n", b"\n"):
-                        break
-                break
-            if len(out) + size > MAX_BODY_BYTES:
-                raise BodyError(413, "too_large", f"a request body is at most "
-                                                  f"{MAX_BODY_BYTES} bytes")
-            chunk = self.rfile.read(size + 2)
-            if len(chunk) != size + 2 or not chunk.endswith(b"\r\n"):
-                raise BodyError(400, "invalid_request_error", "transfer-encoding: truncated "
-                                                              "chunk")
-            out += chunk[:size]
-        return bytes(out)
 
     # -------------------------------------------------------------- access
     def _peer(self) -> str:
