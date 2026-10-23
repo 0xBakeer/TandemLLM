@@ -1380,6 +1380,10 @@ def _run_round(meet) -> None:
     from server import roundlog
     rlog = roundlog.LOG
     for group in groups:
+        # SPD-163: in slot order, whatever order the slots arrived in -- a joint graph is kept per ordered
+        # set of engines (engine/models/qwen3_5/joint_graphs.py), and with 8 slots the arrival order made
+        # most C8 passes a set never seen; a row's bits do not depend on where its block sits in the pass
+        group.sort(key=lambda r: r.slot)
         tc = getattr(meet, "tree_cap", None)
         cap = tc(len(group), meet.max_rows) if tc is not None and len(group) > 1 else None
         pre_rows = [r.rows for r in group] if rlog is not None else None
