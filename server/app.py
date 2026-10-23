@@ -63,6 +63,7 @@ from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noq
                              strip_blocks)
 from server import compat  # noqa: E402
 from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
+from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
@@ -1631,10 +1632,43 @@ def _run_draft_round(meet) -> None:
                 meet.cv.notify_all()
 
 
+def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
+                   deadline, device):
+    """SPD-201: hand this slot's decode to the round runner and stream what it pushes. The turn is the
+    runner's while it decodes; this thread takes it back before the request's bookkeeping."""
+    i = _par_index()
+    slot = par.slots[i]
+    task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
+                              bs, k, deadline, device)
+    slot.phase = "runner"
+    par.wake()
+    runner = _round_runner.runner_for(par, sys.modules[__name__])
+    par.turn.release(i)
+    runner.add(task)
+    try:
+        while True:
+            kind, val = task.q.get()
+            if kind != "tokens":
+                break
+            for t in val:
+                yield t
+    finally:
+        task.cancel = True
+        par.turn.acquire(i)
+        slot.phase = ""
+    if task.err is not None:
+        raise task.err
+
+
 def _draft_meet(drafter, anchor: int, pos0: int):
     """`dflash2.DRAFT_MEET`: with other slots decoding, this slot's draft call joins the round's
     packed draft (one read of the drafter's layers and one head call for every slot); alone, or
     outside a request, None -- the drafter's own graph, as without side slots."""
+    rr = _round_runner.RUNNER
+    if rr is not None:
+        got = rr.meet(drafter, anchor, pos0)        # SPD-201: the runner's packed draft
+        if got is not None:
+            return got
     pool = dict.get(STATE, "pool")
     meet = getattr(pool, "draft_meeting", None) if pool is not None else None
     if meet is None or pool.turn is None:
@@ -1968,6 +2002,14 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
         ahead = None                  # the next proposal, launched before the last stream
         par = dict.get(STATE, "pool")
         t_post = None                 # parallel requests: when this slot's last verify returned
+        if (_round_runner.ON and par is not None and tree_mode and sup is None and probe is None
+                and lpr is None and think is None and ahead is None and drafter is not None
+                and STATE.get("lane") is None and par.turn is not None and n_out < max_new):
+            # SPD-201: the runner-owned round takes this slot's decode from here (server/round_runner.py);
+            # this thread streams what it pushes and takes the turn back at the end
+            yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
+                                      max_new, eos, bs, k, deadline, prompt.device)
+            return
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
