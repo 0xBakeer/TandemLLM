@@ -112,30 +112,25 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def add_rms_norm(res: torch.Tensor, x: torch.Tensor, weight: torch.Tensor,
-                 eps: float, out: tuple | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-    """`h = res + x; (h, rms_norm(h))` in one launch, bit-identical to the two it replaces.
-    `out`: contiguous (h, y) to write into (h may be `res` itself: a row is read before it is written)."""
+                 eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """`h = res + x; (h, rms_norm(h))` in one launch, bit-identical to the two it replaces."""
     n = x.shape[-1]
     r = res.reshape(-1, n).contiguous()
     a = x.reshape(-1, n).contiguous()
-    if out is None:
-        h = torch.empty_like(r)
-        y = torch.empty_like(r)
-    else:
-        h, y = (t.view(-1, n) for t in out)
+    h = torch.empty_like(r)
+    y = torch.empty_like(r)
     _add_rms_norm[(r.shape[0],)](r, a, weight, h, y, n, EPS=eps, BLOCK=_block(n),
                                  PDL=_pdl(), num_warps=8 if n >= 4096 else 4)
     return h.view_as(res), y.view_as(res)
 
 
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
-                   eps: float, out: torch.Tensor | None = None) -> torch.Tensor:
-    """`weight * normalise(x) * silu(gate)`, fused. Drop-in for `engine.model.rms_norm_gated`.
-    `out`: a contiguous tensor of x's rows to write into."""
+                   eps: float) -> torch.Tensor:
+    """`weight * normalise(x) * silu(gate)`, fused. Drop-in for `engine.model.rms_norm_gated`."""
     n = x.shape[-1]
     flat = x.reshape(-1, n).contiguous()
     g = gate.reshape(-1, n).contiguous()
-    y = torch.empty_like(flat) if out is None else out.view(-1, n)
+    y = torch.empty_like(flat)
     _rms_norm_gated[(flat.shape[0],)](flat, g, weight, y, n, EPS=eps, BLOCK=_block(n),
                                       PDL=_pdl(), num_warps=8 if n >= 4096 else 4)
     return y.view_as(x)

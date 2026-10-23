@@ -1141,10 +1141,6 @@ SILU_FUSED = _S.get("EXL3_SILU_FUSED") == "1"
 # A prefill MLP's gate|up products straight into the down projection's rotated input
 # (`exl3_mlp_slab`): the same bits, the bf16 gate|up and the activation never written. 0 = off.
 MLP_BRIDGE = _S.get("EXL3_MLP_BRIDGE") == "1"
-# SPD-175: the slab product and its output rotation as one Triton kernel (tools/exl3_slab_gemm.py),
-# the same bits as the library GEMM + rot_out; the prefill MLP then runs gate|up through it into bf16
-# and `exl3_rot_in_silu` (the bridge's bits). 0 = the library GEMM path.
-SLAB_TRITON = _S.get("EXL3_SLAB_TRITON") == "1"
 
 
 def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
@@ -1171,15 +1167,6 @@ def exl3_mlp_slab(x: torch.Tensor, gu: EXL3Block, wd: EXL3Block) -> torch.Tensor
     mod = _module()
     M = x.shape[0]
     xh = rotate_in(x, gu)                                    # [2, M, K]
-    if SLAB_TRITON:
-        from tools.exl3_slab_gemm import slab_rot
-        y = torch.empty(M, 2 * F, dtype=torch.bfloat16, device=x.device)
-        for g, n0, n1, wi in (_slabs(gu) or [(g, n0, n1, None) for g, n0, n1 in segments(gu, SLAB_N)]):
-            slab_rot(xh[g], wi if wi is not None else gu.inner(n0, n1), gu.svh[n0:n1], y[:, n0:n1])
-        xd = torch.empty(1, M, F, dtype=torch.float16, device=x.device)
-        mod.exl3_rot_in_silu(y, wd.suh, xd)
-        del y
-        return exl3_matmul(None, wd, xh=xd, M=M, dev=x.device)
     segs = _slabs(gu) or [(g, n0, n1, None) for g, n0, n1 in segments(gu, SLAB_N)]
     gs = [t for t in segs if t[0] == 0]
     us = [t for t in segs if t[0] == 1]
@@ -1283,11 +1270,6 @@ def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
     if xh is None:
         xh = rotate_in(x, w)                                # [G, M, K]
     cached = _slabs(w)
-    if SLAB_TRITON and out.dtype in (torch.bfloat16, torch.float32):
-        from tools.exl3_slab_gemm import slab_rot
-        for g, n0, n1, wi in (cached or [(g, n0, n1, None) for g, n0, n1 in segments(w, SLAB_N)]):
-            slab_rot(xh[g], wi if wi is not None else w.inner(n0, n1), w.svh[n0:n1], out[:, n0:n1])
-        return out
     if cached is not None:
         for g, n0, n1, wi in cached:
             yp = _mm_fp32(xh[g], wi)

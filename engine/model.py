@@ -189,6 +189,16 @@ WINDOW_ROWWISE = _S.get("WINDOW_ROWWISE") == "1"
 #: SPD-175: a prefill chunk's GDN preparation (conv, SiLU, l2 norm of q and k) as one kernel,
 #: tools/gdn_prep_kernels.py. Its rounding order is its own: off until the prefill gate has run.
 GDN_PREP = _S.get("GDN_PREP") == "1"
+#: SPD-175: with WINDOW_ROWWISE, the joined rows' norms also write the next projection's rotated input
+#: (tools/exl3_slab_gemm.py `add_norm_rot`: add_rms_norm + rot_in, the same bits): no rot_in launch for
+#: the MLP's and the next mixer's input. 0 = add_rms_norm, then the projection rotates.
+WINDOW_NORM_ROT = _S.get("WINDOW_NORM_ROT") == "1"
+#: SPD-189: prefill calls on the EXL3 slab path run the product and rot_out as one Triton kernel
+#: (tools/exl3_slab_gemm.py, the 27B's module; the shared EXL3 path is untouched), the same bits.
+SLAB_TRITON = _S.get("SLAB_TRITON") == "1"
+#: SPD-191: the scan launch the GDN_PREP path takes (value block, warps); its order is its own
+GDN_PREP_BV = int(_S.get("GDN_PREP_BV"))
+GDN_PREP_WARPS = int(_S.get("GDN_PREP_WARPS"))
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
@@ -307,7 +317,10 @@ def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
                    eps: float, out: torch.Tensor | None = None) -> torch.Tensor:
     if FUSED["norm"]:
         from tools.norm_kernels import rms_norm_gated as fused
-        return fused(x, gate, weight, eps, out=out)
+        if out is not None:
+            from tools.exl3_slab_gemm import rms_norm_gated_out
+            return rms_norm_gated_out(x, gate, weight, eps, out)
+        return fused(x, gate, weight, eps)
     if out is not None:
         out.view_as(x).copy_(rms_norm_gated(x, gate, weight, eps))
         return out
@@ -346,6 +359,9 @@ def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
     if isinstance(g, FP8Group):
         return fp8_matmul(x, g)
     if isinstance(g, EXL3Block):
+        if SLAB_TRITON and x.shape[0] > _x3.CHUNK_UNTIL and g.kb < 10 and x.is_cuda:
+            from tools.exl3_slab_gemm import slab_matmul
+            return slab_matmul(x, g)
         return g.matmul(x)
     return nvfp4_matmul_group(x, g)
 
@@ -356,6 +372,11 @@ def linear(x: torch.Tensor, w) -> torch.Tensor:
     so a new format is a class and not another branch here (engine/linear.py)."""
     if isinstance(w, torch.Tensor):
         return F.linear(x, w)
+    if (SLAB_TRITON and isinstance(w, EXL3Block) and x.numel() // x.shape[-1] > _x3.CHUNK_UNTIL
+            and w.kb < 10 and x.is_cuda):
+        # SPD-189: a prefill call on the slab path, the product and rot_out in one kernel (same bits)
+        from tools.exl3_slab_gemm import slab_matmul
+        return slab_matmul(x.reshape(-1, x.shape[-1]), w).view(*x.shape[:-1], w.N)
     return w.matmul(x)
 
 
@@ -683,7 +704,11 @@ class Qwen38Engine:
                 x2 = h.reshape(-1, h.shape[-1])
                 if x2.stride(1) != 1 or x2.stride(0) % 4 or x2.data_ptr() % 8:
                     x2 = x2.contiguous()
-                out = _x3.exl3_mlp_slab(x2, g, wd)
+                if SLAB_TRITON:
+                    from tools.exl3_slab_gemm import mlp_slab
+                    out = mlp_slab(x2, g, wd)
+                else:
+                    out = _x3.exl3_mlp_slab(x2, g, wd)
                 if out is not None:
                     return out.view(*h.shape[:-1], -1)
             y = matmul_group(h.reshape(-1, h.shape[-1]), g)
@@ -1017,8 +1042,7 @@ class Qwen38Engine:
         """SPD-175: a prefill chunk's GDN mixer with its preparation in one kernel
         (tools/gdn_prep_kernels.py): conv + SiLU + the l2 norm of q and k straight from the
         projection's rows, q and k at the key heads; then the gates, the fused scan and the norm."""
-        from tools.gdn_prep_kernels import gdn_prep
-        from tools.gdn_prefill_kernels import fused_chunk_prefill
+        from tools.gdn_prep_kernels import chunk_prefill_normed, gdn_prep
         cfg = self.cfg
         B, T, _ = h.shape
         q, k, v, new_conv = gdn_prep(qkv_y.reshape(T, -1), self.state.conv[i] if use_state else None,
@@ -1031,8 +1055,8 @@ class Qwen38Engine:
         A_log = self.w.norm(f"{p}.linear_attn.A_log")
         dt_bias = self.w.norm(f"{p}.linear_attn.dt_bias")
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias.float())
-        o, S = fused_chunk_prefill(q, k, v, g, beta, self.state.S[i] if use_state else None,
-                                   chunk_size=GDN_PREFILL_CHUNK, normed=True)
+        o, S = chunk_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None,
+                                    chunk_size=GDN_PREFILL_CHUNK, bv=GDN_PREP_BV, warps=GDN_PREP_WARPS)
         self.state.S[i].copy_(S)
         z = z_pre.reshape(B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
         if out is not None:
@@ -1323,6 +1347,7 @@ class Qwen38Engine:
         Returns (the last row's logits of the last chunk, each chunk's post-norm hidden, each
         chunk's kept tap rows as {invocation: rows})."""
         from tools.norm_kernels import add_rms_norm
+        from tools.exl3_slab_gemm import add_rms_norm_out
         try:
             from tools import exl3_linear as _x3
         except Exception:                                          # noqa: BLE001
@@ -1349,6 +1374,7 @@ class Qwen38Engine:
             hs.append(h)
             xs.append(rms_norm(h, w0, cfg.rms_norm_eps))
         J = self._rowwise_run(toks, _x3) if WINDOW_ROWWISE else None
+        XHJ = None                     # the joined rows' rotated input to the next mixer projection
         if J is not None:
             # SPD-169: the joined chunks' rows live in one window buffer, each chunk a view of it
             j0, j1 = J
@@ -1382,7 +1408,12 @@ class Qwen38Engine:
                     # bits do not depend on the window it was read in; the recurrence, the
                     # convolution and the attention core stay one chunk at a time.
                     gname = f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv"
-                    YJ = matmul_group(XJ.view(RJ, -1), self.w.group(gname))
+                    if XHJ is not None:
+                        from tools.exl3_slab_gemm import slab_matmul
+                        YJ = slab_matmul(None, self.w.group(gname), xh=XHJ, M=RJ, triton_path=SLAB_TRITON)
+                    else:
+                        YJ = matmul_group(XJ.view(RJ, -1), self.w.group(gname))
+                    XHJ = None
                     OJ = torch.empty(1, RJ, cfg.value_dim if lin else
                                      cfg.num_attention_heads * cfg.head_dim,
                                      dtype=XJ.dtype, device=XJ.device)
@@ -1411,10 +1442,27 @@ class Qwen38Engine:
                 if rw:
                     wo = self.w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
                     aj = linear(OJ.view(RJ, -1), wo).view(1, RJ, -1)
-                    add_rms_norm(HJ, aj, wpost, cfg.rms_norm_eps, out=(HJ, XJ))
-                    del aj, YJ, OJ
-                    mj = self.mlp(XJ, p)
-                    add_rms_norm(HJ, mj, wnext, cfg.rms_norm_eps, out=(HJ, XJ))
+                    del YJ, OJ
+                    mj = None
+                    if WINDOW_NORM_ROT and _x3.MLP_BRIDGE:
+                        from tools.exl3_slab_gemm import add_norm_rot, mlp_slab
+                        gu = self.w.group(f"{p}.mlp.gate_up")
+                        xg = add_norm_rot(HJ, aj, wpost, cfg.rms_norm_eps, gu.suh, out=(HJ, XJ))
+                        mj = mlp_slab(XJ.view(RJ, -1), gu, self.w.proj(f"{p}.mlp.down_proj"), xh=xg,
+                                      triton_path=SLAB_TRITON)
+                        del xg
+                    else:
+                        add_rms_norm_out(HJ, aj, wpost, cfg.rms_norm_eps, (HJ, XJ))
+                    del aj
+                    mj = self.mlp(XJ, p) if mj is None else mj.view(1, RJ, -1)
+                    if WINDOW_NORM_ROT and layer + 1 < n:
+                        from tools.exl3_slab_gemm import add_norm_rot
+                        nl = layer + 1
+                        nxt = self.w.group(f"layers.{nl}.linear_attn.qkvz" if cfg.is_linear(nl)
+                                           else f"layers.{nl}.self_attn.qkv")
+                        XHJ = add_norm_rot(HJ, mj, wnext, cfg.rms_norm_eps, nxt.suh, out=(HJ, XJ))
+                    else:
+                        add_rms_norm_out(HJ, mj, wnext, cfg.rms_norm_eps, (HJ, XJ))
                     del mj
                     if layer + 1 in keep:
                         for c in range(j0, j1):

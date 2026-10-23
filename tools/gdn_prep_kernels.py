@@ -101,6 +101,39 @@ def gdn_prep(qkv: torch.Tensor, conv_state: torch.Tensor | None, weight: torch.T
             new.contiguous())
 
 
+def chunk_prefill_normed(q, k, v, g, beta, state=None, chunk_size: int = 64, bv: int | None = None,
+                         warps: int | None = None):
+    """`tools.gdn_prefill_kernels.fused_chunk_prefill` for q and k that come l2-normalised and contiguous
+    (`gdn_prep`): its two kernels, its launch, its knobs; nothing in that file changes."""
+    from tools import gdn_prefill_kernels as G
+    B, T, Hk, Dk = q.shape
+    H, Dv = v.shape[2], v.shape[-1]
+    rep = H // Hk
+    bv = bv or G.BV
+    warps = warps or G.WARPS_SCAN
+    if B != 1 or chunk_size != G.CHUNK or H % Hk or Dv % bv:
+        raise ValueError("chunk_prefill_normed: one sequence, the kernel's chunk and blocking")
+    qq, kk = q.reshape(T, Hk, Dk), k.reshape(T, Hk, Dk)
+    vv = v.reshape(T, H, Dv).contiguous()
+    gg = g.reshape(T, H).contiguous()
+    bb = beta.reshape(T, H).contiguous()
+    nc = (T + chunk_size - 1) // chunk_size
+    ub = torch.empty(H, T, Dv, dtype=torch.float32, device=q.device)
+    kcd = torch.empty(H, T, Dk, dtype=torch.float32, device=q.device)
+    out = torch.empty(T, H, Dv, dtype=q.dtype, device=q.device)
+    S = (torch.zeros(1, H, Dk, Dv, dtype=torch.float32, device=q.device)
+         if state is None else state.clone().float().reshape(1, H, Dk, Dv))
+    prec, prec_scan, prec_a = G.PREC, G.PREC_SCAN or G.PREC, G.PREC_A
+    G._intra[(H, nc)](kk, vv, gg, bb, ub, kcd, T, kk.stride(0), kk.stride(1), vv.stride(0), vv.stride(1),
+                      gg.stride(0), gg.stride(1), C=chunk_size, DK=Dk, DV=Dv, STEPS=G.STEPS, PREC=prec,
+                      SERIES=G.SERIES, REP=rep, num_warps=G.WARPS_INTRA)
+    G._scan[(H, Dv // bv)](qq, kk, gg, ub, kcd, out, S, T, nc, qq.stride(0), qq.stride(1), gg.stride(0),
+                             gg.stride(1), out.stride(0), out.stride(1), C=chunk_size, DK=Dk, DV=Dv, BV=bv,
+                             SCALE=Dk ** -0.5, PREC=prec_scan, PREC_A=prec_a, REP=rep,
+                             num_warps=warps, num_stages=G.STAGES_SCAN)
+    return out.reshape(B, T, H, Dv), S.reshape(B, H, Dk, Dv)
+
+
 def reference(qkv, conv_state, weight, n_qk, n_v, d=128, eps=1e-6):
     """The engine's path on the same inputs (engine/gdn.py), for the check."""
     from engine import gdn

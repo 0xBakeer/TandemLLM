@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 
 import torch
 
@@ -46,26 +47,39 @@ def test_mlp_bits():
     for M in (700, 2048):
         gen = torch.Generator(device="cpu").manual_seed(M)
         x = (torch.randn(M, 5120, generator=gen) * 0.7).to(torch.bfloat16).cuda()
-        X.SLAB_TRITON = False
         ref = X.exl3_mlp_slab(x, gu, wd)
-        X.SLAB_TRITON = True
+        got = S.mlp_slab(x, gu, wd)
+        got_lib = S.mlp_slab(x, gu, wd, triton_path=False)          # the bridge with xh made here
+        X.slab_cache_on()
         try:
-            got = X.exl3_mlp_slab(x, gu, wd)
-            X.slab_cache_on()
-            try:
-                got2 = X.exl3_mlp_slab(x, gu, wd)
-            finally:
-                X.slab_cache_off()
-            one = X.exl3_matmul(x, g)                         # a single projection on the slab path
-            X.SLAB_TRITON = False
-            one_ref = X.exl3_matmul(x, g)
+            got2 = S.mlp_slab(x, gu, wd, xh=X.rotate_in(x, gu))
         finally:
-            X.SLAB_TRITON = False
+            X.slab_cache_off()
         assert ref is not None and torch.equal(got, ref) and torch.equal(got2, ref), M
-        assert torch.equal(one, one_ref), M
+        assert torch.equal(got_lib, ref), M
+        assert torch.equal(S.slab_matmul(x, g), X.exl3_matmul(x, g)), M
+
+
+def test_norm_rot_bits():
+    from tools.norm_kernels import add_rms_norm
+    for G, M in ((2, 513), (3, 1024), (2, 2048)):
+        w = X.random_block(1024 * G, 5120, 4, seed=G)
+        gen = torch.Generator(device="cpu").manual_seed(M)
+        res = (torch.randn(M, 5120, generator=gen) * 2).to(torch.bfloat16).cuda()
+        a = (torch.randn(M, 5120, generator=gen)).to(torch.bfloat16).cuda()
+        nw = (torch.randn(5120, generator=gen) * 0.1).to(torch.bfloat16).cuda()
+        suh = torch.stack([X.random_block(1024, 5120, 4, seed=10 + g).suh[0] for g in range(G)])
+        h_ref, y_ref = add_rms_norm(res, a, nw, 1e-6)
+        xh_ref = X.rotate_in(y_ref, types.SimpleNamespace(suh=suh, K=5120))
+        h, y = torch.empty_like(res), torch.empty_like(res)
+        xh = S.add_norm_rot(res.clone(), a, nw, 1e-6, suh, out=(h, y))
+        assert torch.equal(h, h_ref) and torch.equal(y, y_ref), (G, M)
+        assert torch.equal(xh, xh_ref), (G, M, (xh != xh_ref).sum().item())
+        del w
 
 
 if __name__ == "__main__":
     test_slab_rot_bits()
     test_mlp_bits()
+    test_norm_rot_bits()
     print("ok")

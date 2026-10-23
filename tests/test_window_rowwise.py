@@ -47,7 +47,7 @@ def test_no_join_without_exl3_or_during_a_verify():
 
 
 def test_knobs_default_off():
-    for k in ("WINDOW_ROWWISE", "GDN_PREP", "EXL3_SLAB_TRITON"):
+    for k in ("WINDOW_ROWWISE", "GDN_PREP", "SLAB_TRITON", "WINDOW_NORM_ROT"):
         assert KNOBS[k][0] == "0", k
 
 
