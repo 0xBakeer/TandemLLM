@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
+import engine.models.qwen3_5.adapter  # noqa: E402,F401  (SPD-183: the cold verbs, `cache_state`)
 from engine.model import Qwen38Engine  # noqa: E402
 from tools.verify_spec import tree_router  # noqa: E402
 
