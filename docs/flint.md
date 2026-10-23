@@ -124,6 +124,8 @@ tool-eval-bench 2.8.1.dev13 (commit f2e368b), seed 42, temperature 0, one reques
 | conductor, `tools` (effort `medium`) | 80 (2.2 min) | 54 (4.4 min) | 70 (12.8 min) |
 Raw rows send `X-Tandem: raw`, so the model answers alone; thinking off is `reasoning_effort: none`. The conductor rows pin a profile with `X-Tandem-Profile`: `tools` is what the conductor picks for a client that offers tools, and `bench-pk` is a test profile we do not ship. Hard mode at n=1 varies a lot between runs, so we claim no ranking between the sizes. [models/flint/measurements/2026-10-22-tool-eval-bench.json](../models/flint/measurements/2026-10-22-tool-eval-bench.json) has every row with its misses.
 
+The conductor puts no note into Flint's prompts. Its notes go before the last message's `<|im_end|>`, and Flint's template ends no message with a token, so there is no place for them: no class package, effort sentence, rule or memory note went into the conductor rows above. What acted there is what needs no note: the effort level's thinking switch and budget, the loop guards and the tool-call checks. Since 0.14.2 Flint's adapter says so (`conductor` fit `notes: false`, [server.md](server.md#the-model-fit)), and the decision rows read memory `{mode: off, why: model_notes}` instead of `on` with the error `no_insertion_point` (SRV-703).
+
 ![tool-eval-bench scores for Flint's three profiles, one run a row](media/flint-tool-eval-bench.png)
 
 ## Drafting

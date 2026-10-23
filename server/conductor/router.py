@@ -445,10 +445,16 @@ class Plan:
         at = inject.insertion_point(ids, im_end)
         notes, adds = [], []
         marks = _marks(tok)
-        if at is None:
-            if sess.notes or self.block is not None or self.extras:
-                self.row["extra"].setdefault("errors", []).append("no_insertion_point")
-        else:
+        planned = bool(sess.notes or self.block is not None or self.extras)
+        if not modelfit.FIT["notes"]:
+            # SRV-703: the model's fit says its prompt holds no note (Flint's template ends no
+            # message with a token): nothing goes in, and the row says why instead of an error
+            if planned:
+                self.row["extra"].setdefault("notes", []).append("notes_off:model")
+            at = None
+        elif at is None and planned:
+            self.row["extra"].setdefault("errors", []).append("no_insertion_point")
+        if at is not None:
             with sess.lock:
                 live, hashes = self._live(ids, at, marks=marks, im_end=im_end)
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
@@ -1358,6 +1364,10 @@ class Router:
         libsearch.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row, dry)
         # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
         try:
+            if not modelfit.FIT["notes"]:
+                # SRV-703: the model's prompt holds no note, the off note neither
+                row["extra"]["memory"] = {"mode": "off", "why": "model_notes"}
+                raise _Skip
             if not modelfit.FIT["memory"]:
                 if schema.profile_memory(prof) != "off" and plan.res.mode != "raw" and \
                         getattr(plan, "memory_opt", None) != "off":

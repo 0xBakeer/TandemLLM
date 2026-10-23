@@ -61,8 +61,9 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # overnight reads as off, its shipped value)
           "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow", "memory",
                               "sampling", "tasks.C5", "toolgate.sequence"},
+          # SRV-703: every shipped profile sets its memory switch (`none` there, as absent)
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word", "sampling",
-                                 "tasks.C5", "toolgate.sequence"},
+                                 "tasks.C5", "toolgate.sequence", "memory"},
           "profiles/chat": {"thinking.by_size", "ui", "memory", "sampling", "tasks.C5",
                             "toolgate.sequence"},
           # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)

@@ -125,15 +125,23 @@ class FlintCacheState(SectionState):
         return out
 
 
+#: SRV-703: the conductor's router on this model (server/conductor/modelfit.py). Flint's template ends no message
+#: with a token (a message runs until the next role token, `<|user|>`, `<|assistant|>`, ...), so the router's
+#: notes, which go before the last message's `<|im_end|>`, have no place in its prompt: on the box every turn of a
+#: profile with memory on read `no_insertion_point` and carried no memory card, index or package (2026-10-22). The
+#: fit says so, and the router asks for no note and journals each part as off for the model
+CONDUCTOR_FIT = {"notes": False}
+
+
 class FlintServing:
     """`FlintEngine` with one state and its graphs, in the server's engine interface."""
 
     # as LFM2: the caches on the prefill's 4,096-token grid (the rings are sections, restored whole at an
     # anchor), side slots with joint passes and joint plain steps (no draft head); the shadow reader was
-    # validated on Qwen text; the side lane copies the 27B's pending commit; the conductor's router as its
-    # documents say (not fitted to this model yet)
+    # validated on Qwen text; the side lane copies the 27B's pending commit; the conductor's router asks for no
+    # note (CONDUCTOR_FIT)
     caps = Capabilities(caches=True, side_slots=True, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=True,
-                        side_lane=False, joint_plain=True)
+                        side_lane=False, joint_plain=True, conductor=CONDUCTOR_FIT)
 
     def __init__(self, eng: FlintEngine, max_len: int, slot=None):
         self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len

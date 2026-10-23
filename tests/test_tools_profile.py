@@ -72,7 +72,9 @@ def test_the_shipped_tools_profile():
     assert t["mode"] == "on" and t["clients"] == [] and "locked" not in t
     assert t["decisions"] == {"classify": "off", "effort": "off", "packages": "off",
                               "rules": "off"}
-    assert "memory" not in t and t["transcripts"] == "off" and t["prompt"] == "client"
+    # SRV-703: memory set to `none` (no card, no off note), read as off
+    assert t["memory"] == "none" and schema.profile_memory(t) == "off"
+    assert t["transcripts"] == "off" and t["prompt"] == "client"
     assert t["ui"]["states"] == "off"
     assert t["sampling"] == {"agentic_default": "greedy", "loop_escape": "off"}
     acting = sorted(k for k, v in t["tasks"].items() if v["mode"] == "act")

@@ -615,6 +615,7 @@ def _memory(cond, method: str, rest: list[str], q: dict, body: dict,
 
 def _notes(cond, method: str, rest: list[str], q: dict, body: dict):
     """The Memory screen's Notes tab (2026-10-05, server/conductor/notes.py)."""
+    from server.conductor import memory as memory_mod
     from server.conductor import notes as notes_mod
     st = cond.notes
     user = q.get("user") or "owner"
@@ -638,7 +639,8 @@ def _notes(cond, method: str, rest: list[str], q: dict, body: dict):
                                     for a, b, x in st.duplicates(user)],
                      "kinds": {k: notes_mod.KIND_WORDS[k] for k in notes_mod.KINDS},
                      "store": st.info(), "memory": dict(cond.memory.stats),
-                     "settings": schema.notes(cond.store.peek("settings")[1])}, None
+                     "settings": schema.notes(cond.store.peek("settings")[1]),
+                     "where": memory_mod.where(cond.store)}, None
     if rest == ["search"] and method == "GET":
         text = q.get("q") or ""
         if not text.strip():

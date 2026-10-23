@@ -59,7 +59,7 @@ def drift(profiles: dict, derived: dict) -> list[str]:
 # chat-app's own keys, as SRV-471 decided them: the regression guard does not read them from the
 # schema, so the schema before the fix (no memory key on chat-app) fails here
 # SRV-621: `tools` is general with its own decisions, tasks, tool gate, state lines, sampling,
-# prompt and transcript switches; memory stays absent
+# prompt and transcript switches; memory is general's `none` (SRV-703)
 DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory")),
            "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui",
                                  "sampling", "prompt", "transcripts", "secret_mask"))}
@@ -86,7 +86,7 @@ def test_a_switch_the_parent_gains_is_caught():
     assert drift(profs, DERIVED) == ["chat-app.memory: declared but not set"]
     profs = copy.deepcopy(schema.SHIPPED_PROFILES)
     profs["general"]["memory"] = "on"                    # general gains a switch later
-    assert drift(profs, DERIVED) == ["tools.memory: '<absent>' != general's 'on'"]
+    assert drift(profs, DERIVED) == ["tools.memory: 'none' != general's 'on'"]
 
 
 def test_the_agent_profiles_ship_the_loop_guard_and_the_escape():
@@ -109,11 +109,23 @@ def test_the_agent_profiles_ship_the_loop_guard_and_the_escape():
         assert (tg["risk"], tg["project"], tg["malformed"]) == (False, False, False), name
 
 
-def test_general_has_no_memory_switch():
-    assert "memory" not in schema.SHIPPED_PROFILES["general"]
-    assert schema.profile_memory(schema.SHIPPED_PROFILES["general"]) == "off"
+def test_every_shipped_profile_states_its_memory():
+    # SRV-703: no shipped profile leaves the switch absent; `none` keeps the request the client's
+    # (scripts and SDK clients, tools, unattended runs, the raw ones), read as off
+    for name, p in schema.SHIPPED_PROFILES.items():
+        assert p.get("memory") in schema.MEMORY_MODES, name
     for name in ("chat", "coding", "hermes", "chat-app"):
         assert schema.SHIPPED_PROFILES[name]["memory"] == "on", name
+    for name in ("general", "tools", "overnight", "raw", "bench"):
+        assert schema.SHIPPED_PROFILES[name]["memory"] == "none", name
+        assert schema.profile_memory(schema.SHIPPED_PROFILES[name]) == "off", name
+    assert schema.profile_memory({}) == "off" and schema.profile_memory({"memory": "off"}) == "off"
+    for name, p in schema.SHIPPED_PROFILES.items():
+        if name in schema.LOCKED:
+            continue                    # raw and bench: no write is taken, whatever they hold
+        assert not schema.check("profiles", p, name=name, router=schema.SHIPPED_ROUTER,
+                                packages=schema.SHIPPED_PACKAGES,
+                                profiles=schema.SHIPPED_PROFILES), name
 
 
 # ---------------------------------------------------------------------- the migration

@@ -2,7 +2,7 @@
 // them directly -- the kinds in plain words, the list's filters, the tree's labels, a line diff for a
 // note's history, the journal's write rows in words, and the notes settings over their defaults.
 
-import type { NoteKind, NoteMeta, NoteNode, NotesSettings, NoteWriteRow, WriterSettings } from '../api/conductor';
+import type { MemoryWhere, NoteKind, NoteMeta, NoteNode, NotesSettings, NoteWriteRow, WriterSettings } from '../api/conductor';
 
 export const WRITER_DEFAULTS: WriterSettings = { mode: 'off', idle_s: 180, due_idle_s: 3, min_new_tokens: 1500, max_tokens: 600, max_blocks: 4, gate: true, after_compaction: 'idle', turn_deadline_s: 30, existing: 5 };
 
@@ -152,4 +152,37 @@ export function usesLine(uses: Record<string, number>, today: string): string {
   if (!all) return 'not injected yet';
   const t = uses[today] ?? 0;
   return `${all} injection${all === 1 ? '' : 's'}${t ? ` (${t} today)` : ''}`;
+}
+
+// SRV-703: where memory is on. The served model first (a model whose prompt has no place for the
+// conductor's notes reads none on any profile), then each profile: on, in shadow, off (the model is
+// told), or off with nothing added (`none`, or the switch not set). A profile is named with the
+// clients it serves, the default one with "any other client".
+export const SWITCH_WORDS: Record<string, string> = {
+  on: 'on',
+  shadow: 'in shadow: written, not read back',
+  off: 'off, and the model is told',
+  none: 'off',
+};
+
+export interface MemoryWhereLine {
+  name: string;
+  on: boolean;
+  state: string;
+  who: string;
+}
+
+export function memoryWhere(w: MemoryWhere | undefined | null): { model: string | null; lines: MemoryWhereLine[] } | null {
+  if (!w) return null;
+  const model = w.model.memory ? null : `Memory is off for the served model: ${w.model.words ?? w.model.why ?? 'its conductor fit'}. No profile reads or writes notes while it serves.`;
+  const lines = w.profiles
+    .filter((p) => p.mode !== 'raw')
+    .map((p) => {
+      const sw = p.memory in SWITCH_WORDS ? p.memory : 'none';
+      const state = !w.model.memory && (sw === 'on' || sw === 'shadow') ? `${SWITCH_WORDS[sw]} in the profile, off for this model` : SWITCH_WORDS[sw] + (p.set ? '' : ' (not set)');
+      const who = [...p.clients, ...(p.default ? ['any other client'] : [])].join(', ');
+      return { name: p.name, on: w.model.memory && (sw === 'on' || sw === 'shadow'), state, who };
+    })
+    .sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name));
+  return { model, lines };
 }

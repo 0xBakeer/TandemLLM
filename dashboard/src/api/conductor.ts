@@ -1012,6 +1012,14 @@ export interface NotesList {
   store: { root: string; refused: string | null; users: string[]; writes: number; refused_writes?: number; revised: number; archived: number; redactions: number; searches: number };
   memory: { blocks: number; taken: number; failed: number; index_notes: number; body_notes: number; intent_yes: number };
   settings: NotesSettings;
+  /** SRV-703: where memory is on (server/conductor/memory.py `where`); absent on an engine before it */
+  where?: MemoryWhere;
+}
+/** A profile's `memory` switch: `none` adds nothing, `off` tells the model memory is off here */
+export type MemorySwitch = 'on' | 'shadow' | 'off' | 'none';
+export interface MemoryWhere {
+  model: { memory: boolean; why: string | null; words: string | null };
+  profiles: { name: string; memory: MemorySwitch; set: boolean; mode: string | null; clients: string[]; default: boolean }[];
 }
 export interface NoteRevision {
   n: number;

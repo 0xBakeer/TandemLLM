@@ -315,6 +315,7 @@ The router's documents target Qwen3.8. A model's adapter may declare how the rou
 | `effort_notes` | true | the level's sentence goes into the note; false: the level sets the switch and the budget alone |
 | `rules` | true | the class's rules and note go into the note |
 | `memory` | true | the memory card and index go in under a profile with memory on |
+| `notes` | true | the model's prompt has a place for the router's notes: the end of the last message, before its `<|im_end|>`; false: the template ends no message with a token, so the router asks for no note (`packages: none`, `effort_notes`, `rules` and `memory` false), journals `notes_off:model` where it had one, and memory as `{mode: off, why: model_notes}` (SRV-703; Flint) |
 
 `QWEN38_CONDUCTOR_FIT`: `model` (default) the adapter's fit, `off` the router as written, `key=value,...` the adapter's fit with those keys replaced (a list takes `+`: `no_package_classes=chat+writing`). A wrong key or value stops the start. The journal row says what the fit changed: `extra.model_fit`, `model_fit_lean`, `package_fit_dropped`, and the notes `effort_note_skipped:model_fit`, `rules_skipped:model_fit`. LFM2.5's fit and its measurements: [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md#conductor).
 

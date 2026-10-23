@@ -4964,7 +4964,8 @@
       "enum": [
        "off",
        "shadow",
-       "on"
+       "on",
+       "none"
       ]
      },
      "prompt": {

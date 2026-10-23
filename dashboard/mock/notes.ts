@@ -58,6 +58,20 @@ export function notesSeed(now: number): MockNotes {
 type R = { status: number; body?: unknown; raw?: { type: string; data: string } };
 const err = (status: number, type: string, message: string): R => ({ status, body: { error: { type, message } } });
 
+// SRV-703: the shipped profiles' switches, the served model with a place for the notes
+const MOCK_WHERE = {
+  model: { memory: true, why: null, words: null },
+  profiles: [
+    { name: 'chat', memory: 'on', set: true, mode: 'on', clients: ['open-webui', 'dashboard'], default: false },
+    { name: 'chat-app', memory: 'on', set: true, mode: 'on', clients: ['chat-app'], default: false },
+    { name: 'coding', memory: 'on', set: true, mode: 'on', clients: ['opencode'], default: false },
+    { name: 'general', memory: 'none', set: true, mode: 'on', clients: [], default: true },
+    { name: 'hermes', memory: 'on', set: true, mode: 'on', clients: ['hermes'], default: false },
+    { name: 'overnight', memory: 'none', set: true, mode: 'on', clients: [], default: false },
+    { name: 'tools', memory: 'none', set: true, mode: 'on', clients: [], default: false },
+  ],
+};
+
 export function notesRoute(m: MockNotes, method: string, rest: string[], q: URLSearchParams, body: Record<string, unknown>, settings: Record<string, unknown>): R {
   const user = q.get('user') || 'owner';
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(user)) return err(400, 'bad_request', 'user: letters, digits, dot, dash, underscore');
@@ -76,7 +90,7 @@ export function notesRoute(m: MockNotes, method: string, rest: string[], q: URLS
       tree.set(k, t);
     }
     const order = ['user', 'project', 'session'];
-    return { status: 200, body: { contract_version: '1.0', user, users: [...new Set([...m.users.keys(), user])], tree: [...tree.values()].sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope) || a.node.localeCompare(b.node)), notes, archived: [...u.archived.values()].map(meta), duplicates: [], kinds: KIND_WORDS, store: { root: '~/.qwen38-spark-engine/memory/notes', refused: null, users: [...m.users.keys()], writes: 5, refused_writes: 1, revised: 1, archived: 1, redactions: 0, searches: 12 }, memory: m.stats, settings } };
+    return { status: 200, body: { contract_version: '1.0', user, users: [...new Set([...m.users.keys(), user])], tree: [...tree.values()].sort((a, b) => order.indexOf(a.scope) - order.indexOf(b.scope) || a.node.localeCompare(b.node)), notes, archived: [...u.archived.values()].map(meta), duplicates: [], kinds: KIND_WORDS, store: { root: '~/.qwen38-spark-engine/memory/notes', refused: null, users: [...m.users.keys()], writes: 5, refused_writes: 1, revised: 1, archived: 1, redactions: 0, searches: 12 }, memory: m.stats, settings, where: MOCK_WHERE } };
   }
   if (rest[0] === 'search' && method === 'GET') {
     const words = (q.get('q') ?? '').toLowerCase().split(/\W+/).filter((w) => w.length > 2);

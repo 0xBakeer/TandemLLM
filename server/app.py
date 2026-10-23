@@ -4089,7 +4089,8 @@ def _writer_look(got: str) -> None:
         st["last_look_since_ms"] = int(time.time() * 1000)
         if got == "no_session":
             print("[memory] writer look: no session (the resident conversation has no memory "
-                  "session: no session id, raw, or memory off in its profile)", flush=True)
+                  "session: no session id, raw, or memory off in its profile or for the model)",
+                  flush=True)
         elif got in WRITER_BLOCKED:
             res = STATE.get("resident")
             print(f"[memory] writer look: {got} ({_record_why(res, getattr(res, 'owner', None))})",
