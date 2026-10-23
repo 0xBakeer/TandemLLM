@@ -26,10 +26,12 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import threading
 import re
 
 FORMATS: dict = {}
 DEFAULT = "xml"
+_LOCK = threading.Lock()
 _found = []                     # the package's modules were imported (`_discover`)
 
 
@@ -106,11 +108,18 @@ def register(fmt: ToolFormat) -> ToolFormat:
 
 
 def _discover() -> None:
-    _found.append(True)
-    here = os.path.dirname(os.path.abspath(__file__))
-    for name in sorted(os.listdir(here)):
-        if name.endswith(".py") and not name.startswith("_"):
-            importlib.import_module(f"{__name__}.{name[:-3]}")
+    # SPD-E5: under a lock, and marked found only after every module registered. Four requests that
+    # arrived together on a fresh server raced here: the first marked the formats found and was still
+    # importing them when the other three looked, found none and answered 500 ("no tool-call format
+    # 'xml'").
+    with _LOCK:
+        if _found:
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in sorted(os.listdir(here)):
+            if name.endswith(".py") and not name.startswith("_"):
+                importlib.import_module(f"{__name__}.{name[:-3]}")
+        _found.append(True)
 
 
 def get(name: str | None) -> ToolFormat:
