@@ -400,7 +400,17 @@ def exl3_projections(w: dict, path: str, key: str) -> dict:
             for j, m in enumerate(members):
                 out[f"layers.{i}.{m}.weight"] = grp.member(j)
             fused += 1
-    print(f"[drafter] {n} EXL3 projections from {path}: {nb / 1e9:.3f} GB, {fused} fused groups")
+    # SPD-179: the bf16 projections the blocks replace leave the loaded checkpoint (`load_weights`
+    # keeps it for every drafter of this snapshot): nothing reads them once the blocks are in, and
+    # they were about 3.3 GB a checkpoint beside their 0.65 GB of EXL3
+    freed = 0
+    for base in bases:
+        if base != "fc":
+            t = w.pop(f"{base}.weight", None)
+            if isinstance(t, torch.Tensor):
+                freed += t.numel() * t.element_size()
+    print(f"[drafter] {n} EXL3 projections from {path}: {nb / 1e9:.3f} GB, {fused} fused groups, "
+          f"{freed / 1e9:.2f} GB of bf16 released")
     _EXL3_PROJ[key] = out
     return out
 
@@ -1295,15 +1305,15 @@ class DFlash2Drafter(Drafter):
                 self._alloc_cache()          # released by `release`; the weights stayed
             return self.module
         self._w = load_weights(self.snapshot, self.eng.device)
-        missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
-        if missing:
-            raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
-                               f"first: {missing[:3]}")
         if DRAFT_EXL3 and os.path.isfile(self._exl3_file()):
             self._w = exl3_projections(self._w, os.path.expanduser(self._exl3_file()),
                                        key=f"{self.snapshot}|{self._exl3_file()}")
         elif DRAFT_NVFP4:
             self._w = quantise_projections(self._w, self.cfg.num_hidden_layers, key=self.snapshot)
+        missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
+        if missing:
+            raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
+                               f"first: {missing[:3]}")
         self.module = DFlash2Module(self.cfg, self._w)
         self._alloc_cache()
         if self._draft_head_path:

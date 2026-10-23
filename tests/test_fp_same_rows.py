@@ -91,7 +91,7 @@ M27 = adapter.manifest()
 #: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
 V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
 #: SPD-E5 (2026-10-23): the 27B's v2 with SAME_ROWS after the branch's one move (GOLDEN_V2[0])
-V2_SPDE5 = "fe5a05927c2a1960"
+V2_SPDE5 = "89430e32265751cd"
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 #: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
 FP4_LFM25_011 = "9049446866c5e4fc"
