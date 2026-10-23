@@ -549,6 +549,21 @@ methods:
   recommended: 1.05
   knob: REP_PENALTY
   docs: docs/lfm2.5-24b-a2b.md
+- id: reasoning_effort
+  label: Thinking effort
+  what: How long the model may think before it answers, when a client does not say.
+  type: enum
+  options:
+  - value: low
+    label: low
+  - value: medium
+    label: medium
+  - value: xhigh
+    label: extra high
+  default: medium
+  recommended: medium
+  knob: REASONING_EFFORT
+  docs: docs/server.md
 - id: default_max_tokens
   label: Default answer length
   what: The longest answer, in tokens, when a client does not set max_tokens.

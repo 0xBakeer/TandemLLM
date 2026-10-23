@@ -124,7 +124,7 @@ Ornith-1.5-122B, Ornith AI's agentic and coding model, runs from our EXL3 pack a
 
 ![Decode speed of Ornith-1.5-122B on one DGX Spark, plain and with each draft head](docs/media/ornith-decode-speed.png)
 
-Every drafted text is the plain decode's. On the same pack the engine's top token agrees with the converter's own forward at 498 of 512 positions, so the two are close but not equal. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs, DFlash2's row and what is not measured.
+Speed is greedy with thinking off. A fresh install thinks at effort `medium`; [docs/setup.md](docs/setup.md#reasoning-effort) says how to change it and which effort each published number used. Every drafted text is the plain decode's. On the same pack the engine's top token agrees with the converter's own forward at 498 of 512 positions, so the two are close but not equal. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs, DFlash2's row and what is not measured.
 
 Flint, Recursive's mixture-of-experts model for coding agents, runs from our EXL3 packs at 4.0 and 6.0 bits a weight or from Recursive's BF16 checkpoint. It has 49 layers: 35 see a 513-token window, 14 see everything, and 6 of 256 experts and a shared one run a token, about 2.5B of its 39.8B parameters. It has no draft layer, so every profile drafts with the lookup cut by StairCut. The packs are public, [0xBakeer/TandemLLM-Flint-EXL3-4.0](https://huggingface.co/0xBakeer/TandemLLM-Flint-EXL3-4.0) and [-6.0](https://huggingface.co/0xBakeer/TandemLLM-Flint-EXL3-6.0), in [one collection](https://huggingface.co/collections/0xBakeer/tandemllm-flint-6ad9a9a5e0ebee0bb740826d) with the BF16 checkpoint [RecursiveSI/flint](https://huggingface.co/RecursiveSI/flint). Measured on one DGX Spark on 2026-10-22: quality against BF16 on 50 rows of 2,048 tokens of held-out docs; one fresh server a row, 512 greedy tokens, thinking off, one run each:
 
@@ -136,7 +136,7 @@ Flint, Recursive's mixture-of-experts model for coding agents, runs from our EXL
 
 ![Decode speed of Flint EXL3 4.0 on one DGX Spark, plain and with the lookup](docs/media/flint-decode-speed.png)
 
-Every drafted text is the plain decode's. 4.0 decodes at 39.5 tok/s at a 128k context, and the lookup ran a copy ask at 79.5 and an edit ask at 129.7 behind a 124,000-token prompt. Flint's router is sensitive to rounding: two BF16 forwards of the same weights already differ by KL 0.034. [docs/flint.md](docs/flint.md) has the checks, the long-context numbers and what is not measured.
+Speed is greedy with thinking off, and a fresh install thinks at effort `medium` ([docs/setup.md](docs/setup.md#reasoning-effort)). Every drafted text is the plain decode's. 4.0 decodes at 39.5 tok/s at a 128k context, and the lookup ran a copy ask at 79.5 and an edit ask at 129.7 behind a 124,000-token prompt. Flint's router is sensitive to rounding: two BF16 forwards of the same weights already differ by KL 0.034. [docs/flint.md](docs/flint.md) has the checks, the long-context numbers and what is not measured.
 
 ### Community weights
 

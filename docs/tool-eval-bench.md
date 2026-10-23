@@ -5,7 +5,7 @@ We ran [tool-eval-bench](https://github.com/SeraphimSerapis/tool-eval-bench) aga
 ## Setup
 
 - Model: Qwen3.8-27B in the EXL3 6.0 pack, on the 0.12.0 code. `/health` still said `0.11.4+exl3-6.0`, because the runs came before the version bump.
-- Server: default effort `xhigh` (`--reasoning-effort xhigh`), two slots, response cache on.
+- Server: default effort `xhigh` (`--reasoning-effort xhigh`), two slots, response cache on. A fresh install runs at `medium`. To match these rows, set `REASONING_EFFORT=xhigh` ([setup.md](setup.md#reasoning-effort)). The raw rows send their effort and the turn-class rows set their own, so the `tools` rows are the ones that depend on the server's level.
 - Bench: 2.8.1.dev13, commit [f2e368b](https://github.com/SeraphimSerapis/tool-eval-bench/commit/f2e368b), on another machine on the LAN.
 - Every run: `--seed 42 --temperature 0 --timeout 600`, `--parallel` 1, one run at a time on the box, each row one run (n = 1).
 - The server restarted before the batch, which empties the response cache. No answer in a row below came from the cache. The first raw `xhigh` run did replay 190 answers of the `high` run, which sends the same prompt, so the server restarted and that row ran again.
@@ -31,7 +31,7 @@ We ran [tool-eval-bench](https://github.com/SeraphimSerapis/tool-eval-bench) aga
 | path | score | deployability | responsiveness | time | not passed |
 |-|-|-|-|-|-|
 | raw, `xhigh` | 84 | 71 | 41 | 11.0 min | TC-85, TC-90, TC-91, TC-94, TC-97 partial; TC-88, TC-92 failed |
-| conductor, `tools` | 91 | 77 | 43 | 10.2 min | TC-85, TC-90, TC-94 partial; TC-92 failed |
+| conductor, `tools` (the server's `xhigh`) | 91 | 77 | 43 | 10.2 min | TC-85, TC-90, TC-94 partial; TC-92 failed |
 
 ## How each row ran
 
@@ -110,7 +110,7 @@ Ornith-1.5-122B scored 93 to 97 on the full suite and 80 and 84 in hard mode. Th
 ![Score and time a row for Ornith-1.5-122B on tool-eval-bench, one run a row](media/ornith-tool-eval-bench.png)
 
 - Model: Ornith-1.5-122B in our EXL3 4.0 pack, drafting with its MTP layer and the lookup, on the 0.13.0 code; `/health` said `0.13.0+ornith-1.5-122b-exl3-4.0`.
-- Server: default effort `xhigh`, one slot (the server log: side slots are not built for this model yet), response cache on, a window of 262,144 tokens, 32,768 tokens an answer by default. The model's own sampling defaults are temperature 0.6, `top_k` 20 and `top_p` 0.95; the bench sends temperature 0.
+- Server: default effort `xhigh` (a fresh install runs at `medium`; set `REASONING_EFFORT=xhigh` to match the `tools` rows, [setup.md](setup.md#reasoning-effort)), one slot (the server log: side slots are not built for this model yet), response cache on, a window of 262,144 tokens, 32,768 tokens an answer by default. The model's own sampling defaults are temperature 0.6, `top_k` 20 and `top_p` 0.95; the bench sends temperature 0.
 - Bench f2e368b and the settings above, through `tools/teb_batch.sh`, each row one run (n = 1). The conductor's `tools` row and its hard-mode row send no profile header. We made `bench-pk` and `bench-nopk` again from this build's `tools` profile with the commands above.
 - The server restarted before the raw rows and again before the conductor and hard-mode rows. No answer in a row came from the response cache.
 
@@ -131,7 +131,7 @@ Hard mode, 28 scenarios:
 | path | score | deployability | responsiveness | time | not passed |
 |-|-|-|-|-|-|
 | raw, `xhigh` | 80 | 67 | 36 | 10.7 min | TC-91, TC-94, TC-97 partial; TC-74, TC-85, TC-89, TC-92 failed |
-| conductor, no header | 84 | 73 | 48 | 10.1 min | TC-90, TC-94, TC-97 partial; TC-85, TC-89, TC-92 failed |
+| conductor, no header (`tools`, the server's `xhigh`) | 84 | 73 | 48 | 10.1 min | TC-90, TC-94, TC-97 partial; TC-85, TC-89, TC-92 failed |
 
 - With thinking off the suite ran in 9.8 min at 93; with thinking on, 11.8 to 18.4 min at 93 and 94. `low` took the longest of the raw rows. It is one run, and the cause is not tested.
 - The `tools` row scored 96 against 93 for raw `xhigh` at the same effort. That is 3 points, a little over the 2-point noise of the 27B rows; one run a side.

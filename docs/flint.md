@@ -108,20 +108,20 @@ On 4.0, decode reads about half the bytes and runs 31 to 59 % faster. Prompt rea
 
 ## Tool calls
 
-tool-eval-bench 2.8.1.dev13 (commit f2e368b), seed 42, temperature 0, one request at a time, one run a row (n=1), 2026-10-22, TandemLLM 0.14.1. Each pack ran the Setup Guide's defaults for Flint: one slot, effort medium by default, conductor on, FP8 cache off, a restart before each row. BF16's window is 131,072 tokens. Score, then the time the row took:
+tool-eval-bench 2.8.1.dev13 (commit f2e368b), seed 42, temperature 0, one request at a time, one run a row (n=1), 2026-10-22, TandemLLM 0.14.1. Each pack ran the Setup Guide's defaults for Flint: one slot, effort `medium` by default (the shipped default, [setup.md](setup.md#reasoning-effort)), conductor on, FP8 cache off, a restart before each row. The raw rows send their effort: thinking off or `xhigh`. The `tools` rows think at the server's `medium`, and the `bench-pk` rows at the level of each turn's class. BF16's window is 131,072 tokens. Score, then the time the row took:
 
 | row | EXL3 4.0 | EXL3 6.0 | BF16 |
 |-|-|-|-|
 | **full suite, 69 scenarios** | | | |
 | raw, thinking off | 75 (2 min) | 76 (3.1 min) | 76 (4.7 min) |
 | raw, thinking xhigh | 85 (4.7 min) | 86 (11 min) | 86 (21.5 min) |
-| conductor, `bench-pk` | 81 (5.1 min) | 86 (8.9 min) | 83 (16.8 min) |
-| conductor, `tools` | 83 (4.1 min) | 86 (6.3 min) | 84 (15.3 min) |
+| conductor, `bench-pk` (effort by turn class) | 81 (5.1 min) | 86 (8.9 min) | 83 (16.8 min) |
+| conductor, `tools` (effort `medium`) | 83 (4.1 min) | 86 (6.3 min) | 84 (15.3 min) |
 | **hard mode, 28 scenarios** | | | |
 | raw, thinking off | 36 (1.8 min) | 41 (2 min) | 41 (4.3 min) |
 | raw, thinking xhigh | 71 (5.5 min) | 61 (8.6 min) | 62 (19.9 min) |
-| conductor, `bench-pk` | 73 (3.5 min) | 61 (5.8 min) | 57 (12.8 min) |
-| conductor, `tools` | 80 (2.2 min) | 54 (4.4 min) | 70 (12.8 min) |
+| conductor, `bench-pk` (effort by turn class) | 73 (3.5 min) | 61 (5.8 min) | 57 (12.8 min) |
+| conductor, `tools` (effort `medium`) | 80 (2.2 min) | 54 (4.4 min) | 70 (12.8 min) |
 Raw rows send `X-Tandem: raw`, so the model answers alone; thinking off is `reasoning_effort: none`. The conductor rows pin a profile with `X-Tandem-Profile`: `tools` is what the conductor picks for a client that offers tools, and `bench-pk` is a test profile we do not ship. Hard mode at n=1 varies a lot between runs, so we claim no ranking between the sizes. [models/flint/measurements/2026-10-22-tool-eval-bench.json](../models/flint/measurements/2026-10-22-tool-eval-bench.json) has every row with its misses.
 
 ![tool-eval-bench scores for Flint's three profiles, one run a row](media/flint-tool-eval-bench.png)

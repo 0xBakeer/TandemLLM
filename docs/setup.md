@@ -145,6 +145,14 @@ A request that sends no `max_tokens` may write up to `DEFAULT_MAX_TOKENS` tokens
 
 To change it, set Default answer length in the Methods and advanced step and install. The guide writes the value into `run/setup.env`, which `ops/serve.env` reads after the profile. From a shell, put `DEFAULT_MAX_TOKENS=<tokens>` in `run/local.env` and restart. A box that the guide set up for Ornith before 0.14.2 keeps the 32,768 it wrote then, until you change the field and install again.
 
+## Reasoning effort
+
+A fresh install thinks at effort `medium` when a request says nothing about thinking: `REASONING_EFFORT=medium` in `ops/serve.env`, for every model. Each level caps the thinking: `low` at 1,024 tokens, `medium` at 8,192, `xhigh` not at all, and `none` turns thinking off. A client's own effort word, budget or thinking switch wins ([server.md](server.md#thinking-budgets-from-the-client) has every shape). Under the conductor, the `tools` profile that tool clients get uses the server's level, and a profile that decides the effort by turn class (`chat`) sets its own level each turn.
+
+To change it, set Thinking effort in the Methods and advanced step and install, or put `REASONING_EFFORT=xhigh` in `run/local.env` and restart. `none` (thinking off) is the shell's value only.
+
+The published numbers name their effort. Speed rows run greedy with thinking off, since thinking changes what the model writes and so what a row measures. Quality rows against BF16 (KL, top-1, perplexity) read fixed text and have no effort. Each tool-eval-bench row names its effort and the server's default in its section ([tool-eval-bench.md](tool-eval-bench.md), [flint.md](flint.md#tool-calls)). The 27B and Ornith tool-eval-bench runs used `xhigh` as the server's default, and the Flint runs the shipped `medium`. To match a row on a fresh install, set the effort the row names.
+
 ## Benchmarks and the overlay
 
 `tools/exl3_fastrun.py --env-file ops/serve.env` reads serve.env without `run/setup.env` (it sources it with `QSE_SETUP_ENV` pointing nowhere): a benchmark row is the file's knobs, not what the box was last set up with. Its report says `setup_overlay: <path> (ignored)` when an overlay was there. Pass a knob with `--env KEY=VALUE` to measure an overlay's value.
