@@ -14,6 +14,13 @@ round, after the slots' walks have synced). Lines:
                                  depth and rank, and the accepted path (a node's label: on the path;
                                  its parent on the path: it was reached)
   {"k": "draft", "t", "E", "slots", "ms"}   one packed draft pass
+
+A slot line also carries, for the drafter studies (~/Projects/spd-e5/fable-teach-drafter-1023.md):
+`top_ids` / `top_lp` per verified node the target's top-64 ids and log-probabilities (the verify's row
+after penalties, temperature 1; copied behind the walk's own synchronize, `topk_async`), `drawn` the
+tokens the walk emitted (the target's draw at each path node), `cand` / `lat_lp` the proposing DFlash2
+arm's lattice candidates and log-probabilities, and with QWEN38_ROUND_LOG_HIDDEN=1 `hidden` the anchor's
+post-norm hidden state.
 """
 
 from __future__ import annotations
@@ -27,6 +34,10 @@ import torch
 from engine.settings import SETTINGS as _S
 
 PATH = _S.get("ROUND_LOG") or ""
+#: SPD-187: the anchor's post-norm hidden in each slot line too (fp16, base64; about 10 KB a block)
+HIDDEN = _S.get("ROUND_LOG_HIDDEN") == "1"
+#: the target's top-k a verified node logs (ids and log-probabilities of the verify's own row)
+TOPK = 64
 
 
 class RoundLog:
@@ -96,8 +107,29 @@ class RoundLog:
         self.fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
 
     # ---- a slot's block after its walk -----------------------------------------------------
+    @staticmethod
+    def topk_async(rows, hidden=None):
+        """The target's top-k of each verified row, launched now and copied into pinned memory behind the
+        stream; read by `slot` after the walk has synchronized (no synchronize of its own)."""
+        if rows is None or not torch.is_tensor(rows):
+            return None
+        with torch.no_grad():
+            x = rows.float()
+            vals, idx = torch.topk(x, min(TOPK, x.shape[-1]), dim=-1)
+            lp = vals - torch.logsumexp(x, dim=-1, keepdim=True)
+            pin = rows.is_cuda
+            hv = torch.empty(lp.shape, dtype=torch.float32, pin_memory=pin)
+            hi = torch.empty(idx.shape, dtype=torch.int32, pin_memory=pin)
+            hv.copy_(lp, non_blocking=pin)
+            hi.copy_(idx.to(torch.int32), non_blocking=pin)
+            hh = None
+            if HIDDEN and hidden is not None:
+                hh = torch.empty(hidden.shape[-1], dtype=torch.float16, pin_memory=pin)
+                hh.copy_(hidden.reshape(-1, hidden.shape[-1])[0].to(torch.float16), non_blocking=pin)
+        return hv, hi, hh
+
     def slot(self, rid, slot: int, E: int, ctx: int, tree, path: list, pre_n: int | None,
-             drafter=None) -> None:
+             drafter=None, top=None, drawn=None) -> None:
         if tree is None:
             return
         n = len(tree.tokens)
@@ -110,19 +142,53 @@ class RoundLog:
         rec = {"k": "slot", "rid": rid, "slot": slot, "E": E, "ctx": int(ctx), "n": n,
                "parents": list(tree.parents), "source": list(tree.source),
                "score": [round(float(x), 5) for x in tree.scores], "q": q, "depth": dep, "rank": rank,
-               "path": list(path), "accepted": len(path) - 1, "pre_n": pre_n}
+               "path": list(path), "accepted": len(path) - 1, "pre_n": pre_n,
+               "drawn": list(drawn) if drawn is not None else None}
+        if top is not None:
+            hv, hi, hh = top
+            rec["top_ids"] = hi[:n].tolist()
+            rec["top_lp"] = [[round(v, 3) for v in r] for r in hv[:n].tolist()]
+            if hh is not None:
+                import base64
+                rec["hidden"] = base64.b64encode(hh.numpy().tobytes()).decode()
+        cand, lat = lattice(drafter)
+        rec["cand"], rec["lat_lp"] = cand, lat
         with self.lock:
             self._write(rec)
             self._drain()
 
 
+def _arm(drafter):
+    key = getattr(drafter, "last_key", None)
+    if key is not None and hasattr(drafter, "small"):
+        return drafter.small if key == "s" else drafter.large
+    return drafter
+
+
+def lattice(drafter):
+    """The proposing arm's DFlash2 lattice of this block, host-side already (`walk_host_logp`): its
+    candidates [L][k] and their log-probabilities, or (None, None)."""
+    arm = _arm(drafter)
+    d2 = getattr(arm, "mtp", arm)
+    cand = getattr(d2, "_cand_host", None)
+    lat = getattr(d2, "_logp_host", None)
+    if isinstance(lat, list) and lat and isinstance(lat[0], list) and lat[0] and isinstance(lat[0][0], list):
+        # [L][parent][candidate]: the rows along the lattice's own greedy walk (L x k numbers, not L x k x k)
+        rows, j = [], 0
+        for slot_lp in lat:
+            row = slot_lp[j] if j < len(slot_lp) else slot_lp[0]
+            rows.append([round(float(v), 3) for v in row])
+            j = max(range(len(row)), key=row.__getitem__)
+        lat = rows
+    elif isinstance(lat, list):
+        lat = [[round(float(v), 3) for v in r] if isinstance(r, list) else round(float(r), 3) for r in lat]
+    return cand, lat
+
+
 def node_q(drafter, tree, dep, rank):
     """Per node the calibrated acceptance probability of the router arm that proposed `tree`
     (engine/router.py `_node_q`), or None when the drafter has none."""
-    arm = drafter
-    key = getattr(drafter, "last_key", None)
-    if key is not None and hasattr(drafter, "small"):
-        arm = drafter.small if key == "s" else drafter.large
+    arm = _arm(drafter)
     fn = getattr(arm, "_node_q", None)
     if fn is None:
         return None

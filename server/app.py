@@ -1925,6 +1925,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if pen is not None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
+                    # SPD-187: the target's top-k of the verified rows, copied behind the walk's synchronize
+                    rtop = (rlog.topk_async(lg[:len(tree.tokens)], eng.hidden_post_norm)
+                            if rlog is not None else None)
                     on_verify = getattr(drafter, "on_verify", None)
                     if on_verify is not None and vms is not False:
                         # a joint round's time is the round's, not this block's (`_verify_tree`)
@@ -1946,7 +1949,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if rlog is not None:
                         rlog.slot(rid, _par_index() if par is not None else 0,
                                   (par.last_joint.get(_par_index(), 1) if vms is False else 1),
-                                  pos, tree, path, pre_n, drafter)
+                                  pos, tree, path, pre_n, drafter, top=rtop, drawn=new)
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
                         _par_note(par, "accept", f"joint{par.last_joint.get(_par_index(), 1)}"

@@ -28,9 +28,15 @@ class Arm:
         return 0.5 ** depth
 
 
+class D2:
+    _cand_host = [[11, 12], [13, 14]]
+    _logp_host = [[[-0.1, -2.3], [-0.7, -0.7]], [[-0.2, -1.9], [-1.5, -0.3]]]
+
+
 class LenRouter:
     last_key = "l"
     small, large = None, Arm()
+    large.mtp = D2()
 
 
 def test_round_slot_and_draft_lines():
@@ -40,11 +46,15 @@ def test_round_slot_and_draft_lines():
         rid = log.round([Req(0, 8, 300), Req(3, 6, 512)], None, cap=8, pre_rows=[12, 6], graphed=True)
         rid2 = log.round([Req(1, 4, 100)], None)
         tree = DraftTree([5, 6, 7, 8], [-1, 0, 1, 0], scores=[1.0, 0.9, 0.4, 0.7], source=["root", "mtp", "mtp", "sib"])
-        log.slot(rid, 3, 2, 512, tree, [0, 1, 2], 6, LenRouter())
+        import torch
+        lg = torch.randn(4, 100)
+        top = roundlog.RoundLog.topk_async(lg)
+        log.slot(rid, 3, 2, 512, tree, [0, 1, 2], 6, LenRouter(), top=top, drawn=[6, 7, 9])
         log.slot(rid2, 1, 1, 100, tree, [0], 4, object())
         log.draft([Req(0, 16, 300), Req(3, 16, 512)], None)
         log.fh.close()
         lines = [json.loads(x) for x in open(path)]
+    import torch
     r, r2, s, s2, dr = lines
     assert (r["k"], r["rid"], r["E"], r["slots"], r["rows"], r["pre_rows"], r["cap"], r["ctx"], r["graphed"]) == \
         ("round", 1, 2, [0, 3], [8, 6], [12, 6], 8, [300, 512], True)
@@ -53,6 +63,12 @@ def test_round_slot_and_draft_lines():
     assert s["depth"] == [0, 1, 2, 1] and s["rank"] == [0, 1, 3, 2] and s["pre_n"] == 6
     assert s["q"] == [None, 0.5, 0.25, 0.5], s["q"]
     assert s2["q"] is None, "a drafter without a calibrated q"
+    ref = torch.log_softmax(lg, -1).topk(64, dim=-1)
+    assert s["top_ids"] == ref.indices.tolist() and len(s["top_lp"][0]) == 64
+    assert max(abs(a - b) for a, b in zip(s["top_lp"][2], ref.values[2].tolist())) < 1e-3
+    assert s["drawn"] == [6, 7, 9] and s["cand"] == [[11, 12], [13, 14]]
+    assert s["lat_lp"] == [[-0.1, -2.3], [-0.2, -1.9]], "the rows along the lattice's greedy walk"
+    assert s2["cand"] is None and s2["top_ids"] if "top_ids" in s2 else True
     assert dr["k"] == "draft" and dr["E"] == 2 and dr["ms"] is None and "pass_ms" not in dr
     return "round, lone round, slot (q from the proposing arm, ranks, depths, path) and draft lines"
 
