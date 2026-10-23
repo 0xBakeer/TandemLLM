@@ -40,6 +40,9 @@ def prompt_ids(tok, repo: Path, n: int) -> list[int]:
             ids += tok.encode(p.read_text())
         if len(ids) >= n:
             break
+    if not ids:
+        # SPD-183: an empty source doubled forever; the tool now says what it needs
+        raise SystemExit(f"no prompt text under {repo / 'bench'} (heldout_prose.txt, heldout_code.txt, calib.txt)")
     while len(ids) < n:
         ids += ids
     return ids[:n]

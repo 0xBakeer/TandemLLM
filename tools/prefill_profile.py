@@ -23,6 +23,7 @@ from engine import cache  # noqa: E402
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from engine.model import Qwen38Engine  # noqa: E402
+import engine.models.qwen3_5.adapter  # noqa: E402,F401  (SPD-183: the cold verbs, `cache_state` among them)
 from tools.prefill_window_check import prompt_ids  # noqa: E402
 from tools.verify_spec import tree_router  # noqa: E402
 

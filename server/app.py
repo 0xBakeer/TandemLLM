@@ -2734,8 +2734,12 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False) -> None:
+              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
+              learn: bool = True) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
+
+    `learn` (SPD-151): False leaves the suffix store as it was (`suffix_learns`: a request that
+    asked for the raw engine, a benchmark's); the lookup still reads the store for it.
 
     `cold` (#98, `cache_prompt: false`): no state is kept, neither a session snapshot nor the end
     anchor; the suffix store, the lookup's memory of text, takes the tokens as for every turn.
@@ -2755,7 +2759,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
     if cold:
-        _suffix_add(prompt_ids, out_ids, mm, delta)
+        if learn:
+            _suffix_add(prompt_ids, out_ids, mm, delta)
         return
     store = STATE.get("state_store")
     committed = STATE.get("last_ctx") or []
@@ -2886,7 +2891,24 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         if STATE.get("verbose") and why not in ("kept", "off"):
             print(f"[parallel] side end not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
-    _suffix_add(prompt_ids, out_ids, mm, delta)
+    if learn:
+        _suffix_add(prompt_ids, out_ids, mm, delta)
+
+
+#: SPD-151: the suffix store's rule for a request that asks for the raw engine (`X-Tandem: raw` or
+#: `off`, or the locked `raw` / `bench` profile): `read` (the default) drafts from the store and
+#: writes nothing into it, so a benchmark that repeats its prompts measures the same engine every
+#: run; `write` learns from it as from any other request (`QSE_SUFFIX_RAW`)
+SUFFIX_RAW = (os.environ.get("QSE_SUFFIX_RAW") or "read").strip().lower()
+
+
+def suffix_learns(headers) -> bool:
+    """Whether a request's tokens go into the suffix store (SPD-151, `SUFFIX_RAW`)."""
+    if SUFFIX_RAW == "write" or headers is None:
+        return True
+    forced = str(headers.get("X-Tandem") or "").strip().lower()
+    profile = str(headers.get("X-Tandem-Profile") or "").strip().lower()
+    return not (forced in ("raw", "off") or profile in ("raw", "bench"))
 
 
 def _suffix_add(prompt_ids: list[int], out_ids: list[int], mm=None, delta: int = 0) -> None:
@@ -7269,6 +7291,7 @@ class Handler(BaseHTTPRequestHandler):
         mon = STATE.get("monitor")
         self._tandem = (mon.mode_for(self.headers.get("X-Tandem"), n_req) if mon is not None
                         else "raw")
+        rec.learn_suffix = suffix_learns(self.headers)         # SPD-151
         self._images_left_out = 0                      # a keep-alive socket's handler is reused
         live_registry().register(rec)                  # visible from now until 30 s after
         try:
@@ -8692,7 +8715,8 @@ class Handler(BaseHTTPRequestHandler):
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)), cold=cold)
+                                                 else getattr(rec, "note_at", None)), cold=cold,
+                                  learn=getattr(rec, "learn_suffix", True))
                         if rkey is not None and not ci and not (sup is not None and sup.acted) \
                                 and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
@@ -9336,7 +9360,8 @@ class Handler(BaseHTTPRequestHandler):
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)), cold=cold)
+                                                 else getattr(rec, "note_at", None)), cold=cold,
+                                  learn=getattr(rec, "learn_suffix", True))
                 if rkey is not None and not (sup is not None and sup.acted) and \
                         not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
