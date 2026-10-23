@@ -138,6 +138,26 @@ A streamed response sends one chunk per token, carries `usage` on the last chunk
 
 `usage` counts what the client sent and what it received. `prompt_tokens` is the client's messages (with its tools) as the chat template renders them; the conductor's notes (the router's note for the turn, the session's replayed notes, the closed think block of a turn it turned thinking off, the monitor's SP4 note, an earlier answer's hidden tokens put back) are not in it, and when there are any `prompt_tokens_details.hidden_tokens` says how many the model read besides (absent when none, so a raw request's `usage` has its old shape). `cached_tokens` is the client's tokens served from a cache: the cached span less the hidden tokens inside it, which the server tracks by position (the notes, the end anchor's replay, a reasoning the client left out, SP4's note); when the positions are not known it is at most `prompt_tokens`, as before. `timings.cache_n` and `prompt_n` stay the engine's own counts of the whole prompt, and the ledger keeps them as `engine_cached` and `forwarded_tokens` (schema 8). Until 0.3.50-test the hidden rows inside the cached span counted as client tokens: an opencode turn that re-read 3,827 of its 24,706 client tokens reported all 24,706 cached (SRV-233); it now reports 20,879. The ledger keeps the client's count in `prompt_tokens` and the conductor's in `conductor_hidden_tokens`. Until 0.3.41-test the router's notes were counted: a "hi" reported 238 prompt tokens under the chat profile (926 on 0.3.39-test), 11 raw (SRV-165).
 
+### Speed and draft fields: `timings` and `metrics`
+
+Every response carries two objects beside `usage`, with the engine's own counts of the request. A response without a stream has them in its body. A stream has them in one chunk only, the one that carries `usage`: the finish chunk when the client sends no `stream_options`, the separate `choices: []` chunk with `include_usage: true`, and none with `include_usage: false` or `--usage-default off`. [server/METRICS.md](../server/METRICS.md#per-response-usage-and-timings) has an example with consistent numbers.
+
+| field | what it is |
+|-|-|
+| `timings.cache_n` | prompt tokens restored from a cache |
+| `timings.prompt_n`, `prompt_ms`, `prompt_per_second` | prompt tokens forwarded, and the time from the engine lock to the first token |
+| `timings.predicted_n` | tokens the engine committed, the end token included (`completion_tokens`) |
+| `timings.predicted_ms`, `predicted_per_second` | the first token to the last, and `(predicted_n - 1) / predicted_ms` |
+| `timings.blocks` | decode forwards: each verify round is one block, and so is a plain step without a draft |
+| `timings.tokens_per_block` | `(completion_tokens - 1) / blocks` |
+| `timings.draft_n`, `draft_n_accepted` | drafted tokens the verify checked, and those it kept |
+| `timings.reasoning_n` | committed tokens of the reasoning block |
+| `timings.ttft_ms`, `queue_ms`, `total_ms` | arrival to the first token, arrival to the engine lock, arrival to the end |
+| `metrics.speculative_decoding.mean_acceptance_length` | the same number as `tokens_per_block` |
+| `metrics.speculative_decoding.draft_acceptance_rate` | `draft_n_accepted / draft_n`, to four decimals |
+
+A block commits the drafted tokens the verify kept plus one token the verify decides itself. `tokens_per_block` counts that token too, so 1.0 means no drafted token was kept, and a round that kept 4 drafted tokens counts 5. The first token comes from the prefill, which is why both speeds subtract 1. As an example, a response with `completion_tokens` 412, `blocks` 90, `draft_n` 1,350 and `draft_n_accepted` 322 has a mean accepted length of `411 / 90 = 4.57` and an acceptance rate of `322 / 1350 = 0.2385`.
+
 `finish_reason` is one of `stop` (end of text or a stop string), `length` (`max_tokens`), `tool_calls`, `timeout` (the request's wall-clock cap), or `error`. On `error` the partial text has already been sent and an `error` object sits beside the finish reason. A client that hung up is logged as `abandoned`, not as an error.
 
 `server/stream.py` turns tokens into characters. A character can span tokens, because the tokenizer works on bytes, and a stream that sent every decoded prefix would send a replacement character (U+FFFD) that never goes away. Our detokenizer holds back a trailing partial character until the next token completes it. Every character it sends is final.

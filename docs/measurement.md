@@ -12,6 +12,8 @@ Each request's speed is computed from its own record:
 
 The first token belongs to the prefill, so it is subtracted, and the decode time is the request's wall clock after its first token. A row reports the mean, p50, p90 and max over the 50 requests, with the median time to first token.
 
+The client measures the row's speed and time to first token itself. The server's own numbers come with every response, in `timings` and `metrics` ([server.md](server.md#speed-and-draft-fields-timings-and-metrics) lists them), and its `[req]` log line holds the same record. The Setup Guide's card cells take two of them from that line: `tok_round` is `tokens_per_block`, the mean accepted length, and `ms_round` is the decode time over `blocks` (`tools/exl3_fastrun.py`). No row reports `draft_acceptance_rate`. It depends on how many tokens a round drafts, and StairCut sets that number again every round.
+
 Two readings of a row are easy to get wrong.
 
 - The gaps between tokens. A verified round writes several tokens into the socket at once, so half the gaps are microseconds and the other half a whole round. The median inter-token latency therefore says nothing about round time.
