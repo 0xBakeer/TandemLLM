@@ -5,6 +5,8 @@ Moved from server/app.py (ENG-406): the same steps over the same arguments; what
 
 from __future__ import annotations
 
+import os
+
 from engine.settings import SETTINGS as _S
 from engine.spec import Relax
 
@@ -89,11 +91,47 @@ def serve(a, ctx) -> dict:
             "side_slots": side_slots(a, ctx, cfg, w)}
 
 
+def _share_drafter_weights() -> None:
+    """SPD-165: the drafter checkpoints read once for every slot. `dflash2.load_weights` meant to cache by
+    (snapshot, device, dtype), but its loop variable over the file's tensor names took the key's name, so
+    the cache was filed under the last tensor's name and never hit: each side slot read both arms' BF16
+    checkpoints again (38-40 s a slot on 2026-10-23, 39 s of it in `.to(device)`, and the copies stayed
+    resident). This keeps one copy per key from the adapter; the fix in dflash2.py itself waits for the
+    branch's one fingerprint move (dflash2.py is in the 27B's arithmetic manifest)."""
+    from engine.drafters import dflash2 as df2
+    if getattr(df2.load_weights, "shared", False):
+        return
+    orig, cache = df2.load_weights, {}
+
+    def load_weights(snapshot: str, device: str = "cuda", dtype=None):
+        import torch
+        dtype = torch.bfloat16 if dtype is None else dtype
+        key = (os.path.abspath(os.path.expanduser(snapshot)), str(torch.device(device)), dtype)
+        if key not in cache:
+            cache[key] = orig(snapshot, device, dtype)
+        return cache[key]
+
+    load_weights.shared = True
+    df2.load_weights = load_weights
+
+
+def _share_draft_head(e2) -> None:
+    """SPD-165: a side slot's drafters read the EXL3 draft head slot 0 already holds (`dflash2.exl3_draft_head`
+    keys it by engine, so every side slot read its own 0.64 GB copy). Read-only weights, as the target's."""
+    from engine.drafters import dflash2 as df2
+    path = df2.DRAFT_HEAD_EXL3
+    for (_, p), blk in list(df2._EXL3_HEADS.items()):
+        if p == path:
+            df2._EXL3_HEADS.setdefault((id(e2), path), blk)
+            return
+
+
 def make_lenrouter(a, eng, max_len: int, ctx, corpus_from=None):
     """The served drafter stack (`--drafter lenrouter`) over `eng`, its draft caches `max_len`
     long: slot 0's at the engine's window, a side slot's (`--parallel N`) at its own. Sets
     `a.depth`. `corpus_from`: the lookup drafter whose corpus (and suffix store) a side slot's
     lookup drafter reads too, instead of loading its own copy."""
+    _share_drafter_weights()
     from engine.drafters.dflash2 import DFlash2Drafter
     from engine.lenrouter import LengthRouter, NoArm
     if not a.dflash2_ckpt16:
@@ -169,6 +207,7 @@ def side_slots(a, ctx, cfg, w) -> dict:
         from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
         e2 = Qwen38Engine(cfg, w, max_len=L)
         e2.graphs_off = a.side_graphs == "off"
+        _share_draft_head(e2)
         ng0 = getattr(drafter0, "ngram", None)
         d2 = make_lenrouter(a, e2, L, ctx, corpus_from=ng0) if a.drafter == "lenrouter" else None
         return e2, d2
