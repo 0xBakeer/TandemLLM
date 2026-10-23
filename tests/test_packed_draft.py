@@ -150,6 +150,33 @@ def test_the_folded_attention_is_the_expanded_one():
     return f"6 blocks (3 masked): folded = expanded within {worst:.1e}"
 
 
+def test_the_window_with_a_free_tail_is_the_cat():
+    """SPD-203, DF2_PACK_TAIL: a window gathered with the block's rows free at its tail, the block's keys
+    and values written there, gives the blocks `torch.cat` gives, bit for bit."""
+    real = D._lin
+    D._lin = _lin
+    try:
+        m, embed = _quantised(block=16, seed=5)
+        g = torch.Generator().manual_seed(13)
+        items = [_item(m, embed, 300 + 5 * j, 25 + 4 * j, g) for j in range(3)]
+        bs = m.cfg.block_size
+        tails = []
+        for noise, positions, ctx_kv, ctx_pos, masks in items:
+            kv = []
+            for ck, cv in ctx_kv:
+                n0 = ck.shape[1]
+                fk = torch.full((ck.shape[0], n0 + bs, ck.shape[2]), float("nan"))
+                fv = torch.full_like(fk, float("nan"))
+                fk[:, :n0], fv[:, :n0] = ck, cv
+                kv.append((fk, fv, n0))
+            tails.append((noise, positions, kv, ctx_pos, masks))
+        a, b = D.forward_block_multi(m, items), D.forward_block_multi(m, tails)
+        assert all(torch.equal(x, y) for x, y in zip(a, b))
+    finally:
+        D._lin = real
+    return "3 blocks: the free-tail window = the cat, bit for bit"
+
+
 def test_bf16_weights_are_not_handed_out():
     """A plain tensor weight runs inside the block (cuBLAS may pick another algorithm by M): the
     generator yields nothing for an all-bf16 module."""

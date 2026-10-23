@@ -747,9 +747,18 @@ class DFlash2Module:
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
             v = v.transpose(0, 1)[None]
             if ctx_kv is not None:
-                ck, cv = ctx_kv[i]
-                k = torch.cat([ck[None], k], dim=2)
-                v = torch.cat([cv[None], v], dim=2)
+                e = ctx_kv[i]
+                if len(e) == 3:
+                    # SPD-203 (PACK_TAIL): the window was gathered with the block's rows left free at its
+                    # tail; the block's keys and values go there (the values `torch.cat` writes)
+                    ck, cv, n0 = e
+                    ck[:, n0:] = k[0]
+                    cv[:, n0:] = v[0]
+                    k, v = ck[None], cv[None]
+                else:
+                    ck, cv = e
+                    k = torch.cat([ck[None], k], dim=2)
+                    v = torch.cat([cv[None], v], dim=2)
             mask = masks[1] if cfg.is_sliding(i) else masks[0]
             if PACK_FOLD:
                 # SPD-203: each key/value head's query group folded into the query rows ([1, nkv, rep t,
@@ -941,6 +950,8 @@ PACK_KP = _S.get("DF2_PACK_KP") == "1"
 PACK_GQA = _S.get("DF2_PACK_GQA") == "1"
 #: SPD-203: the packed draft's attention with each query group folded into its key/value head's rows
 PACK_FOLD = _S.get("DF2_PACK_FOLD") == "1"
+#: SPD-203: the packed draft gathers each layer's window with the block's rows free at its tail (no cat)
+PACK_TAIL = _S.get("DF2_PACK_TAIL") == "1"
 PACK_TOPK = _S.get("DF2_PACK_TOPK") == "1"
 
 

@@ -167,8 +167,16 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         idx = torch.clamp(idx, max=d.max_len - 1)
         if getattr(d, "_cs", None) is not None:
             valid = valid & (d._cs.index_select(0, idx) > 0)      # SPD-177: rows that are real
-        ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
-                  for i in range(cfg.num_hidden_layers)]
+        from engine.drafters.dflash2 import PACK_TAIL
+        if PACK_TAIL:
+            # SPD-203: the window gathered with bs rows to spare at its tail, where the block's own keys
+            # and values are written (`_forward_block_steps`): one copy of the window a layer, not two
+            idx_t = torch.cat([idx, torch.zeros(bs, dtype=idx.dtype, device=dev)])
+            ctx_kv = [(d._ck[i].index_select(1, idx_t), d._cv[i].index_select(1, idx_t), span)
+                      for i in range(cfg.num_hidden_layers)]
+        else:
+            ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
+                      for i in range(cfg.num_hidden_layers)]
         allpos = torch.cat([idx, positions])
         seen = torch.cat([valid, torch.ones(bs, dtype=torch.bool, device=dev)])
         mask = ((positions[:, None] - allpos[None, :]) < W) & seen[None, :]
