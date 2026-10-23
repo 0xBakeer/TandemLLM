@@ -50,7 +50,7 @@ def _post(url_body, content_length):
 def _serve():
     global _server
     _setup()
-    app.MAX_BODY_BYTES = CAP                      # a real budget, a testable number
+    app.http_body.MAX_BODY_BYTES = CAP             # a real budget, a testable number
     _server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
     threading.Thread(target=_server.serve_forever, daemon=True).start()
 
