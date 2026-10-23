@@ -488,6 +488,10 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
     return keep
 
 
+#: SPD-163: how long a barrier waiter sleeps while a decoding slot holds the GPU turn (it is woken by
+#: the round's end or a submit before that); `QSE_PARALLEL_BUSY_WAIT_MS`
+BUSY_WAIT_S = float(os.environ.get("QSE_PARALLEL_BUSY_WAIT_MS", "20") or 20) / 1e3
+
 #: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
 #: in one pass (`QSE_PARALLEL_AUTO_N`): below it each slot cuts its own share
 AUTO_JOINT_N = int(os.environ.get("QSE_PARALLEL_AUTO_N", "3") or 3)
@@ -718,7 +722,14 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
         try:
             with meet.cv:
                 while req.out is None and req.error is None:
-                    meet.cv.wait(meet.timeout / 2)
+                    # SPD-163: a waiter polls at half the barrier's timeout only while the turn could
+                    # be idle; while a decoding slot holds it (the round's runner, or a slot on its
+                    # way to submit) it sleeps until notified, up to BUSY_WAIT_S. Seven waiters that
+                    # woke every millisecond took the GIL from the thread issuing the joint pass:
+                    # an 8-block pass ran 210 ms in the server against 110-130 ms alone.
+                    own = turn.owner
+                    busy = own is not None and own in pool.decoding() and own != slot_index
+                    meet.cv.wait(BUSY_WAIT_S if busy else meet.timeout / 2)
                     if req.out is not None or req.error is not None:
                         break
                     if all(i in meet.pending for i in pool.decoding()):
