@@ -81,6 +81,12 @@ NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
 # torch's own ops over all rows at once, and each generator left as the walk leaves it. The draws are
 # the same bits; 0 = a seed, a launch and four elementwise launches a depth and slot, as before.
 KEYED_KERNEL = _S.get("SAMPLE_KEYED_KERNEL") == "1"
+# SPD-201: a joint round's keyed draws over each row's kept set (`keyed_noise.sparse_keyed_draws`): the top
+# candidates, `_filter`'s steps on them and the noise at their ids, for every slot of a profile in one kernel;
+# no [n, V] distribution or noise rows. Rows with top_k in 1..48 and a temperature; the rest as before. The
+# draws are the dense walk's but where a softmax or cumulative sum of the kept values rounds differently
+# (another summation order): an ulp, at a tie. 0 = the dense walk
+SPARSE_KEYED = os.environ.get("QWEN38_SAMPLE_SPARSE_KEYED", "0") == "1"
 
 
 _MASK64 = (1 << 64) - 1
@@ -569,6 +575,23 @@ def round_walks(specs: list) -> list:
             continue
         groups.setdefault((sm.temperature, sm.top_p, sm.top_k, sm.min_p), []).append(i)
     many: list = []                     # keyed slots for the one-kernel draws (KEYED_KERNEL)
+    for key_, idx in list(groups.items()):
+        sm0 = specs[idx[0]]["sampler"]
+        if not (SPARSE_KEYED and sm0.temperature > 0.0 and 0 < sm0.top_k <= _sparse_topk_max()):
+            continue
+        keyed = [i for i in idx if specs[i]["sampler"].coupled and specs[i].get("start") is not None
+                 and specs[i]["rows"].is_cuda]
+        if not keyed:
+            continue
+        got = _keyed_sparse_many([(specs[i]["sampler"], specs[i]["rows"], specs[i]["tokens"],
+                                   specs[i]["parents"], specs[i]["start"]) for i in keyed])
+        for i, (xs, extra) in zip(keyed, got):
+            dev_vals.append((i, "keyed", xs, extra))
+        rest = [i for i in idx if i not in keyed]
+        if rest:
+            groups[key_] = rest
+        else:
+            del groups[key_]
     for idx in groups.values():
         sm0 = specs[idx[0]]["sampler"]
         # SPD-201: each slot's rows filtered alone, on the tensor its own walk filters (`probs_rows`): a
@@ -662,6 +685,36 @@ def _keyed_draws_many(items: list) -> list:
         for (j, n, depth, D) in metas:
             out[j] = (xs[pos:pos + n], (depth, D, True))
             pos += n
+    return out
+
+
+def _sparse_topk_max() -> int:
+    from engine import keyed_noise as KN
+    return KN.SPARSE_TOPK_MAX
+
+
+def _keyed_sparse_many(items: list) -> list:
+    """`_keyed_draws_many` over each row's kept set (SPARSE_KEYED): items (sampler, rows [T, V] logits, tokens,
+    parents, start) of one sampling profile; per slot (draws, (depth, D, True)), the generators left as the
+    kernel walk leaves them (`_keyed_walk`)."""
+    from engine import keyed_noise as KN
+    sm0 = items[0][0]
+    rows, keys, metas = [], [], []
+    for sm, lg, tokens, parents, start in items:
+        n = len(tokens)
+        depth = [0] * n
+        for c in range(1, n):
+            depth[c] = depth[parents[c]] + 1
+        seed = sm.seed if sm.seed is not None else 0
+        keys.extend(_key(seed, start + d) for d in depth)
+        rows.append(lg[:n])
+        metas.append((n, depth, max(depth) + 1))
+    xs = KN.sparse_keyed_draws(rows, keys, rows[0].shape[-1], sm0.temperature, sm0.top_k, sm0.top_p, sm0.min_p,
+                               rows[0].device)
+    out, pos = [], 0
+    for n, depth, D in metas:
+        out.append((xs[pos:pos + n], (depth, D, True)))
+        pos += n
     return out
 
 

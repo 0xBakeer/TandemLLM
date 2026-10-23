@@ -121,6 +121,92 @@ def check(n_keys: int = 64, sizes=(1, 7, 256, 4096, 151936, 248320, 300000)) -> 
     return out
 
 
+# ---- SPD-201: a seeded walk's draws over each row's kept set only ------------------------------------------
+# `_filter` keeps at most top_k tokens of a row (ties at the cut included); outside them the distribution is 0
+# and a keyed draw (`argmax(log p + G)`) can never land there. So the draw needs the row's top candidates, the
+# filter's arithmetic on them and the noise at their ids, not the [n, V] tensors. Element j of a keyed noise
+# row is Philox output (j mod 4S) // S at counter ((j // 4S), 0, j mod S, 0), as `_uniforms` writes it; the
+# elementwise steps use libdevice's IEEE division, exp and log (torch's own); only the sums of the softmax and
+# the top-p cumulative mass are taken over the kept values in another order than torch's [V]-wide reductions.
+if HAVE_TRITON:
+    from triton.language.extra.cuda import libdevice as _ld
+
+    @triton.jit
+    def _sparse_keyed(VALS, IDS, KEYS, OUT, s_r, S, TEMP, TOP_K, TOP_P, LOG_MIN_P,
+                      HAS_MINP: tl.constexpr, HAS_TOPP: tl.constexpr, KP: tl.constexpr):
+        r = tl.program_id(0)
+        o = tl.arange(0, KP)
+        x = _ld.div_rn(tl.load(VALS + r * s_r + o), TEMP)          # logits / temperature, descending
+        ids = tl.load(IDS + r * s_r + o)
+        ninf = float("-inf")
+        mx = tl.max(x, axis=0)
+        keep = x > ninf
+        if HAS_MINP:
+            keep = keep & (x >= mx + LOG_MIN_P)                     # `logits < floor` is dropped
+        nk = tl.sum(keep.to(tl.int32), axis=0)
+        kth = tl.sum(tl.where(o == TOP_K - 1, x, 0.0), axis=0)
+        cut = tl.where(TOP_K - 1 < nk, kth, ninf)                  # the top-k cutoff of the kept row
+        keep = keep & (x >= cut)
+        xm = tl.where(keep, x, ninf)
+        if HAS_TOPP:
+            e = tl.where(keep, _ld.exp(xm - mx), 0.0)
+            lse = mx + _ld.log(tl.sum(e, axis=0))
+            cum = tl.cumsum(tl.where(keep, _ld.exp(xm - lse), 0.0), axis=0)
+            drop = cum > TOP_P
+            prev = tl.cumsum(drop.to(tl.int32), axis=0) - drop.to(tl.int32)   # a drop before this one
+            keep = keep & ((prev == 0) | (o == 0))                  # the first token that crosses stays
+            xm = tl.where(keep, x, ninf)
+        e2 = tl.where(keep, _ld.exp(xm - mx), 0.0)
+        logp = _ld.log(_ld.div_rn(e2, tl.sum(e2, axis=0)))
+        key = tl.load(KEYS + r).to(tl.uint64)
+        k0 = (key & 0xFFFFFFFF).to(tl.uint32)
+        k1 = ((key >> 32) & 0xFFFFFFFF).to(tl.uint32)
+        j = ids.to(tl.int64)
+        it = j // (4 * S)
+        rem = j - it * (4 * S)
+        ii = rem // S
+        idx = rem - ii * S
+        z = (o * 0).to(tl.uint32)
+        o0, o1, o2, o3 = philox_impl(it.to(tl.uint32), z, idx.to(tl.uint32), z, k0, k1, 10)
+        w = tl.where(ii == 0, o0, tl.where(ii == 1, o1, tl.where(ii == 2, o2, o3)))
+        u = w.to(tl.float32) * 2.3283064365386963e-10 + 1.1641532182693481e-10
+        u = tl.where(u == 1.0, 0.0, u)
+        g = -_ld.log(-_ld.log(tl.maximum(u, 1e-20)))
+        sc = tl.where(keep, logp + g, ninf)
+        best = tl.max(sc, axis=0)
+        pick = tl.min(tl.where(sc == best, o, KP), axis=0)
+        tl.store(OUT + r, tl.sum(tl.where(o == pick, ids, 0), axis=0))
+
+
+#: candidates a row brings to the sparse keyed draw; the request's top_k must leave room for ties at its cut
+SPARSE_KP = 64
+SPARSE_TOPK_MAX = 48
+
+
+def sparse_keyed_draws(rows: list, keys: list[int], V: int, temperature: float, top_k: int, top_p: float,
+                       min_p: float, device) -> torch.Tensor:
+    """One draw per row of `rows` (each [n_i, V] logits, penalties applied), row r under noise key keys[r]:
+    `argmax(log _filter(row) + G_key)` evaluated on the row's top SPARSE_KP logits. int64 [sum n_i]."""
+    import math
+    dev = torch.device(device)
+    n = sum(int(x.shape[0]) for x in rows)
+    vals = torch.empty(n, SPARSE_KP, dtype=torch.float32, device=dev)
+    ids = torch.empty(n, SPARSE_KP, dtype=torch.long, device=dev)
+    r0 = 0
+    for x in rows:
+        r1 = r0 + int(x.shape[0])
+        torch.topk(x.float() if x.dtype != torch.float32 else x, SPARSE_KP, dim=-1, sorted=True,
+                   out=(vals[r0:r1], ids[r0:r1]))
+        r0 = r1
+    out = torch.empty(n, dtype=torch.long, device=dev)
+    S, _ = policy(V, dev)
+    kt = torch.tensor(keys, dtype=torch.int64).to(dev, non_blocking=True)
+    _sparse_keyed[(n,)](vals, ids, kt, out, vals.stride(0), S, float(temperature), int(top_k), float(top_p),
+                        math.log(min_p) if min_p > 0 else 0.0, HAS_MINP=min_p > 0.0, HAS_TOPP=top_p < 1.0,
+                        KP=SPARSE_KP, num_warps=2)
+    return out
+
+
 if __name__ == "__main__":
     print(f"torch {torch.__version__}")
     print("\n".join(check()))
