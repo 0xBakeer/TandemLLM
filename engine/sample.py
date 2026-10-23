@@ -393,6 +393,8 @@ class Sampler:
         keyed = self.coupled and start is not None
         if BATCH and not keyed:
             return self._tree_walk_batched(dists, tokens, parents, q)
+        if BATCH and keyed:
+            return self._tree_walk_keyed(dists, tokens, parents, start)
         path, node = [0], 0
         while True:
             kids = [c for c in range(node + 1, len(tokens)) if parents[c] == node]
@@ -421,6 +423,48 @@ class Sampler:
         return path, new
 
     @torch.no_grad()
+    @torch.no_grad()
+    def _tree_walk_keyed(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
+                         start: int) -> tuple[list[int], list[int]]:
+        """`tree_walk` for a seeded request (SPD-163 step 2) with every node's keyed draw taken up front
+        and brought over in one copy. A node at depth d draws `argmax(log p + G_(start + d))`, `pick_at`'s
+        statements: the noise of a position is a function of the seed and the position alone, so the
+        nodes of one depth share one noise row, made once (one row a depth, not one a visited node with
+        a copy each). The same draws, bit for bit, at every node the walk visits. The generator is left as
+        the one-at-a-time walk left it: last seeded at the position the walk stopped on."""
+        n = len(tokens)
+        dev = dists.device
+        depth = [0] * n
+        kids: list[list[int]] = [[] for _ in range(n)]
+        for c in range(1, n):
+            depth[c] = depth[parents[c]] + 1
+            kids[parents[c]].append(c)
+        D = max(depth) + 1
+        V = dists.shape[-1]
+        g = self._rng(dev)
+        seed = self.seed if self.seed is not None else 0
+        noise = []
+        for d in range(D):
+            g.manual_seed(_key(seed, start + d))
+            u = torch.rand(V, generator=g, device=dev)
+            noise.append(-torch.log(-torch.log(u.clamp_min(1e-20))))
+        G = torch.stack(noise)
+        rows = torch.log(dists[:n].float()) + (G[torch.tensor(depth, device=dev)] if D > 1 else G)
+        xs = torch.argmax(rows, dim=-1).tolist()
+        path, node = [0], 0
+        while True:
+            x = xs[node]
+            nxt = next((k for k in kids[node] if tokens[k] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        last = len(path) - 1
+        if last != D - 1:
+            g.manual_seed(_key(seed, start + last))
+            torch.rand(V, generator=g, device=dev)
+        return path, [tokens[i] for i in path[1:]] + [x]
+
     def _tree_walk_batched(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
                            q: list | None) -> tuple[list[int], list[int]]:
         """`tree_walk` (unseeded) with every node's randomness drawn up front on the device and

@@ -176,6 +176,43 @@ def test_tree_walk_logits_falls_back():
     return "keyed / min_p / q requests fall back; an unseeded det walk takes the nucleus"
 
 
+def test_spd163_the_keyed_walk_batched_is_the_one_at_a_time_walk():
+    """A seeded request's tree walk with every keyed draw up front (`_tree_walk_keyed`): the same path,
+    the same tokens and the generator left in the same state as the one-draw-a-node walk, on random
+    trees whose rows put mass on the drafted tokens (so the walks go deep)."""
+    import random
+    rng = random.Random(5)
+    V, deep = 64, 0
+    for trial in range(200):
+        n = rng.randint(2, 16)
+        parents, path = [-1], [0]
+        for i in range(1, n):
+            path = path[:rng.randint(1, len(path))]
+            parents.append(path[-1])
+            path.append(i)
+        tokens = [rng.randrange(V) for _ in range(n)]
+        logits = torch.randn(n, V, generator=torch.Generator().manual_seed(trial))
+        for c in range(1, n):
+            logits[parents[c], tokens[c]] += rng.choice((0.0, 3.0, 6.0))
+        dists = torch.softmax(logits, -1)
+        start = rng.randint(0, 5000)
+        outs = []
+        for batch in (False, True):
+            sm = S.Sampler(temperature=1.0, seed=17 + trial)
+            old, S.BATCH = S.BATCH, batch
+            try:
+                pth, new = sm.tree_walk(dists, tokens, parents, start=start)
+            finally:
+                S.BATCH = old
+            outs.append((pth, new, sm.generator.get_state()))
+        (p0, n0, g0), (p1, n1, g1) = outs
+        assert p0 == p1 and n0 == n1, (trial, p0, p1)
+        assert torch.equal(g0, g1), f"trial {trial}: the generator's state differs"
+        deep += len(p0) > 2
+    assert deep > 20, deep
+    return f"200 random trees: paths, tokens and generator state equal ({deep} walks past depth 1)"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
