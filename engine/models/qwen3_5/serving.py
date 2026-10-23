@@ -92,24 +92,27 @@ def serve(a, ctx) -> dict:
 
 
 def _share_drafter_weights() -> None:
-    """SPD-165: the drafter checkpoints read once for every slot. `dflash2.load_weights` meant to cache by
+    """SPD-165: a side slot reads no drafter checkpoint again. `dflash2.load_weights` meant to cache by
     (snapshot, device, dtype), but its loop variable over the file's tensor names took the key's name, so
-    the cache was filed under the last tensor's name and never hit: each side slot read both arms' BF16
-    checkpoints again (38-40 s a slot on 2026-10-23, 39 s of it in `.to(device)`, and the copies stayed
-    resident). This keeps one copy per key from the adapter; the fix in dflash2.py itself waits for the
-    branch's one fingerprint move (dflash2.py is in the 27B's arithmetic manifest)."""
+    the cache never hit: each side slot read both arms' BF16 checkpoints again (38-40 s a slot on
+    2026-10-23, 39 s of it in `.to(device)`). What a drafter keeps is the dict its projections were
+    replaced in (`exl3_projections`, `quantise_projections`, each cached by snapshot); once slot 0 built
+    it, a side slot is handed that dict, which the replacement step then returns from its own cache, and
+    no BF16 copy is kept for it. The fix in dflash2.py itself waits for the branch's one fingerprint move
+    (dflash2.py is in the 27B's arithmetic manifest)."""
     from engine.drafters import dflash2 as df2
     if getattr(df2.load_weights, "shared", False):
         return
-    orig, cache = df2.load_weights, {}
+    orig = df2.load_weights
 
     def load_weights(snapshot: str, device: str = "cuda", dtype=None):
         import torch
-        dtype = torch.bfloat16 if dtype is None else dtype
-        key = (os.path.abspath(os.path.expanduser(snapshot)), str(torch.device(device)), dtype)
-        if key not in cache:
-            cache[key] = orig(snapshot, device, dtype)
-        return cache[key]
+        for k, w in df2._EXL3_PROJ.items():
+            if k.startswith(f"{snapshot}|"):
+                return w
+        if snapshot in df2._QUANTISED:
+            return df2._QUANTISED[snapshot]
+        return orig(snapshot, device, torch.bfloat16 if dtype is None else dtype)
 
     load_weights.shared = True
     df2.load_weights = load_weights
