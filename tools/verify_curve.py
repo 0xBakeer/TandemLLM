@@ -201,6 +201,7 @@ def _joint(a) -> None:
                     paths = [accepted_path(t, rng) for t in trees]
                     jg = JG.graphs_for(engs[0])
                     fn = JG.forward_tree_multi if mode == "graph" else M.forward_tree_multi
+                    JG.FORCE_T = T if mode == "graph" else None      # the graph at this bucket, not t_pad's
                     ts = []
                     r0 = jg.stats["replayed"]
                     for rep in range(3 + a.reps):
@@ -216,6 +217,7 @@ def _joint(a) -> None:
                         for e in engs[:E]:
                             e.kv.length = start
                     graphed = jg.stats["replayed"] > r0
+                    JG.FORCE_T = None
                     if mode == "graph" and not graphed:
                         continue                       # this shape has no graph (T past the grouped tile)
                     ms = statistics.median(ts)
