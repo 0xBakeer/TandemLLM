@@ -155,9 +155,11 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | `--queue-timeout` | 240 s | a request without a stream that waited that long gets a 429 with `Retry-After: 10`; a streamed chat request and a client's side request wait as long as `--request-timeout` (see "A turn behind a running turn") |
 | `--request-timeout` | 3,600 s | a generation that runs that long ends with `finish_reason: "timeout"` |
 | `--max-len` | 262,144 tokens | a prompt that does not fit gets a 400; `max_tokens` is clamped to what fits |
-| `--default-max-tokens` | 32,768 | used when the request sends no `max_tokens` |
+| `--default-max-tokens` | 32,768; 131,072 on Ornith | used when the request sends no `max_tokens`; a request's own `max_tokens` wins |
 
 At load the server allocates the KV buffer for the whole context, so the context length is a memory decision taken before the first request ([operations.md](operations.md)).
+
+The answer limit is `DEFAULT_MAX_TOKENS`. `ops/serve.env` sets 32,768, and a weight profile sets its own where the model's card names another number: Ornith's card names 131,072 new tokens, so its profile sets 131,072. `/v1/models` shows the running value as `tandem.max_output`. [setup.md](setup.md#the-answer-limit) says how to change it.
 
 The memory gate (OPS-47) runs before every prefill: back under the ceiling, then the prompt's workspace under the declared peak, shedding caches cheapest first (`store`, `anchors`, `end`, `stash`, `park`, `pin`, and since 0.3.26-test `roles`), or a 503 with `Retry-After`. On 2026-10-04 it refused every request, 12-token ones included, at "needs 82.0 GiB, peak 77.0 GiB", until :8000 was restarted at 16:41. The cause was the shadow reader's model pool: it had read 123,000 rows of a 195,694-token conversation, and every KV growth and every chunk's attention temporaries (larger with each chunk, as the context grows) took a new segment of its own MemPool. A live MemPool never gives its free segments back (torch 2.13, measured: 556 MiB stayed reserved after every tensor in it was freed; `empty_cache` returned it only once the pool was deleted), so 17.6 GiB of free memory sat in it and counted as the engine's reserve. Now:
 

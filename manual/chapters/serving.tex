@@ -133,7 +133,7 @@ A sequence serves one request at a time, so requests wait for a free one in a bo
 \code{--queue-timeout} & 120~s (240) & a request without a stream that waited that long gets a 429; a streamed chat request waits up to the request timeout \\
 \code{--request-timeout} & 900~s (3,600) & a generation that runs that long ends with \code{finish_reason: "timeout"} \\
 \code{--max-len} & 8,192 (262,144) & a prompt that does not fit gets a 400; \code{max_tokens} is clamped to what fits \\
-\code{--default-max-tokens} & 8,192 (32,768) & used when the request sends no \code{max_tokens} \\
+\code{--default-max-tokens} & 8,192 (32,768; Ornith 131,072) & used when the request sends no \code{max_tokens}; a request's own \code{max_tokens} wins \\
 \bottomrule
 \end{tabularx}
 \end{table}

@@ -397,12 +397,12 @@ methods:
   docs: docs/server.md
 - id: default_max_tokens
   label: Default answer length
-  what: The longest answer, in tokens, when a client does not set max_tokens.
+  what: The longest answer, in tokens, when a client does not set max_tokens. 131,072 is the model card's limit.
   type: int
   min: 1024
   max: 262144
-  default: 32768
-  recommended: 32768
+  default: 131072
+  recommended: 131072
   knob: DEFAULT_MAX_TOKENS
   docs: docs/server.md
 - id: request_timeout

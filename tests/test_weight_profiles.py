@@ -17,7 +17,7 @@ KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EX
         "QSE_WEIGHTS_DIR", "QSE_WEIGHTS_REVISION", "QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
         "QWEN38_FN_TABLE", "QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP", "VISION", "MAX_LEN", "QWEN38_FN_LOOKUP",
         "RESIDENT_STASH_GB", "QSE_PARALLEL", "QSE_KV_POOL", "QSE_SIDE_MAX_LEN", "QWEN38_DECIDER_MODELS",
-        "QWEN38_DECIDER_DIR")
+        "QWEN38_DECIDER_DIR", "DEFAULT_MAX_TOKENS")
 
 
 def _env(profile: str | None, extra: dict | None = None) -> dict:
@@ -553,6 +553,34 @@ def test_super_vl_profiles_read_images_and_the_other_nemotrons_do_not():
     assert len(vl) == 3, vl
     for n in names:
         assert _env(n)["VISION"] == ("on" if n in vl else "off"), n
+
+
+def test_each_profile_answers_up_to_its_model_cards_limit():
+    """#96: a request with no max_tokens may write what the model's card names. Each profile's
+    DEFAULT_MAX_TOKENS (ops/use-profile.sh), its model's card.json max_output (/v1/models) and the
+    registry field the Setup Guide writes are one number: 131,072 on Ornith, serve.env's 32,768 for the
+    rest."""
+    sys.path.insert(0, ROOT)
+    from server import model_card
+    from server.setup import apply, estimate, registry
+    models, errors = registry.load_all()
+    assert errors == [], errors
+    base = int(_env(None)["DEFAULT_MAX_TOKENS"])
+    assert base == 32768, base
+    seen = {}
+    for m in models.values():
+        (f,) = [f for g in ("methods", "advanced") for f in m[g] if f["id"] == "default_max_tokens"]
+        assert f["knob"] == "DEFAULT_MAX_TOKENS" and f["default"] == f["recommended"], (m["id"], f)
+        # what the Setup Guide's apply writes into run/setup.env for the recommended selection
+        assert apply.overlay_values(m, estimate.defaults(m))["DEFAULT_MAX_TOKENS"] == str(f["default"]), m["id"]
+        for p in m["profiles"]:
+            card = model_card.find(p["id"])
+            assert card is not None and card["model"] == m["id"], p["id"]
+            got = int(_env(p["id"])["DEFAULT_MAX_TOKENS"])
+            assert got == card["max_output"] == f["default"], (p["id"], got, card["max_output"], f["default"])
+            seen[p["id"]] = got
+    assert seen["ornith-1.5-122b-exl3-4.0"] == 131072, seen
+    assert {v for k, v in seen.items() if not k.startswith("ornith-")} == {base}, seen
 
 
 if __name__ == "__main__":
