@@ -220,7 +220,7 @@ KNOBS: dict[str, tuple] = {
     # ENG-E6: an EXL3 checkpoint (exllamav3 trellis) for every projection and the head; unset = off
     'EXL3': (None, 'engine/loader.py'),
     'EXL3_TILES': (None, 'tools/exl3_linear.py'),
-    'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
+    'EXL3_CHUNK_UNTIL': ('512', 'tools/exl3_linear.py'),
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
     'EXL3_SILU_FUSED': ('0', 'tools/exl3_linear.py'),
