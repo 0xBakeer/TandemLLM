@@ -11,7 +11,7 @@ curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.14.1/install
 bash install.sh --setup --yes
 ```
 
-`install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB), writes the config with no weights, and starts setup mode. Then open the Setup Guide in a browser and pick a model:
+`install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB) and the two Wikipedia shards of the lookup corpus (1.2 GB), writes the config with no weights, and starts setup mode. The corpus itself needs the model's tokenizer, so the install job builds it after the model's download ([speculative-decoding.md](speculative-decoding.md#the-corpus-of-each-tokenizer)). Then open the Setup Guide in a browser and pick a model:
 
 - On the box itself: `http://127.0.0.1:8000/dashboard/#/setup`.
 - From another computer: setup mode listens on 127.0.0.1 only, so open an SSH tunnel first, `ssh -L 8000:127.0.0.1:8000 <user>@<box>`, and then open `http://127.0.0.1:8000/dashboard/#/setup` on that computer.

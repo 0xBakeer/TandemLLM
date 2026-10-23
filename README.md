@@ -248,7 +248,7 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 
 | flag | what |
 |-|-|
-| `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
+| `--setup` | install the code, Wren's model and the corpus' two Wikipedia shards, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
 | `--ref REF` | the engine version to check out (any git ref), default `v0.14.1`; `v0.2.0-staircut` is the paper's |
@@ -263,7 +263,7 @@ Afterwards, `~/TandemLLM/bin/tandem start|stop|status|smoke|logs` controls the e
 
 The dashboard at `http://<host>:8000/dashboard/` asks for no password. Until an admin password is set, anyone who can reach the port can read and change what it shows, the memory included, so keep the engine on a trusted network. [docs/dashboard.md](docs/dashboard.md#no-password) says what it shows.
 
-The installer builds its lookup corpus from public text: one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens. The served corpus is not published, and the paper's numbers come from it. With the installer's corpus, or with `--no-corpus`, the lookup drafter proposes different continuations, so speeds can differ from the paper's. We haven't measured by how much. Other CUDA GPUs are best effort: the installer turns off the sm_121a-only skinny kernel there, and StairCut's cost tables come from the Spark.
+The installer builds its lookup corpus from public text: one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens. The served corpus is not published, and the paper's numbers come from it. With the installer's corpus, or with `--no-corpus`, the lookup drafter proposes different continuations, so speeds can differ from the paper's. We haven't measured by how much. With `--setup` the installer downloads only the two shards, since the corpus needs the model's tokenizer: `ops/use-profile.sh` builds it once the model is on the disk, with no network ([docs/speculative-decoding.md](docs/speculative-decoding.md#the-corpus-of-each-tokenizer)). Other CUDA GPUs are best effort: the installer turns off the sm_121a-only skinny kernel there, and StairCut's cost tables come from the Spark.
 
 ## Quick start
 

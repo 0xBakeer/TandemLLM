@@ -205,6 +205,13 @@ case "${SAMPLED_TREE:-}" in
     1|det) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=det" ;;
     mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
 esac
+# #97: the lookup corpus of the served model's tokenizer, CORPUS/tokenizers/<its fingerprint> once
+# ops/use-profile.sh has built it (server/setup/corpus.py); without that folder CORPUS goes as it is
+if [ -n "${CORPUS:-}" ] && [ -d "$CORPUS/tokenizers" ]; then
+    PICKED="$(timeout 60 "$PY" -m server.setup.corpus pick --corpus "$CORPUS" \
+              --engine-flags "${QSE_ENGINE_FLAGS:-}" 2>/dev/null | tail -n 1)"
+    [ -n "$PICKED" ] && CORPUS="$PICKED"
+fi
 # OPS-99: a profile of another model names its own model and drafter flags (QSE_ENGINE_FLAGS; a
 # Flash-Next pack: --model <pack> --drafter mtp) in place of the 27B's, with the lookup's corpus (the
 # tokenizer's, shared; ENG-229); unset, the 27B's, in their places

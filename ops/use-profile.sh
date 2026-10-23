@@ -138,6 +138,16 @@ if ! weights_ok; then
 else
     say "$NAME: weights $WDIR present"
 fi
+# #97: the lookup corpus of the profile's tokenizer, built once from public text into CORPUS/tokenizers/
+# (server/setup/corpus.py), so a box the setup guide installs drafts from a corpus too. It decides speed
+# only: a build that fails leaves the lookup to the conversation and the switch goes on.
+# QSE_CORPUS_BUILD=off (serve.env or the environment) skips it.
+if [ -n "$(pv CORPUS)" ] && [ "${QSE_CORPUS_BUILD:-$(pv QSE_CORPUS_BUILD)}" != off ]; then
+    QSE_PROFILE_OVERRIDE="$NAME" bash -c 'set -a; . "$1/serve.env"; set +a; cd "$2" &&
+        exec nice -n 10 "$PY" -m server.setup.corpus build --corpus "$CORPUS" --engine-flags "${QSE_ENGINE_FLAGS:-}" $3' \
+        - "$HERE" "$REPO_DIR" "$([ "$MODE" = "--dry-run" ] && echo --dry-run)" \
+        || say "$NAME: the lookup corpus was not built; the lookup reads the conversation only"
+fi
 [ "$MODE" = "--fetch-only" ] && { say "fetch-only: done"; exit 0; }
 
 PREV="$(cat "$ACTIVE" 2>/dev/null || echo nvfp4)"
