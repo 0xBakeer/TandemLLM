@@ -1338,7 +1338,7 @@ def _share_trim(pool, tree):
     joint pass then stays at or under 32 rows, where every projection is row-invariant. Dropping
     candidates never changes what is accepted, only how much. A slot alone keeps its tree."""
     meet = pool.meeting
-    if meet is None or meet.cut == "joint":
+    if meet is None or meet.joint_for(len(pool.decoding())):
         return tree                    # a joint cut is the round's (`_run_round`)
     budget = slots_mod.share(len(pool.decoding()), meet.max_rows)
     if budget is None or len(tree.parents) <= budget:
@@ -1369,7 +1369,8 @@ def _run_round(meet) -> None:
         groups = meet.batches()
         meet.pending.clear()
     for group in groups:
-        if meet.cut == "joint" and len(group) > 1 and all(r.tree is not None for r in group):
+        if (len(group) > 1 and all(r.tree is not None for r in group)
+                and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows)):
             # one cut over every slot's whole tree, to the pass's row budget
             keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows)
             for r, keep in zip(group, keeps):
@@ -1516,7 +1517,7 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
                 why[k] = why.get(k, 0) + 1
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
-                              tree=tree if meet.cut == "joint" else None)
+                              tree=tree if meet.cut != "share" else None)
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
@@ -10195,12 +10196,17 @@ def parser() -> argparse.ArgumentParser:
                     help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
                          "Python's 5 ms); a woken slot waits up to this long for the GIL")
     ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "share"),
-                    choices=("share", "joint"),
+                    choices=("share", "joint", "auto"),
                     help="how a joint pass's rows are shared: share (each slot cuts its tree to a "
                          "fixed share before it submits: 16 at two slots, 10 at three, 8 at four) or "
                          "joint (the round cuts every slot's whole tree together, best nodes first)")
     ap.add_argument("--parallel-max-rows", type=int, default=32,
                     help="rows of a joint pass at most (32: the row-invariant kernels' range)")
+    ap.add_argument("--parallel-draft-rows", type=int,
+                    default=int(os.environ.get("QSE_PARALLEL_DRAFT_ROWS", "128") or 128),
+                    help="rows of a packed draft pass at most (SPD-157): drafting decides speed only, "
+                         "so the drafter's pass is not held to the verify's row-invariant range; at "
+                         "128, eight slots' 16-row blocks draft in one pass (32 packed two)")
     ap.add_argument("--batch-timeout-ms", type=float, default=2.0,
                     help="a joint round runs without a missing slot once the GPU turn has been "
                          "idle this long")
@@ -11053,7 +11059,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     if meet is not None and a.parallel_draft == "on" and a.drafter == "lenrouter":
         # the packed draft: the decoding slots' draft calls in one pass over the drafter
         from engine.drafters import dflash2 as _df2
-        dmeet = slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
+        dmeet = slots_mod.Meeting(a.parallel_draft_rows, a.batch_timeout_ms / 1e3)
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)

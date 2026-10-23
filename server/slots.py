@@ -488,6 +488,11 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
     return keep
 
 
+#: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
+#: in one pass (`QSE_PARALLEL_AUTO_N`): below it each slot cuts its own share
+AUTO_JOINT_N = int(os.environ.get("QSE_PARALLEL_AUTO_N", "3") or 3)
+
+
 def share(n_decoding: int, max_rows: int = 32) -> int | None:
     if n_decoding <= 1:
         return None
@@ -507,8 +512,10 @@ class Meeting:
         self.max_rows = int(max_rows)
         self.timeout = float(timeout_s)
         # "share": each slot cuts its own tree to its share before it submits; "joint": the slots
-        # submit their whole trees and the round cuts them together (`joint_cut`)
+        # submit their whole trees and the round cuts them together (`joint_cut`); "auto" (SPD-155):
+        # joint from `auto_n` decoding slots on, share below
         self.cut = cut
+        self.auto_n = AUTO_JOINT_N
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken
@@ -524,16 +531,23 @@ class Meeting:
         self.timing = False
         self._last_submit: dict = {}
 
+    def joint_for(self, n_decoding: int) -> bool:
+        """Whether a round of `n_decoding` slots cuts its trees together (`cut`)."""
+        return self.cut == "joint" or (self.cut == "auto" and n_decoding >= self.auto_n)
+
     def batches(self) -> list:
         """The pending blocks cut into passes: the batchable ones together while they fit in
-        `max_rows` rows, every other block in a pass of its own, in arrival order."""
+        `max_rows` rows, every other block in a pass of its own, in arrival order. With the joint
+        cut, every batchable block that came with its tree goes in one pass (the round cuts them
+        together to `max_rows`); one without a tree is packed as under the share cut."""
         out, cur, rows = [], [], 0
-        if self.cut == "joint":
-            # whole trees: one pass for every batchable block, cut together to `max_rows`
-            joint = [r for r in self.pending.values() if r.batchable]
-            alone = [[r] for r in self.pending.values() if not r.batchable]
-            return ([joint] if joint else []) + alone
-        for r in self.pending.values():
+        pend = list(self.pending.values())
+        if self.joint_for(len(pend)):
+            joint = [r for r in pend if r.batchable and r.tree is not None]
+            if len(joint) > 1:
+                out.append(joint)
+                pend = [r for r in pend if r not in joint]
+        for r in pend:
             if not r.batchable:
                 out.append([r])
                 continue
