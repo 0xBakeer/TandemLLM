@@ -63,6 +63,23 @@ def run(r, blocks, runs, local=None, k=31):
     return keys
 
 
+def test_spd161_a_joint_cap_keeps_the_narrow_arm_in_the_wide_policy():
+    """`keep_narrow` (a server with side slots whose joint cap can fall to the narrow width): the wide
+    policy never releases the narrow arm and drafts there while the round's `row_cap` fits it; without the
+    flag it releases it at the first block, as served before."""
+    r, small, large, ng = build()
+    assert r._choose_wide() == "l" and r.idle == "s", "the served wide policy releases the narrow arm"
+    r, small, large, ng = build()
+    r.keep_narrow = True
+    r.row_cap = None
+    assert r._choose_wide() == "l" and r.idle is None
+    r.row_cap = 8
+    assert r._choose_wide() == "s" and r.idle is None
+    r.row_cap = 16
+    assert r._choose_wide() == "l" and r.idle is None
+    return "kept: wide at no cap or a wide cap, narrow at a cap of 8; not kept: released at once"
+
+
 def test_off_by_default_and_on_from_the_environment():
     old = os.environ.pop("QWEN38_LEN_SWITCH", None)
     try:

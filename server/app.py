@@ -11268,6 +11268,13 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         # block count and the row cap), e.g. the row bucket of its joint graphs
         meet.tree_cap = pol.get("tree_cap")
         # SPD-187: the family's round planner (`joint_policy` "planner") and its context classes
+        # SPD-161: every slot's length router keeps its narrow arm when the joint cap can fall to it
+        tcap = meet.tree_cap(len(slots), max_rows) if meet.tree_cap is not None else None
+        for sl in slots:
+            d = STATE.get("drafter") if sl.index == 0 else (sl.values or {}).get("drafter")
+            if (ROW_CAP and tcap is not None and hasattr(d, "keep_narrow")
+                    and tcap <= getattr(d, "w_small", 0) and not d.idle == "s"):
+                d.keep_narrow = True
         meet.planner = pol.get("planner")
         meet.ctx_class = pol.get("ctx_class") or (lambda n: 1024)
         meet.plan_keys, meet.plan_last = [], None

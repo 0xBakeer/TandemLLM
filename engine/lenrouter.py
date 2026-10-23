@@ -396,6 +396,9 @@ class LengthRouter(Drafter):
         # SPD-161: the rows a joint round keeps of this slot's tree (set by the server before each
         # proposal; None alone): at or under the narrow arm's width, the wide arm is not drafted
         self.row_cap = None
+        # SPD-161: set by a server with side slots whose joint cap can fall to the narrow width: the wide
+        # policy then never releases the narrow arm (it drafts there while `row_cap` fits it)
+        self.keep_narrow = False
         self.last_width = 0
         self.last_depth = 0
         self.last_expected = 0.0
@@ -1484,6 +1487,10 @@ class LengthRouter(Drafter):
         request, as a released arm (so a snapshot carries only the wide arm)."""
         self.last_forced = False
         self._copy = False
+        if self.keep_narrow and self.idle is None:
+            # SPD-161: a server whose joint rounds can keep no more than the narrow width keeps the narrow
+            # arm synced (lazily, `lazy_cap`) and drafts on it while the round's cap is that narrow
+            return "s" if self.row_cap is not None and self.row_cap <= self.w_small else "l"
         if self.idle is None and self.stats.get("idle") != "s":
             self.idle = "s"
             rel = getattr(self.head_small, "release", None)
