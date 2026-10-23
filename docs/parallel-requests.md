@@ -25,7 +25,7 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
 | `--parallel-cut` | auto | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first; `auto` (SPD-155): `joint` from `QSE_PARALLEL_AUTO_N` (3) decoding slots, `share` below |
 | `--parallel-draft-rows` | 128 | rows of a packed draft pass (SPD-157): eight slots' 16-row draft blocks in one pass; drafting decides speed only |
-| `--parallel-max-rows` | 32 | rows of a joint pass at most, the row-invariant kernels' range |
+| `--parallel-max-rows` | 64 | rows of a joint pass at most (`QSE_PARALLEL_MAX_ROWS`; SPD-159: 64 since 2026-10-23, each engine's rows in an 8 x 8-row joint pass bit for bit its own eager verify on the 27B EXL3 pack) |
 | `--side-precapture` | off | capture a side slot's verify graphs at start (about a minute a slot) instead of at first use |
 | `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
 | `--side-slot-const-gb` | 7.5, or 1.5 with side graphs off | a side slot's bytes beyond its window in the build's estimate (`QSE_SIDE_SLOT_CONST_GB`) |
@@ -172,6 +172,10 @@ On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side 
 | chains join the joint pass (SPD-153) | 35.0 | 48.7 | 57.3 | 43.2 | 379 ms |
 | and draft packs of 8 (SPD-157) | 35.8 | 49.0 | 60.8 | 49.9 | 326 ms |
 | and the auto cut (SPD-155) | 34.4 | 48.4 | 56.3 | 55.2 | 294 ms |
+| and waiters asleep while the turn is busy (SPD-161) | | | 60.4 | 60.9 | 268 ms |
+| and packed drafts in slot order (SPD-157) | 32.4 | 46.8 | 61.8 | 68.4 | 236 ms |
+| and the joint pass's row-wise steps once for all engines (SPD-163) | | 54.5, 53.5 | 68.8, 70.0 | 73.7, 71.7 | |
+| and a 64-row joint pass (SPD-159) | | 53.7, 53.5 | 69.0, 70.2 | 79.8, 79.2 | |
 
 Single runs; three repeats of the old rules spread 33.1 to 37.7 at C8, so a difference under about 10 % is noise. In an 8-slot round the joint verify pass is still about 210 ms against 77 ms for one block: the per-state parts (GDN, attention, norms, the gate inputs) run once per engine, eagerly, and the pass issues about 7,500 kernels (SPD-163).
 

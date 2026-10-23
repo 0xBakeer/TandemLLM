@@ -10207,7 +10207,7 @@ def parser() -> argparse.ArgumentParser:
                          "auto (SPD-155, the default: joint from QSE_PARALLEL_AUTO_N decoding slots, "
                          "share below)")
     ap.add_argument("--parallel-max-rows", type=int,
-                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "32") or 32),
+                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "64") or 64),
                     help="rows of a joint pass at most (32: the row-invariant kernels' range; SPD-159: "
                          "64 measured row-invariant too on the 27B EXL3 pack, each engine's joint rows "
                          "bit for bit its own eager verify)")
