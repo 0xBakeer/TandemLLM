@@ -413,7 +413,7 @@ class VerifyReq:
     and `ms`; the submitter reads them when it holds the turn again."""
 
     __slots__ = ("slot", "eng", "tokens", "parents", "start", "rows", "batchable", "out", "ms",
-                 "error", "joint", "tree", "tree_cut", "rid", "q")
+                 "error", "joint", "tree", "tree_cut", "rid", "q", "walk_spec", "walked")
 
     def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True,
                  tree=None):
@@ -422,6 +422,8 @@ class VerifyReq:
         self.tree_cut = None               # the tree the round verified, when it cut it
         self.rid = None                    # SPD-187: the round logger's id of the pass that verified it
         self.q = None                      # SPD-187: the tree's per-node calibrated q (the round planner)
+        self.walk_spec = None              # SPD-161: what the round runner needs to walk this block
+        self.walked = None                 # SPD-161: its walk ("picks" / "walk"), or None
         self.rows = len(parents)
         self.batchable = bool(batchable)
         self.out = None
@@ -606,6 +608,7 @@ class Pool:
         self.stats = {"side_grants": 0, "slot0_grants": 0, "peak_running": 0}
         self.last_joint: dict = {}             # slot -> blocks in its last joint pass
         self.last_rid: dict = {}           # SPD-187: slot -> its last joint round's logger id
+        self.last_walk: dict = {}          # SPD-161: slot -> the round runner's walk of its last block
         # 0.8.2: the slots `--parallel` asked for, and why fewer were built (the memory floor at
         # load, `_build_side_slots`); None when all of them were
         self.requested = len(self.slots)

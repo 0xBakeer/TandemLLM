@@ -522,3 +522,112 @@ class Sampler:
             node = nxt
         new = [tokens[i] for i in path[1:]] + [x]
         return path, new
+
+
+@torch.no_grad()
+def round_walks(specs: list) -> list:
+    """SPD-161: the walks of a joint round's slots in one batch (the round runner, `server/app.py
+    _run_round`), each bit for bit what the slot's own walk computes, with one copy to the host for all.
+
+    `specs`: per slot None (the slot walks itself) or dict(sampler, rows [T, V] (penalties applied), tokens,
+    parents, start, q, picks (the verify graph's argmax on the device, or None)). Returns per slot None, or
+    ("picks", list) for a greedy slot (the slot's engine walks them: `accept_tree`), or ("walk", (path,
+    new)) for a sampled one. Batched: the `_filter` of every slot with the same profile (temperature, top-p,
+    top-k, min-p) is one call over their rows (each row's statements are its own); the draws stay each
+    slot's own (its generator, its keyed noise). Taken here: greedy; a seeded request's keyed walk
+    (`_tree_walk_keyed`); an unseeded one's batched walk without q (`_tree_walk_batched`) and its nucleus
+    draws (`row_draws`). Anything else (a q-aware spine, BATCH off): None."""
+    out: list = [None] * len(specs)
+    dev_vals: list = []                  # (slot, kind, device tensor of draws, extra)
+    groups: dict = {}
+    for i, sp in enumerate(specs):
+        if sp is None:
+            continue
+        sm, rows, n = sp["sampler"], sp["rows"], len(sp["tokens"])
+        if sm is None or not sm.on:
+            x = sp.get("picks")
+            dev_vals.append((i, "picks", (x if x is not None else rows.argmax(-1))[:n].reshape(-1), None))
+            continue
+        if not BATCH:
+            continue
+        keyed = sm.coupled and sp.get("start") is not None
+        q = sp.get("q")
+        if not keyed and q is not None and any(v is not None for v in q):
+            continue                                      # the q-aware spine: the slot's own walk
+        if not keyed and NUCLEUS and sm.nucleus_ok():
+            dev_vals.append((i, "draws", sm.row_draws(rows[:n]), None))
+            continue
+        groups.setdefault((sm.temperature, sm.top_p, sm.top_k, sm.min_p), []).append(i)
+    for idx in groups.values():
+        sm0 = specs[idx[0]]["sampler"]
+        rows = [specs[i]["rows"].float() for i in idx]
+        dists = sm0._filter(torch.cat(rows)) if len(rows) > 1 else sm0._filter(rows[0])
+        for i, d in zip(idx, dists.split([r.shape[0] for r in rows])):
+            sp = specs[i]
+            sm, n = sp["sampler"], len(sp["tokens"])
+            if sm.coupled and sp.get("start") is not None:
+                xs, depth = _keyed_draws(sm, d, sp["tokens"], sp["parents"], sp["start"])
+                dev_vals.append((i, "keyed", xs, depth))
+            else:
+                x = torch.multinomial(d[:n], 1, generator=sm._rng(d.device)).squeeze(-1)
+                dev_vals.append((i, "draws", x, None))
+    if not dev_vals:
+        return out
+    flat = torch.cat([v.reshape(-1).to(torch.long) for _, _, v, _ in dev_vals]).tolist()
+    pos = 0
+    for i, kind, v, extra in dev_vals:
+        k = v.numel()
+        xs, pos = [int(t) for t in flat[pos:pos + k]], pos + k
+        sp = specs[i]
+        if kind == "picks":
+            out[i] = ("picks", xs)
+        elif kind == "draws":
+            out[i] = ("walk", sp["sampler"].walk_draws(xs, sp["tokens"], sp["parents"]))
+        else:
+            out[i] = ("walk", _keyed_walk(sp["sampler"], xs, extra, sp["tokens"], sp["parents"], sp["start"],
+                                          sp["rows"].shape[-1], sp["rows"].device))
+    return out
+
+
+def _keyed_draws(sm: "Sampler", dists: torch.Tensor, tokens: list, parents: list, start: int):
+    """`_tree_walk_keyed`'s device part: every node's keyed draw (one noise row a depth)."""
+    n = len(tokens)
+    dev = dists.device
+    depth = [0] * n
+    for c in range(1, n):
+        depth[c] = depth[parents[c]] + 1
+    D = max(depth) + 1
+    V = dists.shape[-1]
+    g = sm._rng(dev)
+    seed = sm.seed if sm.seed is not None else 0
+    noise = []
+    for d in range(D):
+        g.manual_seed(_key(seed, start + d))
+        u = torch.rand(V, generator=g, device=dev)
+        noise.append(-torch.log(-torch.log(u.clamp_min(1e-20))))
+    G = torch.stack(noise)
+    rows = torch.log(dists[:n].float()) + (G[torch.tensor(depth, device=dev)] if D > 1 else G)
+    return torch.argmax(rows, dim=-1), (depth, D)
+
+
+def _keyed_walk(sm: "Sampler", xs: list, extra, tokens: list, parents: list, start: int, V: int, dev):
+    """`_tree_walk_keyed`'s host part on its draws, the generator left as that walk leaves it."""
+    depth, D = extra
+    n = len(tokens)
+    kids: list[list[int]] = [[] for _ in range(n)]
+    for c in range(1, n):
+        kids[parents[c]].append(c)
+    path, node = [0], 0
+    while True:
+        x = xs[node]
+        nxt = next((k for k in kids[node] if tokens[k] == x), None)
+        if nxt is None:
+            break
+        path.append(nxt)
+        node = nxt
+    last = len(path) - 1
+    if last != D - 1:
+        g = sm._rng(dev)
+        g.manual_seed(_key(sm.seed if sm.seed is not None else 0, start + last))
+        torch.rand(V, generator=g, device=dev)
+    return path, [tokens[i] for i in path[1:]] + [x]

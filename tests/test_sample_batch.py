@@ -213,6 +213,63 @@ def test_spd163_the_keyed_walk_batched_is_the_one_at_a_time_walk():
     return f"200 random trees: paths, tokens and generator state equal ({deep} walks past depth 1)"
 
 
+def test_spd161_a_rounds_walks_in_one_batch_are_each_slots_own():
+    """`round_walks`: a joint round's slots walked together (greedy, seeded keyed, unseeded batched and
+    nucleus draws, two sampling profiles in one round) give each slot the path, the tokens and the generator
+    state of its own walk (`tree_walk_logits`, greedy: the argmax)."""
+    import copy
+    import random
+    rng = random.Random(9)
+    V = 80
+    keep = (S.BATCH, S.NUCLEUS, S.TOPP_K)
+    S.BATCH, S.NUCLEUS, S.TOPP_K = True, True, 16
+    try:
+        for trial in range(40):
+            specs, refs = [], []
+            for slot in range(rng.randint(2, 6)):
+                n = rng.randint(2, 12)
+                parents, path = [-1], [0]
+                for i in range(1, n):
+                    path = path[:rng.randint(1, len(path))]
+                    parents.append(path[-1])
+                    path.append(i)
+                tokens = [rng.randrange(V) for _ in range(n)]
+                rows = torch.randn(n, V, generator=torch.Generator().manual_seed(100 * trial + slot)) * 2
+                for c in range(1, n):
+                    rows[parents[c], tokens[c]] += rng.choice((0.0, 4.0))
+                kind = rng.choice(("greedy", "keyed", "batched", "nucleus"))
+                start = rng.randint(0, 900)
+                if kind == "greedy":
+                    sm = None
+                elif kind == "keyed":
+                    sm = S.Sampler(temperature=rng.choice((0.7, 1.0)), top_p=0.95, top_k=20, seed=trial * 7 + slot)
+                elif kind == "batched":
+                    sm = S.Sampler(temperature=1.0, top_p=0.95, top_k=20)
+                else:
+                    sm = S.Sampler(temperature=1.0, top_p=0.9)
+                if sm is not None:
+                    sm.generator = torch.Generator().manual_seed(trial * 31 + slot)
+                twin = copy.deepcopy(sm) if sm is not None else None
+                if twin is not None:
+                    twin.generator = torch.Generator()
+                    twin.generator.set_state(sm.generator.get_state())
+                specs.append(dict(sampler=sm, rows=rows, tokens=tokens, parents=parents, start=start, q=None,
+                                  picks=None))
+                if sm is None:
+                    refs.append(("picks", rows.argmax(-1).tolist()))
+                else:
+                    refs.append(("walk", twin.tree_walk_logits(rows, tokens, parents, start=start), twin))
+            got = S.round_walks(specs)
+            for sp, g, r in zip(specs, got, refs):
+                assert g is not None and g[0] == r[0], (g, r[0])
+                assert g[1] == r[1], (trial, sp["sampler"] and sp["sampler"].coupled, g[1], r[1])
+                if sp["sampler"] is not None:
+                    assert torch.equal(sp["sampler"].generator.get_state(), r[2].generator.get_state()), trial
+    finally:
+        S.BATCH, S.NUCLEUS, S.TOPP_K = keep
+    return "40 rounds of 2-6 slots of mixed kinds: every slot's path, tokens and generator state its own"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

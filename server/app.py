@@ -1465,6 +1465,16 @@ def _run_round(meet) -> None:
             rid = rlog.round(group, ev, cap=cap, pre_rows=pre_rows, graphed=graphed, plan=plan)
             for r in group:
                 r.rid = rid
+        if err is None and any(getattr(r, "walk_spec", None) is not None for r in group):
+            try:
+                _round_walk(group, outs)
+            except Exception as exc:                                    # noqa: BLE001
+                # the slots walk their own blocks (none of the batch's results is handed out)
+                print(f"[parallel] the round's batched walk failed ({type(exc).__name__}: {exc}); "
+                      f"the slots walk their own", flush=True)
+                for r in group:
+                    if r.walked is None or r.walked[0] != "pen_applied":
+                        r.walked = None
         if meet.timing and err is None:
             torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1e3
@@ -1492,6 +1502,34 @@ def _run_round(meet) -> None:
                 r.joint = len(group)
                 meet.transit.add(r.slot)
             meet.cv.notify_all()
+
+
+#: SPD-161: the round runner walks the round's blocks in one batch (engine/sample.py `round_walks`): each
+#: slot's penalties and walk, bit for bit its own, one copy to the host for all; 0: each slot walks its own
+ROUND_WALK = os.environ.get("QSE_ROUND_WALK", "0") == "1"
+
+
+def _round_walk(group, outs) -> None:
+    """SPD-161: apply each block's penalties and walk every block of the round (`round_walks`); a slot whose
+    walk the batch does not take walks it itself (its `walked` stays None)."""
+    from engine.sample import round_walks
+    specs = []
+    for r, lg in zip(group, outs):
+        sp = getattr(r, "walk_spec", None)
+        r.walked = None
+        if sp is None or lg is None:
+            specs.append(None)
+            continue
+        tree = r.tree_cut if r.tree_cut is not None else sp["tree"]
+        if sp["pen"] is not None:
+            sp["pen"].apply_tree(lg, tree)
+            r.walked = ("pen_applied", None)            # whatever happens next, not applied twice
+        specs.append({"sampler": sp["sampler"], "rows": lg, "tokens": tree.tokens, "parents": tree.parents,
+                      "start": sp["start"], "q": sp["q"], "picks": None})
+    got = round_walks(specs)
+    for r, sp, g in zip(group, specs, got):
+        if sp is not None and g is not None:
+            r.walked = g                  # else the slot walks itself (its penalties, if any, are applied)
 
 
 def _plan_tail(meet, pl, now: float) -> None:
@@ -1600,7 +1638,7 @@ class _LoneReq:
         self.slot, self.rows, self.start = slot, rows, start
 
 
-def _verify_tree(pool, eng, block, parents, pos, tree=None, q=None):
+def _verify_tree(pool, eng, block, parents, pos, tree=None, q=None, walk=None):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms, tree): `ms` None when it verified alone (the
     caller times it), the lone verify's time when another slot ran it, False for a joint pass;
@@ -1615,13 +1653,16 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None, q=None):
                 why = meet.stats.setdefault("alone_why", {})
                 k = "one" if len(pool.decoding()) <= 1 else "turn"
                 why[k] = why.get(k, 0) + 1
+        pool.last_walk[i] = None
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
                               tree=tree if meet.cut != "share" else None)
     req.q = q
+    req.walk_spec = walk
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
     pool.last_rid[i] = req.rid                            # SPD-187: the round logger's id
+    pool.last_walk[i] = req.walked                        # SPD-161: the runner's walk of this block, or None
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
 
 
@@ -1974,7 +2015,15 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # SPD-187: the nodes' calibrated q for the round planner (its gain curves)
                         nq = (_roundlog.tree_q(drafter, tree)
                               if getattr(par.meeting, "planner", None) is not None else None)
-                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree, q=nq)
+                        wspec = None
+                        if ROUND_WALK and par.meeting is not None:
+                            # SPD-161: the round runner walks this block with the round's others (one batch)
+                            if pen is not None:
+                                pen.mask = bool(think is not None and think.inside)
+                            wspec = {"sampler": sampler if sampler is not None and sampler.on else None,
+                                     "pen": pen, "start": len(ctx), "q": tree.q, "tree": tree}
+                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree, q=nq,
+                                                     walk=wspec)
                         t_post = time.perf_counter()
                         _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
                     if rlog is not None:
@@ -1984,7 +2033,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         else:
                             rid = rlog.round([_LoneReq(_par_index() if par is not None else 0,
                                                        len(tree.tokens), pos)], rev)
-                    if pen is not None:
+                    walked = par.last_walk.get(_par_index()) if par is not None else None
+                    if pen is not None and walked is None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
                     # SPD-187: the target's top-k of the verified rows, copied behind the walk's synchronize
@@ -1995,7 +2045,11 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # a joint round's time is the round's, not this block's (`_verify_tree`)
                         on_verify(tree.n_draft + 1,
                                   vms if vms is not None else (time.perf_counter() - tvt) * 1e3)
-                    if sampler is not None and sampler.on:
+                    if walked is not None and walked[0] == "walk":
+                        path, new = walked[1]          # SPD-161: the round runner's batch, this slot's walk
+                    elif walked is not None and walked[0] == "picks":
+                        path, new = walk.accept_tree(tree, walked[1])
+                    elif sampler is not None and sampler.on:
                         # Rejection accept down the tree: the target's own token is
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
