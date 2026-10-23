@@ -21,6 +21,8 @@ COPY pyproject.toml VERSION LICENSE COMMERCIAL-LICENSE.md NOTICE ./
 COPY docs/proxy.md docs/proxy.md
 COPY proxy proxy
 COPY server server
+COPY chatd chatd
+COPY packages packages
 COPY dashboard/dist dashboard/dist
 RUN python -m build --wheel -o /wheel .
 
