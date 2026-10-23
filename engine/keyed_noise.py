@@ -183,6 +183,21 @@ SPARSE_KP = 64
 SPARSE_TOPK_MAX = 48
 
 
+def _consecutive(rows: list):
+    """`rows` as one [sum n, V] view when they are consecutive row slices of one fp32 tensor, else None."""
+    x0 = rows[0]
+    if x0.dtype != torch.float32 or x0.dim() != 2 or x0.stride(1) != 1:
+        return None
+    n, nxt = int(x0.shape[0]), x0.data_ptr() + x0.shape[0] * x0.stride(0) * 4
+    for x in rows[1:]:
+        if (x.dtype != x0.dtype or x.dim() != 2 or x.stride() != x0.stride() or x.shape[1] != x0.shape[1]
+                or x.data_ptr() != nxt or x.untyped_storage().data_ptr() != x0.untyped_storage().data_ptr()):
+            return None
+        n += int(x.shape[0])
+        nxt = x.data_ptr() + x.shape[0] * x.stride(0) * 4
+    return x0.as_strided((n, x0.shape[1]), x0.stride())
+
+
 def sparse_keyed_draws(rows: list, keys: list[int], V: int, temperature: float, top_k: int, top_p: float,
                        min_p: float, device) -> torch.Tensor:
     """One draw per row of `rows` (each [n_i, V] logits, penalties applied), row r under noise key keys[r]:
@@ -192,12 +207,18 @@ def sparse_keyed_draws(rows: list, keys: list[int], V: int, temperature: float, 
     n = sum(int(x.shape[0]) for x in rows)
     vals = torch.empty(n, SPARSE_KP, dtype=torch.float32, device=dev)
     ids = torch.empty(n, SPARSE_KP, dtype=torch.long, device=dev)
-    r0 = 0
-    for x in rows:
-        r1 = r0 + int(x.shape[0])
-        torch.topk(x.float() if x.dtype != torch.float32 else x, SPARSE_KP, dim=-1, sorted=True,
-                   out=(vals[r0:r1], ids[r0:r1]))
-        r0 = r1
+    whole = _consecutive(rows)
+    if whole is not None:
+        # the slots' rows are one tensor's consecutive rows (the joint pass's head): one top-k for all
+        # (a row's top-k is its own)
+        torch.topk(whole, SPARSE_KP, dim=-1, sorted=True, out=(vals, ids))
+    else:
+        r0 = 0
+        for x in rows:
+            r1 = r0 + int(x.shape[0])
+            torch.topk(x.float() if x.dtype != torch.float32 else x, SPARSE_KP, dim=-1, sorted=True,
+                       out=(vals[r0:r1], ids[r0:r1]))
+            r0 = r1
     out = torch.empty(n, dtype=torch.long, device=dev)
     S, _ = policy(V, dev)
     kt = torch.tensor(keys, dtype=torch.int64).to(dev, non_blocking=True)
