@@ -9,4 +9,6 @@ KNOBS: dict[str, tuple] = {
     'JOINT_GRAPHS': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: joint graphs kept, the least recently replayed dropped first
     'JOINT_GRAPHS_MAX': ('12', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
+    'JOINT_GRAPHS_AFTER': ('3', 'engine/models/qwen3_5/joint_graphs.py'),
 }

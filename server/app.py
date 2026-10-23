@@ -559,8 +559,12 @@ def _par_health() -> dict:
     out = dict.get(STATE, "pool").report()
     r = dict.get(STATE, "disk_side")
     out["side_disk"] = r.report() if r is not None else None
-    jg = getattr(getattr(dict.get(STATE, "engine"), "fn", None), "__dict__", {}).get("joint_graphs")
+    eng = dict.get(STATE, "engine")
+    jg = getattr(getattr(eng, "fn", None), "__dict__", {}).get("joint_graphs")
     out["joint_graphs"] = jg.report() if hasattr(jg, "report") else None
+    rep = getattr(eng, "joint_graphs_report", None)
+    if out["joint_graphs"] is None and callable(rep):
+        out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
     return out

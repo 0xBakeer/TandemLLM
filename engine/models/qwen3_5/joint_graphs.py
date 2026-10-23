@@ -37,6 +37,9 @@ from engine.settings import SETTINGS as _S
 ON = _S.get("JOINT_GRAPHS") == "1"
 #: joint graphs kept (one per engine set, row bucket and context classes); the least recently replayed go
 CAP = int(_S.get("JOINT_GRAPHS_MAX") or 12)
+#: a pass shape is captured once it has come this many times (an engine set that only exists while the
+#: slots' streams end one by one runs eager instead of paying a capture each)
+AFTER = int(_S.get("JOINT_GRAPHS_AFTER") or 3)
 #: the most rows a block keeps in a graphed pass (the grouped WY tile)
 MAX_T = 16
 #: the factor columns of the GDN offset table a replay rewrites for an engine's parity (gc, kk, delta, and
@@ -149,7 +152,8 @@ class JointGraphs:
         self.stream = torch.cuda.Stream()
         self.bufs: dict = {}
         self.bad: set = set()                # keys whose capture was refused: eager from then on
-        self.stats = {"replayed": 0, "captured": 0, "eager": 0, "why": {}}
+        self.seen: dict = {}                 # passes of a shape not captured yet
+        self.stats = {"replayed": 0, "captured": 0, "eager": 0, "why": {}, "capture_ms": 0.0}
 
     def _no(self, why: str):
         self.stats["eager"] += 1
@@ -218,6 +222,11 @@ class JointGraphs:
         if key in self.bad:
             return self._no("refused")
         if key not in self.lru:
+            n_seen = self.seen[key] = self.seen.get(key, 0) + 1
+            if n_seen < AFTER:
+                return self._no("warming")
+            if len(self.seen) > 4096:
+                self.seen.clear()
             # captured before `_fold_begin` hands this round's pending commit to the device, so a refusal
             # leaves the engines as the eager pass expects them; the capture writes the parity `_par`
             keep = [eng._fold_par for eng, *_ in items]
@@ -226,7 +235,10 @@ class JointGraphs:
                     if fold:
                         eng._fold_buffers()
                         eng._fold_par = eng._par
+                import time
+                t0 = time.perf_counter()
                 made = self._capture(items, bufs, fold)
+                self.stats["capture_ms"] += (time.perf_counter() - t0) * 1e3
             except Exception as exc:                                    # noqa: BLE001
                 self.bad.add(key)
                 print(f"[joint-graphs] capture refused ({type(exc).__name__}: {exc}); this pass shape runs "

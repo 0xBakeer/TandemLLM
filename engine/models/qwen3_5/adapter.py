@@ -136,7 +136,14 @@ def _joint_multi(items: list) -> list:
     return JG.forward_tree_multi(items)
 
 
+def joint_graphs_report(eng) -> dict | None:
+    """SPD-163: `/health`'s `parallel.joint_graphs` (None while QWEN38_JOINT_GRAPHS is off)."""
+    from engine.models.qwen3_5 import joint_graphs as JG
+    return JG.graphs_for(eng).report() if JG.ON else None
+
+
 Qwen38Engine.forward_tree_multi = staticmethod(_joint_multi)
+Qwen38Engine.joint_graphs_report = joint_graphs_report
 Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
 Qwen38Engine.tree_batchable = tree_batchable
 Qwen38Engine.joint_policy = joint_policy
