@@ -2051,7 +2051,7 @@ def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
     return linear(x, eng.w.proj(name))
 
 
-def _run_gdn(eng, name: str, xs: list) -> list:
+def _run_gdn(eng, name: str, xs: list, reuse: dict | None = None) -> list:
     """SPD-163: the `gdn` requests of a joint pass (`_gdn_verify_steps`, QWEN38_JOINT_GDN): one grouped
     WY launch pair when every block fits it (tools/gdn_wy_kernels.py `grouped_ok`), else each engine's
     own `verify_mixer` call, the lone statement. Returns per request (o, factors)."""
@@ -2064,10 +2064,16 @@ def _run_gdn(eng, name: str, xs: list) -> list:
         from tools import gdn_wy_kernels as G
         items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
                       state=x["state"].reshape(H, dk, dv)) for x in xs]
-        if G.grouped_ok(items):
+        # one joint pass's layers are laid out alike: the check is made once (`reuse`, the pass's)
+        ok = reuse.get("ok") if reuse is not None else None
+        if ok is None:
+            ok = G.grouped_ok(items)
+            if reuse is not None:
+                reuse["ok"] = ok
+        if ok:
             return G.wy_recurrence_grouped(items, key_heads=cfg.linear_num_key_heads, value_heads=H,
                                            head_k=dk, head_v=dv, conv_w=conv_w, a_log=a_log,
-                                           dt_bias=dt_bias, key_dim=cfg.key_dim)
+                                           dt_bias=dt_bias, key_dim=cfg.key_dim, reuse=reuse)
     out = []
     for x in xs:
         o, fac, _ = verify_mixer(
@@ -2105,6 +2111,7 @@ def forward_tree_multi(items: list) -> list:
             gens.append(eng._forward_steps(tokens, start))
         reqs = [next(g) for g in gens]
         eng0 = items[0][0]
+        gdn_pass: dict = {}          # SPD-163: the grouped GDN launch's table and check, per engine set
         done: list = [None] * len(gens)
         live = list(range(len(gens)))
         while live:
@@ -2116,8 +2123,8 @@ def forward_tree_multi(items: list) -> list:
             for (kind, name), js in groups.items():
                 xs = [reqs[j][2] for j in js]
                 if kind == "gdn":
-                    # SPD-163: per-engine payloads, not rows to join (`_run_gdn`)
-                    for j, r in zip(js, _run_gdn(eng0, name, xs)):
+                    # SPD-163: per-engine payloads, not rows to join (`_run_gdn`), one table a pass
+                    for j, r in zip(js, _run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
                         answers[j] = r
                     continue
                 if len(xs) == 1:

@@ -24,20 +24,22 @@ import torch  # noqa: E402
 
 from tools import gdn_wy_kernels as G  # noqa: E402
 
-H, DK, DV, C, W = 4, 8, 8, 40, 4
+# dimensions whose offsets are 16-element aligned, as the model's are (the kernels are told so)
+H, DK, DV, C, W = 16, 16, 16, 48, 4
 
 
 def _items(sizes, pend=True, joined=True):
-    mixed = torch.zeros(sum(sizes), C + 7)
+    mixed = torch.zeros(sum(sizes), C + 16)
     ab = torch.zeros(sum(sizes), 2 * H)
+    wins = torch.zeros(len(sizes) * 256, dtype=torch.long)     # the windows 16-element aligned
     out, r = [], 0
-    for T in sizes:
+    for e, T in enumerate(sizes):
         P = 3
         pd = ((torch.zeros(H, P, DK), torch.zeros(H, P, DV), torch.zeros(H, P),
                torch.zeros(P, dtype=torch.int32), torch.zeros(1, dtype=torch.int32))
               if pend else None)
-        m = mixed[r:r + T, :C] if joined else torch.zeros(T, C + 7)[:, :C]
-        out.append(dict(mixed=m, conv_state=torch.zeros(C, W - 1), window=torch.zeros(T, W, dtype=torch.long),
+        m = mixed[r:r + T, :C] if joined else torch.zeros(T, C + 16)[:, :C]
+        out.append(dict(mixed=m, conv_state=torch.zeros(C, W - 1), window=wins[e * 256:e * 256 + T * W].view(T, W),
                         anc=torch.zeros(T, T, dtype=torch.bool), a_raw=ab[r:r + T, :H],
                         b_raw=ab[r:r + T, H:], state=torch.zeros(H, DK, DV), pend=pd,
                         fac_out=(torch.zeros(H, 32, DK), torch.zeros(H, 32, DV), torch.zeros(H, 32))))
@@ -48,7 +50,7 @@ def _items(sizes, pend=True, joined=True):
 def test_grouped_ok_takes_trees_of_up_to_16_rows_laid_out_alike():
     assert G.grouped_ok(_items([2, 16, 5]))
     assert G.grouped_ok(_items([4, 4], pend=False))
-    assert not G.grouped_ok(_items([4])), "one engine is the lone launch"
+    assert G.grouped_ok(_items([4])), "one engine: the same launch (the board check's reference)"
     assert not G.grouped_ok(_items([4, 17])), "a 17-row block is another tile"
     chain = _items([4, 4])
     chain[1]["window"] = None
@@ -59,7 +61,7 @@ def test_grouped_ok_takes_trees_of_up_to_16_rows_laid_out_alike():
     odd = _items([4, 4])
     odd[1]["mixed"] = torch.zeros(4, C)
     assert not G.grouped_ok(odd), "another row stride"
-    return "trees 2..16 alike: yes; one engine, 17 rows, a chain, mixed pend, other strides: no"
+    return "trees 2..16 alike (one engine too): yes; 17 rows, a chain, mixed pend, other strides: no"
 
 
 def test_the_offset_table_puts_each_engine_at_its_own_tensors():
@@ -125,7 +127,6 @@ def test_run_gdn_groups_when_the_blocks_fit_and_calls_each_alone_otherwise():
         r = M._run_gdn(eng, "layers.0", [x(3), x(5)])
         assert seen["grouped"] == 1 and seen["alone"] == [(3, None, True, True), (5, None, True, True)]
         assert r == [("o", 3), ("o", 5)]
-        G.grouped_ok = lambda items: True
         M._run_gdn(eng, "layers.0", [x(4)])
         assert seen["grouped"] == 1, "a single engine takes its own launches"
         V.WY_FUSED_MAXT = 8

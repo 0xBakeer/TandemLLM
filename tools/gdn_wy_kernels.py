@@ -177,21 +177,21 @@ if HAVE_TRITON:
             h = tl.program_id(0) % H
             ob = OFF + e * NOFF_
             T = tl.load(ob + 0).to(tl.int32)
-            GC += tl.load(ob + 1)
-            ANC += tl.load(ob + 2)
+            GC += tl.multiple_of(tl.load(ob + 1), 16)
+            ANC += tl.multiple_of(tl.load(ob + 2), 16)
             s_anc = tl.load(ob + 17)
-            KK += tl.load(ob + 3)
-            X += tl.load(ob + 4)
-            CST += tl.load(ob + 5)
-            WIN += tl.load(ob + 6)
-            A += tl.load(ob + 7)
-            B_ += tl.load(ob + 8)
-            QE += e * H * TP * DK
-            INV += e * H * TP * TP
-            QKD += e * H * TP * TP
-            BETA_S += e * H * TP
+            KK += tl.multiple_of(tl.load(ob + 3), 16)
+            X += tl.multiple_of(tl.load(ob + 4), 16)
+            CST += tl.multiple_of(tl.load(ob + 5), 16)
+            WIN += tl.multiple_of(tl.load(ob + 6), 16)
+            A += tl.multiple_of(tl.load(ob + 7), 16)
+            B_ += tl.multiple_of(tl.load(ob + 8), 16)
+            # the scratch rows are indexed by e * H + h (`hs`), not reached through moved pointers: a
+            # moved pointer lives in registers where an argument does not (255 + spills against 157)
+            hs = e * H + h
         else:
             h = tl.program_id(0)
+            hs = h
         hk = h // REP
         tt = tl.arange(0, TP)
         mt = tt < T
@@ -242,7 +242,7 @@ if HAVE_TRITON:
             sp = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
             g = tl.where(mt, -tl.exp(tl.load(ALOG + h).to(tl.float32)) * sp, 0.0)
             beta = tl.where(mt, 1.0 / (1.0 + tl.exp(-b)), 0.0)
-            tl.store(BETA_S + h * TP + tt, beta)
+            tl.store(BETA_S + hs * TP + tt, beta)
         else:
             beta = tl.load(BETA + tt * H + h, mask=mt, other=0.0)
             g = tl.load(G + tt * H + h, mask=mt, other=0.0)
@@ -259,7 +259,7 @@ if HAVE_TRITON:
             else:
                 gc = tl.load(GC + h * gc_h + tt, mask=mt, other=0.0)
         eg = tl.exp(gc)
-        base = h * TP
+        base = hs * TP
         if STORE:
             # a chain that stores its walk: S_T = exp(G_T) S0 + sum_j exp(G_T - G_j) k_j d_j^T
             gT = tl.sum(tl.where(tt == T - 1, gc, 0.0))
@@ -314,27 +314,27 @@ if HAVE_TRITON:
             h = tl.program_id(0) % H
             ob = OFF + e * NOFF_
             T = tl.load(ob + 0).to(tl.int32)
-            GC += tl.load(ob + 1)
-            KK += tl.load(ob + 3)
-            X += tl.load(ob + 4)
-            CST += tl.load(ob + 5)
-            WIN += tl.load(ob + 6)
-            S += tl.load(ob + 9)
-            S_OUT += tl.load(ob + 9)
-            DELTA += tl.load(ob + 10)
-            OUT += tl.load(ob + 11)
-            PK += tl.load(ob + 12)
-            PU += tl.load(ob + 13)
-            PG += tl.load(ob + 14)
-            PROWS += tl.load(ob + 15)
-            PN += tl.load(ob + 16)
-            QE += e * H * TP * DK
-            INV += e * H * TP * TP
-            QKD += e * H * TP * TP
-            BETA_S += e * H * TP
+            GC += tl.multiple_of(tl.load(ob + 1), 16)
+            KK += tl.multiple_of(tl.load(ob + 3), 16)
+            X += tl.multiple_of(tl.load(ob + 4), 16)
+            CST += tl.multiple_of(tl.load(ob + 5), 16)
+            WIN += tl.multiple_of(tl.load(ob + 6), 16)
+            S += tl.multiple_of(tl.load(ob + 9), 16)
+            S_OUT += tl.multiple_of(tl.load(ob + 9), 16)
+            DELTA += tl.multiple_of(tl.load(ob + 10), 16)
+            OUT += tl.multiple_of(tl.load(ob + 11), 16)
+            PK += tl.multiple_of(tl.load(ob + 12), 16)
+            PU += tl.multiple_of(tl.load(ob + 13), 16)
+            PG += tl.multiple_of(tl.load(ob + 14), 16)
+            PROWS += tl.multiple_of(tl.load(ob + 15), 16)
+            PN += tl.multiple_of(tl.load(ob + 16), 16)
+            # the scratch rows are indexed by e * H + h (`hs`), not reached through moved pointers: a
+            # moved pointer lives in registers where an argument does not (255 + spills against 157)
+            hs = e * H + h
         else:
             h = tl.program_id(0)
             H = tl.num_programs(0)
+            hs = h
         vb = tl.program_id(1)
         tt = tl.arange(0, TP)
         mt = tt < T
@@ -345,7 +345,7 @@ if HAVE_TRITON:
             # K S0 and Qe S0 summed over KC-row slices of the state tile, each slice's
             # pending commit applied and written back as `_pending` does it element for element (the
             # same bits), so no [DK, BV] tile and no [TP, DK] operand is live at once
-            base = h * TP
+            base = hs * TP
             oc = tl.arange(0, KC)
             ks = tl.zeros([TP, BV], dtype=tl.float32)
             qs = tl.zeros([TP, BV], dtype=tl.float32)
@@ -368,13 +368,13 @@ if HAVE_TRITON:
                               ov)
             else:
                 s0 = tl.load(S + tile)
-            base = h * TP
+            base = hs * TP
             k = tl.load(KK + h * kk_h + tt[:, None] * DK + ok[None, :], mask=mt[:, None],
                         other=0.0)
         if FUSED:
             vch = 2 * KEY_DIM + h * DV + ov
             v = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, vch, tt, mt, TREE, WIDTH)
-            beta = tl.load(BETA_S + h * TP + tt)
+            beta = tl.load(BETA_S + hs * TP + tt)
             if not TREE:
                 # every thread's window loads are in before any thread overwrites the state
                 tl.debug_barrier()
@@ -522,10 +522,10 @@ def _elem_off(t: torch.Tensor, base: torch.Tensor) -> int:
 
 
 def grouped_ok(items: list) -> bool:
-    """Whether `wy_recurrence_grouped` takes these engines' verify blocks in one launch pair: each a
+    """Whether `wy_recurrence_grouped` takes these engines' verify blocks (one or more) in one launch pair: each a
     tree on the fused WY path at a 16-row tile (the lone kernels' constexprs for every one of them),
     all with or all without a pending commit, and their tensors laid out alike (same strides)."""
-    if len(items) < 2:
+    if not items:
         return False
     a0 = items[0]
     for it in items:
@@ -567,11 +567,20 @@ def grouped_offsets(items: list, facs: list, rows: list, out_row: int) -> list:
                     _elem_off(it["b_raw"], i0["b_raw"]), _elem_off(it["state"], i0["state"]),
                     _elem_off(de, de0), rows[e] * out_row] + po + [it["anc"].stride(0)])
     assert len(off) == NOFF * len(items)
+    # the kernels are told every tensor offset is a multiple of 16 elements (`tl.multiple_of`): the
+    # alignment the lone launch's pointers had, so the loads keep their width
+    for e in range(len(items)):
+        row = off[e * NOFF:(e + 1) * NOFF]
+        if any(v % 16 for v in row[1:17]):
+            raise ValueError(f"grouped launch: engine {e}'s tensors are not 16-element aligned: {row}")
     return off
 
 
+_ONE_TABLES: dict = {}
+
+
 def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head_k: int,
-                          head_v: int, conv_w, a_log, dt_bias, key_dim: int) -> list:
+                          head_v: int, conv_w, a_log, dt_bias, key_dim: int, reuse: dict | None = None) -> list:
     """SPD-163: the fused WY recurrence of several engines' tree blocks (a joint verify pass) in one
     `_wy_prep` and one `_wy_apply` launch: grid (E * H,) and (E * H, Dv / BV), engine e's tensors
     reached through its row of an offset table. Every program runs the lone kernels' statements with
@@ -579,7 +588,12 @@ def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head
     engine's rows are the bits its own `wy_recurrence(fused=...)` gives them; `check_grouped()` proves
     it on the board. `items` (`grouped_ok`): dicts of mixed [T, C], conv_state [C, W-1], window [T, W],
     a_raw / b_raw [T, H], state [H, Dk, Dv], anc [T, T], pend (or None), fac_out (kk, delta, gc) or
-    None. Returns per engine (out [1, T, H, Dv], (kk, delta, gc) as `verify_mixer` returns them)."""
+    None. Returns per engine (out [1, T, H, Dv], (kk, delta, gc) as `verify_mixer` returns them).
+
+    `reuse`: a dict the caller keeps for one joint pass. Every offset is the same in each of its layers
+    (the engines' state buffers are alike, and each layer's rows come from one joined projection), so
+    the table is built and uploaded at the first layer and read again by the others, after a check of
+    the two offsets that would move first (the last engine's rows and state)."""
     H, dk, dv = value_heads, head_k, head_v
     E = len(items)
     tp, blk = 16, min(BLOCK, 16)
@@ -604,8 +618,27 @@ def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head
         facs = [(kk_all[e], de_all[e], gc_all[e]) for e in range(E)]
     kk0, de0, gc0 = facs[0]
     p0 = i0["pend"]
-    from engine.model import h2d
-    table = h2d(grouped_offsets(items, facs, rows, H * dv), torch.int64, dev)
+    prev = reuse.get("table") if reuse is not None else None
+    guard = (tuple(Ts), _elem_off(items[-1]["mixed"], i0["mixed"]), _elem_off(items[-1]["state"], i0["state"]),
+             _elem_off(facs[-1][0], kk0)) if reuse is not None else None
+    hit = prev is not None and prev[0] == guard
+    if hit:
+        table = prev[1]
+        reuse["hits"] = reuse.get("hits", 0) + 1
+    elif E == 1:
+        off = grouped_offsets(items, facs, rows, H * dv)
+        # one engine: every offset 0 but T and the mask's stride, so the table is a constant per pair,
+        # kept on the device (a captured verify graph reads it at the address it was captured with)
+        key = (dev, off[0], off[-1])
+        table = _ONE_TABLES.get(key)
+        if table is None:
+            table = _ONE_TABLES[key] = torch.tensor(off, dtype=torch.int64).to(dev)
+    else:
+        from engine.model import h2d
+        table = h2d(grouped_offsets(items, facs, rows, H * dv), torch.int64, dev)
+    if reuse is not None and not hit:
+        reuse["table"] = (guard, table)
+        reuse["builds"] = reuse.get("builds", 0) + 1
     x, cst = i0["mixed"], i0["conv_state"]
     win, a8 = i0["window"], i0["anc"].view(torch.uint8)
     fz = (x, x.stride(0), cst, cst.stride(0), conv_w, win)
@@ -641,8 +674,9 @@ def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head
 
 def check_grouped(E: int = 8, seed: int = 0, pend: bool = True) -> list[str]:
     """SPD-163 on the board: `wy_recurrence_grouped` over E engines' tree blocks (row counts 2..16,
-    random trees, a pending commit or none) against each engine's own lone fused launch, from
-    identical inputs: out, kk, u (delta), gc and the state after the pending commit, bit for bit."""
+    random trees, a pending commit or none), their rows one tensor as the joint pass hands them out,
+    against each engine alone through the same launch: out, kk, u (delta), gc and the state after the
+    pending commit, bit for bit; and each engine alone against the lone kernel (`verify_mixer`)."""
     import random
     from engine.tree import DraftTree
     from tools.gdn_verify_kernels import verify_mixer
@@ -650,6 +684,7 @@ def check_grouped(E: int = 8, seed: int = 0, pend: bool = True) -> list[str]:
     gen = torch.Generator(device="cuda").manual_seed(seed)
     out = []
     H, dk, dv, kh = KW["value_heads"], KW["head_k"], KW["head_v"], KW["key_heads"]
+    gk = dict(key_heads=kh, value_heads=H, head_k=dk, head_v=dv)
 
     def rand_tree(n):
         parents, path = [-1], [0]
@@ -659,9 +694,16 @@ def check_grouped(E: int = 8, seed: int = 0, pend: bool = True) -> list[str]:
             path.append(i)
         return DraftTree(tokens=[0] * n, parents=parents)
 
+    def fac0():
+        return (torch.zeros(H, 32, dk, device="cuda"), torch.zeros(H, 32, dv, device="cuda"),
+                torch.zeros(H, 32, device="cuda"))
+
+    worst = 0.0
     for trial, sizes in enumerate(([16] * E, [rng.randint(2, 16) for _ in range(E)],
-                                   [2, 16] * (E // 2), [rng.randint(2, 8) for _ in range(E)])):
+                                   [2, 16] * max(1, E // 2), [rng.randint(2, 8) for _ in range(E)])):
         shared = _inputs(16, gen)
+        sw = dict(conv_w=shared["conv_w"], a_log=shared["a_log"], dt_bias=shared["dt_bias"],
+                  key_dim=KW["key_dim"])
         engs = []
         for T in sizes:
             x = _inputs(T, gen)
@@ -674,39 +716,43 @@ def check_grouped(E: int = 8, seed: int = 0, pend: bool = True) -> list[str]:
                       -torch.rand(H, P, device="cuda", generator=gen).cumsum(-1) * 0.05,
                       torch.arange(P, dtype=torch.int32, device="cuda"),
                       torch.tensor([rng.randint(0, P)], dtype=torch.int32, device="cuda"))
-            fo = (torch.zeros(H, 32, dk, device="cuda"), torch.zeros(H, 32, dv, device="cuda"),
-                  torch.zeros(H, 32, device="cuda"))
-            engs.append((x, ta, pd, fo))
-        lone = []
-        for x, ta, pd, fo in engs:
+            engs.append((x, ta, pd))
+
+        def item(x, ta, pd, mixed, a, b):
+            return dict(mixed=mixed, conv_state=x["conv_state"].clone().reshape(x["conv_state"].shape[1], -1),
+                        window=ta["window"], anc=ta["anc"], a_raw=a, b_raw=b,
+                        state=x["state"].clone().reshape(H, dk, dv), pend=pd, fac_out=fac0())
+        alone = []
+        for x, ta, pd in engs:
+            it = item(x, ta, pd, x["mixed"].clone(), x["a_raw"].clone(), x["b_raw"].clone())
+            (o, fac), = wy_recurrence_grouped([it], **gk, **sw)
+            alone.append((o, fac, it["state"]))
             y = {k: v.clone() for k, v in x.items()}
-            for k in ("conv_w", "a_log", "dt_bias"):
-                y[k] = shared[k]
-            fo2 = tuple(f.clone() for f in fo)
-            o, fac, _ = verify_mixer(**y, **KW, **ta, wy=True, fused=True, store_state=False,
-                                     pend=pd, fac_out=fo2)
-            lone.append((o, fac, y["state"]))
-        # one joined mixed / a / b, as the joint pass hands them out (row views of one tensor)
+            y.update(conv_w=shared["conv_w"], a_log=shared["a_log"], dt_bias=shared["dt_bias"])
+            o_old, _, _ = verify_mixer(**y, **KW, **ta, wy=True, fused=True, store_state=False,
+                                       pend=pd, fac_out=fac0())
+            worst = max(worst, ((o_old.float() - o.float()).abs().max() /
+                                o_old.float().abs().max().clamp_min(1e-30)).item())
+            # the offsets are hinted 16-element aligned, as the lone launch's pointers are: the same
+            # register layouts, the same sums (without the hint the reductions moved by ~1e-7)
+            assert torch.equal(o_old, o), f"trial {trial}: one engine through the table is not the lone kernel"
         mixed = torch.cat([x["mixed"] for x, *_ in engs])
         ab = torch.cat([torch.cat([x["a_raw"], x["b_raw"]], -1) for x, *_ in engs])
         r0, items = 0, []
-        for (x, ta, pd, fo), T in zip(engs, sizes):
-            items.append(dict(mixed=mixed[r0:r0 + T], conv_state=x["conv_state"].clone().reshape(
-                x["conv_state"].shape[1], -1), window=ta["window"], anc=ta["anc"],
-                a_raw=ab[r0:r0 + T, :H], b_raw=ab[r0:r0 + T, H:],
-                state=x["state"].clone().reshape(H, dk, dv), pend=pd, fac_out=fo))
+        for (x, ta, pd), T in zip(engs, sizes):
+            items.append(item(x, ta, pd, mixed[r0:r0 + T], ab[r0:r0 + T, :H], ab[r0:r0 + T, H:]))
             r0 += T
         assert grouped_ok(items), "grouped_ok refused the battery"
-        got = wy_recurrence_grouped(items, key_heads=kh, value_heads=H, head_k=dk, head_v=dv,
-                                    conv_w=shared["conv_w"], a_log=shared["a_log"],
-                                    dt_bias=shared["dt_bias"], key_dim=KW["key_dim"])
-        for e, ((o, fac, st), (og, facg), it) in enumerate(zip(lone, got, items)):
+        got = wy_recurrence_grouped(items, **gk, **sw)
+        for e, ((o, fac, st), (og, facg), it) in enumerate(zip(alone, got, items)):
             assert torch.equal(o, og), f"trial {trial} engine {e} (T={sizes[e]}): out"
             for name, a, b in zip(("kk", "u", "gc"), fac, facg):
                 assert torch.equal(a, b), f"trial {trial} engine {e}: {name}"
-            assert torch.equal(st.reshape(H, dk, dv), it["state"]), f"trial {trial} engine {e}: state"
-        out.append(f"grouped WY, {E} engines, rows {sizes}, pending {'on' if pend else 'off'}: "
-                   f"out, kk, u, gc and the state bit-identical to each engine's own launch")
+            assert torch.equal(st, it["state"]), f"trial {trial} engine {e}: state"
+        out.append(f"grouped WY, {len(sizes)} engines, rows {sizes}, pending {'on' if pend else 'off'}: "
+                   f"out, kk, u, gc and the state bit-identical to each engine alone")
+    out.append(f"each engine alone through the table against the lone kernel (`verify_mixer`): out "
+               f"bit-identical (max relative {worst:.1e})")
     return out
 
 
