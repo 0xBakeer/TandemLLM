@@ -37,19 +37,19 @@ def test_a_one_way_flow_keeps_the_tunnel_past_the_idle_clock():
     done = threading.Event()
 
     def run():
-        _splice(cl_a, sv_a, idle=0.4)
+        _splice(cl_a, sv_a, idle=2.0)
         done.set()
     threading.Thread(target=run, daemon=True).start()
-    cl_b.settimeout(2.0)
+    cl_b.settimeout(5.0)
     t0 = time.monotonic()
-    for _ in range(4):                               # ~0.8 s of one-way flow, idle 0.4
-        sv_b.sendall(b"x" * 64)
-        assert cl_b.recv(64) == b"x" * 64            # reached the silent client
-        time.sleep(0.2)
-    assert time.monotonic() - t0 > 0.8, f"flow only lasted {time.monotonic() - t0:.2f} s"
+    for _ in range(30):                              # ~3 s of one-way flow, idle 2:
+        sv_b.sendall(b"x" * 64)                      # the send every 0.1 s leaves a
+        assert cl_b.recv(64) == b"x" * 64            # stalled test thread room to
+        time.sleep(0.1)                              # miss, not the tunnel
+    assert time.monotonic() - t0 > 2.5, f"flow only lasted {time.monotonic() - t0:.2f} s"
     assert not done.is_set(), "the splice died inside a live one-way download"
     sv_b.close()                                     # the flow stops: idle now applies
-    assert done.wait(2.5), "the splice did not end when both directions went quiet"
+    assert done.wait(4.0), "the splice did not end when both directions went quiet"
 
 
 def test_a_download_survives_a_client_that_pauses_reading_past_the_poll():

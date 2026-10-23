@@ -60,8 +60,10 @@ def test_closer_ends_the_exec_and_reaps_the_slot():
     open_pipe = mcp_mod.exec_pipe(sb, "c1", "server", [], {})
     _write, start_reader, closer = open_pipe(lines.append)
     start_reader()
-    time.sleep(0.05)
-    assert sb.box_.busy == 1
+    t0 = time.monotonic()                            # the reader thread takes the slot
+    while time.monotonic() - t0 < 2.0 and sb.box_.busy != 1:   # when it gets there --
+        time.sleep(0.02)                             # a blind 0.05 s lost this on a
+    assert sb.box_.busy == 1, "the reader never took the slot"  # slow runner
     closer()
     t0 = time.monotonic()
     while time.monotonic() - t0 < 2.0 and None not in lines:
