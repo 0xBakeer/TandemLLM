@@ -158,6 +158,7 @@ import glob
 import json
 import os
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
+from engine import native_tree, rowcopy  # noqa: E402
 
 import torch
 import torch.nn.functional as F
@@ -1226,6 +1227,7 @@ def flush_syncs(ds) -> None:
     """Run the pending syncs (`DEFER_SYNC`) of the drafters `ds` -- one `project_context` and one
     `context_kv` call over every pending row of the drafters that share a checkpoint -- and write each
     one's rows into its own cache."""
+    rowcopy.flush()
     groups: dict = {}
     for d in ds:
         if getattr(d, "_psync", None):
@@ -1259,6 +1261,7 @@ class DFlash2Drafter(Drafter):
 
     name = "dflash2"
     wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
+    hidden_free = True         # `sync` never reads its `hidden` (SPD-201: a recorded copy may be pending)
 
     def requires(self) -> dict:
         """The taps (hidden states of these target layers, this width), the target's
@@ -1644,6 +1647,7 @@ class DFlash2Drafter(Drafter):
         if rows is None and taps[0].shape[0] < n:
             raise RuntimeError(f"tap holds {taps[0].shape[0]} positions, sync wants {n}")
         with torch.no_grad():
+            picked = None
             if rows is None:
                 # A chain block: the accepted tokens are the first n rows of the pass.
                 picked = [r[:n] for r in taps]
@@ -1654,15 +1658,22 @@ class DFlash2Drafter(Drafter):
                 # the 12:05 failure in the ledger, in its tree form.
                 if len(rows) != n:
                     raise RuntimeError(f"{len(rows)} rows for {n} tokens")
-                from engine.model import h2d
-                sel = h2d(rows, torch.long, taps[0].device)
-                picked = [r[sel] for r in taps]
-            fused = torch.cat(picked, dim=-1)
+                picked = None
+                if rowcopy.active():
+                    # SPD-201: the round's row copies in one launch (engine/rowcopy.py)
+                    fused = rowcopy.rows_cat(taps, rows)
+                else:
+                    from engine.model import h2d
+                    sel = h2d(rows, torch.long, taps[0].device)
+                    picked = [r[sel] for r in taps]
+            if picked is not None:
+                fused = torch.cat(picked, dim=-1)
             if DEFER_SYNC and DRAFT_MEET is not None and n <= DEFER_SYNC_ROWS:
                 # SPD-161: written at this drafter's next cache read, with the other slots' (`flush_syncs`)
                 self._psync.append((fused, first_pos, n))
                 self.ctx_len = first_pos + n
                 return
+            rowcopy.flush()
             self._flush_sync()
             ctx_hidden = m.project_context(fused.to(m.dtype))
             positions = torch.arange(first_pos, first_pos + n, device=self.eng.device)
@@ -1757,7 +1768,14 @@ class DFlash2Drafter(Drafter):
                 cand, scores = out[0], out[1]
                 self._lattice = (cand, scores)
                 self._logp_host = None
-                if len(out) > 3:
+                self._native_lat = None
+                if len(out) > 3 and logp and native_tree.ON and not self._want_lattice:
+                    # SPD-201: the walk and the tree read the pinned copy in place (engine/native_tree.py)
+                    blob, lp = out[3][0].get_raw(out[3][1])
+                    toks = list(native_tree.module().walk(blob, *cand.shape))
+                    self._cand_host = None
+                    self._native_lat = (blob, lp)
+                elif len(out) > 3:
                     # the packed draft's one copy for every block (draft_graph `_HostBlobs`)
                     blob, lp = out[3][0].get(out[3][1])
                     toks, self._cand_host = m._walk_blob(blob, *cand.shape)
@@ -1942,6 +1960,15 @@ class DFlash2Drafter(Drafter):
         if not chain:
             return None
         build = lattice_paths if self.tree_mode == "paths" else lattice_tree
+        nat, self._native_lat = getattr(self, "_native_lat", None), None
+        if (nat is not None and self._lattice is not None and budget > 0 and not sampled
+                and build is lattice_tree):
+            L, k = self._lattice[0].shape
+            return native_tree.lattice_tree(nat[0], nat[1], L, k, anchor, chain, budget)
+        if nat is not None and self._lattice is not None:
+            # a caller past the native tree's case: the lists the Python tree reads
+            self._cand_host = self._lattice[0].tolist()
+            self._logp_host = nat[1].tolist()
         if self._lattice is None or budget <= 0:
             if sampled:
                 self.last_det_tree = DraftTree.chain(anchor, chain, source="df2-greedy")

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import os
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
+from engine import rowcopy
 import time
 
 from engine.drafters import Drafter, run_steps, tree_steps
@@ -856,6 +857,10 @@ class LengthRouter(Drafter):
                 out += fn()
         return out
 
+    @property
+    def hidden_free(self) -> bool:
+        return all(getattr(d, "hidden_free", False) for d in (self.small, self.large))
+
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         lag = self._lagging() if self.switch else None
         for key, d in (("s", self.small), ("l", self.large)):
@@ -900,8 +905,16 @@ class LengthRouter(Drafter):
             if len(rows) != n:
                 self._catch_up(key)
                 return False
-            sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
-            kept = [t[sel] for t in taps]
+            if rowcopy.active() and len({t.dtype for t in taps}) == 1:
+                # SPD-201: the rows the drafting arm's sync records too, one copy for both arms
+                fused = rowcopy.rows_cat(list(taps), rows)
+                kept, col = [], 0
+                for t in taps:
+                    kept.append(fused[:, col:col + t.shape[1]])
+                    col += t.shape[1]
+            else:
+                sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
+                kept = [t[sel] for t in taps]
         bl = self.backlog[key]
         if bl and bl[-1][0] + len(bl[-1][1]) != first_pos:
             # not contiguous with what is kept: bring the arm up to date first, then this block
@@ -918,6 +931,7 @@ class LengthRouter(Drafter):
         if not bl:
             return
         import torch
+        rowcopy.flush()
         head = self.head_small if key == "s" else self.head_large
         arm = self.small if key == "s" else self.large
         first = bl[0][0]

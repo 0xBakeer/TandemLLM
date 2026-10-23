@@ -349,6 +349,15 @@ class _HostBlobs:
         self.hl.copy_(self.logp, non_blocking=True)
         self.ev.record()
         self.lists = None
+        self._waited = False
+
+    def get_raw(self, e: int) -> tuple:
+        """Block `e`'s blob and log-probabilities as the pinned host tensors (engine/native_tree.py reads
+        them in place), after the one wait."""
+        if not getattr(self, "_waited", False):
+            self.ev.synchronize()
+            self._waited = True
+        return self.hb[e], self.hl[e]
 
     def get(self, e: int) -> tuple[list, list]:
         if self.lists is None:

@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import gdn  # noqa: E402
+from engine import rowcopy  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
@@ -2064,7 +2065,10 @@ class Qwen38Engine:
         start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)
         if FUSED_COMMIT and len(trace.factors) == len(self.cfg.linear_layers):
             self._fused_commit(trace, path)
-            if path != list(range(L)):
+            if path != list(range(L)) and not self.kv.fp8 and rowcopy.compact(self.kv.k, start, path):
+                # SPD-201: the round's row copies in one launch (engine/rowcopy.py)
+                rowcopy.compact(self.kv.v, start, path)
+            elif path != list(range(L)):
                 sel = start + h2d(path, torch.long, self.device)
                 self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
                 self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]

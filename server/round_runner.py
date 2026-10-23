@@ -41,9 +41,13 @@ ON = os.environ.get("QSE_ROUND_RUNNER", "0") == "1"
 #: rows take the same statements alone as among other slots' (the lone pass is another kernel set). 0: the
 #: lone `forward_tree`
 JOINT1 = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
+#: SPD-201: the tails' row copies (the drafters' tap rows, the hidden rows, the cache compaction) recorded and
+#: run as one launch at the end of the tails (engine/rowcopy.py); 0: each its own torch statement
+ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "0") == "1"
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
+
 
 
 def why_not(*, sup, probe, lpr, think, ahead, drafter, lane, turn) -> str | None:
@@ -318,6 +322,12 @@ class Runner:
         walked = round_walks(specs)
         t0 = self._t("walk", t0)
         # 4. each task's tail, as the slot loop runs it
+        from engine import rowcopy
+        with (rowcopy.recording() if ROWCOPY else _nothing()):
+            self._tails(group, trees, outs, walked)
+        self._t("tails", t0)
+
+    def _tails(self, group, trees, outs, walked) -> None:
         for t, x, lg, w in zip(group, trees, outs, walked):
             self._bind(t)
             if w is not None and w[0] == "walk":
@@ -329,7 +339,6 @@ class Runner:
             else:
                 path, new = t.eng.accept_tree(x, lg.argmax(-1).tolist())
             self._tail(t, x, path, new)
-        self._t("tails", t0)
 
     def _tail(self, t: Task, tree, path, new) -> None:
         from engine.model import h2d
@@ -341,12 +350,18 @@ class Runner:
         t.eng.commit_tree(path)
         d = t.drafter
         if hasattr(d, "sync"):
-            sel = h2d(path, torch.long, t.device)
+            from engine import rowcopy
+            if rowcopy.active():
+                hidden = rowcopy.rows_of(t.eng.hidden_post_norm[0], path)
+                if not getattr(d, "hidden_free", False):
+                    rowcopy.flush()             # this drafter's sync reads the hidden rows at once
+            else:
+                hidden = t.eng.hidden_post_norm[0, h2d(path, torch.long, t.device)]
             toks = [int(tree.tokens[i]) for i in path]
             if getattr(d, "wants_rows", False):
-                d.sync(toks, t.eng.hidden_post_norm[0, sel], t.pos, rows=path)
+                d.sync(toks, hidden, t.pos, rows=path)
             else:
-                d.sync(toks, t.eng.hidden_post_norm[0, sel], t.pos)
+                d.sync(toks, hidden, t.pos)
         t.pos += len(path)
         t.bs.block(max(tree.depths()), accepted)
         d.observe(new)
@@ -398,6 +413,14 @@ class Runner:
             t.end("stop")
         elif tok in t.eos or t.n_out >= t.max_new or t.pos >= eng.max_len - 1:
             t.end("eos" if tok in t.eos else "length")
+
+
+class _nothing:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
 
 
 RUNNER: Runner | None = None
