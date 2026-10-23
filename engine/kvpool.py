@@ -353,10 +353,6 @@ POOL: KVPool | None = None
 OWNER = "slot0"
 #: a window shorter than this stays a static buffer (the shadow reader's 8-row engine, tests)
 PAGED_MIN_ROWS = int(os.environ.get("QSE_KV_POOL_MIN_ROWS", "16384") or 16384)
-#: SPD-165: rows committed ahead of the margin when a sequence's set grows, so a decode commits pages every
-#: ~1,000 rows instead of every page (64 rows of the 27B's KV): one request alone ran 0.5-1.3 % slower with
-#: the pool on than off on 2026-10-23, with the same text (`QSE_KV_COMMIT_AHEAD`, 0: the margin alone)
-COMMIT_AHEAD = int(os.environ.get("QSE_KV_COMMIT_AHEAD", "768") or 0)
 
 
 def enabled() -> bool:
@@ -586,7 +582,6 @@ class PagedSet:
         want = int(rows) + (self.pool.margin_rows if self.pool is not None else 0)
         if want <= self.rows:
             return 0
-        want += COMMIT_AHEAD
         got = 0
         for b in self.bufs:
             got += b.ensure(want)
