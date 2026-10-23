@@ -1547,6 +1547,8 @@ def _round_walk(group, outs) -> None:
 
 #: SPD-161: a slot drafts no wider than its joint round keeps (the family's tree cap at the slots decoding now)
 ROW_CAP = os.environ.get("QSE_PARALLEL_ROW_CAP", "1") != "0"
+#: SPD-201: the row cap counts the round runner's slots (0: only the slot loop's, as before)
+RUNNER_ROWCAP = os.environ.get("QSE_RUNNER_ROWCAP", "0") == "1"
 
 
 def _row_cap(par, drafter) -> None:
@@ -1558,6 +1560,9 @@ def _row_cap(par, drafter) -> None:
     meet = par.meeting if par is not None else None
     tc = getattr(meet, "tree_cap", None) if meet is not None else None
     n = len(par.decoding()) if par is not None else 0
+    if RUNNER_ROWCAP and par is not None:
+        # SPD-201: a slot the round runner decodes (phase "runner") is decoding too (`Pool.report`)
+        n = sum(1 for s in par.slots if s.phase in ("decode", "runner"))
     if ROW_CAP and tc is not None and n > 1:
         cap = tc(n, meet.max_rows)
     drafter.row_cap = cap
