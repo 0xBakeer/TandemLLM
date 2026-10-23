@@ -39,10 +39,12 @@ from engine.models import REGISTRY  # noqa: E402
 #: v0.14.0 (7c682ab0), extra {}: the 27B's v2 (skip NOT_ARITHMETIC, then the tier's) read through SAME_ROWS
 #: (the bytes every release since 0.7.2 adopts under; engine/grammar.py's 0.14.0 and pre-0.14.0 bytes both
 #: count as 0.9's), and each adapter's fp4 on its raw bytes
-GOLDEN_V2 = ("9ac3d8a94c8a91990b83b3674d94f2f95a50e07441e56cafbe8e6f5d8d5c2a3d",
-             "36852358bfa9287407ae56fe4dabc7a90936528619a3ca9da36dc5bcb560a7dc")
+#: SPD-E5 (2026-10-23): the 27B's v2 and fp4 move once for the branch (engine/model.py's joint row-wise
+#: steps and window-MLP knob, engine/drafters/draft_graph.py's packed-graph cap, two knobs in engine/settings.py)
+GOLDEN_V2 = ("468c183d8935a15a8d74c304d42a69a8e4064b78f561672a0c6d9300e7855653",
+             "79ce729d50eaa735cac3e7bbae0b61b19d7f02e96c4290801bda82df7befe103")
 GOLDEN_FP4 = {
-    "qwen3_5": "5d57bf7b7e57f24a561d9e316da3a5c89ce78841bffb2741836045df03f5752f",
+    "qwen3_5": "cd91f831089d9162814bba9672d4b5d7831dd02ae179ea15720a232ffe4a5a22",
     "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
     "nemotron_h": "7fdc694358e113492eab5bdf3ac96562937e1282876dd83933c44874627b8d4d",
     "lfm2_moe": "9a10d58fc924dab2c6e6b74abe07dcd69eea64640401469ed2ecb1dffde20115",

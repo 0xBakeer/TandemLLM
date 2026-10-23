@@ -5,9 +5,8 @@ instead of doubling an empty list forever (a run from outside the repository did
 from __future__ import annotations
 
 import ast
+import tempfile
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -17,17 +16,23 @@ class _Tok:
         return [ord(c) % 97 for c in text]
 
 
-def test_prompt_ids_refuses_an_empty_source(tmp_path):
+def test_prompt_ids_refuses_an_empty_source():
     from tools.prefill_window_check import prompt_ids
-    with pytest.raises(SystemExit, match="no prompt text"):
-        prompt_ids(_Tok(), tmp_path, 64)
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            prompt_ids(_Tok(), Path(d), 64)
+        except SystemExit as exc:
+            assert "no prompt text" in str(exc)
+        else:
+            raise AssertionError("an empty source was accepted")
 
 
-def test_prompt_ids_repeats_a_short_source(tmp_path):
+def test_prompt_ids_repeats_a_short_source():
     from tools.prefill_window_check import prompt_ids
-    (tmp_path / "bench").mkdir()
-    (tmp_path / "bench" / "calib.txt").write_text("abc")
-    assert prompt_ids(_Tok(), tmp_path, 10) == [ord(c) % 97 for c in "abcabcabca"]
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "bench").mkdir()
+        (Path(d) / "bench" / "calib.txt").write_text("abc")
+        assert prompt_ids(_Tok(), Path(d), 10) == [ord(c) % 97 for c in "abcabcabca"]
 
 
 def test_the_profiler_imports_the_27b_adapter():

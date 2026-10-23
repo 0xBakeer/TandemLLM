@@ -90,6 +90,8 @@ M27 = adapter.manifest()
 #: the code fingerprints of 0.9.0-0.9.2 (extra {}), the first 16 hex digits: v2 on the bytes and with
 #: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
 V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
+#: SPD-E5 (2026-10-23): the 27B's v2 with SAME_ROWS after the branch's one move (GOLDEN_V2[0])
+V2_SPDE5 = "468c183d8935a15a"
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 #: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
 FP4_LFM25_011 = "9049446866c5e4fc"
@@ -113,8 +115,10 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
     assert LOADER in M27.modules
     code = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
     same = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=mf.SAME_ROWS)
-    assert same.startswith(V2_072), same
-    assert not code.startswith(V2_072), "the loader's bytes count without the entry"
+    # SPD-E5 moved the 27B's fingerprint once (tests/test_adapter_guards.py GOLDEN_V2): the entry still
+    # reads loader.py as the bytes it replaced, and the tree's other files are SPD-E5's
+    assert same.startswith(V2_SPDE5), same
+    assert code != same, "the loader's bytes count without the entry"
     assert mf.adoption() != mf.FORMULA and mf.adoption().startswith(mf.FORMULA + "+same-")
     return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS (0.7.2's)"
 
@@ -128,11 +132,13 @@ AFTER_09 = {k: v for k, v in mf.SAME_ROWS.items() if k[0] == "engine/grammar.py"
 
 
 def test_the_27bs_code_fingerprints_are_0_9s():
+    """Until SPD-E5 the 27B's code read as 0.9's; SPD-E5 moved it once (the 27B's disk caches are rebuilt
+    once, tests/test_adapter_guards.py), so 0.9's files are no longer adopted: the 27B's v2 and fp4 are
+    the branch's own, and the other families' 0.9 adoption stays (test_flash_next_and_lfm25_...)."""
     v2 = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=AFTER_09)
     v3 = mf.fingerprint(ROOT, M27, {}, same=AFTER_09)
-    assert v2.startswith(V2_09), v2
-    assert v3.startswith(FP4_09["27b"]), v3
-    return f"v2 {v2[:16]}, fp4 {v3[:16]}"
+    assert not v2.startswith(V2_09) and not v3.startswith(FP4_09["27b"]), (v2, v3)
+    return f"v2 {v2[:16]}, fp4 {v3[:16]} (moved by SPD-E5)"
 
 
 def test_lilicorr_is_in_no_27b_fingerprint():
@@ -329,7 +335,8 @@ def test_ops225_every_model_adopts_the_files_before_it():
     from engine.models.nemotron_h import serving as nh_serving
     from engine.models.qwen3_5_moe import serving as q_serving
     out = []
-    for name, m in (("27b", M27), ("flashnext", fn_serving.manifest()), ("ornith", q_serving.manifest()),
+    # the 27B no longer adopts them: SPD-E5 moved its fingerprint once (tests/test_adapter_guards.py)
+    for name, m in (("flashnext", fn_serving.manifest()), ("ornith", q_serving.manifest()),
                     ("nemotron_h", nh_serving.manifest())):
         want = FP4_BEFORE_OPS225[name]
         assert not mf.fingerprint(ROOT, m, {}).startswith(want), (name, "the files are the old tree's: drop the entries")
