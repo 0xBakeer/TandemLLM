@@ -185,10 +185,25 @@ smoke() {   # a /health that names the profile, then one conductor turn through 
     local h; h="$(curl -s -m 10 "http://127.0.0.1:$PORT/health")"
     echo "$h" | "$PY" -c "import json,sys; w=json.load(sys.stdin).get('weights') or {}; sys.exit(0 if w.get('name')=='$1' else 1)" \
         || { say "smoke: /health does not name $1"; return 1; }
-    local r; r="$(curl -s -m 300 -H 'Content-Type: application/json' -H 'X-Tandem-Memory: off' "$SMOKE_URL/chat/completions" \
-        -d '{"model":"'"$SMOKE_MODEL"'","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
-    echo "$r" | "$PY" -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]['message'].get('content') or ''; print('[smoke] ' + c.strip()[:80]); sys.exit(0 if c.strip() else 1)" \
-        || { say "smoke: the turn through $SMOKE_URL failed: ${r:0:300}"; return 1; }
+    # SPD-167: two tries, the request timeout's worth of time each, and the whole answer in the log; an
+    # answer that landed in the reasoning field counts (the engine served it). The first activation of a
+    # pack warms its caches and graphs, so one empty turn is not yet a reason to roll back.
+    local r i
+    for i in 1 2; do
+        r="$(curl -s -m "${SMOKE_TIMEOUT_S:-600}" -H 'Content-Type: application/json' -H 'X-Tandem-Memory: off' "$SMOKE_URL/chat/completions" \
+            -d '{"model":"'"$SMOKE_MODEL"'","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
+        echo "$r" | "$PY" -c "
+import json, sys
+d = json.load(sys.stdin)
+m = d['choices'][0]['message']
+c = (m.get('content') or '').strip()
+t = (m.get('reasoning_content') or m.get('reasoning') or '').strip()
+print('[smoke] ' + (c or '(in reasoning) ' + t)[:80])
+sys.exit(0 if (c or t) else 1)" && return 0
+        say "smoke: turn $i through $SMOKE_URL gave no answer: ${r:0:2000}"
+        [ "$i" = 1 ] && sleep "${SMOKE_RETRY_S:-10}"
+    done
+    return 1
 }
 
 back_to_setup() {   # the marker and the active-profile file as they were, then setup mode

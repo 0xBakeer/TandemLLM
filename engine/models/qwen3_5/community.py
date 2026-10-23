@@ -37,6 +37,8 @@ def env(m: dict, c: dict, d: str) -> str:
                                              else "") + '--drafter none"')
     lines += ["QWEN38_SAMPLE_NUCLEUS=1",
               f"VISION={'on' if c['modalities']['image'] else 'off'}",
+              # SPD-167: a text-only pack's limit, which setup.env cannot turn back on (ops/serve.env)
+              *([] if c['modalities']['image'] else ["QSE_PACK_VISION=off"]),
               f'QSE_DISK_CACHE="${{HOME}}/.qwen38-spark-engine/cache/disk-community-{c["id"]}"']
     return "\n".join(lines) + "\n"
 

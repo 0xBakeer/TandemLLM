@@ -193,6 +193,8 @@ done
 # The vision tower, on unless serve.env says off, and the response cache, off unless it says on
 # (the setup guide's two switches for them, docs/setup.md)
 [ "${VISION:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --vision off"
+[ "${QSE_PACK_VISION:-}" = "off" ] && [ "${QSE_VISION_ASKED:-on}" = "on" ] && \
+    echo "[start] vision off: ${QSE_PROFILE_NAME:-the profile} serves text only (its entry), whatever setup.env asks"
 [ "${RESPONSE_CACHE:-off}" = "on" ] && MEM_FLAGS="$MEM_FLAGS --response-cache"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"

@@ -47,7 +47,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `links` | no | https links, such as `pr` for a pull request that made the pack load. |
 | `profile` | no | The model's own profile that serves this pack, for a pack TandemLLM already runs as one of its profiles. The entry must have that profile's repository, format and bits a weight. Set by a maintainer. |
 
-The check refuses a modality the load path cannot serve. A standalone pack is text only for now (ENG-271), even when it carries a vision tower: write `"image": false` and list `image` in `modalities_in_pack`. An overlay keeps the base checkpoint's vision tower, so `"image": true` is allowed there. No path serves audio or video yet.
+The check refuses a modality the load path cannot serve. A standalone pack is text only for now (ENG-271), even when it carries a vision tower: write `"image": false` and list `image` in `modalities_in_pack`. An overlay keeps the base checkpoint's vision tower, so `"image": true` is allowed there. A text-only entry's profile also writes `QSE_PACK_VISION=off`, which `ops/serve.env` applies after the Setup Guide's `run/setup.env`, so a box whose setup turned vision on still starts the pack text only and `ops/start.sh` says so (SPD-167; before, the start failed on the pack's tower). The switch's smoke turn (`ops/use-profile.sh`) gets two tries of `SMOKE_TIMEOUT_S` (600 s) each and logs the whole answer before it rolls back; an answer in the reasoning field counts. No path serves audio or video yet.
 
 ## Bases
 
