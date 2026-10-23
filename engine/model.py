@@ -168,6 +168,8 @@ FUSED_ATTN_PREP = _S.get("FUSED_ATTN_PREP") == "1"
 # library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
 # verify, the graphed verify and the decode step.
 GDN_AB = _S.get("GDN_AB") == "1"
+#: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call (0: one call a chunk)
+WINDOW_MLP = _S.get("WINDOW_MLP") != "0"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
@@ -1254,6 +1256,7 @@ class Qwen38Engine:
                 wpost = self.w.norm(f"{p}.post_attention_layernorm.weight")
                 wnext = self.w.norm(f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                                     else "norm.weight")
+                mids = []
                 for c in range(C):
                     if lin:
                         a = self.linear_attention(xs[c], p, layer, primed0 or c > 0)
@@ -1263,10 +1266,25 @@ class Qwen38Engine:
                     else:
                         a = self.attention(xs[c], p, layer, starts[c], pos[c])
                     h, x = add_rms_norm(hs[c], a, wpost, cfg.rms_norm_eps)
+                    if WINDOW_MLP and C > 1:
+                        hs[c] = h
+                        mids.append(x)
+                        continue
                     m = self.mlp(x, p)
                     hs[c], xs[c] = add_rms_norm(h, m, wnext, cfg.rms_norm_eps)
                     if layer + 1 in keep:
                         taps[c][layer + 1] = hs[c][0].detach()
+                if mids:
+                    # SPD-169: the MLP of every chunk of the window in one call. A row's MLP depends on
+                    # its own row alone, and the library GEMM gives a row the same bits at 8,192 rows
+                    # as at 1,024 (tools/m6_gemm.py on GB10: equal on every prefill shape), so each
+                    # chunk's rows are what its own call gives; at M = 8,192 cuBLAS takes its sm121
+                    # kernel where at 1,024 it took an sm80 one (gate+up 69 -> 86 TFLOPS)
+                    ms = self.mlp(torch.cat(mids, dim=1), p).split([x.shape[1] for x in mids], dim=1)
+                    for c in range(C):
+                        hs[c], xs[c] = add_rms_norm(hs[c], ms[c], wnext, cfg.rms_norm_eps)
+                        if layer + 1 in keep:
+                            taps[c][layer + 1] = hs[c][0].detach()
                 if _x3 is not None:
                     _x3.slab_cache_clear()
                 if WINDOW_YIELD is not None and layer + 1 < n:
