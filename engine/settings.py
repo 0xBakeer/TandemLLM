@@ -113,6 +113,7 @@ KNOBS: dict[str, tuple] = {
     'GDN_PREP_WARPS': ('8', 'engine/model.py'),
     'JOINT_ROWWISE': ('1', 'engine/model.py'),
     'JOINT_GDN': ('0', 'engine/model.py'),
+    'JOIN_VIEWS': ('1', 'engine/model.py'),
     'GDN_CHUNK': ('64', 'engine/model.py'),
     'GDN_PREFILL_NOREP': ('0', 'engine/model.py'),
     'ATTN_STAGES3': ('1', 'tools/attn_kernels.py'),

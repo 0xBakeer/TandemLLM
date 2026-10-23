@@ -177,6 +177,9 @@ JOINT_ROWWISE = _S.get("JOINT_ROWWISE") != "0"
 #: tensors (tools/gdn_wy_kernels.py `wy_recurrence_grouped`); blocks it does not take run alone (0: every
 #: engine its own launches, as before)
 JOINT_GDN = _S.get("JOINT_GDN") == "1"
+#: SPD-E5: a joint pass joins a request's parts as a view when they are the consecutive slices of one tensor
+#: (a joined answer split and handed straight on): the same values without a copy (0: always `torch.cat`)
+JOIN_VIEWS = _S.get("JOIN_VIEWS") != "0"
 #: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call. Off by default: a window's
 #: partial chunk alone (<= EXL3_CHUNK_UNTIL rows) takes the skinny kernel and inside the joined call the
 #: slab, and NVFP4's 1,024-row chunks take the v2 tile alone and dequant + cuBLAS joined, so a row's bits
@@ -2332,6 +2335,29 @@ def forward_tree_multi(items: list) -> list:
         raise
 
 
+def _join(xs: list, dim: int) -> torch.Tensor:
+    """`torch.cat(xs, dim)`, or -- when the parts are the consecutive slices of one tensor along `dim`, as
+    a joined request's answer comes back split and is often handed straight to the next request -- that
+    tensor itself as a view (the same values, no copy and no launch)."""
+    x0 = xs[0]
+    st, sh = x0.stride(), x0.shape
+    ptr = x0.data_ptr()
+    step = x0.element_size()
+    for x in xs[1:]:
+        if (x.dtype != x0.dtype or x.device != x0.device or x.stride() != st or x.dim() != x0.dim()
+                or any(a != b for k, (a, b) in enumerate(zip(x.shape, sh)) if k != dim)
+                or x.untyped_storage().data_ptr() != x0.untyped_storage().data_ptr()):
+            return torch.cat(xs, dim=dim)
+    for a, b in zip(xs, xs[1:]):
+        if b.data_ptr() != a.data_ptr() + a.shape[dim] * st[dim] * step:
+            return torch.cat(xs, dim=dim)
+    if JOIN_VIEWS:
+        shape = list(sh)
+        shape[dim] = sum(x.shape[dim] for x in xs)
+        return x0.as_strided(shape, st, x0.storage_offset())
+    return torch.cat(xs, dim=dim)
+
+
 def joint_steps(eng0, gens: list) -> list:
     """`forward_tree_multi`'s loop: run the engines' step generators, each request for the same weight as
     one call over every engine's rows; returns each generator's value (its logits). The joint graphs
@@ -2360,10 +2386,10 @@ def joint_steps(eng0, gens: list) -> list:
             # projections [T, H]; a tuple payload (SPD-163: the row-wise steps) is joined part by part
             dim = 1 if kind in ("mlp", "head", "addnorm") else 0
             if isinstance(xs[0], tuple):
-                joined = tuple(torch.cat([x[k] for x in xs], dim=dim) for k in range(len(xs[0])))
+                joined = tuple(_join([x[k] for x in xs], dim) for k in range(len(xs[0])))
                 sizes = [x[0].shape[dim] for x in xs]
             else:
-                joined = torch.cat(xs, dim=dim)
+                joined = _join(xs, dim)
                 sizes = [x.shape[dim] for x in xs]
             if kind == "gated":
                 # the gated norm's rows are a head's; its output projection's rows are a token's
