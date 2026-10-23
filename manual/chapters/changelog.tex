@@ -45,9 +45,18 @@
 0.13.0 & 10-20 & Ornith-1.5-122B on the Qwen3.5 MoE trunk, from our EXL3 4.0 pack, drafting with its MTP layer; the conductor's third tool-eval-bench round; room for Ornith's caches; \code{chatd} fixes for long sessions \\
 0.14.0 & 10-22 & Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint, drafting with the lookup; a resumed session keeps its end anchor; a re-rendered tool call served as written; prompt attention over the KV heads as they are; a lost CUDA context fails \code{/health}; \code{tools/release.sh} \\
 0.14.1 & 10-22 & a call's argument names matched to the offered tool's schema; a call to a tool not offered mapped to one that is; Flint answers directly with thinking off; Flint's e4m3 KV cache, off by default; model families behind adapters \\
+0.14.2 & 10-23 & with thinking off, reasoning written into the answer goes to its field; Ornith answers up to its card's 131,072 tokens and decodes plain at long context; \code{cache_prompt: false} as a cold read; a lookup corpus for each tokenizer; no conductor notes on a model without a place for them; \code{tandem-dash serve} without the engine \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.14.2, an Ornith test report}\label{sec:changelog-0142}
+
+0.14.2 fixes what an outside test of Ornith found. With thinking off, the text a model writes before the first \code{</think>} that stands alone on its line, outside a code block, goes to \code{reasoning_content}, and usage counts it as reasoning; a tag in code or in a line of text stays. Of the report's four long contest answers, two now carry their working-out in the reasoning field and only the answer in \code{content} (\measured). Ornith's profiles answer up to the 131,072 tokens its card evaluates with when a request sets no limit; every other profile keeps 32,768.
+
+Ornith's price file prices the MTP head's backlog, the prompt rows the head reads before a turn's first draft (Chapter~\ref{ch:ornith}). A fresh server's first long turn drafted and paid it: at 112,068 prompt tokens greedy decode ran at 18.04~tok/s against 25.16 plain, and now that turn takes the plain step at 25.11; at 220,038 it runs at 18.85, where drafting ran at 10.95 (\measured, one run each). The Setup Guide stops Ornith at one parallel chat, as its engine builds no side slots yet, and \code{/health} says so under \code{--parallel N}.
+
+\code{cache_prompt: false} on a request is a cold read: the whole prompt is read, no prompt cache answers it or keeps it, and the conversation in place is where it was for the next request (Chapter~\ref{ch:caches}). The lookup corpus is built for the served model's tokenizer after its download, one store a tokenizer under \code{CORPUS/tokenizers/}; its effect on speed is not measured yet. A model whose prompt has no place for the conductor's notes, Flint, gets none, and its turns record memory off with the reason instead of an error (Chapter~\ref{ch:memory}). \code{tandem-dash serve} starts without the engine installed (Chapter~\ref{ch:install-dash}). The Setup Guide sets the thinking effort for every model, and the cards name each number's effort. Several requests that arrive together as a fresh server's first traffic no longer answer 500 for a tool-call format not yet registered, and the page check closes its Chrome in about 0.1~s instead of up to 5~s. No fingerprint moves: every model writes the same tokens as in 0.14.1 and keeps its saved conversations.
 
 \section{0.14.1, adapters}\label{sec:changelog-0141}
 

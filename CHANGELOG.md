@@ -2,6 +2,55 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.14.2, 2026-10-23
+
+0.14.2 fixes what an outside test of Ornith found, and the bugs we met on the way. With thinking off, reasoning that a model writes into its answer anyway now goes to `reasoning_content`. Ornith answers up to its card's 131,072 tokens when a request sets no limit, and at 131,072 tokens and above it decodes plain instead of drafting slower than plain. The Setup Guide no longer offers Ornith parallel chats its engine cannot run, and it sets the thinking effort for every model. `cache_prompt: false` reads the whole prompt and leaves the caches as they were. The lookup corpus is built for each model's tokenizer after its download. `tandem-dash serve` starts without the engine installed. No fingerprint moves: every model writes the same tokens as in 0.14.1 and keeps its saved conversations.
+
+### Answers
+
+- With thinking off, the text before the first `</think>` that stands alone on its line, outside a code block, goes to `reasoning_content`, and usage counts it as reasoning (#93). This applies to every model, and only when no `<think>` of the model's own came before the tag. A block the model opens at its start is read as reasoning, and an empty pair is dropped. Streamed, the text before the tag has gone out already, so only the tag line is dropped. A tag inside a code block or in a line of text stays, and so does every tag after the first. The report's 4 long contest answers wrote everything into `content` on 0.14.1. Replayed on Ornith 4.0, two now carry their working-out in `reasoning_content` (1,536 and 68,172 characters) and only the answer in `content`, the empty pair is gone, and the block opened at the start reads as reasoning. Flint's answers to 10 greedy asks with thinking off are byte for byte those of 0.14.1. Ornith gets no thinking-off line like Flint's: one cleaned 3 of the 4, but it cut the median ordinary answer from 506 to 362 tokens greedy.
+- A family whose template reads one system prompt first gets its thinking-off line at the end of that prompt. A developer message there made Ornith's template answer 500 (#93).
+- A request with no `max_tokens` on Ornith's profiles can write up to 131,072 tokens, the limit its card evaluates with (#96). Every other profile keeps 32,768. The longest answer in the report, at effort `xhigh`, was 39,046 tokens. `/v1/models` shows the value as `tandem.max_output`, and a request's own `max_tokens` still wins, clamped to the window. A box the Setup Guide set up for Ornith before 0.14.2 keeps the 32,768 in `run/setup.env` until the field is changed. docs/setup.md says how ("The answer limit").
+- When several requests arrive together as a fresh server's first traffic, none answers 500 with "no tool-call format 'xml'" any more (SPD-185). The tool-call formats were marked found before their modules had registered, and with parallel slots three of four requests in such a burst failed. The formats are now found once, under a lock.
+
+### Ornith
+
+- Ornith's price file has the measured cost of the MTP head's backlog, the prompt rows the head reads before a turn's first draft (#110). Before, a fresh server's first long turn always drafted and paid it: 87,717 rows in 4.6 s at 112k tokens, 109,443 rows in 10.2 s at 220k. Greedy, one run each: at 112,068 tokens the turn now takes the plain step at 25.11 tok/s, where drafting ran at 18.04 against 25.16 plain. At 220,038 tokens it runs at 18.85, where drafting ran at 10.95 against 18.89. At 3,525 tokens it still drafts, 40.9 against 37.4 plain.
+- The Setup Guide stops Ornith at one parallel chat and says why under the stepper (#104). Its engine builds no side slots yet, so the server ran one slot while `/health` showed the count asked for. Each `model.yaml` names its engine family, and the family's `ServeSpec.side_slots` says whether it builds side slots. With `--parallel N` on such an engine, `/health`'s `parallel` names the one slot and why. The other families keep the engine's 16.
+
+### Caches and drafting
+
+- `cache_prompt: false` on a request is honoured as a cold read (#98). It reads the whole prompt (`timings.cache_n` 0), uses and writes no state-store entry, disk-tier anchor or end anchor, and the response cache neither answers it nor keeps its answer. The conversation in place is set aside as for another client's and is where it was for the next request. `true`, a missing field and any other value keep the caches on. In the report, 32 of 37 requests that sent `false` had reused cached tokens. docs/server.md has a `cache_prompt` section.
+- The lookup corpus is built for the served model's tokenizer after its download (#97). One store a tokenizer sits under `CORPUS/tokenizers/<16 hex of the tokenizer's sha256>/`. `ops/use-profile.sh` and the Setup Guide's install build it once the weights are complete (about 31 million tokens, from one English and one German Wikipedia shard and local Python sources). `install.sh --setup` downloads the two shards (1.2 GB) and sets `CORPUS`, and `ops/start.sh` passes the engine the store of the served model's tokenizer. A failed build logs a line and the switch goes on, and `QSE_CORPUS_BUILD=off` skips it. A `CORPUS` that records no tokenizer is read as before. The speed with and without the corpus is not measured yet.
+- docs/caches.md says why the first request after a restart can report a resident hit: the drain's conversation is read back at the start (#94).
+
+### Conductor and memory
+
+- A model whose prompt has no place for the conductor's notes gets none, and its turns say so (SRV-703). The conductor puts its notes before the last message's `<|im_end|>`, and Flint's template ends no message with a token. On Flint every turn of a profile with memory on found no place: 1,456 turns in a day carried the error `no_insertion_point`, 199 of them with memory on, while the decision rows said `memory: on`. A family's fit has a `notes` key, Flint's is false, and such a turn records `memory: {mode: off, why: model_notes}`. Nothing went into Flint's prompt before either, so it writes the same text.
+- Profiles have a fourth memory switch, `none`: nothing added, as an absent key meant. Every shipped profile sets its switch: `on` in `chat`, `coding`, `hermes` and `chat-app`, `none` in the others. A box's stored profiles keep what they hold.
+- The Notes tab has a "Where memory is on" panel: the served model when it reads no note, and every profile with its switch and its clients.
+
+### Setup Guide and docs
+
+- The Setup Guide sets the thinking effort (`low`, `medium`, `xhigh`, default `medium`) for every model, as it did for the two Qwen models (#100). docs/setup.md has a section on it, and the cards, docs/tool-eval-bench.md and docs/flint.md name the effort of each published number. Speed rows are greedy with thinking off. A fresh install thinks at `medium`, and the tool-eval-bench `tools` rows of the 27B and Ornith ran at `xhigh`.
+- docs/server.md lists the `timings` and `metrics` fields, which chunk of a stream carries them, and the two draft formulas: `tokens_per_block = (completion_tokens - 1) / blocks`, also `mean_acceptance_length`, and `draft_acceptance_rate = draft_n_accepted / draft_n` (#99).
+- The manual's ledger table closes the group its last paragraph opened, which held to the end of the book (#126).
+
+### Chat tab
+
+- The page check and the browser drive close their Chrome in about 0.1 s (#131). The kit sent SIGTERM to Chrome's whole process group, so its helpers died at once and the browser process, waiting for them in its shutdown, sometimes stayed up until the SIGKILL 5 s later: on CI runners 3 closes in 200, and 17 in 200 with the CPUs busy. The SIGTERM now goes to the browser process alone, which ends its helpers, and to the rest of the group once it is gone. On the same runners 0 closes in 400 took more than 1 s.
+
+### Install and dashboard
+
+- `tandem-dash serve` starts without the engine (#108). It exited with `ModuleNotFoundError: No module named 'engine'`, as the standalone proxy ships `proxy` and `server` only. The conductor reads its knobs through `server/knobs.py`: the engine's registry where it is installed, else the environment with the same defaults.
+- The dashboard's tests run on `vitest` 5.0.3, for two moderate advisories in `@vitest/mocker` 5.0.1 (#128). Nothing of it is in `dashboard/dist`.
+
+### Tests and CI
+
+- CPU-job tests that failed at random are fixed at their cause (#113, #120, #122, OPS-231). The disk-tier tests wait for a staging slot, Flint's and LFM2's structure checks run in fp64, the page check bounds Chrome's start and not the whole check, and its test starts Chrome once before it times a start. The page check's Chrome picks its own debugging port. The preview's long-poll stops watching the client once its answer is complete, so a client that closes after the answer leaves the relay to end by itself. The proxy gate's tests hold a kept retry to the gate's own bounds.
+- The dashboard's size budget measures with `pako`, zlib in JavaScript, so `dist/` gets the same gzip size on every Node (#130). Node's own zlib depends on how Node is built: the same bytes read 470,034 with stock zlib and 471,208 on the official Linux builds, against a budget of 471,040, so `npm test` failed on Linux. The bundle sits 1,006 bytes under its 460 KB.
+- `tests/test_manual_braces.py` checks that every table the manual's generator writes closes each brace it opens (#126).
+
 ## 0.14.1, 2026-10-22
 
 0.14.1 fixes how Flint's tool calls reach a client and how it answers with thinking off, and moves model code behind adapters. A call's argument names are matched to the offered tool's schema, so Flint's `read` with `path` reaches opencode as `filePath`. A call to a tool the request did not offer goes to the offered tool of its kind. With thinking off, Flint answers without writing its reasoning into the answer. Flint can keep its full layers' keys and values in e4m3, off by default. Each model family now registers itself and declares how it is served, and shared code names no model. The other models write the same text as in 0.14.0 and keep their saved conversations. Flint's fingerprint moves once, so its saved prompt-cache entries from 0.14.0 are rebuilt once.

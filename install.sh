@@ -33,7 +33,9 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
+# The engine release. v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
+# card's answer limit and the plain step at long context, and builds the lookup corpus for each tokenizer;
+# v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
 # answer directly with thinking off and puts the model families behind adapters;
 # v0.14.0 adds Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint,
 # drafting with the lookup; v0.13.0 adds Ornith-1.5-122B from our EXL3 4.0 pack, drafting with its MTP layer;
