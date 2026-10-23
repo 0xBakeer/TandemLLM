@@ -32,6 +32,7 @@ def test_a_side_slot_gets_the_replaced_dict_and_reads_no_checkpoint(monkeypatch)
     df2._QUANTISED["/ckpt/b16"] = q = {"fc.weight": torch.ones(1, dtype=torch.bfloat16)}
     assert df2.load_weights("/ckpt/b16", "cpu") is q
     assert reads == ["/ckpt/b8"]
+    assert df2.load_weights("/ckpt/b8", "cpu:0") is built            # "cpu" and "cpu:0" are one device
     df2.load_weights("/ckpt/b8", "cpu", torch.float32)               # another dtype: read
     assert reads == ["/ckpt/b8", "/ckpt/b8"]
     serving._share_drafter_weights()                                  # idempotent

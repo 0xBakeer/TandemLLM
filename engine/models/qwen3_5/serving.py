@@ -112,8 +112,10 @@ def _share_drafter_weights() -> None:
         def fits(w) -> bool:
             # the built dict serves only the device and dtype it was read for
             t = w.get("fc.weight") if isinstance(w, dict) else None
+            want = torch.device(device)
             return (t is not None and torch.is_tensor(t) and t.dtype == dtype
-                    and t.device == torch.device(device))
+                    and t.device.type == want.type
+                    and (want.index is None or t.device.index in (None, want.index)))
         for k, w in df2._EXL3_PROJ.items():
             if k.startswith(f"{snapshot}|") and fits(w):
                 return w
