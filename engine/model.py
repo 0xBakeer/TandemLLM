@@ -1038,17 +1038,21 @@ class Qwen38Engine:
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
+    def _ab_weight(self, p: str) -> torch.Tensor:
+        """`[in_proj_a; in_proj_b]` of layer `p`, concatenated once (QWEN38_GDN_AB)."""
+        w = self._ab_cat.get(p)
+        if w is None:
+            w = self._ab_cat[p] = torch.cat(
+                [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
+                 self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
+        return w
+
     def _gate_inputs(self, flat: torch.Tensor, p: str) -> tuple[torch.Tensor, torch.Tensor]:
         """The two 48-wide gate projections, `a` and `b`, of `flat` [T, H]."""
         if GDN_AB:
             from tools.small_linear import small_linear
-            w = self._ab_cat.get(p)
-            if w is None:
-                w = self._ab_cat[p] = torch.cat(
-                    [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
-                     self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
-            ab = small_linear(flat, w)
-            n = w.shape[0] // 2
+            ab = small_linear(flat, self._ab_weight(p))
+            n = ab.shape[1] // 2
             return ab[:, :n], ab[:, n:]
         return (linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")),
                 linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")))
@@ -1640,7 +1644,14 @@ class Qwen38Engine:
         else:
             mixed = yield "lin", f"{p}.linear_attn.in_proj_qkv", flat
             z = yield "lin", f"{p}.linear_attn.in_proj_z", flat
-        a, b = self._gate_inputs(flat, p)
+        if GDN_AB:
+            # SPD-163: the gate inputs in one call for every engine's rows (the kernel's rows are
+            # independent, so a row's `a | b` is its bits alone); the split is `_gate_inputs`'
+            ab = yield "gate", p, flat
+            n = ab.shape[1] // 2
+            a, b = ab[:, :n], ab[:, n:]
+        else:
+            a, b = self._gate_inputs(flat, p)
         tree = self.tree
         pend, store, fac_out = None, True, None
         fp = self.trace.fold_par
@@ -2014,6 +2025,10 @@ def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
         # SPD-163: `h + a` and its norm, one launch for every engine's rows (one program a row)
         from tools.norm_kernels import add_rms_norm
         return add_rms_norm(x[0], x[1], eng.w.norm(name), eng.cfg.rms_norm_eps)
+    if kind == "gate":
+        # SPD-163: the GDN gate inputs `a | b` of every engine's rows (QWEN38_GDN_AB's kernel)
+        from tools.small_linear import small_linear
+        return small_linear(x, eng._ab_weight(name))
     if kind == "gated":
         # SPD-163: the GDN gated norm (one program a row) and the output projection of its rows
         cfg = eng.cfg
@@ -2037,7 +2052,8 @@ def forward_tree_multi(items: list) -> list:
     by the weight's shape, never by the row count, up to the family's row cap (32, or 64 for EXL3
     weights: `joint_policy`, docs/kernels.md), so a row's projection is the bits it is alone; the
     caller keeps the joint pass at or under that cap. The row-wise steps (`addnorm`, `gated`) are one
-    program a row and run once for all engines too (SPD-163)."""
+    program a row and run once for all engines too (SPD-163), and so are the GDN gate inputs under
+    QWEN38_GDN_AB (`gate`: tools/small_linear.py, whose rows are independent)."""
     if not items:
         return []
     sts, gens = [], []
