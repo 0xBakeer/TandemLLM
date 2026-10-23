@@ -1034,6 +1034,74 @@ def _sid(pid, default):
         return default + 1          # gone already: it ran in a session of its own
 
 
+def test_the_oom_death_names_itself():
+    # a runner killed mid-fetch is reported as the oom-killer it almost certainly was;
+    # a death in any other step keeps the plain message (we do not guess without evidence)
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="setup-job-")
+    jid = "a0b6d3fa00989455"
+    with open(os.path.join(tmp, "state.json"), "w") as fh:
+        pass
+    os.makedirs(os.path.join(tmp, jid), exist_ok=True)
+    real_dir, real_alive = apply.jobs_dir, apply._alive
+    try:
+        apply.jobs_dir = lambda: tmp
+        apply._alive = lambda *a, **k: False
+        def job_running(sid):
+            return {"state": "running", "created_at": time.time() - 60, "pid": 999999,
+                    "steps": [{"id": s, "label": s, "state": "running" if s == sid else "pending"}
+                              for s in ("check", "fetch", "switch")]}
+        with open(os.path.join(tmp, jid, "state.json"), "w") as fh:
+            json.dump(job_running("fetch"), fh)
+        job = apply.read_job(jid)
+        assert job["state"] == "failed" and "out-of-memory" in job["message"], job["message"]
+        with open(os.path.join(tmp, jid, "state.json"), "w") as fh:
+            json.dump(job_running("switch"), fh)
+        job = apply.read_job(jid)
+        assert job["message"] == "interrupted: the job's process is gone", job["message"]
+    finally:
+        apply.jobs_dir, apply._alive = real_dir, real_alive
+
+
+def test_the_fetch_avoids_the_xet_buffers():
+    # the download runs beside a loaded engine: fetch() must default to the plain HTTP
+    # path (the Xet backend's ~2 GiB of buffers is what the oom-killer takes down)
+    import sys
+    import types
+    import tempfile
+    import ops.fetch_weights as fw
+    saved = {k: os.environ.pop(k, None) for k in ("HF_HUB_DISABLE_XET", "HF_HUB_ENABLE_HF_TRANSFER")}
+    real = {n: getattr(fw, n) for n in ("manifest", "verify", "_token")}
+    real_hub = sys.modules.get("huggingface_hub")
+    tmp = tempfile.mkdtemp(prefix="fetch-env-")
+    calls = {}
+    try:
+        fw.manifest, fw.verify, fw._token = lambda *a, **k: "c" * 40, lambda *a, **k: [], lambda: None
+        def fake_snapshot(**kw):
+            calls.update(kw)
+            os.makedirs(os.path.join(kw["local_dir"], ".cache"), exist_ok=True)
+        hub = types.ModuleType("huggingface_hub")
+        hub.snapshot_download = fake_snapshot
+        sys.modules["huggingface_hub"] = hub
+        d = os.path.join(tmp, "pack")
+        assert fw.fetch("org/repo", d, []) == 0
+        assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+        assert os.environ["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
+        assert os.path.isdir(d) and calls.get("local_dir") == d + ".partial"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        for n, v in real.items():
+            setattr(fw, n, v)
+        if real_hub is not None:
+            sys.modules["huggingface_hub"] = real_hub
+        else:
+            sys.modules.pop("huggingface_hub", None)
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

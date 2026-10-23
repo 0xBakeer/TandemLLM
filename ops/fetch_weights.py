@@ -181,6 +181,13 @@ def share(part: str, d: str) -> list[str]:
 
 
 def fetch(repo: str, d: str, files: list[str], revision: str | None = None, part: str | None = None) -> int:
+    # A download runs on a box that may already hold an engine, and the hub's Xet backend
+    # alone wants ~2 GiB of buffers: on a loaded Spark the kernel's oom-killer takes the
+    # fetch (and often the job's runner beside it) down, which the wizard can only report
+    # as "interrupted: the job's process is gone". The plain HTTP path fits in ~100 MB,
+    # so it is the default here; setdefault keeps an operator's own choice in charge.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     from huggingface_hub import snapshot_download
     part = part or d.rstrip("/") + ".partial"
     allow = (files + ["crc32.txt", "quality/sha256.txt", "README.md", "LICENSE"]) if files else None
