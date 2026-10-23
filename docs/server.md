@@ -183,6 +183,8 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | `--request-timeout` | 3,600 s | a generation that runs that long ends with `finish_reason: "timeout"` |
 | `--max-len` | 262,144 tokens | a prompt that does not fit gets a 400; `max_tokens` is clamped to what fits |
 | `--default-max-tokens` | 32,768; 131,072 on Ornith | used when the request sends no `max_tokens`; a request's own `max_tokens` wins |
+| `QSE_MAX_BODY_MB` | 512 MiB | a body that promises more is a 413 before its first byte is read; a chunked body hits the same line as it passes it (server/http_body.py) |
+| `QSE_HANDLER_TIMEOUT_S` | 60 s | a client that stalls mid-request gets a 408 and the connection closes; the clock restarts at every socket op that makes progress, as nginx's `*_read_timeout` |
 
 At load the server allocates the KV buffer for the whole context, so the context length is a memory decision taken before the first request ([operations.md](operations.md)).
 
