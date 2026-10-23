@@ -41,10 +41,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: count as 0.9's), and each adapter's fp4 on its raw bytes
 #: SPD-E5 (2026-10-23): the 27B's v2 and fp4 move once for the branch (engine/model.py's joint row-wise
 #: steps and window-MLP knob, engine/drafters/draft_graph.py's packed-graph cap, two knobs in engine/settings.py)
-GOLDEN_V2 = ("468c183d8935a15a8d74c304d42a69a8e4064b78f561672a0c6d9300e7855653",
-             "79ce729d50eaa735cac3e7bbae0b61b19d7f02e96c4290801bda82df7befe103")
+GOLDEN_V2 = ("99a48f93714dfc933815f4215b6e420b36cce1e7e56ab7a98fd7f213a85829e6",
+             "1443701a85447fe50d2fac34db4f532bfa5ae19aa9d7f69ec0fa97b0fe2c5460")
 GOLDEN_FP4 = {
-    "qwen3_5": "cd91f831089d9162814bba9672d4b5d7831dd02ae179ea15720a232ffe4a5a22",
+    "qwen3_5": "d0ba8fe0399941bdb05679a2560f6f9bb80b23d2ec4ebd41443de1dcecc7533b",
     "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
     "nemotron_h": "7fdc694358e113492eab5bdf3ac96562937e1282876dd83933c44874627b8d4d",
     "lfm2_moe": "9a10d58fc924dab2c6e6b74abe07dcd69eea64640401469ed2ecb1dffde20115",

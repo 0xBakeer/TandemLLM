@@ -14,7 +14,7 @@ KNOBS: dict[str, tuple] = {
     # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
     'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json
-    'ROUND_PLAN_PRICES': (None, 'engine/models/qwen3_5/roundplan.py'),
+    'ROUND_PLAN_PRICES': ('', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the rows a block may take in a planned round
     'ROUND_PLAN_BUCKETS': ('4,8,16', 'engine/models/qwen3_5/roundplan.py'),
 }
