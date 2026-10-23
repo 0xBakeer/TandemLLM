@@ -88,6 +88,61 @@ def _recorded(gen, log):
             return fin.value
 
 
+def _joint_steps_nojoin(M, nojoin):
+    """engine.model.joint_steps with the request kinds in `nojoin` run per engine (each engine's rows alone), every
+    other kind joined as served: the brute-force half of the bisect (the kind whose un-joining makes the joint pass
+    the lone one's bits is the parting op)."""
+    def steps(eng0, gens):
+        reqs = [next(g) for g in gens]
+        gdn_pass: dict = {}
+        done: list = [None] * len(gens)
+        live = list(range(len(gens)))
+        while live:
+            groups: dict = {}
+            for j in live:
+                kind, name, _ = reqs[j]
+                key = (kind, name, j) if kind in nojoin else (kind, name)
+                groups.setdefault(key, []).append(j)
+            answers: dict = {}
+            for key, js in groups.items():
+                kind, name = key[0], key[1]
+                xs = [reqs[j][2] for j in js]
+                if kind == "gdn":
+                    for j, r in zip(js, M._run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
+                        answers[j] = r
+                    continue
+                if len(xs) == 1:
+                    answers[js[0]] = M._run_request(eng0, kind, name, xs[0])
+                    continue
+                dim = 1 if kind in ("mlp", "head", "addnorm") else 0
+                if isinstance(xs[0], tuple):
+                    joined = tuple(torch.cat([x[k] for x in xs], dim=dim) for k in range(len(xs[0])))
+                    sizes = [x[0].shape[dim] for x in xs]
+                else:
+                    joined = torch.cat(xs, dim=dim)
+                    sizes = [x.shape[dim] for x in xs]
+                if kind == "gated":
+                    heads = eng0.cfg.linear_num_value_heads
+                    sizes = [n // heads for n in sizes]
+                out = M._run_request(eng0, kind, name, joined)
+                if isinstance(out, tuple):
+                    parts = list(zip(*(o.split(sizes, dim=dim) for o in out)))
+                else:
+                    parts = out.split(sizes, dim=dim)
+                for j, part in zip(js, parts):
+                    answers[j] = part
+            nxt = []
+            for j in live:
+                try:
+                    reqs[j] = gens[j].send(answers[j])
+                    nxt.append(j)
+                except StopIteration as fin:
+                    done[j] = fin.value
+            live = nxt
+        return done
+    return steps
+
+
 def _tree(rng, anchor, n, chain):
     from engine.tree import DraftTree
     parents, path = [-1], [0]
@@ -105,6 +160,8 @@ def main() -> None:
     ap.add_argument("--rows", type=int, default=8)
     ap.add_argument("--chain", action="store_true", help="chain-shaped blocks (the lone path's chain kernel)")
     ap.add_argument("--max-len", type=int, default=4096)
+    ap.add_argument("--nojoin", default="", help="request kinds run per engine in the joint pass (comma list)")
+    ap.add_argument("--sweep", action="store_true", help="each kind un-joined in turn: joint vs lone per kind")
     a = ap.parse_args()
     from engine.config import load_config
     from engine.loader import Weights
@@ -112,6 +169,10 @@ def main() -> None:
     import engine.model as M
     cfg = load_config(None)
     w = Weights(cfg.path, skip_mtp=True)
+    if a.sweep:
+        return _sweep(a, cfg, w)
+    if a.nojoin:
+        M.joint_steps = _joint_steps_nojoin(M, set(a.nojoin.split(",")))
     rng = random.Random(31)
     g = torch.Generator().manual_seed(37)
     E = a.slots
@@ -165,6 +226,40 @@ def main() -> None:
               f"{'identical' if ab[0] else f'differ {ab[1]:.3g}'}; B vs C {'identical' if bc[0] else f'differ {bc[1]:.3g}'}; "
               f"A vs C {'identical' if ac[0] else f'differ {ac[1]:.3g}'}; first parting A vs B: {where} "
               f"(steps {len(la)} / {len(lb)})", flush=True)
+
+
+def _sweep(a, cfg, w) -> None:
+    """For each request kind (and all of them): the joint pass with that kind un-joined vs the lone verify, over
+    `--rounds`-free single blocks on fresh engines: how many of E blocks come out lone-identical."""
+    from engine.models.qwen3_5.adapter import Qwen38Engine
+    import engine.model as M
+    real = M.joint_steps
+    kinds = ["grp", "lin", "gate", "gdn", "gated", "addnorm", "mlp", "head"]
+    for nj in [[]] + [[k] for k in kinds] + [kinds]:
+        M.joint_steps = _joint_steps_nojoin(M, set(nj)) if nj else real
+        rng = random.Random(31)
+        g = torch.Generator().manual_seed(37)
+        E = a.slots
+        ok = 0
+        with torch.no_grad():
+            J = [Qwen38Engine(cfg, w, max_len=a.max_len) for _ in range(E)]
+            L = [Qwen38Engine(cfg, w, max_len=a.max_len) for _ in range(E)]
+            items, lone = [], []
+            for i in range(E):
+                p = torch.randint(1000, 100000, (rng.randint(150, 900),), generator=g).cuda()
+                J[i].forward(p, start=0, last_only=True)
+                L[i].forward(p, start=0, last_only=True)
+                t = _tree(rng, int(p[-1]), a.rows, a.chain)
+                b = torch.tensor(t.tokens).cuda()
+                items.append((J[i], b, t.parents, p.numel()))
+                lone.append(L[i].forward_tree(b, t.parents, start=p.numel()))
+            joint = M.forward_tree_multi(items)
+            for x, y in zip(joint, lone):
+                ok += int(torch.equal(x, y))
+        M.joint_steps = real
+        print(f"NOJOIN {','.join(nj) if nj else '(none: served)'}: {ok} of {E} blocks lone-identical", flush=True)
+        del J, L
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
