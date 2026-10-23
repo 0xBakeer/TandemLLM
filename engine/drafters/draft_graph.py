@@ -140,7 +140,14 @@ class DraftGraph:
         return got[1]
 
 
+#: SPD-201: the draft window's gathered span in steps of this many rows (0: a power of two from 512); a block attends
+#: over the rows it would at any span (the rows past its context are masked)
+SPAN_STEP = int(os.environ.get("QWEN38_DF2_SPAN_STEP", "0") or 0)
+
+
 def _span(pos0: int, win: int) -> int:
+    if SPAN_STEP > 0:
+        return min(win, max(SPAN_STEP, -(-(pos0 + 1) // SPAN_STEP) * SPAN_STEP))
     c = 512
     while c < min(pos0 + 1, win):
         c *= 2
