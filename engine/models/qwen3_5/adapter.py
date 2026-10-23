@@ -66,7 +66,12 @@ def settle(eng) -> None:
 def precapture(eng, drafter) -> int | None:
     """The verify graphs for every width at the first context class, at load (None: graphs off). A
     router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits any row count
-    up to 32; the others stay at 2..16 and capture the rest lazily."""
+    up to 32; the others stay at 2..16 and capture the rest lazily. SPD-199: the decode-once EXL3 tile
+    (QWEN38_EXL3_TALL) is installed first, so every graph captures the path the calls take."""
+    from engine.models.qwen3_5 import tall
+    n = tall.install(eng)
+    if n:
+        print(f"[exl3] decode-once tile for 33+ rows: {tall.MODE} rows, {n} blocks", flush=True)
     if eng._graphs_for(2, 0) is None:
         return None
     import engine.model as _M
