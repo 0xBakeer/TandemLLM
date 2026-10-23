@@ -112,6 +112,26 @@ def judge(rows: list, tol: float = 0.02, tol_one: float = 0.05) -> dict:
     return summary
 
 
+def best_of(send, tol_one: float, repeats: int, again=lambda k, rel: None) -> dict:
+    """One request's row: `send()` up to `repeats` times while its decode misses `tol_one`, the try
+    with the smallest |decode_rel| kept, `tries` the number sent. A strict check that fails ends the
+    tries and that try counts. `again(k, rel)` is told about each try that is sent again."""
+    tries, best = 0, None
+    while True:
+        rec = send()
+        tries += 1
+        if rec["fail"]:
+            best = rec          # a strict check failed: it counts, no repeat
+            break
+        if best is None or abs(rec["decode_rel"]) < abs(best["decode_rel"]):
+            best = rec
+        if abs(rec["decode_rel"]) <= tol_one or tries >= max(1, repeats):
+            break
+        again(tries, rec["decode_rel"])
+    best["tries"] = tries
+    return best
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True, help="the engine's base URL, ending in /v1")
@@ -143,20 +163,9 @@ def main(argv=None) -> int:
               f"within {a.tol:.0%}, each within {a.tol_one:.0%} on its best of {a.repeats}",
               flush=True)
         for i in range(a.n):
-            tries, best = 0, None
-            while True:
-                rec = _one(px, public, i, a)
-                tries += 1
-                if rec["fail"]:
-                    best = rec          # a strict check failed: it counts, no repeat
-                    break
-                if best is None or abs(rec["decode_rel"]) < abs(best["decode_rel"]):
-                    best = rec
-                if abs(rec["decode_rel"]) <= a.tol_one or tries >= max(1, a.repeats):
-                    break
-                print(f"[gate] {i:2d} try {tries}: decode {rec['decode_rel']:+.2%}, again",
-                      flush=True)
-            best["tries"] = tries
+            best = best_of(lambda: _one(px, public, i, a), a.tol_one, a.repeats,
+                           lambda k, rel: print(f"[gate] {i:2d} try {k}: decode {rel:+.2%}, again",
+                                                flush=True))
             rows.append(best)
             e, p = best["engine"], best["proxy"]
             why = best["fail"] + ([f"decode {best['decode_rel']:+.2%}"]
