@@ -44,6 +44,8 @@ CAP = int(_S.get("JOINT_GRAPHS_MAX") or 12)
 AFTER = int(_S.get("JOINT_GRAPHS_AFTER") or 3)
 #: the most rows a block keeps in a graphed pass (the grouped WY tile)
 MAX_T = 16
+#: SPD-201: a pass of one block from a graph too (the round runner's QSE_RUNNER_JOINT1)
+ONE = __import__("os").environ.get("QSE_RUNNER_JOINT1", "0") == "1"
 #: SPD-187: set by the round planner for the pass about to run (server/app.py `_run_round`): its bucket
 FORCE_T = None
 #: the factor columns of the GDN offset table a replay rewrites for an engine's parity (gc, kk, delta, and
@@ -441,7 +443,7 @@ def graphs_for(eng) -> JointGraphs:
 def forward_tree_multi(items: list) -> list:
     """The 27B's joint pass: from a graph where it qualifies (`ON`), else `engine.model.forward_tree_multi`."""
     import engine.model as M
-    if ON and len(items) > 1 and torch.cuda.is_available():
+    if ON and (len(items) > 1 or ONE) and torch.cuda.is_available():
         out = graphs_for(items[0][0]).run(items)
         if out is not None:
             return out

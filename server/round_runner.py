@@ -37,6 +37,10 @@ import time
 import torch
 
 ON = os.environ.get("QSE_ROUND_RUNNER", "0") == "1"
+#: SPD-201 (row invariance): a round of one task verifies through the family's joint pass too, so a request's
+#: rows take the same statements alone as among other slots' (the lone pass is another kernel set). 0: the
+#: lone `forward_tree`
+JOINT1 = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
@@ -280,7 +284,7 @@ class Runner:
         h = self.stats["joint_hist"]
         h[len(group)] = h.get(len(group), 0) + 1
         trees = [t.tree for t in group]
-        if len(group) > 1 and meet is not None:
+        if (len(group) > 1 or JOINT1) and meet is not None:
             tc = getattr(meet, "tree_cap", None)
             cap = tc(len(group), meet.max_rows) if tc is not None else None
             if sum(len(x.parents) for x in trees) > meet.max_rows or (
@@ -289,7 +293,7 @@ class Runner:
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
         t0 = time.perf_counter()
         blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
-        if len(group) == 1:
+        if len(group) == 1 and not (JOINT1 and getattr(group[0].eng, "forward_tree_multi", None) is not None):
             t = group[0]
             self._bind(t)
             outs = [t.eng.forward_tree(blocks[0], trees[0].parents, start=t.pos)]

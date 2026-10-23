@@ -2278,7 +2278,10 @@ def _run_gdn(eng, name: str, xs: list, reuse: dict | None = None) -> list:
     conv_w = eng.w.norm(f"{name}.linear_attn.conv1d.weight").squeeze(1)
     a_log, dt_bias = eng.w.norm(f"{name}.linear_attn.A_log"), eng.w.norm(f"{name}.linear_attn.dt_bias")
     H, dk, dv = cfg.linear_num_value_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim
-    if len(xs) > 1 and WY and WY_FUSED and min(WY_MAXT, WY_FUSED_MAXT) >= 16:
+    # SPD-201 (QSE_RUNNER_JOINT1): one block through the grouped launch too, so a one-block pass is graphed
+    # (the grouped launch of one engine is the lone kernel's bits: gdn_wy_kernels `check_grouped`)
+    one = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
+    if (len(xs) > 1 or one) and WY and WY_FUSED and min(WY_MAXT, WY_FUSED_MAXT) >= 16:
         from tools import gdn_wy_kernels as G
         items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
                       state=x["state"].reshape(H, dk, dv)) for x in xs]
