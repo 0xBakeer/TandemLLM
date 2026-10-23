@@ -42,8 +42,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-E5 (2026-10-23): the 27B's v2 and fp4 move once for the branch (engine/model.py's joint row-wise
 #: steps and window-MLP knob, engine/drafters/draft_graph.py's packed-graph cap, two knobs in engine/settings.py;
 #: the 27B's prefill knobs SPD-169/189/191/193 and their modules tools/exl3_slab_gemm.py, tools/gdn_prep_kernels.py)
-GOLDEN_V2 = ("b723a9382fb900bbfb4cfb2fba03d00fa5e4a488206f711fa3fbd9be8fa06668",
-             "224bc33623158b1542588544100bbff6ba9befd3b280d73cd07c5739e5ed7d83")
+GOLDEN_V2 = ("6fd0ec9002acfd20f960974b646341ddf307045bf04bcc65b6d21a44f1ea23ce",
+             "6e2688c816226a9f72e92654f77b8df016273c3e2120bd880aa9c656e31870f0")
 GOLDEN_FP4 = {
     "qwen3_5": "ecfe064cdd6b9a4b2b870978b97f7a2936417a8a298999755b96aef4c61183d9",
     "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
