@@ -127,6 +127,7 @@ KNOBS: dict[str, tuple] = {
     'GDN_PREFILL_WARPS_SCAN': ('8', 'tools/gdn_prefill_kernels.py'),
     'GQA_FROM': ('64', 'engine/model.py'),
     'GRAPH_SHARE_OUT': ('0', 'engine/verify_graph.py'),
+    'GRAPH_SHARE_FROM': ('2', 'engine/verify_graph.py'),
     'GRAPH_MAX_CTX': ('32768', 'engine/verify_graph.py'),
     'HEAD_GEMM': ('', 'tools/head_gemv.py'),
     'HOST_ASYNC': ('0', 'engine/model.py'),

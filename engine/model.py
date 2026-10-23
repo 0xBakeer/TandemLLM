@@ -1083,7 +1083,12 @@ class Qwen38Engine:
         B, T, _ = h.shape
         flat = h.reshape(-1, h.shape[-1])
         grp = self.w.group(f"{p}.linear_attn.qkvz")
-        if grp is not None:
+        sv = self._gv.share_view if self._gv is not None else None
+        if grp is not None and sv is not None and isinstance(grp, EXL3Block) and not grp.out_fp32:
+            # SPD-179: a sharing capture's projections into the shared set (the trace keeps a view)
+            y = _x3.exl3_matmul(flat, grp, out=sv(f"y{layer}", (flat.shape[0], grp.N), torch.bfloat16))
+            mixed, z = y.split(grp.sizes, dim=-1)
+        elif grp is not None:
             mixed, z = matmul_group(flat, grp).split(grp.sizes, dim=-1)
         else:
             mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
@@ -1283,7 +1288,16 @@ class Qwen38Engine:
             m = self.mlp(x, p)
             nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                    else "norm.weight")
-            h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+            sv = self._gv.share_view if self._gv is not None else None
+            if sv is not None and self.tap is not None:
+                # SPD-179: a sharing capture's residual rows, the taps, go to the shared set
+                from tools.exl3_slab_gemm import add_rms_norm_out
+                hb = sv(f"h{layer + 1}", tuple(h.shape), h.dtype)
+                xb = (sv("x_last", tuple(h.shape), h.dtype) if layer + 1 == n else torch.empty_like(h))
+                add_rms_norm_out(h, m, self.w.norm(nxt), cfg.rms_norm_eps, (hb, xb))
+                h, x = hb, xb
+            else:
+                h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
             if self.tap is not None:
                 self.tap(h[0].detach())
         self.state.primed = True
@@ -1396,7 +1410,10 @@ class Qwen38Engine:
             for k, c in enumerate(range(j0, j1)):
                 hs[c] = HJ[:, offs[k]:offs[k + 1]]
                 xs[c] = XJ[:, offs[k]:offs[k + 1]]
-        if _x3 is not None:
+        if _x3 is not None and J is None:
+            # with the window's slab-path chunks joined (J) each projection runs once a window and no
+            # other call reads a slab: a decoded slab lives for its own GEMM only, not for the layer
+            # (the slab cache held about 0.8 GB at the peak of a long prefill)
             _x3.slab_cache_on()
         try:
             for layer in range(n):
@@ -1494,7 +1511,7 @@ class Qwen38Engine:
                     if _x3 is not None:
                         _x3.slab_cache_off()
                     WINDOW_YIELD()
-                    if _x3 is not None:
+                    if _x3 is not None and J is None:
                         _x3.slab_cache_on()
         finally:
             if _x3 is not None:
