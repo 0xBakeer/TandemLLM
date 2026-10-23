@@ -156,20 +156,70 @@ def _joint_rounds(delta1: int = 0, rows1: int = 9):
 
 
 def test_a_chain_block_is_not_batchable_while_chains_take_their_own_kernel():
+    """With SPD-153's rule off (QWEN38_JOINT_CHAINS=0): a chain delegates and verifies alone."""
+    import engine.model as m
+    from engine.models.qwen3_5 import adapter
     cfg = tiny_config()
     eng = _engine(cfg, FakeWeights(cfg))
     chain = DraftTree.chain(3, [4, 5, 6])
-    import engine.model as m
-    saved = m.TREE_CHAIN_DELEGATE
+    saved, saved_j = m.TREE_CHAIN_DELEGATE, adapter.JOINT_CHAINS
     try:
+        adapter.JOINT_CHAINS = False
         m.TREE_CHAIN_DELEGATE = True
         assert not eng.tree_batchable(chain.parents)
         assert eng.tree_batchable(_tree(1, 3, 2, 3).parents)
         m.TREE_CHAIN_DELEGATE = False
         assert eng.tree_batchable(chain.parents)
     finally:
-        m.TREE_CHAIN_DELEGATE = saved
+        m.TREE_CHAIN_DELEGATE, adapter.JOINT_CHAINS = saved, saved_j
     assert not eng.tree_batchable([-1]), "an anchor alone is no block"
+
+
+def test_spd153_a_chain_joins_the_joint_pass():
+    """SPD-153 (the default): a chain-shaped block is batchable whatever the chain kernel's rule, and
+    a block over VERIFY_ROWS or an anchor alone is not."""
+    import engine.model as m
+    cfg = tiny_config()
+    eng = _engine(cfg, FakeWeights(cfg))
+    saved = m.TREE_CHAIN_DELEGATE
+    try:
+        m.TREE_CHAIN_DELEGATE = True
+        assert eng.tree_batchable(DraftTree.chain(3, [4, 5, 6]).parents)
+        assert eng.tree_batchable(_tree(1, 3, 2, 3).parents)
+        assert not eng.tree_batchable([-1])
+        assert not eng.tree_batchable([-1] + list(range(m.VERIFY_ROWS)))
+    finally:
+        m.TREE_CHAIN_DELEGATE = saved
+
+
+def test_spd153_a_chain_in_the_joint_pass_is_its_tree_verify_bit_for_bit():
+    """In the joint pass a chain is verified on the tree path: its logits and its committed state are
+    the bits of its own tree-path verify alone (the chain kernel's delegation off), beside a tree."""
+    import engine.model as m
+    cfg = tiny_config()
+    w = FakeWeights(cfg, seed=5)
+    alone = [_engine(cfg, w), _engine(cfg, w)]
+    joint = [_engine(cfg, w), _engine(cfg, w)]
+    n0 = [_prefill(e, 21, 12) for e in (alone[0], joint[0])][0]
+    n1 = [_prefill(e, 22, 9) for e in (alone[1], joint[1])][0]
+    pos = [len(n0), len(n1)]
+    trees = [DraftTree.chain(5, [11, 12, 13, 14]), _tree(300, 3, 2, 7)]
+    blocks = [torch.tensor(t.tokens) for t in trees]
+    saved = m.TREE_CHAIN_DELEGATE
+    try:
+        m.TREE_CHAIN_DELEGATE = False        # the lone reference on the tree path, as the joint pass
+        with torch.no_grad():
+            lone = [alone[i].forward_tree(blocks[i], trees[i].parents, start=pos[i]) for i in (0, 1)]
+            multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i]) for i in (0, 1)])
+        for i in (0, 1):
+            assert torch.equal(multi[i], lone[i]), f"slot {i}: max diff {(multi[i] - lone[i]).abs().max()}"
+            path = [0, 1, 2]
+            alone[i].commit_tree(path)
+            joint[i].commit_tree(path)
+            for a, b in zip(_state(alone[i]), _state(joint[i])):
+                assert (a == b) if not torch.is_tensor(a) else torch.equal(a, b)
+    finally:
+        m.TREE_CHAIN_DELEGATE = saved
 
 
 # ------------------------------------------------------------------ the served loop

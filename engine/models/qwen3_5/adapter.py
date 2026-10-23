@@ -8,9 +8,10 @@ hot verbs stay the engine's own methods."""
 from __future__ import annotations
 
 from engine.methods.manifest import Manifest
-from engine.model import Qwen38Engine
+from engine.model import VERIFY_ROWS, Qwen38Engine
 from engine.models.adapter import Capabilities, CostModel
 from engine.models.state import Qwen38State
+from engine.settings import SETTINGS as _S
 
 #: what the 27B's stored rows depend on (fingerprint v3, ENG-243): the forward, verify and commit
 #: bodies, the KV pages and the tree they index, the vision tower (image rows are prompt rows), the
@@ -96,7 +97,25 @@ def manifest(eng=None) -> Manifest:
     return Manifest(arch="qwen3_5", modules=MODULES)
 
 
+#: SPD-153: a chain-shaped tree block shares the joint verify pass of a parallel round. Alone, a chain
+#: delegates to its chain kernel (`forward_tree`); in a joint round that made it a pass of its own while
+#: the other slots waited: 856 lone 77 ms passes against 434 joint ones in an 8-slot run on 2026-10-23.
+#: In the joint pass it is verified on the tree path, as every tree block there (`_tree_begin`), so the
+#: exactness rule is the joint pass's own (docs/exactness.md, Parallel requests). 0: the old rule.
+JOINT_CHAINS = _S.get("JOINT_CHAINS") != "0"
+_tree_batchable_alone = Qwen38Engine.tree_batchable
+
+
+def tree_batchable(eng, parents) -> bool:
+    """Whether this block can share a joint pass (the server asks only while two or more slots decode):
+    any tree block of 2 to VERIFY_ROWS rows, chains included (`JOINT_CHAINS`)."""
+    if not JOINT_CHAINS:
+        return _tree_batchable_alone(eng, parents)
+    return 2 <= len(parents) <= VERIFY_ROWS
+
+
 Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
+Qwen38Engine.tree_batchable = tree_batchable
 Qwen38Engine.cost = cost
 Qwen38Engine.discard_pending = discard_pending
 Qwen38Engine.cache_state = cache_state
