@@ -10195,11 +10195,13 @@ def parser() -> argparse.ArgumentParser:
                     default=float(os.environ.get("QSE_PARALLEL_SWITCH_MS", "0") or 0),
                     help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
                          "Python's 5 ms); a woken slot waits up to this long for the GIL")
-    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "share"),
+    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "auto"),
                     choices=("share", "joint", "auto"),
                     help="how a joint pass's rows are shared: share (each slot cuts its tree to a "
-                         "fixed share before it submits: 16 at two slots, 10 at three, 8 at four) or "
-                         "joint (the round cuts every slot's whole tree together, best nodes first)")
+                         "fixed share before it submits: 16 at two slots, 10 at three, 8 at four), "
+                         "joint (the round cuts every slot's whole tree together, best nodes first), or "
+                         "auto (SPD-155, the default: joint from QSE_PARALLEL_AUTO_N decoding slots, "
+                         "share below)")
     ap.add_argument("--parallel-max-rows", type=int, default=32,
                     help="rows of a joint pass at most (32: the row-invariant kernels' range)")
     ap.add_argument("--parallel-draft-rows", type=int,

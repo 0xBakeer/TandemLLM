@@ -23,7 +23,8 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 | `--parallel-floor-gb` | 15 | a request in flight beside others waits while its own prefill workspace, the others' and what the caches may still grow into (together at most the engine's room to `--mem-peak-gib`) would push MemAvailable under this; a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
-| `--parallel-cut` | share | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first |
+| `--parallel-cut` | auto | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first; `auto` (SPD-155): `joint` from `QSE_PARALLEL_AUTO_N` (3) decoding slots, `share` below |
+| `--parallel-draft-rows` | 128 | rows of a packed draft pass (SPD-157): eight slots' 16-row draft blocks in one pass; drafting decides speed only |
 | `--parallel-max-rows` | 32 | rows of a joint pass at most, the row-invariant kernels' range |
 | `--side-precapture` | off | capture a side slot's verify graphs at start (about a minute a slot) instead of at first use |
 | `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
@@ -160,6 +161,19 @@ One request at a time costs nothing with the flag on: in one hour, A/B/A/B, 49.2
 Every two- and four-request window showed that many slots decoding at once and joint passes of that many blocks; none queued. A joint pass of two blocks takes 94 to 98 ms on the GPU, of four 114 to 119 ms.
 
 After the merge into 0.4.0 (2026-10-06), one check per shape (single runs, `--parallel 4 --side-max-len 8192`, the same four prompts): one at a time 48.35 tok/s (median), two at once 65.83 in total (1.36x; 59 and 80 two-way joint rounds, 2 slots decoding at once in both pairs), four at once 67.00 (1.39x; 45 four-way and 55 three-way rounds, 4 slots decoding at once), no round timed out. With the flag off, one request at a time: 49.96 tok/s before the merge and 50.39 after (93.4 and 93.5 ms a block; the atlas row, `--no-learn-cost`, one run each).
+
+## SPD-E5 (2026-10-23)
+
+On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side graphs off), suffix store off, temperature 1.0, prose prompt, 512 tokens a request, one round a level, N decoding at once proven from `/health` at 5 Hz (`~/spd-e5/raw/par-Y*.json` on the reference box):
+
+| rules | C1 | C2 | C4 | C8 (total tok/s) | 8-slot round |
+|-|-:|-:|-:|-:|-:|
+| before (chains alone, draft packs of 2, share cut) | 37.4 | 47.1 | 56.2 | 37.7 | 426 ms |
+| chains join the joint pass (SPD-153) | 35.0 | 48.7 | 57.3 | 43.2 | 379 ms |
+| and draft packs of 8 (SPD-157) | 35.8 | 49.0 | 60.8 | 49.9 | 326 ms |
+| and the auto cut (SPD-155) | 34.4 | 48.4 | 56.3 | 55.2 | 294 ms |
+
+Single runs; three repeats of the old rules spread 33.1 to 37.7 at C8, so a difference under about 10 % is noise. In an 8-slot round the joint verify pass is still about 210 ms against 77 ms for one block: the per-state parts (GDN, attention, norms, the gate inputs) run once per engine, eagerly, and the pass issues about 7,500 kernels (SPD-163).
 
 ## The text
 
