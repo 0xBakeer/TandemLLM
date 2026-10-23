@@ -1292,7 +1292,14 @@ class Qwen38Engine:
         self.hidden_post_norm = x
         if last_only:
             x = x[:, -1:]
-        return head_logits(x, self.w.norm("lm_head.weight"))
+        hw = self.w.norm("lm_head.weight")
+        out = getattr(self._gv, "logits_out", None) if self._gv is not None else None
+        if out is not None and isinstance(hw, EXL3Block) and hw.out_fp32 and x.shape[-2] > 1:
+            # SPD-179: a captured verify's head writes its parity's shared logits (the same kernel)
+            n = x.shape[-2] * hw.N
+            return _x3.exl3_matmul(x.reshape(-1, x.shape[-1]), hw, out=out(n).view(-1, hw.N)).view(
+                *x.shape[:-1], hw.N)
+        return head_logits(x, hw)
 
     def window_ok(self, start: int) -> bool:
         """Can `prefill_window` run prompt rows from `start` on: a plain text prefill with the
