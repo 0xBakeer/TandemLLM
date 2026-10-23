@@ -51,9 +51,17 @@ FORCE_T = None
 _PAR_COLS = [1, 3, 10, 12, 13, 14]
 
 
+#: SPD-199: rows a block keeps in a joint pass at any E (0: the share of the row cap, `max_rows // E`); the
+#: joint cut's tree cap and the graphs' padding both follow it
+ROWS_A_SLOT = int(_S.get("JOINT_ROWS_A_SLOT") or 0)
+
+
 def t_pad(E: int, max_rows: int) -> int:
-    """The rows every block of an E-block graphed pass is padded to."""
-    return max(2, min(MAX_T, max_rows // max(1, E)))
+    """The rows every block of an E-block graphed pass is padded to (the joint cut's tree cap)."""
+    t = min(MAX_T, max_rows // max(1, E))
+    if ROWS_A_SLOT:
+        t = min(t, ROWS_A_SLOT)
+    return max(2, t)
 
 
 class _Bufs:

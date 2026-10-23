@@ -14,6 +14,8 @@ KNOBS: dict[str, tuple] = {
     # SPD-199: the joint pass's row cap, at most the proven one (64 on EXL3, 32 else); empty: the proven one.
     # The EXL3 4-bit projections cost ~1.6x more from 33 rows on (tools/exl3_tall.py), so 32 is the other arm
     'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),
+    # SPD-199: rows a block keeps in a joint pass whatever E (0: max_rows // E); 8 -> 32 rows at 4 slots, 64 at 8
+    'JOINT_ROWS_A_SLOT': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-199: the 27B's EXL3 projections at 33+ rows through the decode-once tile: '' off, '64' or '128' rows
     'EXL3_TALL': ('', 'engine/models/qwen3_5/tall.py'),
     # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
