@@ -520,6 +520,11 @@ class LengthRouter(Drafter):
             for head in (self.head_small, self.head_large):
                 if hasattr(head, "tree_temp"):
                     head.tree_temp = float(stair_temp)
+        # SPD-181: a sampled request's cut may rank the lattice at another temperature (a draw lands on
+        # a sibling far more often than an argmax does); `note_sampled` switches it per request
+        self.stair_temp = float(stair_temp)
+        st = _S.get("STAIR_TEMP_SAMPLED")
+        self.stair_temp_sampled = float(st) if st else None
         # What a block really costs, learned in the loop: the time from one proposal to the next is
         # the whole round (draft, verify, commit, sync), and its ratio to the staircase's price is
         # kept per (chain or tree, row tile, context class). The cut prices on the staircase times
@@ -731,6 +736,16 @@ class LengthRouter(Drafter):
             self.idle = "s"
             self.stats["idle"] = "s"
             self.stats["latched"] = "l"
+
+    def note_sampled(self, on: bool) -> None:
+        """SPD-181: the request samples (`on`) or decodes greedily; the cut's lattice temperature
+        follows (QWEN38_STAIR_TEMP_SAMPLED; unset: the one temperature for both)."""
+        if not self.calc or self.stair_temp_sampled is None:
+            return
+        t = self.stair_temp_sampled if on else self.stair_temp
+        for head in (self.head_small, self.head_large):
+            if hasattr(head, "tree_temp"):
+                head.tree_temp = t
 
     def set_sampling(self, sampler) -> None:
         """Both arms can sample their proposals; the length policy is unchanged."""

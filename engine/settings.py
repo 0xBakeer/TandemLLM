@@ -275,6 +275,7 @@ KNOBS: dict[str, tuple] = {
     'STAIR_RHO': ('', 'engine/lenrouter.py'),
     'STAIR_SKIP': ('0', 'engine/lenrouter.py'),
     'STAIR_MAX_NODES': ('', 'engine/lenrouter.py'),
+    'STAIR_TEMP_SAMPLED': ('', 'engine/lenrouter.py'),
     'TWO_STREAM': ('0', 'engine/model.py'),
     'UT_INVERSE': ('1', 'engine/gdn.py'),
     'VERIFY_GRAPH': ('0', 'engine/model.py'),

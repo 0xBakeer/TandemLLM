@@ -1694,6 +1694,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
                        and sampler is not None and sampler.on)
                 drafter.set_sampling(None if det else sampler)
+            if hasattr(drafter, "note_sampled"):
+                drafter.note_sampled(sampler is not None and bool(sampler.on))   # SPD-181
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
