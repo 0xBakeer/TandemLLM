@@ -184,10 +184,10 @@ JOINT_GDN = _S.get("JOINT_GDN") == "1"
 WINDOW_MLP = _S.get("WINDOW_MLP") == "1"
 #: SPD-169 again, same-path joining only: a window's chunks that each take the EXL3 slab path alone run
 #: their input projection, output projection and MLP as one call (`Qwen38Engine._rowwise_run`); the
-#: partial chunk keeps its own call and kernels. Off by default until the identity is proven.
+#: partial chunk keeps its own call and kernels. Bit-identical to the chunk-major prefill (prefill_window_check).
 WINDOW_ROWWISE = _S.get("WINDOW_ROWWISE") == "1"
 #: SPD-175: a prefill chunk's GDN preparation (conv, SiLU, l2 norm of q and k) as one kernel,
-#: tools/gdn_prep_kernels.py. Its rounding order is its own: off until the prefill gate has run.
+#: tools/gdn_prep_kernels.py. Its rounding order is its own: on after the fp64-reference gate (SPD-191).
 GDN_PREP = _S.get("GDN_PREP") == "1"
 #: SPD-175: with WINDOW_ROWWISE, the joined rows' norms also write the next projection's rotated input
 #: (tools/exl3_slab_gemm.py `add_norm_rot`: add_rms_norm + rot_in, the same bits): no rot_in launch for

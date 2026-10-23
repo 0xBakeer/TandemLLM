@@ -1,6 +1,6 @@
 """SPD-169: which chunks of a layer-major prefill window share their projections (`_rowwise_run`).
 Only a contiguous run of at least two chunks that each take the EXL3 slab path alone (more than
-EXL3_CHUNK_UNTIL rows), and only when every projection of the model is EXL3; the knobs are off by
+EXL3_CHUNK_UNTIL rows), and only when every projection of the model is EXL3; the shipped prefill knobs are on by
 default."""
 
 import types
@@ -46,9 +46,11 @@ def test_no_join_without_exl3_or_during_a_verify():
     assert run(_eng(), _toks(1024, 1024), None) is None
 
 
-def test_knobs_default_off():
+def test_knobs_default_on():
+    # SPD-169/189/193 are bit-identical; SPD-191's prep kernel ships after the fp64 gate (2026-10-23)
     for k in ("WINDOW_ROWWISE", "GDN_PREP", "SLAB_TRITON", "WINDOW_NORM_ROT"):
-        assert KNOBS[k][0] == "0", k
+        assert KNOBS[k][0] == "1", k
+    assert (KNOBS["GDN_PREP_BV"][0], KNOBS["GDN_PREP_WARPS"][0]) == ("32", "8")
 
 
 if __name__ == "__main__":
