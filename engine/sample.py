@@ -542,9 +542,9 @@ def round_walks(specs: list) -> list:
     `specs`: per slot None (the slot walks itself) or dict(sampler, rows [T, V] (penalties applied), tokens,
     parents, start, q, picks (the verify graph's argmax on the device, or None)). Returns per slot None, or
     ("picks", list) for a greedy slot (the slot's engine walks them: `accept_tree`), or ("walk", (path,
-    new)) for a sampled one. Batched: the `_filter` of every slot with the same profile (temperature, top-p,
-    top-k, min-p) is one call over their rows (each row's statements are its own); the draws stay each
-    slot's own (its generator, its keyed noise). Taken here: greedy; a seeded request's keyed walk
+    new)) for a sampled one. Each slot's rows are filtered alone, on the tensor its own walk filters (a
+    reduction's split on CUDA can depend on the row count); the draws stay each slot's own (its generator,
+    its keyed noise), copied to the host in one go. Taken here: greedy; a seeded request's keyed walk
     (`_tree_walk_keyed`); an unseeded one's batched walk without q (`_tree_walk_batched`) and its nucleus
     draws (`row_draws`). Anything else (a q-aware spine, BATCH off): None."""
     out: list = [None] * len(specs)
@@ -571,9 +571,11 @@ def round_walks(specs: list) -> list:
     many: list = []                     # keyed slots for the one-kernel draws (KEYED_KERNEL)
     for idx in groups.values():
         sm0 = specs[idx[0]]["sampler"]
-        rows = [specs[i]["rows"].float() for i in idx]
-        dists = sm0._filter(torch.cat(rows)) if len(rows) > 1 else sm0._filter(rows[0])
-        for i, d in zip(idx, dists.split([r.shape[0] for r in rows])):
+        # SPD-201: each slot's rows filtered alone, on the tensor its own walk filters (`probs_rows`): a
+        # reduction over [n, V] (logsumexp, top-k, softmax) may split differently by n on CUDA, and a token at
+        # the top-p boundary then enters or leaves the kept set -- the draws would depend on the batch
+        dists = [sm0._filter(specs[i]["rows"].float()) for i in idx]
+        for i, d in zip(idx, dists):
             sp = specs[i]
             sm, n = sp["sampler"], len(sp["tokens"])
             if sm.coupled and sp.get("start") is not None:
