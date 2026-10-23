@@ -823,12 +823,15 @@ class DFlash2Module:
         return None, delta < cfg.sliding_window
 
     # ---- candidate selection ---------------------------------------------------
-    def unary_candidates(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def unary_candidates(self, logits: torch.Tensor, exact: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """Top-k over the head's output. The head read has already happened by this point --
         `logits` is [P, V] and reading it whole is, in the reference's own words, "the selector's
-        largest single cost"."""
+        largest single cost". `exact=False` (the batched packed draft): the top-k over the logits'
+        own dtype, no fp32 copy of [P, V] (the values are the same; only the order of exact ties
+        can differ)."""
         k = self.cfg.selector_top_k
-        vals, ids = torch.topk(logits.float(), k, dim=-1)
+        vals, ids = torch.topk(logits if not exact else logits.float(), k, dim=-1)
+        vals = vals.float()
         if self.cfg.output_multiplier != 1.0:
             vals = vals * self.cfg.output_multiplier
         if self.cfg.final_logit_softcapping is not None:
@@ -1001,6 +1004,83 @@ def forward_block_multi(module: "DFlash2Module", items: list) -> list:
                 done[j] = fin.value
         live = nxt
     return done
+
+
+#: SPD-203: the packed draft as one batched block pass: every row-wise statement (norms, rotary, the
+#: convolutions, the MLP) once over all blocks' rows, attention once per layer over [E, heads, t, L]
+#: with each block's window padded to the longest (padded columns masked: exact zeros in the softmax)
+#: and each key/value head's query group folded into its rows. The drafter's bits may move (the
+#: attention's tiling, the padded width); it only proposes, the target verifies every token
+PACK_BATCH = _S.get("DF2_PACK_BATCH") == "1"
+
+
+def forward_block_batched(module: "DFlash2Module", noise: torch.Tensor, positions: torch.Tensor,
+                          ctx_k: list, ctx_v: list, mask: torch.Tensor) -> torch.Tensor:
+    """`forward_block` for E blocks of t rows at once. `noise` [E*t, H], `positions` [E*t], `ctx_k` /
+    `ctx_v` per layer [E, nkv, L + t, hd]: each block's window padded to L, its last t rows free for
+    the block's own keys and values (written here, no concatenated copy), `mask` [E, t, L + t]
+    (True: attend). Returns `norm(h)` [E*t, H]."""
+    m, cfg = module, module.cfg
+    E = ctx_k[0].shape[0]
+    T = noise.shape[0]
+    t = T // E
+    L = ctx_k[0].shape[2] - t
+    hd, nh, nkv = cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads
+    rep = nh // nkv
+    dev = noise.device
+    block_pos = torch.arange(t, device=dev).repeat(E)
+    cos, sin = m.rope(positions, hd, noise.dtype)                         # [E*t, hd]
+    cos = cos.view(E, 1, t, hd)
+    sin = sin.view(E, 1, t, hd)
+    # folded query rows: [E, nkv, rep * t]; the mask repeats per group member
+    fmask = mask[:, None].expand(E, rep, t, L + t).reshape(E, 1, rep * t, L + t)
+
+    def rope(x):                                                          # x [E, heads, t, hd]
+        return x * cos + _rotate_half(x) * sin
+
+    def conv_in(c, x):
+        coef = _lin(x, c.kp).reshape(T, 2, c.taps, c.groups)
+        return (_grouped_conv(x, coef[:, 0], c.base[0], c.groups, c.gsize, c.taps, block_pos),
+                coef[:, 1])
+
+    h = noise
+    for i in range(cfg.num_hidden_layers):
+        p = f"layers.{i}"
+        conv = m.convs[i]
+        res = h
+        x = _rms(h, m.w[f"{p}.input_layernorm.weight"], cfg.rms_norm_eps)
+        if conv is not None:
+            x, akernel = conv_in(conv[0], x)
+        q = _rms(_lin(x, m.w[f"{p}.self_attn.q_proj.weight"]).view(T, nh, hd),
+                 m.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
+        k = _rms(_lin(x, m.w[f"{p}.self_attn.k_proj.weight"]).view(T, nkv, hd),
+                 m.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
+        v = _lin(x, m.w[f"{p}.self_attn.v_proj.weight"]).view(T, nkv, hd)
+        q = rope(q.view(E, t, nh, hd).transpose(1, 2))                    # [E, nh, t, hd]
+        k = rope(k.view(E, t, nkv, hd).transpose(1, 2))
+        v = v.view(E, t, nkv, hd).transpose(1, 2)
+        kk, vv = ctx_k[i], ctx_v[i]                                       # [E, nkv, L + t, hd]
+        kk[:, :, L:] = k
+        vv[:, :, L:] = v
+        qf = q.reshape(E, nkv, rep * t, hd)
+        o = F.scaled_dot_product_attention(qf, kk, vv, attn_mask=fmask)  # [E, nkv, rep t, hd]
+        o = o.reshape(E, nh, t, hd).transpose(1, 2).reshape(T, nh * hd)
+        o = _lin(o, m.w[f"{p}.self_attn.o_proj.weight"])
+        if conv is not None:
+            o = conv[0].finish(o, akernel, block_pos)
+        h = res + o
+
+        res = h
+        x = _rms(h, m.w[f"{p}.post_attention_layernorm.weight"], cfg.rms_norm_eps)
+        if conv is not None:
+            x, mkernel = conv_in(conv[1], x)
+        g = _lin(x, m.w[f"{p}.mlp.gate_proj.weight"])
+        u = _lin(x, m.w[f"{p}.mlp.up_proj.weight"])
+        x = _lin(F.silu(g) * u, m.w[f"{p}.mlp.down_proj.weight"])
+        if conv is not None:
+            x = conv[1].finish(x, mkernel, block_pos)
+        h = res + x
+    return _rms(h, m.w["norm.weight"], cfg.rms_norm_eps)
 
 
 #: The server's hook for the packed draft -- a callable (drafter, anchor, pos0) -> the draft

@@ -177,6 +177,50 @@ def test_the_window_with_a_free_tail_is_the_cat():
     return "3 blocks: the free-tail window = the cat, bit for bit"
 
 
+def test_the_batched_pass_is_the_blocks_alone():
+    """SPD-203, DF2_PACK_BATCH: the batched block pass (every row-wise statement once over all rows,
+    attention once per layer over windows padded to the longest, padded columns masked, the query
+    groups folded) gives each block what it computes alone, within float rounding (the drafter's bits
+    may move: the attention's tiling and the padded width)."""
+    real = D._lin
+    D._lin = _lin
+    try:
+        m, embed = _quantised(block=16, seed=6)
+        cfg = m.cfg
+        bs, W = cfg.block_size, int(cfg.sliding_window)
+        g = torch.Generator().manual_seed(17)
+        ctxs = (25, 40, 33)
+        items = [_item(m, embed, 400 + 11 * j, c, g) for j, c in enumerate(ctxs)]
+        E, L = len(items), max(ctxs)
+        nkv, hd = cfg.num_key_value_heads, cfg.head_dim
+        ctx_k, ctx_v = [], []
+        for i in range(cfg.num_hidden_layers):
+            kb = torch.full((E, nkv, L + bs, hd), float("nan"))
+            vb = torch.full_like(kb, float("nan"))
+            for e, it in enumerate(items):
+                ck, cv = it[2][i]
+                kb[e].zero_()
+                vb[e].zero_()
+                kb[e, :, :ck.shape[1]] = ck
+                vb[e, :, :cv.shape[1]] = cv
+            ctx_k.append(kb)
+            ctx_v.append(vb)
+        positions = torch.stack([it[1] for it in items])                 # [E, bs]
+        allpos = torch.stack([torch.cat([it[3], torch.zeros(L - it[3].shape[0], dtype=torch.long), it[1]])
+                              for it in items])
+        seen = torch.stack([torch.cat([torch.ones(c, dtype=torch.bool), torch.zeros(L - c, dtype=torch.bool),
+                                       torch.ones(bs, dtype=torch.bool)]) for c in ctxs])
+        mask = ((positions[:, :, None] - allpos[:, None, :]) < W) & seen[:, None, :]
+        noise = torch.cat([it[0] for it in items])
+        out = D.forward_block_batched(m, noise, positions.reshape(-1), ctx_k, ctx_v, mask).view(E, bs, -1)
+        worst = max(float((out[e] - m.forward_block(it[0], it[1], it[2], it[3])).abs().max())
+                    for e, it in enumerate(items))
+        assert worst < 1e-5, worst
+    finally:
+        D._lin = real
+    return f"3 blocks over windows of 25/40/33: batched = alone within {worst:.1e}"
+
+
 def test_bf16_weights_are_not_handed_out():
     """A plain tensor weight runs inside the block (cuBLAS may pick another algorithm by M): the
     generator yields nothing for an all-bf16 module."""

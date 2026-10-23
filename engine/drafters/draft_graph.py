@@ -194,13 +194,66 @@ def _packed_body(ds: list, scals: list, spans: list, temp, projs: list | None = 
     from engine.drafters.dflash2 import PACK_TOPK
     if PACK_TOPK:
         # SPD-161: the head's top-k once over every block's rows (a row's top-k is its own)
-        c_all, u_all = m.unary_candidates(logits)
+        c_all, u_all = m.unary_candidates(logits, exact=False)
         cu = list(zip(c_all.split(sizes, dim=0), u_all.split(sizes, dim=0)))
     for j, (a_t, lg, pred) in enumerate(zip(anchors, logits.split(sizes, dim=0), preds)):
         cand, unary = cu[j] if PACK_TOPK else m.unary_candidates(lg)
         scores = m.lattice(pred, cand, unary, a_t)
         out.append((cand, scores) if temp is None
                    else (cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)))
+    return out
+
+
+def _packed_body_batched(ds: list, scals: list, L: int, temp, projs: list | None = None):
+    """`_packed_body` as one batched block pass (dflash2 PACK_BATCH): every block's window gathered
+    to the longest span `L` (rows past a block's own context masked, so each block attends over the
+    rows it attends alone), the inputs, masks and top-k built once for all blocks."""
+    from engine.drafters.dflash2 import forward_block_batched
+    from engine.model import head_logits
+    d0 = ds[0]
+    m, cfg, eng = d0.module, d0.cfg, d0.eng
+    dev = eng.device
+    bs, W, E = cfg.block_size, int(cfg.sliding_window), len(ds)
+    sc = torch.stack(scals)                                               # [E, 3]
+    pos0, ctx_len = sc[:, 1:2], sc[:, 2:3]
+    ids = torch.cat([sc[:, 0:1], torch.full((E, bs - 1), cfg.mask_token_id, dtype=torch.long,
+                                            device=dev)], dim=1)
+    noise = F.embedding(ids.reshape(-1), eng.w.norm("embed_tokens.weight")).to(m.dtype)
+    positions = pos0 + torch.arange(bs, device=dev)                       # [E, bs]
+    idx = torch.clamp(pos0 - W + 1, min=0) + torch.arange(L, device=dev)  # [E, L]
+    valid = idx < ctx_len
+    idx = torch.clamp(idx, max=min(d.max_len for d in ds) - 1)
+    if getattr(d0, "_cs", None) is not None:
+        valid = valid & torch.stack([d._cs.index_select(0, idx[e]) > 0 for e, d in enumerate(ds)])
+    # each window gathered straight into its block's row of one buffer, bs rows to spare at the tail
+    # for the block's own keys and values (no stacked or concatenated copy of the windows)
+    idx_t = torch.cat([idx, torch.zeros(E, bs, dtype=idx.dtype, device=dev)], dim=1)
+    ctx_k, ctx_v = [], []
+    for i in range(cfg.num_hidden_layers):
+        ck0 = d0._ck[i]
+        kb = torch.empty((E, ck0.shape[0], L + bs, ck0.shape[2]), dtype=ck0.dtype, device=dev)
+        vb = torch.empty_like(kb)
+        for e, d in enumerate(ds):
+            torch.index_select(d._ck[i], 1, idx_t[e], out=kb[e])
+            torch.index_select(d._cv[i], 1, idx_t[e], out=vb[e])
+        ctx_k.append(kb)
+        ctx_v.append(vb)
+    allpos = torch.cat([idx, positions], dim=1)                           # [E, L + bs]
+    seen = torch.cat([valid, torch.ones(E, bs, dtype=torch.bool, device=dev)], dim=1)
+    mask = ((positions[:, :, None] - allpos[:, None, :]) < W) & seen[:, None, :]
+    hidden = forward_block_batched(m, noise, positions.reshape(-1), ctx_k, ctx_v, mask)
+    preds = hidden.view(E, bs, -1)[:, 1:]                                 # [E, bs - 1, H]
+    if projs is not None:
+        wp = m.w["candidate_selector.hidden_projection.weight"]
+        projs.extend(F.linear(preds[e], wp) for e in range(E))
+    logits = head_logits(preds.reshape(E * (bs - 1), -1), dflash2_head(eng))
+    c_all, u_all = m.unary_candidates(logits)
+    out = []
+    for e in range(E):
+        r = slice(e * (bs - 1), (e + 1) * (bs - 1))
+        scores = m.lattice(preds[e], c_all[r], u_all[r], scals[e][0:1])
+        out.append((c_all[r], scores) if temp is None
+                   else (c_all[r], scores, torch.log_softmax(scores.float() / temp, dim=-1)))
     return out
 
 
@@ -229,6 +282,9 @@ class PackedDraftGraph:
         for j in range(len(reqs)):
             self.scal[j].copy_(self.host[j], non_blocking=True)
         spans = tuple(_span(pos0, W) for _, _, pos0 in reqs)
+        from engine.drafters.dflash2 import PACK_BATCH
+        if PACK_BATCH:
+            spans = (max(spans),)                   # one padded width for every block
         key = (spans, temp, VerifyGraphs.signature())
         got = self.graphs.get(key)
         if got is None:
@@ -236,13 +292,16 @@ class PackedDraftGraph:
                 self.graphs.clear()
             self.stream.wait_stream(torch.cuda.current_stream())
             projs = [] if LOG_PROJ else None
+            body = ((lambda pj: _packed_body_batched(list(self.ds), self.scal, spans[0], temp, pj))
+                    if PACK_BATCH else
+                    (lambda pj: _packed_body(list(self.ds), self.scal, list(spans), temp, pj)))
             with torch.cuda.stream(self.stream):
-                _packed_body(list(self.ds), self.scal, list(spans), temp, [] if LOG_PROJ else None)
+                body([] if LOG_PROJ else None)
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(g, pool=self.pool, stream=self.stream):
-                out = _packed_body(list(self.ds), self.scal, list(spans), temp, projs)
+                out = body(projs)
             got = self.graphs[key] = (g, out, projs)
             self.stats["captured"] += 1
         got[0].replay()
@@ -296,7 +355,9 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     scals = [torch.tensor([a, p, d.ctx_len], dtype=torch.long, device=dev) for d, a, p in reqs]
     spans = [_span(p, int(ds[0].cfg.sliding_window)) for _, _, p in reqs]
     projs = [] if LOG_PROJ else None
-    out = _packed_body(ds, scals, spans, temp, projs)
+    from engine.drafters.dflash2 import PACK_BATCH
+    out = (_packed_body_batched(ds, scals, max(spans), temp, projs) if PACK_BATCH
+           else _packed_body(ds, scals, spans, temp, projs))
     for d, pj in zip(ds, projs or []):
         d._pred_proj = pj
     return out

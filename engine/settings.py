@@ -65,6 +65,7 @@ KNOBS: dict[str, tuple] = {
     'DF2_PACK_FOLD': ('0', 'engine/drafters/dflash2.py'),
     'DF2_PACK_TAIL': ('0', 'engine/drafters/dflash2.py'),
     'DF2_PACK_TOPK': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_BATCH': ('0', 'engine/drafters/dflash2.py'),
     'DFLASH2': (None, 'engine/drafters/dflash2.py'),
     'DRAFT_FC_NVFP4': ('0', 'engine/drafters/dflash2.py'),
     'DRAFT_GRAPH': ('0', 'engine/drafters/dflash2.py'),

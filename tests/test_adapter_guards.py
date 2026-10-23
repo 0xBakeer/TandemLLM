@@ -42,10 +42,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-E5 (2026-10-23): the 27B's v2 and fp4 move once for the branch (engine/model.py's joint row-wise
 #: steps and window-MLP knob, engine/drafters/draft_graph.py's packed-graph cap, two knobs in engine/settings.py;
 #: the 27B's prefill knobs SPD-169/189/191/193 and their modules tools/exl3_slab_gemm.py, tools/gdn_prep_kernels.py)
-GOLDEN_V2 = ("3e35a3f647749b8c94b0a8910dfa0ac49940b67b9db4a02ee7e8f3528a183d17",
-             "b80398b430f3b36ddabf33ccd71c6dc44f83383ecc0898a79883f7296ccd6fa3")
+GOLDEN_V2 = ("b4c7bc66c88f478dca6385db02b780243a114ccc84de414a4d83224cfee4930b",
+             "a054b20b2012949578132ded9ae80206bb6afdc715623d51f3e8bca98795c8e9")
 GOLDEN_FP4 = {
-    "qwen3_5": "fc56935060972654511fb92b695e24a4cc361deb5f89cc6e24fb3cd656513d87",
+    "qwen3_5": "632c3fc9426d314cae00866c4a94ce83b6933cf0e6d7c682ba8953f033248e71",
     "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
     "nemotron_h": "7fdc694358e113492eab5bdf3ac96562937e1282876dd83933c44874627b8d4d",
     "lfm2_moe": "9a10d58fc924dab2c6e6b74abe07dcd69eea64640401469ed2ecb1dffde20115",
