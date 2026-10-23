@@ -242,6 +242,8 @@ KNOBS: dict[str, tuple] = {
     'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),
     'SAMPLE_BATCH': ('1', 'engine/sample.py'),
     'SAMPLE_NUCLEUS': ('1', 'engine/sample.py'),
+    # SPD-201: a round's keyed draws from one kernel bit for bit torch.rand (engine/keyed_noise.py); 0: a launch a depth
+    'SAMPLE_KEYED_KERNEL': ('0', 'engine/sample.py'),
     'SAMPLED_CUT': ('0', 'engine/router.py'),
     # the layer-major prefill (engine/model.py `prefill_window`): rows a window takes when its chunk
     # lines hand out anchors/snapshots (each line holds a recurrent-state copy), and when none do;

@@ -75,6 +75,12 @@ BATCH = _S.get("SAMPLE_BATCH") == "1"
 # base vs nucleus 2 x 2 runs a side: no class worse beyond the run-to-run spread; board gate
 # tools/sampled_dist.py nospec/det/cool PASS, greedy identical). 0 = the probs_rows path.
 NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
+# SPD-201: a joint round's keyed draws (`round_walks`, seeded requests) from one kernel: every (slot,
+# depth) noise row is `torch.rand` after its `manual_seed(_key(seed, position))` bit for bit
+# (engine/keyed_noise.py, held per torch version by tests/test_keyed_noise.py), the noise and argmax
+# torch's own ops over all rows at once, and each generator left as the walk leaves it. The draws are
+# the same bits; 0 = a seed, a launch and four elementwise launches a depth and slot, as before.
+KEYED_KERNEL = _S.get("SAMPLE_KEYED_KERNEL") == "1"
 
 
 _MASK64 = (1 << 64) - 1
@@ -562,6 +568,7 @@ def round_walks(specs: list) -> list:
             dev_vals.append((i, "draws", sm.row_draws(rows[:n]), None))
             continue
         groups.setdefault((sm.temperature, sm.top_p, sm.top_k, sm.min_p), []).append(i)
+    many: list = []                     # keyed slots for the one-kernel draws (KEYED_KERNEL)
     for idx in groups.values():
         sm0 = specs[idx[0]]["sampler"]
         rows = [specs[i]["rows"].float() for i in idx]
@@ -570,11 +577,18 @@ def round_walks(specs: list) -> list:
             sp = specs[i]
             sm, n = sp["sampler"], len(sp["tokens"])
             if sm.coupled and sp.get("start") is not None:
+                if KEYED_KERNEL and d.is_cuda:
+                    many.append((i, sm, d, sp))
+                    continue
                 xs, depth = _keyed_draws(sm, d, sp["tokens"], sp["parents"], sp["start"])
                 dev_vals.append((i, "keyed", xs, depth))
             else:
                 x = torch.multinomial(d[:n], 1, generator=sm._rng(d.device)).squeeze(-1)
                 dev_vals.append((i, "draws", x, None))
+    if many:
+        got = _keyed_draws_many([(sm, d, sp["tokens"], sp["parents"], sp["start"]) for _, sm, d, sp in many])
+        for (i, _, _, _), (xs, extra) in zip(many, got):
+            dev_vals.append((i, "keyed", xs, extra))
     if not dev_vals:
         return out
     flat = torch.cat([v.reshape(-1).to(torch.long) for _, _, v, _ in dev_vals]).tolist()
@@ -614,9 +628,45 @@ def _keyed_draws(sm: "Sampler", dists: torch.Tensor, tokens: list, parents: list
     return torch.argmax(rows, dim=-1), (depth, D)
 
 
+def _keyed_draws_many(items: list) -> list:
+    """`_keyed_draws` for several slots at once (`KEYED_KERNEL`): items (sampler, dists, tokens, parents,
+    start); returns per slot (draws, (depth, D, True)). Every noise row is the one `_keyed_draws` takes
+    (engine/keyed_noise.py), the ops after it the same ops on the rows of all slots; no generator is
+    touched (`_keyed_walk` leaves each as the one-at-a-time walk does)."""
+    from engine import keyed_noise as KN
+    out: list = [None] * len(items)
+    by_v: dict = {}
+    for j, it in enumerate(items):
+        by_v.setdefault((it[1].shape[-1], it[1].device), []).append(j)
+    for (V, dev), js in by_v.items():
+        keys, sel, metas = [], [], []
+        for j in js:
+            sm, d, tokens, parents, start = items[j]
+            n = len(tokens)
+            depth = [0] * n
+            for c in range(1, n):
+                depth[c] = depth[parents[c]] + 1
+            D = max(depth) + 1
+            seed = sm.seed if sm.seed is not None else 0
+            base = len(keys)
+            keys.extend(_key(seed, start + k) for k in range(D))
+            sel.extend(base + x for x in depth)
+            metas.append((j, n, depth, D))
+        G = KN.uniforms(keys, V, dev)
+        G = G.clamp_min_(1e-20).log_().neg_().log_().neg_()     # -log(-log(u)), as `_keyed_draws`
+        logd = torch.cat([items[j][1][:n].float() for j, n, _, _ in metas]).log_()
+        xs = torch.argmax(logd + G[torch.tensor(sel).to(dev, non_blocking=True)], dim=-1)
+        pos = 0
+        for (j, n, depth, D) in metas:
+            out[j] = (xs[pos:pos + n], (depth, D, True))
+            pos += n
+    return out
+
+
 def _keyed_walk(sm: "Sampler", xs: list, extra, tokens: list, parents: list, start: int, V: int, dev):
     """`_tree_walk_keyed`'s host part on its draws, the generator left as that walk leaves it."""
-    depth, D = extra
+    depth, D = extra[0], extra[1]
+    kernel = len(extra) > 2 and extra[2]
     n = len(tokens)
     kids: list[list[int]] = [[] for _ in range(n)]
     for c in range(1, n):
@@ -630,7 +680,14 @@ def _keyed_walk(sm: "Sampler", xs: list, extra, tokens: list, parents: list, sta
         path.append(nxt)
         node = nxt
     last = len(path) - 1
-    if last != D - 1:
+    if kernel:
+        # the draws took no generator: it is left where the one-at-a-time walk leaves it, seeded at
+        # the last node's position and one `torch.rand(V)` on (no launch)
+        from engine import keyed_noise as KN
+        g = sm._rng(dev)
+        g.manual_seed(_key(sm.seed if sm.seed is not None else 0, start + last))
+        g.set_offset(KN.policy(V, dev)[1])
+    elif last != D - 1:
         g = sm._rng(dev)
         g.manual_seed(_key(sm.seed if sm.seed is not None else 0, start + last))
         torch.rand(V, generator=g, device=dev)
