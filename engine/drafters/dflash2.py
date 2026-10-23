@@ -159,6 +159,7 @@ import json
 import os
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine import native_tree, rowcopy  # noqa: E402
+from engine.drafters import topk_small  # noqa: E402
 
 import torch
 import torch.nn.functional as F
@@ -831,7 +832,12 @@ class DFlash2Module:
         own dtype, no fp32 copy of [P, V] (the values are the same; only the order of exact ties
         can differ)."""
         k = self.cfg.selector_top_k
-        vals, ids = torch.topk(logits if not exact else logits.float(), k, dim=-1)
+        if topk_small.ON and logits.is_cuda and logits.dim() == 2:
+            # SPD-201: two passes over the rows instead of the radix select, in fp32 either way, the same
+            # values; exact ties to the lowest id (engine/drafters/topk_small.py)
+            vals, ids = topk_small.topk(logits, k)
+        else:
+            vals, ids = torch.topk(logits if not exact else logits.float(), k, dim=-1)
         vals = vals.float()
         if self.cfg.output_multiplier != 1.0:
             vals = vals * self.cfg.output_multiplier
