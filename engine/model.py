@@ -196,7 +196,8 @@ WINDOW_NORM_ROT = _S.get("WINDOW_NORM_ROT") == "1"
 #: SPD-189: prefill calls on the EXL3 slab path run the product and rot_out as one Triton kernel
 #: (tools/exl3_slab_gemm.py, the 27B's module; the shared EXL3 path is untouched), the same bits.
 SLAB_TRITON = _S.get("SLAB_TRITON") == "1"
-#: SPD-191: the scan launch the GDN_PREP path takes (value block, warps); its order is its own
+#: SPD-191: the scan launch the GDN_PREP path takes (value block, warps): the shared default 32 / 8; 16 / 4
+#: is faster and moves the scan's order (the fp64 gate puts it further from the reference on repeated text)
 GDN_PREP_BV = int(_S.get("GDN_PREP_BV"))
 GDN_PREP_WARPS = int(_S.get("GDN_PREP_WARPS"))
 
