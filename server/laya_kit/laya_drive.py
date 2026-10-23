@@ -322,9 +322,16 @@ def _spawn_kw() -> dict:
     return kw
 
 
-def _end_group(p, grace: float = 5.0) -> None:
+def _end_group(p, grace: float = 5.0, leader_first: bool = False) -> None:
     """SIGTERM to the child's whole group (its own, `_spawn_kw`), SIGKILL to what is left after
-    `grace` s; the group is ended even when its first process is gone already."""
+    `grace` s; the group is ended even when its first process is gone already.
+
+    `leader_first`: the SIGTERM goes to the first process alone, which ends its own children, and
+    to the rest of the group only once it is gone. Chrome needs this (#131): given the group's
+    SIGTERM, its helpers died at once and the browser process, waiting for them in its shutdown,
+    sometimes stayed up with every child already exited, until the SIGKILL. On fresh CI runners
+    that was 3 closes in 200, and 17 in 200 with the CPUs busy; signalled alone, 0 in 400, at most
+    0.16 s."""
     if p is None:
         return
     pg = p.pid
@@ -336,15 +343,25 @@ def _end_group(p, grace: float = 5.0) -> None:
             return True
         except OSError:
             return False
+    rest = not (leader_first and p.poll() is None)    # the group's turn has come
     try:
-        os.killpg(pg, signal.SIGTERM)
+        if rest:
+            os.killpg(pg, signal.SIGTERM)
+        else:
+            os.kill(pg, signal.SIGTERM)
     except OSError:
         return
     end = time.monotonic() + grace
     while time.monotonic() < end:
         if not alive():
             return
-        time.sleep(0.05)
+        if not rest and p.returncode is not None:
+            rest = True                    # the first process is gone: the rest of its group too
+            try:
+                os.killpg(pg, signal.SIGTERM)
+            except OSError:
+                return
+        time.sleep(0.02)
     try:
         os.killpg(pg, signal.SIGKILL)
     except OSError:
@@ -677,7 +694,7 @@ class Browser:
         except (OSError, RuntimeError, AttributeError):
             pass
         if self.proc is not None:
-            _end_group(self.proc)          # Chrome and every process it started
+            _end_group(self.proc, leader_first=True)    # Chrome ends what it started (#131)
             self.proc = None
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
