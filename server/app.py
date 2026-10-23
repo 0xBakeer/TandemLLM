@@ -10206,8 +10206,11 @@ def parser() -> argparse.ArgumentParser:
                          "joint (the round cuts every slot's whole tree together, best nodes first), or "
                          "auto (SPD-155, the default: joint from QSE_PARALLEL_AUTO_N decoding slots, "
                          "share below)")
-    ap.add_argument("--parallel-max-rows", type=int, default=32,
-                    help="rows of a joint pass at most (32: the row-invariant kernels' range)")
+    ap.add_argument("--parallel-max-rows", type=int,
+                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "32") or 32),
+                    help="rows of a joint pass at most (32: the row-invariant kernels' range; SPD-159: "
+                         "64 measured row-invariant too on the 27B EXL3 pack, each engine's joint rows "
+                         "bit for bit its own eager verify)")
     ap.add_argument("--parallel-draft-rows", type=int,
                     default=int(os.environ.get("QSE_PARALLEL_DRAFT_ROWS", "128") or 128),
                     help="rows of a packed draft pass at most (SPD-157): drafting decides speed only, "
