@@ -43,7 +43,14 @@ The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by def
 - Accepted and without effect by their own definition: `user`, `metadata`, `store`, `service_tier`, `prompt_cache_key`, `safety_identifier`, `prediction`.
 - Refused with a 400 that names the field: `audio`, `functions`, `function_call` (use `tools`), `web_search_options`, `verbosity`, and for completions `suffix` and `echo`.
 
-Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: `top_k`, `min_p`, `repetition_penalty`, `no_repeat_ngram_size`, `max_reasoning_tokens`, `reasoning_format`, `draft_temperature` and `chat_template_kwargs`, and the other servers' thinking-budget shapes (`reasoning`, `thinking`, `thinking_budget`, `enable_thinking` and more, see Thinking budgets from the client).
+Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: `top_k`, `min_p`, `repetition_penalty`, `no_repeat_ngram_size`, `max_reasoning_tokens`, `reasoning_format`, `draft_temperature`, `chat_template_kwargs` and `cache_prompt`, and the other servers' thinking-budget shapes (`reasoning`, `thinking`, `thinking_budget`, `enable_thinking` and more, see Thinking budgets from the client).
+
+### `cache_prompt`
+
+The prompt caches are on for every request ([caches.md](caches.md)). A request that leaves out `cache_prompt`, or sends `true`, resumes from the longest prefix a cache holds, and `timings.cache_n` counts the tokens it reused. Any other value but `false` does the same.
+
+`cache_prompt: false` reads the whole prompt: `timings.cache_n` is 0 and `timings.prompt_n` is the prompt's length. A benchmark that measures a cold prompt read sends it. The request also leaves every prompt cache as it was. It reads and writes no state-store entry, no disk-tier anchor and no end anchor, and the response cache neither answers it nor keeps its answer. A conversation already in place is set aside as for another client's. A prompt of up to `RESIDENT_GUEST_MAX` tokens (8,192 served) and under a quarter of that conversation runs as a guest, and the conversation's rows go back after it. A longer prompt parks the conversation, or writes it to the NVMe when the park cannot hold it. Its next request without the flag then finds it where it would have found it before. Nothing parks or keeps the rows a cold request wrote, since they belong to no conversation. One store stays on: the suffix store is the lookup's memory of text, not a prompt cache, and takes the request's tokens as it does for every request.
+
 
 ## Reasoning
 

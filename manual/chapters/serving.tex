@@ -14,7 +14,9 @@
 
 The request's own shape is checked first, and a wrong one is a 400 that names the field before anything reads it: no \code{messages} or an empty list, an unknown role (\code{messages[0].role}), a system prompt alone or only tool results (no user message to answer), a system message after the conversation began, \code{max_tokens} or \code{max_completion_tokens} below 1, an empty completion \code{prompt}, a body that is not a JSON object, and a prompt that renders to no token. OpenAI's \code{developer} role is the system prompt; a system and a developer message at the start become one system prompt, because the chat template reads one.
 
-Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: \code{top_k}, \code{min_p}, \code{repetition_penalty}, \code{no_repeat_ngram_size}, \code{max_reasoning_tokens}, \code{reasoning_format}, \code{draft_temperature}, \code{chat_template_kwargs}, and the other servers' thinking-budget shapes.
+Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: \code{top_k}, \code{min_p}, \code{repetition_penalty}, \code{no_repeat_ngram_size}, \code{max_reasoning_tokens}, \code{reasoning_format}, \code{draft_temperature}, \code{chat_template_kwargs}, \code{cache_prompt}, and the other servers' thinking-budget shapes.
+
+The prompt caches are on for every request. \code{cache_prompt: false} reads the whole prompt, so \code{timings.cache_n} is 0, and leaves every prompt cache as it was: the conversation in place is set aside as for another client's and is there for the next request without the flag. Any other value, or none, keeps the caches on. \code{docs/server.md} has the details.
 
 \section{Reasoning}\index{reasoning format}
 

@@ -1549,6 +1549,30 @@ def _end_cut_said(rows: int) -> None:
         print(f"[spec] the accepted path ran {rows} row(s) past the end: not committed", flush=True)
 
 
+#: #98: `cache_prompt: false`. The caches compare a cold prompt under this first key, which no token
+#: id has, so no cache resumes it and no anchor it leaves matches a later prompt; and file it under
+#: this session, so the conversation in place is stashed, parked or spilled as for another client's
+COLD_KEY = -1
+COLD_SESSION = "cache_prompt:false"
+
+
+def cache_prompt_off(body: dict) -> bool:
+    """#98: the request asks for its prompt read whole, with no prompt cache read or written.
+    Only `false` does: `true`, a missing field or any other value is the prompt cache as always."""
+    return body.get("cache_prompt") is False
+
+
+def _cold_release() -> None:
+    """#98: after a `cache_prompt: false` request, under the engine lock. Its rows hold no one's
+    conversation: the resident prefix forgets them, so no later request parks or spills them, and
+    the conversation it stashed (a guest) comes back at the next prefill, the one it parked or
+    spilled at that conversation's next turn."""
+    res = STATE.get("resident")
+    if res is not None and res.owner == COLD_SESSION and res._stash is None:
+        res.clear()
+        res.owner = None
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -1568,7 +1592,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
                     disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
-                    scratch: bool = False, stay: bool = False):
+                    scratch: bool = False, stay: bool = False, cold: bool = False):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -1613,6 +1637,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     `pos_delta`, `end_mm` (server/compaction.py): a text prompt that continues a
     conversation with images: the rotary offset its rows take and leave to the end anchor kept
     after those images. `scratch`: a summary prepared in the background, whose rows are nobody's.
+
+    `cold` (#98, a request's `cache_prompt: false`): the prompt is read whole and no prompt cache
+    is read or written (`COLD_KEY`, `COLD_SESSION`); the handler gives the rows back after it
+    (`_cold_release`).
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -1677,13 +1705,18 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             on_chunk = _lane_chunks(on_chunk)
         if dict.get(STATE, "pool") is not None:
             on_chunk = _par_chunks(on_chunk)
+        keys = mm.key_ids if mm is not None else None
+        if cold:
+            # #98: a key no cache holds, so nothing resumes; another session's, so the resident
+            # conversation is stashed (a short prompt) or parked or spilled as for any other one
+            keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
         logits, reused, forwarded = cache.prefill(
-            eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
-            chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_chunk, info=where,
-            key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
-            compacting=compacting, disk=_slot_disk(), disk_tag=disk_tag,
+            eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
+            chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
+            checkpoint=bool(STATE.get("prefix_cache")) and not cold,
+            resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
+            key_ids=keys, mem=STATE.get("mem"),
+            compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
             end_mm=end_mm, scratch=scratch, stay=stay,
             # FX5: the highest row this generation can write, for a guest's stash; the monitor's
             # hidden tokens are not in `max_new`
@@ -2701,8 +2734,11 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0, served_hidden=None) -> None:
+              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
+
+    `cold` (#98, `cache_prompt: false`): no state is kept, neither a session snapshot nor the end
+    anchor; the suffix store, the lookup's memory of text, takes the tokens as for every turn.
 
     The resident prefix keeps the end of the generation as its end anchor
     (`ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
@@ -2718,6 +2754,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
+    if cold:
+        _suffix_add(prompt_ids, out_ids, mm, delta)
+        return
     store = STATE.get("state_store")
     committed = STATE.get("last_ctx") or []
     if mm is not None and len(committed) >= mm.n:
@@ -2847,6 +2886,12 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         if STATE.get("verbose") and why not in ("kept", "off"):
             print(f"[parallel] side end not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
+    _suffix_add(prompt_ids, out_ids, mm, delta)
+
+
+def _suffix_add(prompt_ids: list[int], out_ids: list[int], mm=None, delta: int = 0) -> None:
+    """A turn's tokens into the suffix store (`_remember`)."""
+    eng = STATE["engine"]
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         if mm is not None:
@@ -7456,6 +7501,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # the caches' session key: the body's conversation, else opencode's x-session-id (OPS-47)
         conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
+        # #98: `cache_prompt: false` reads the prompt whole and leaves every prompt cache as it was
+        cold = cache_prompt_off(body)
         # ENG-371: an agent's worker (its session comes back at its next call) and its parent
         stay, parent = _worker_of(self.headers)
         if stay:
@@ -8126,7 +8173,7 @@ class Handler(BaseHTTPRequestHandler):
             # the park in and the 15,8k-token chat lost its end anchor; its next turn re-read it)
             guest = bool(par_why.get("guest")) or bool(me.get("own")) or lane_kind is not None
             if (res_ is not None and not images and not (comp and comp["prepared"] is not None)
-                    and not guest):
+                    and not guest and not cold):
                 if comp is None:
                     # FX10 (SRV-213): a conversation that ran on a side slot is carried over first
                     with torch.no_grad():
@@ -8134,7 +8181,8 @@ class Handler(BaseHTTPRequestHandler):
                 # A conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
                 _spill_before_replay(prompt.tolist(), mm_ok=comp is not None)
-            if res_ is not None and res_.end is not None and not images and comp is None:
+            if (res_ is not None and res_.end is not None and not images and comp is None
+                    and not cold):
                 before = prompt.tolist()
                 ids_, replayed, aligned = _end_replay(res_, before)
                 if replayed or aligned:
@@ -8253,7 +8301,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": {"message": str(exc),
                                                       "type": "invalid_request_error",
                                                       "param": "messages"}})
-                if MM_END == "on" and res_ is not None and comp is None and not guest:
+                if MM_END == "on" and res_ is not None and comp is None and not guest and not cold:
                     # SRV-546: the conversation on the NVMe read back, and the end anchor's replay
                     # and alignment, on the expanded key ids (`_mm_end_replay`); SP4's note
                     # (text positions) moves to the rows' coordinates with it
@@ -8434,7 +8482,7 @@ class Handler(BaseHTTPRequestHandler):
             elif comp is not None and comp["prepared"] is not None:
                 cached_ids = comp["prepared"]       # the summary written ahead (no engine)
             elif (rcache is not None and not STATE["relax"].on and not sampler.on
-                    and lp_top is None and comp is None
+                    and lp_top is None and comp is None and not cold
                     and not (plan is not None and plan.changed) and not replayed):
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
                 # without the RNG stream; do not memoise it. A request for log-probabilities needs
@@ -8493,6 +8541,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
                 if stay:
                     kw["stay"] = True                  # ENG-371: never a guest of the resident
+                if cold:
+                    kw["cold"] = True                  # #98
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -8641,7 +8691,7 @@ class Handler(BaseHTTPRequestHandler):
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)))
+                                                 else getattr(rec, "note_at", None)), cold=cold)
                         if rkey is not None and not ci and not (sup is not None and sup.acted) \
                                 and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
@@ -9285,7 +9335,7 @@ class Handler(BaseHTTPRequestHandler):
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)))
+                                                 else getattr(rec, "note_at", None)), cold=cold)
                 if rkey is not None and not (sup is not None and sup.acted) and \
                         not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
@@ -9347,6 +9397,8 @@ class Handler(BaseHTTPRequestHandler):
                 res_h = STATE.get("resident")
                 if res_h is not None:
                     res_h.end_hold = False
+                if cold:
+                    _cold_release()                    # #98: its rows are nobody's
                 # SRV-307: the pages past what this slot keeps go back to the pool, before the
                 # slot is given to the next request
                 kv_trim_current()
@@ -9362,7 +9414,7 @@ class Handler(BaseHTTPRequestHandler):
                         getattr(STATE.get("conductor"), "memory", None) is not None:
                     STATE["conductor"].memory.writer.mark(conv_id, "give_up")
                 if par is not None:
-                    if side is None and not micro:
+                    if side is None and not micro and not cold:
                         # SRV-197: the conversation slot 0 now holds, as its client renders it
                         try:
                             ctx_ = STATE.get("last_ctx")
@@ -9373,7 +9425,8 @@ class Handler(BaseHTTPRequestHandler):
                                                par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
-                    elif side is not None and not micro and not getattr(side, "no_carry", False):
+                    elif (side is not None and not micro and not cold
+                          and not getattr(side, "no_carry", False)):
                         # FX16: the conversation the side slot now holds (its resident prefix)
                         try:
                             ctx_ = STATE.get("last_ctx")
