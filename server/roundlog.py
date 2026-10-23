@@ -36,6 +36,10 @@ from engine.settings import SETTINGS as _S
 PATH = _S.get("ROUND_LOG") or ""
 #: SPD-187: the anchor's post-norm hidden in each slot line too (fp16, base64; about 10 KB a block)
 HIDDEN = _S.get("ROUND_LOG_HIDDEN") == "1"
+#: SPD-201: each slot line also carries the proposing arm's whole lattice (`lat_scores` [L][k][k], the raw
+#: pair scores the walk reads: a depth's log q given its predecessor is their log-softmax at the request's
+#: temperature) and the request's sampling profile and seed (`samp`), for the keyed-noise ranking study
+LATTICE = _S.get("ROUND_LOG_LATTICE") == "1"
 #: the target's top-k a verified node logs (ids and log-probabilities of the verify's own row)
 TOPK = 64
 
@@ -134,7 +138,7 @@ class RoundLog:
         return hv, hi, hh
 
     def slot(self, rid, slot: int, E: int, ctx: int, tree, path: list, pre_n: int | None,
-             drafter=None, top=None, drawn=None) -> None:
+             drafter=None, top=None, drawn=None, sampler=None) -> None:
         if tree is None:
             return
         n = len(tree.tokens)
@@ -158,6 +162,12 @@ class RoundLog:
                 rec["hidden"] = base64.b64encode(hh.numpy().tobytes()).decode()
         cand, lat = lattice(drafter)
         rec["cand"], rec["lat_lp"] = cand, lat
+        if LATTICE:
+            rec["lat_scores"] = lattice_scores(drafter)
+            sm = sampler if sampler is not None and getattr(sampler, "on", False) else None
+            rec["samp"] = (None if sm is None else
+                           {"seed": sm.seed, "t": sm.temperature, "top_p": sm.top_p, "top_k": sm.top_k,
+                            "min_p": sm.min_p})
         with self.lock:
             self._write(rec)
             self._drain()
@@ -239,6 +249,19 @@ def lattice(drafter):
     elif isinstance(lat, list):
         lat = [[round(float(v), 3) for v in r] if isinstance(r, list) else round(float(r), 3) for r in lat]
     return cand, lat
+
+
+def lattice_scores(drafter):
+    """The proposing arm's whole lattice scores of this block ([L][k][k], 3 decimals), or None. A copy to
+    the host: only while QWEN38_ROUND_LOG_LATTICE is on (logging runs)."""
+    arm = _arm(drafter)
+    d2 = getattr(arm, "mtp", arm)
+    lt = getattr(d2, "_lattice", None)
+    if not lt or lt[1] is None:
+        return None
+    sc = lt[1].float().cpu()
+    return [[[round(float(v), 3) for v in row] for row in sl] for sl in sc.tolist()] if sc.dim() == 3 else \
+        [[round(float(v), 3) for v in row] for row in sc.tolist()]
 
 
 def node_q(drafter, tree, dep, rank):

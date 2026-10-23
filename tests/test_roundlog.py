@@ -73,6 +73,36 @@ def test_round_slot_and_draft_lines():
     return "round, lone round, slot (q from the proposing arm, ranks, depths, path) and draft lines"
 
 
+def test_the_lattice_and_the_sampling_profile_with_round_log_lattice():
+    """QWEN38_ROUND_LOG_LATTICE: the arm's whole lattice scores [L][k][k] and the request's seed and profile."""
+    import torch
+    from engine.sample import Sampler
+    real = roundlog.LATTICE
+    roundlog.LATTICE = True
+    try:
+        d2 = D2()
+        sc = torch.tensor([[[0.5, -1.25], [2.0, 0.0]], [[1.0, 1.5], [-0.5, 0.25]]])
+        d2._lattice = (torch.tensor([[11, 12], [13, 14]]), sc)
+        arm = LenRouter()
+        arm.large.mtp = d2
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rounds.jsonl")
+            log = roundlog.RoundLog(path)
+            rid = log.round([Req(0, 4, 50)], None)
+            tree = DraftTree([5, 6], [-1, 0], scores=[1.0, 0.9], source=["root", "mtp"])
+            sm = Sampler(temperature=1.0, top_p=0.95, top_k=20, seed=1042)
+            log.slot(rid, 0, 1, 50, tree, [0, 1], 2, arm, drawn=[6, 9], sampler=sm)
+            log.slot(rid, 0, 1, 52, tree, [0], 2, arm, drawn=[3])
+            log.fh.close()
+            _, s, s2 = [json.loads(x) for x in open(path)]
+    finally:
+        roundlog.LATTICE = real
+    assert s["lat_scores"] == sc.tolist(), s["lat_scores"]
+    assert s["samp"] == {"seed": 1042, "t": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0}, s["samp"]
+    assert s2["samp"] is None, "a greedy request"
+    return "the whole lattice and the sampling profile, greedy logged as null"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -2130,7 +2130,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if rlog is not None:
                         rlog.slot(rid, _par_index() if par is not None else 0,
                                   (par.last_joint.get(_par_index(), 1) if vms is False else 1),
-                                  pos, tree, path, pre_n, drafter, top=rtop, drawn=new)
+                                  pos, tree, path, pre_n, drafter, top=rtop, drawn=new, sampler=sampler)
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
                         _par_note(par, "accept", f"joint{par.last_joint.get(_par_index(), 1)}"

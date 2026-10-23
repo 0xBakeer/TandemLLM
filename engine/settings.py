@@ -43,6 +43,7 @@ KNOBS: dict[str, tuple] = {
     'BLOCKING_SYNC': ('0', 'server/app.py'),
     'ROUND_LOG': (None, 'server/roundlog.py'),
     'ROUND_LOG_HIDDEN': ('0', 'server/roundlog.py'),
+    'ROUND_LOG_LATTICE': ('0', 'server/roundlog.py'),
     'COMMIT_IN_VERIFY': ('0', 'engine/model.py'),
     'CORPUS': ('', 'engine/drafters/ngram.py'),
     'DECODE_ATTN': ('0', 'engine/model.py'),
