@@ -44,6 +44,10 @@ JOINT1 = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
 #: SPD-201: the tails' row copies (the drafters' tap rows, the hidden rows, the cache compaction) recorded and
 #: run as one launch at the end of the tails (engine/rowcopy.py); 0: each its own torch statement
 ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "0") == "1"
+#: SPD-201: a round's tails in two halves around the next round's packed draft: what the draft reads first (the
+#: accepted tokens, positions, the drafter syncs, which tasks end), then the draft is queued, then the rest (the
+#: target's commit, penalties, stop patterns, the stream) runs on the host while the GPU drafts; 0: one tail a task
+PIPE = os.environ.get("QSE_RUNNER_PIPE", "0") == "1"
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
@@ -75,6 +79,7 @@ class Task:
         self.cancel = False                 # the client left: dropped at the next round
         self.done = False
         self.steps = None                   # the proposal generator stopped at its draft
+        self.pre = False                    # PIPE: the last round's tails queued this task's draft
         self.tree = None
         self.err = None
 
@@ -110,6 +115,11 @@ class Runner:
         self._ev: list = []                 # this round's (label, event)
         self._ev_done: list = []            # finished rounds' event lists, read when complete
         self._ev_last = None                # the last round's final event
+        # steady state by the slots in a round's verify (SPD-201): each round's GPU period (one round end to the
+        # next) and tokens, the last 512 a slot count; `report` gives the medians and their tokens a second
+        self._steady: dict = {}
+        self._round_e = 0
+        self._round_tok = 0
         self._collect: list | None = None    # the runner thread's pending draft calls, while proposals run
 
     # ---- registration (the slot's thread) ---------------------------------------------------
@@ -171,9 +181,18 @@ class Runner:
     def report(self) -> dict:
         n = max(1, self.stats["rounds"])
         g = max(1, self.gpu_n)
+        steady = {}
+        for e, st in sorted(self._steady.items()):
+            if len(st) >= 8:
+                per = sorted(p for p, _ in st)[len(st) // 2]
+                tok = sorted(t for _, t in st)[len(st) // 2]
+                mean_tok = sum(t for _, t in st) / len(st)
+                steady[e] = {"rounds": len(st), "period_ms": round(per, 2), "tokens": tok,
+                             "tok_s": round(1e3 * mean_tok / per, 1)}
         return dict(self.stats, skips=dict(SKIPS),
                     ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
-                    gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n)
+                    gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n,
+                    steady=steady)
 
     def _t(self, key, t0):
         t1 = time.perf_counter()
@@ -190,10 +209,16 @@ class Runner:
     def _gpu_read(self) -> None:
         """The finished rounds' GPU segments into `gpu` (a round whose last event is not done waits)."""
         keep = []
-        for rnd, prev in self._ev_done:
+        for rnd, prev, e, tok in self._ev_done:
             if not rnd[-1][1].query():
-                keep.append((rnd, prev))
+                keep.append((rnd, prev, e, tok))
                 continue
+            if prev is not None and prev.query() and e:
+                per = prev.elapsed_time(rnd[-1][1])
+                st = self._steady.setdefault(e, [])
+                st.append((per, tok))
+                if len(st) > 512:
+                    del st[0]
             for (_, a), (lab, b) in zip(rnd, rnd[1:]):
                 if lab in self.gpu:
                     self.gpu[lab] += a.elapsed_time(b)
@@ -211,6 +236,7 @@ class Runner:
         self.stats["rounds"] += 1
         self._gpu_read()
         self._ev = []
+        self._round_e, self._round_tok = 0, 0
         self._mark("start")
         t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
@@ -220,22 +246,20 @@ class Runner:
                 self._bind(t)
                 lane = app.STATE.get("lane")
                 if lane is not None and lane.jobs:
+                    if t.pre:
+                        # PIPE: the draft the last tails queued is read before the lane runs on this slot
+                        t.tree, t.steps = app._collect(t.steps, t.tree), None
                     self.stats["lane_jobs"] += lane.serve("decode")
-        self._collect = []
         for t in tasks:
-            self._bind(t)
-            if t.deadline is not None and t.deadline.expired():
+            if t.pre and not t.done and t.deadline is not None and t.deadline.expired():
                 t.end("deadline")
-                continue
-            app._row_cap(self.pool, t.drafter)
-            t.steps, t.tree = app._launch(tree_steps(t.drafter, t.ctx, min(t.k, t.max_new - t.n_out)))
-        calls, self._collect = self._collect, None
-        self._bind_none()
-        t0 = self._t("prop", t0)
-        self._packed(calls)
-        t0 = self._t("packed", t0)
+        t0 = self._propose([t for t in tasks if not t.pre], t0)
         for t in tasks:
+            t.pre = False
             if t.done:
+                if t.steps is not None:
+                    t.steps.close()             # a draft queued for a task that ended after it
+                    t.steps = None
                 continue
             self._bind(t)
             t.tree = app._collect(t.steps, t.tree)
@@ -254,10 +278,32 @@ class Runner:
         self._bind_none()
         self._t("round", t_r)
         if self._ev:
-            self._ev_done.append((self._ev, self._ev_last))
+            self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok))
             self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
             print(f"[runner] {self.report()}", flush=True)
+
+    def _propose(self, tasks: list, t0: float, deadline: bool = True) -> float:
+        """Each task's proposal to its draft, then one packed draft for them (queued, not read). `deadline`
+        False (PIPE, inside a tail): the deadline is the next round's to check, after the stream."""
+        from engine.drafters import tree_steps
+        app = self.app
+        self._collect = []
+        for t in tasks:
+            if t.done:
+                continue
+            self._bind(t)
+            if deadline and t.deadline is not None and t.deadline.expired():
+                t.end("deadline")
+                continue
+            app._row_cap(self.pool, t.drafter)
+            t.steps, t.tree = app._launch(tree_steps(t.drafter, t.ctx, min(t.k, t.max_new - t.n_out)))
+        calls, self._collect = self._collect, None
+        self._bind_none()
+        t0 = self._t("prop", t0)
+        if calls:
+            self._packed(calls)
+        return self._t("packed", t0)
 
     def _bind_none(self):
         from server import slots as slots_mod
@@ -285,6 +331,7 @@ class Runner:
         from server import slots as slots_mod
         meet = self.pool.meeting
         group.sort(key=lambda t: t.slot.index)
+        self._round_e = len(group)
         h = self.stats["joint_hist"]
         h[len(group)] = h.get(len(group), 0) + 1
         trees = [t.tree for t in group]
@@ -328,6 +375,20 @@ class Runner:
         self._t("tails", t0)
 
     def _tails(self, group, trees, outs, walked) -> None:
+        if PIPE:
+            halves = [self._tail_a(t, x, path, new) for t, x, path, new in self._paths(group, trees, outs, walked)]
+            go = [t for t, h in zip(group, halves) if h[2] is None]
+            self._propose(go, time.perf_counter(), deadline=False)
+            for t in go:
+                t.pre = True
+            for t, h in zip(group, halves):
+                self._bind(t)
+                self._tail_b(t, *h)
+            return
+        for t, x, path, new in self._paths(group, trees, outs, walked):
+            self._tail(t, x, path, new)
+
+    def _paths(self, group, trees, outs, walked):
         for t, x, lg, w in zip(group, trees, outs, walked):
             self._bind(t)
             if w is not None and w[0] == "walk":
@@ -338,7 +399,7 @@ class Runner:
                 path, new = t.sampler.tree_walk_logits(lg, x.tokens, x.parents, start=len(t.ctx), q=x.q)
             else:
                 path, new = t.eng.accept_tree(x, lg.argmax(-1).tolist())
-            self._tail(t, x, path, new)
+            yield t, x, path, new
 
     def _tail(self, t: Task, tree, path, new) -> None:
         from engine.model import h2d
@@ -370,6 +431,7 @@ class Runner:
         stop_now = t.pstop is not None and t.pstop.observe(new)
         t.ctx.extend(new)
         t.n_out += len(new)
+        self._round_tok += len(new)
         t.tok = t.ctx[-1]
         t.push(new)
         if stop_now:
@@ -378,6 +440,57 @@ class Runner:
             t.end("eos" if any(x in t.eos for x in new) else "length")
         elif t.think is not None:
             t.think.observe(new)            # the slot loop looks at a block it goes on after
+
+    def _tail_a(self, t: Task, tree, path, new) -> tuple:
+        """PIPE: the part of `_tail` the next draft reads: the cut, the drafter's sync and observation, the position
+        and context, and whether the task ends (it ends in `_tail_b`, after its tokens are pushed). Returns
+        (path, new, the end reason or None)."""
+        from engine.model import h2d
+        app = self.app
+        accepted = len(path) - 1
+        cut = app._end_cut(new, t.eos, t.max_new - t.n_out)
+        if cut < len(new):
+            path, new = path[:cut + 1], new[:cut]
+        d = t.drafter
+        if hasattr(d, "sync"):
+            from engine import rowcopy
+            if rowcopy.active():
+                hidden = rowcopy.rows_of(t.eng.hidden_post_norm[0], path)
+                if not getattr(d, "hidden_free", False):
+                    rowcopy.flush()             # this drafter's sync reads the hidden rows at once
+            else:
+                hidden = t.eng.hidden_post_norm[0, h2d(path, torch.long, t.device)]
+            toks = [int(tree.tokens[i]) for i in path]
+            if getattr(d, "wants_rows", False):
+                d.sync(toks, hidden, t.pos, rows=path)
+            else:
+                d.sync(toks, hidden, t.pos)
+        t.bs.block(max(tree.depths()), accepted)
+        d.observe(new)
+        end = None
+        if any(x in t.eos for x in new) or t.n_out + len(new) >= t.max_new or t.pos + len(path) >= t.eng.max_len - 1:
+            end = "eos" if any(x in t.eos for x in new) else "length"
+        t.pos += len(path)
+        t.ctx.extend(new)
+        t.n_out += len(new)
+        self._round_tok += len(new)
+        t.tok = t.ctx[-1]
+        if end is None and t.think is not None:
+            t.think.observe(new)
+        return path, new, end
+
+    def _tail_b(self, t: Task, path, new, end) -> None:
+        """PIPE: the rest of `_tail` while the GPU drafts: the target's commit, the penalties, the stop patterns,
+        the stream, the end."""
+        t.eng.commit_tree(path)
+        if t.pen is not None:
+            t.pen.commit(new)
+        stop_now = t.pstop is not None and t.pstop.observe(new)
+        t.push(new)
+        if stop_now:
+            t.end("stop")
+        elif end is not None:
+            t.end(end)
 
     def _plain(self, t: Task) -> None:
         """A task with no draft this round: the slot loop's plain step (one row, alone)."""
