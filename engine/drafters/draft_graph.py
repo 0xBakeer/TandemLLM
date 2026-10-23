@@ -174,8 +174,14 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
     preds = [h[1:] for h in hidden]
     logits = head_logits(torch.cat(preds, dim=0), dflash2_head(eng))
     out = []
-    for a_t, lg, pred in zip(anchors, logits.split([p.shape[0] for p in preds], dim=0), preds):
-        cand, unary = m.unary_candidates(lg)
+    sizes = [p.shape[0] for p in preds]
+    from engine.drafters.dflash2 import PACK_TOPK
+    if PACK_TOPK:
+        # SPD-161: the head's top-k once over every block's rows (a row's top-k is its own)
+        c_all, u_all = m.unary_candidates(logits)
+        cu = list(zip(c_all.split(sizes, dim=0), u_all.split(sizes, dim=0)))
+    for j, (a_t, lg, pred) in enumerate(zip(anchors, logits.split(sizes, dim=0), preds)):
+        cand, unary = cu[j] if PACK_TOPK else m.unary_candidates(lg)
         scores = m.lattice(pred, cand, unary, a_t)
         out.append((cand, scores) if temp is None
                    else (cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)))

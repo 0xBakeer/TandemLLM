@@ -721,6 +721,14 @@ class DFlash2Module:
             y = yield key, x
             return y
 
+        def prep(c, x, i, side):
+            # SPD-161: the convolution's kernel projection, one call over every block's rows (PACK_KP)
+            if PACK_KP:
+                coef = (yield ("kp", i, side), x).reshape(x.shape[0], 2, c.taps, c.groups)
+                return (_grouped_conv(x, coef[:, 0], c.base[0], c.groups, c.gsize, c.taps, block_pos),
+                        coef[:, 1])
+            return c.prepare(x, block_pos)
+
         h = noise_emb
         for i in range(cfg.num_hidden_layers):
             p = f"layers.{i}"
@@ -729,7 +737,7 @@ class DFlash2Module:
             x = _rms(h, self.w[f"{p}.input_layernorm.weight"], cfg.rms_norm_eps)
             akernel = None
             if conv is not None:
-                x, akernel = conv[0].prepare(x, block_pos)
+                x, akernel = yield from prep(conv[0], x, i, 0)
             q = (yield from lin(x, f"{p}.self_attn.q_proj.weight")).view(t, nh, hd)
             q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
             k = (yield from lin(x, f"{p}.self_attn.k_proj.weight")).view(t, nkv, hd)
@@ -742,9 +750,13 @@ class DFlash2Module:
                 ck, cv = ctx_kv[i]
                 k = torch.cat([ck[None], k], dim=2)
                 v = torch.cat([cv[None], v], dim=2)
-            o = F.scaled_dot_product_attention(q, k.repeat_interleave(rep, dim=1),
-                                               v.repeat_interleave(rep, dim=1),
-                                               attn_mask=masks[1] if cfg.is_sliding(i) else masks[0])
+            mask = masks[1] if cfg.is_sliding(i) else masks[0]
+            if PACK_GQA:
+                # SPD-161: the key/value heads read in place by the query groups (no copy to nh heads)
+                o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
+            else:
+                o = F.scaled_dot_product_attention(q, k.repeat_interleave(rep, dim=1),
+                                                   v.repeat_interleave(rep, dim=1), attn_mask=mask)
             o = o.transpose(1, 2).reshape(t, -1)
             o = yield from lin(o, f"{p}.self_attn.o_proj.weight")
             if conv is not None:
@@ -755,7 +767,7 @@ class DFlash2Module:
             x = _rms(h, self.w[f"{p}.post_attention_layernorm.weight"], cfg.rms_norm_eps)
             mkernel = None
             if conv is not None:
-                x, mkernel = conv[1].prepare(x, block_pos)
+                x, mkernel = yield from prep(conv[1], x, i, 1)
             g = yield from lin(x, f"{p}.mlp.gate_proj.weight")
             u = yield from lin(x, f"{p}.mlp.up_proj.weight")
             x = yield from lin(F.silu(g) * u, f"{p}.mlp.down_proj.weight")
@@ -914,6 +926,14 @@ class DFlash2Module:
 
 # ----------------------------------------------------------------------------- the drafter
 
+#: SPD-161, the packed draft only (the lone draft keeps its statements): the convolutions' kernel projections
+#: as one call over every block's rows, and attention over the key/value heads in place (`enable_gqa`). The
+#: drafter's rows may move by an ulp (a library GEMM's rows and another attention path); the target's never
+PACK_KP = _S.get("DF2_PACK_KP") == "1"
+PACK_GQA = _S.get("DF2_PACK_GQA") == "1"
+PACK_TOPK = _S.get("DF2_PACK_TOPK") == "1"
+
+
 def forward_block_multi(module: "DFlash2Module", items: list) -> list:
     """The packed draft of parallel requests (server/slots.py): `forward_block` for several slots' blocks over ONE module, each NVFP4
     projection one call over every block's rows (rows are independent of their neighbours on the
@@ -937,7 +957,8 @@ def forward_block_multi(module: "DFlash2Module", items: list) -> list:
         answers: dict = {}
         for key, js in groups.items():
             xs = [reqs[j][1] for j in js]
-            y = _lin(torch.cat(xs, dim=0) if len(xs) > 1 else xs[0], module.w[key])
+            w = module.w[key] if isinstance(key, str) else module.convs[key[1]][key[2]].kp
+            y = _lin(torch.cat(xs, dim=0) if len(xs) > 1 else xs[0], w)
             for j, part in zip(js, y.split([x.shape[0] for x in xs], dim=0)):
                 answers[j] = part
         nxt = []
