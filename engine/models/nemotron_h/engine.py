@@ -53,7 +53,7 @@ ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
 #: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
-DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
+DENSE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 
 
 #: SPD-125: the EXL3 projections of decode steps and verify blocks on tools/fn_kernels.dense_rows (each trellis
