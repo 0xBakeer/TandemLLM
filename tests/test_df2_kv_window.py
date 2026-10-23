@@ -1,4 +1,4 @@
-"""SPD-177: the draft's context K/V committed for a window of rows (engine/drafters/dflash2.py `KV_WINDOW`),
+"""SPD-177: the draft's context K/V committed for a window of rows (engine/drafters/dflash2.py `kv_window_for`),
 CPU only, with the pool's bookkeeping fallback (no driver: pages counted, nothing mapped).
 
   * below the threshold (the window plus one page of rows) the window buffer commits exactly the pages a
@@ -7,7 +7,9 @@ CPU only, with the pool's bookkeeping fallback (no driver: pages counted, nothin
     page) and the account follows; the rows a draft reads stay committed;
   * a resume or a restore at an earlier row (`_fit_window`) lowers the floor and the window is mapped
     again; `trim` below the floor lowers it too; a snapshot past the threshold holds only the rows
-    from the floor and restores into the same rows.
+    from the floor and restores into the same rows;
+  * the window is the family's choice: a DFlash2 drafter is built without it unless its family asks
+    (only the 27B's builds do), and an explicit QWEN38_DF2_KV_WINDOW wins either way.
 
 Run: python tests/test_df2_kv_window.py
 """
@@ -149,6 +151,49 @@ def test_an_anchor_copied_from_below_the_floor_resumes_as_not_real():
     assert d._ckb.floor == (30000 - 10240) // 8192 * 8192 == 16384
     assert bool((d._cs[30000 - 2048:30000] == 1).all()), "the window rows came back real"
     assert not bool(d._cs[16384:24576].any()), "rows the first session had given back stay not real"
+
+
+
+def test_the_window_is_the_27bs_choice_and_off_for_any_other_build():
+    import ast
+    import inspect
+    from engine import settings
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    assert settings.KNOBS["DF2_KV_WINDOW"][0] == "0", "the shared default stays off"
+    assert inspect.signature(D.DFlash2Drafter.__init__).parameters["kv_window"].default is False
+    assert "kv_window" not in inspect.signature(__import__("engine.drafters.dspark", fromlist=["x"])
+                                                .DSparkDrafter.__init__).parameters
+    env = os.environ.pop("QWEN38_DF2_KV_WINDOW", None)
+    try:
+        assert D.kv_window_for(False) is False and D.kv_window_for(True) is True
+        for v, want in (("0", False), ("1", True)):
+            os.environ["QWEN38_DF2_KV_WINDOW"] = v
+            assert D.kv_window_for(False) is want and D.kv_window_for(True) is want, v
+    finally:
+        os.environ.pop("QWEN38_DF2_KV_WINDOW", None)
+        if env is not None:
+            os.environ["QWEN38_DF2_KV_WINDOW"] = env
+    # who asks: every `kv_window=True` in the engine is a build in the 27B's package
+    asks = []
+    for dp, _, fs in os.walk(os.path.join(root, "engine")):
+        for f in fs:
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(dp, f)
+            for node in ast.walk(ast.parse(open(path, encoding="utf-8").read())):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg == "kv_window" and not (isinstance(kw.value, ast.Constant)
+                                                          and kw.value.value is False):
+                            asks.append(os.path.relpath(path, root))
+    assert asks and all(a.startswith(os.path.join("engine", "models", "qwen3_5") + os.sep)
+                        for a in asks), asks
+    own = os.path.join("engine", "models", "qwen3_5") + os.sep
+    for dp, _, fs in os.walk(os.path.join(root, "engine", "models")):
+        for f in fs:
+            rel = os.path.relpath(os.path.join(dp, f), root)
+            if f.endswith(".py") and not rel.startswith(own) and "__pycache__" not in rel:
+                assert "kv_window" not in open(os.path.join(dp, f), encoding="utf-8").read(), rel
 
 
 if __name__ == "__main__":

@@ -49,6 +49,8 @@ def drafter(w):
     d._cv = torch.zeros(L, HKV, MAXLEN, HD)
     d._psync, d.ctx_len, d._tap_i, d._tap_rows = [], 0, 0, []
     d._want = {0: 0}
+    d._cs = d._ckb = d._cvb = None             # SPD-177's window off: no row stamps
+    d.kv_window = False
     return d
 
 

@@ -1019,7 +1019,12 @@ DEFER_SYNC = _S.get("DF2_DEFER_SYNC") == "1"
 #: and their addresses point at one shared page instead (a cache's copy of them reads and writes
 #: garbage, never a fault); a resume or a restore at an earlier row maps its window again (rows it lost
 #: read as zeros). Below the threshold (window + a page) nothing is given back: the path of today.
-KV_WINDOW = _S.get("DF2_KV_WINDOW") == "1"
+#: The family that builds the drafter says whether (`DFlash2Drafter(kv_window=)`, off unless it asks);
+#: an explicit QWEN38_DF2_KV_WINDOW=0/1 wins over it.
+def kv_window_for(family: bool) -> bool:
+    if _S.is_set("DF2_KV_WINDOW"):
+        return _S.get("DF2_KV_WINDOW") == "1"
+    return bool(family)
 
 
 def _window_buffer(kvp):
@@ -1088,7 +1093,7 @@ def _window_buffer(kvp):
 
         def need_bytes(self, rows: int) -> int:
             rows = max(0, min(int(rows), self.max_rows))
-            lo = max(self.floor, self._floor_for(rows)) if KV_WINDOW else self.floor
+            lo = max(self.floor, self._floor_for(rows))
             return sum(1 for p in self._pages_for(lo, self.round_rows(rows))
                        if p not in self.handles) * self.page
 
@@ -1184,8 +1189,9 @@ class DFlash2Drafter(Drafter):
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
                  max_len: int | None = None, path: str = "greedy", tap: str = "entry",
-                 block: int | None = None):
-        """`block` overrides the checkpoint's block length.
+                 block: int | None = None, kv_window: bool = False):
+        """`block` overrides the checkpoint's block length. `kv_window`: the family's choice of SPD-177's
+        draft KV window (`kv_window_for`; the environment's explicit value wins).
 
         The module is non-causal inside its block and its rotary is absolute, so nothing in the
         architecture ties it to eight: a block of sixteen is sixteen rows, fifteen of them masked,
@@ -1195,6 +1201,7 @@ class DFlash2Drafter(Drafter):
         slot. `tools/train_dflash2.py --block` trains one.
         """
         self.eng = eng
+        self.kv_window = kv_window_for(kv_window)
         # Which hidden state `target_layer_ids` names. The header argues for the residual stream
         # ENTERING the listed layer, the reference's capture point. The alternative
         # reading -- the listed layer's OUTPUT -- is one index along, and it is the one thing the
@@ -1260,7 +1267,7 @@ class DFlash2Drafter(Drafter):
         self._ck: torch.Tensor | None = None
         self._psync: list = []        # SPD-161: syncs not yet written (`DEFER_SYNC`), in order
         self._cv: torch.Tensor | None = None
-        self._ckb = self._cvb = None   # SPD-177: the window buffers behind _ck / _cv (KV_WINDOW)
+        self._ckb = self._cvb = None   # SPD-177: the window buffers behind _ck / _cv (kv_window)
         self._cs: torch.Tensor | None = None   # SPD-177: a row's K/V is real (1) or not (0)
         self._partial = False          # SPD-177: a resume uncovered rows that are not real
         self.ctx_len = 0
@@ -1338,7 +1345,7 @@ class DFlash2Drafter(Drafter):
             # SRV-307: the target's paged set grows and trims this arm's context KV with its own
             # rows (a context row is a position the target has forwarded)
             from engine import kvpool as _kvp
-            if KV_WINDOW and cfg.sliding_window:
+            if self.kv_window and cfg.sliding_window:
                 # SPD-177: the window of rows a draft reads, committed; the rest given back
                 W = _window_buffer(_kvp)
                 self._ckb = pages.add(W(shape, 2, torch.bfloat16, self.eng.device, owner=pages.owner,

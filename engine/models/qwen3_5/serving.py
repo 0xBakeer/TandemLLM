@@ -47,7 +47,7 @@ def serve(a, ctx) -> dict:
         from engine.router import MergedRouter, VERIFY_MS, VERIFY_MS_NVFP4
         table = VERIFY_MS_NVFP4 if a.nvfp4 or _S.get("NVFP4") else VERIFY_MS
         head = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, max_len=a.max_len,
-                              path=a.dflash2_path, draft_head=a.draft_head)
+                              path=a.dflash2_path, draft_head=a.draft_head, kv_window=True)
         head.tree_temp = a.df2_temp
         head._build()
         # `--budget` counts nodes INCLUDING the anchor, because that is what the measured curve is
@@ -68,7 +68,7 @@ def serve(a, ctx) -> dict:
         from engine.drafters.dflash2 import DFlash2Drafter
         drafter = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=a.dflash2_blocks,
                                  path=a.dflash2_path, draft_head=a.draft_head,
-                                 max_len=a.max_len)
+                                 max_len=a.max_len, kv_window=True)
         drafter._build()
         # The block width, not `--depth`, is what this drafter proposes per verify pass.
         a.depth = (drafter.cfg.block_size - 1) * a.dflash2_blocks
@@ -159,10 +159,10 @@ def make_lenrouter(a, eng, max_len: int, ctx, corpus_from=None):
         small = NoArm(eng, block=8)
     else:
         small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
-                               draft_head=a.draft_head, max_len=max_len, block=8)
+                               draft_head=a.draft_head, max_len=max_len, block=8, kv_window=True)
         small._build()
     large = DFlash2Drafter(eng, a.dflash2_ckpt16, blocks=1, path=a.dflash2_path,
-                           draft_head=a.draft_head, max_len=max_len, block=16)
+                           draft_head=a.draft_head, max_len=max_len, block=16, kv_window=True)
     large._build()
     if a.tree:
         # The combined configuration: each arm is the lookup drafter's tree merged with that
