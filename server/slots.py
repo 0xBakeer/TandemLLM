@@ -490,7 +490,8 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
 
 
 #: SPD-161: how long a barrier waiter sleeps while a decoding slot holds the GPU turn; it is woken before
-#: that by the round's end, a submit, or a slot leaving decode (`Pool.wake`); `QSE_PARALLEL_BUSY_WAIT_MS`
+#: that by the round's end or a slot leaving decode (`Pool.wake`). A submit wakes nobody: the slot whose
+#: submit completes the set runs the round itself (`QSE_PARALLEL_BUSY_WAIT_MS`)
 BUSY_WAIT_S = float(os.environ.get("QSE_PARALLEL_BUSY_WAIT_MS", "20") or 20) / 1e3
 
 #: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
@@ -715,7 +716,6 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
     with meet.cv:
         meet.pending[slot_index] = req
         meet.stats["submitted"] += 1
-        meet.cv.notify_all()            # a waiter asleep on a busy turn (BUSY_WAIT_S) looks again
         dec = pool.decoding()
         now = time.monotonic()
         last = meet._last_submit.get(slot_index)
