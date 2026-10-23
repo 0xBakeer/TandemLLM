@@ -67,6 +67,37 @@ def test_the_27b_family_takes_64_rows_on_exl3_and_32_otherwise():
     assert adapter.Qwen38Engine.joint_policy is adapter.joint_policy
 
 
+
+def test_spd163_the_joint_cut_keeps_each_tree_within_a_cap():
+    """A family's tree cap (`joint_policy` "tree_cap", the joint graphs' row bucket): no tree keeps more
+    than the cap, every kept set stays ancestor-closed, and without a cap the cut is what it was."""
+    from engine.tree import DraftTree
+    import random
+    rng = random.Random(3)
+
+    def tree(n):
+        parents, path = [-1], [0]
+        for i in range(1, n):
+            path = path[:rng.randint(1, len(path))]
+            parents.append(path[-1])
+            path.append(i)
+        t = DraftTree([0] * n, parents)
+        t.scores = [0.0] + [rng.random() for _ in range(n - 1)]
+        return t
+    for _ in range(50):
+        trees = [tree(rng.randint(2, 30)) for _ in range(rng.randint(2, 8))]
+        cap = rng.choice((4, 8, 12, 16))
+        keeps = slots.joint_cut(trees, 64, cap)
+        assert all(len(k) <= cap for k in keeps), (cap, [len(k) for k in keeps])
+        assert sum(len(k) for k in keeps) <= 64
+        for t, k in zip(trees, keeps):
+            assert 0 in k and all(t.parents[i] in k for i in k if i)
+        assert slots.joint_cut(trees, 64) == slots.joint_cut(trees, 64, None)
+    from engine.models.qwen3_5 import joint_graphs as JG
+    assert [JG.t_pad(e, 64) for e in (2, 3, 4, 5, 8)] == [16, 16, 16, 12, 8]
+    assert JG.t_pad(8, 32) == 4
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())

@@ -577,6 +577,9 @@ def grouped_offsets(items: list, facs: list, rows: list, out_row: int) -> list:
 
 
 _ONE_TABLES: dict = {}
+#: SPD-163: set while a joint graph is captured: `record(offsets, items, facs)` returns the device row the
+#: launch reads (the graph's static table) and keeps what a replay patches (the row counts, the parities)
+TABLE_REC = None
 
 
 def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head_k: int,
@@ -608,7 +611,9 @@ def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head
     inv = torch.empty(E * H, tp, tp, dtype=f32, device=dev)
     qkd = torch.empty(E * H, tp, tp, dtype=f32, device=dev)
     beta_s = torch.empty(E * H, tp, dtype=f32, device=dev)
-    out = torch.empty(rows[-1], H, dv, dtype=i0["mixed"].dtype, device=dev)
+    # a joint graph pads its blocks (rows past an engine's T are never written): zeros keep the pad rows finite
+    out = (torch.zeros if TABLE_REC is not None else torch.empty)(rows[-1], H, dv, dtype=i0["mixed"].dtype,
+                                                                  device=dev)
     if i0.get("fac_out") is not None:
         facs = [it["fac_out"] for it in items]
     else:
@@ -618,11 +623,19 @@ def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head
         facs = [(kk_all[e], de_all[e], gc_all[e]) for e in range(E)]
     kk0, de0, gc0 = facs[0]
     p0 = i0["pend"]
+    rec = TABLE_REC
+    if rec is not None:
+        # a joint graph's capture (engine/models/qwen3_5/joint_graphs.py): this layer's row of the
+        # graph's own table, which the graph copies from pinned memory as its first node
+        table = rec.record(grouped_offsets(items, facs, rows, H * dv), items, facs)
+        reuse = None
     prev = reuse.get("table") if reuse is not None else None
     guard = (tuple(Ts), _elem_off(items[-1]["mixed"], i0["mixed"]), _elem_off(items[-1]["state"], i0["state"]),
              _elem_off(facs[-1][0], kk0)) if reuse is not None else None
     hit = prev is not None and prev[0] == guard
-    if hit:
+    if rec is not None:
+        pass
+    elif hit:
         table = prev[1]
         reuse["hits"] = reuse.get("hits", 0) + 1
     elif E == 1:

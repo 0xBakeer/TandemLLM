@@ -121,9 +121,22 @@ def joint_policy(eng) -> dict:
     pack): 64 rows. NVFP4 sends 33-64 rows to its prefill tile (tools/nvfp4_linear.py) and FP8 is not
     proven: 32 rows there. The cut is the auto one either way (it stays within the cap)."""
     exl3 = getattr(getattr(eng, "w", None), "exl3_source", None) is not None
-    return {"max_rows": 64 if exl3 else 32, "cut": "auto"}
+    pol = {"max_rows": 64 if exl3 else 32, "cut": "auto"}
+    from engine.models.qwen3_5 import joint_graphs as JG
+    if JG.ON:
+        # SPD-163: a joint cut keeps each tree within the graphs' row bucket, so the pass is graphed
+        pol["tree_cap"] = JG.t_pad
+    return pol
 
 
+def _joint_multi(items: list) -> list:
+    """SPD-163: the 27B's joint verify pass (`server/app.py _run_round`): from a CUDA graph where it
+    qualifies (engine/models/qwen3_5/joint_graphs.py, QWEN38_JOINT_GRAPHS), else the eager pass."""
+    from engine.models.qwen3_5 import joint_graphs as JG
+    return JG.forward_tree_multi(items)
+
+
+Qwen38Engine.forward_tree_multi = staticmethod(_joint_multi)
 Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
 Qwen38Engine.tree_batchable = tree_batchable
 Qwen38Engine.joint_policy = joint_policy

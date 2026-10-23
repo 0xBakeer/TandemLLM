@@ -1373,10 +1373,13 @@ def _run_round(meet) -> None:
         groups = meet.batches()
         meet.pending.clear()
     for group in groups:
+        tc = getattr(meet, "tree_cap", None)
+        cap = tc(len(group), meet.max_rows) if tc is not None and len(group) > 1 else None
         if (len(group) > 1 and all(r.tree is not None for r in group)
-                and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows)):
-            # one cut over every slot's whole tree, to the pass's row budget
-            keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows)
+                and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows
+                     or (cap is not None and any(r.rows > cap for r in group)))):
+            # one cut over every slot's whole tree, to the pass's row budget (and the family's tree cap)
+            keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows, cap)
             for r, keep in zip(group, keeps):
                 if len(keep) < len(r.tree.tokens):
                     t = r.tree_cut = r.tree.subset(keep)
@@ -11076,6 +11079,9 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
         meet.timing = timing
+        # SPD-163: the family's per-tree cap of a joint cut (`joint_policy` "tree_cap": a callable of the
+        # block count and the row cap), e.g. the row bucket of its joint graphs
+        meet.tree_cap = pol.get("tree_cap")
     dmeet = None
     if meet is not None and a.parallel_draft == "on" and a.drafter == "lenrouter":
         # the packed draft: the decoding slots' draft calls in one pass over the drafter

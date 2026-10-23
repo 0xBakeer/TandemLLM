@@ -452,14 +452,16 @@ class DraftReq:
 SHARES = {2: 16, 3: 10, 4: 8}
 
 
-def joint_cut(trees: list, max_rows: int) -> list[set]:
+def joint_cut(trees: list, max_rows: int, cap: int | None = None) -> list[set]:
     """One cut over several slots' trees: each slot keeps its anchor and its best node, then nodes
     are admitted best-first by score across all the trees (each with its ancestors, so a kept set
     stays ancestor-closed) while the total stays at or under `max_rows`. A slot whose text the
-    drafters read well (a copy) keeps more of its tree than one whose candidates are weak. Returns
+    drafters read well (a copy) keeps more of its tree than one whose candidates are weak. `cap`
+    (SPD-163, a family's `joint_policy` "tree_cap"): no tree keeps more than `cap` nodes. Returns
     each tree's kept node indices."""
     keep = [{0} for _ in trees]
     used = len(trees)
+    big = cap if cap is not None else max_rows
 
     def path(g, i):
         out, j = [], i
@@ -472,7 +474,7 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
         if len(t.tokens) > 1 and used < max_rows:
             best = max(range(1, len(t.tokens)), key=lambda i: t.scores[i])
             p = path(g, best)
-            if used + len(p) <= max_rows:
+            if used + len(p) <= max_rows and len(keep[g]) + len(p) <= big:
                 keep[g].update(p)
                 used += len(p)
     order = sorted(((-t.scores[i], g, i) for g, t in enumerate(trees) for i in range(1, len(t.tokens))),
@@ -483,7 +485,7 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
         if i in keep[g]:
             continue
         p = path(g, i)
-        if used + len(p) <= max_rows:
+        if used + len(p) <= max_rows and len(keep[g]) + len(p) <= big:
             keep[g].update(p)
             used += len(p)
     return keep
@@ -529,6 +531,8 @@ class Meeting:
         # SPD-163: a family's own `auto_n` / `shares` (`joint_policy`), unless QSE_PARALLEL_AUTO_N is set
         self.auto_n = AUTO_JOINT_N if auto_n is None or AUTO_JOINT_N_SET else int(auto_n)
         self.shares = dict(shares or {})
+        # SPD-163: a family's per-tree cap for an E-block joint cut (`joint_policy` "tree_cap"), or None
+        self.tree_cap = None
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken

@@ -582,6 +582,7 @@ class Qwen38Engine:
         self._tree_start = 0
         self._tree_is_chain = False
         self._gv = None               # set while a graph-safe verify body is being run/captured
+        self._jg = None               # SPD-163: this engine's static buffers in a joint graph's body
         self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
         self.graphs_off = False       # True: every verify eager, no graph pool (a side slot's choice)
         self.picks = None             # the last tree verify's argmax, when a graph took it
@@ -1671,7 +1672,7 @@ class Qwen38Engine:
             o, fac = yield "gdn", p, dict(
                 mixed=mixed, conv_state=self.state.conv[i], a_raw=a, b_raw=b, state=s_in,
                 window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
-                anc=tree.anc_incl, pend=pend, fac_out=fac_out, store=store)
+                anc=tree.anc_incl, pend=pend, fac_out=fac_out, store=store, eng=self, slot=i)
         else:
             o, fac, _ = verify_mixer(
                 mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
@@ -1734,11 +1735,21 @@ class Qwen38Engine:
             rr = self._rope_rows
             cos, sin = self.rope(positions) if rr is None else rr
             q, k = self.apply_rope(q, k, cos, sin)
-        kk, vv = self.kv.append(layer, k, v, start)
-        from tools.attn_kernels import decode_attention
-        bm = self.tree.anc_incl
-        ks, vs = self.kv.scales(layer, start + T)
-        o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
+        if self._jg is not None:
+            # SPD-163, a joint graph: `attention`'s graph-safe statements (the scatter at the static
+            # slots, the whole cache, the start and the length from the device)
+            from tools.attn_kernels import decode_attention_dev
+            jg = self._jg
+            i = self.kv.slot[layer]
+            self.kv.k[i].index_copy_(2, jg.slots, k.to(self.kv.k.dtype))
+            self.kv.v[i].index_copy_(2, jg.slots, v.to(self.kv.v.dtype))
+            o = decode_attention_dev(q, self.kv.k[i], self.kv.v[i], jg.lenp, self.tree.anc_incl, jg.max_lc)
+        else:
+            kk, vv = self.kv.append(layer, k, v, start)
+            from tools.attn_kernels import decode_attention
+            bm = self.tree.anc_incl
+            ks, vs = self.kv.scales(layer, start + T)
+            o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
         o = o.transpose(1, 2).reshape(B, T, -1)
         o = o * torch.sigmoid(gate)
         out = yield "lin", f"{p}.self_attn.o_proj", o.reshape(B * T, -1)
@@ -1765,12 +1776,15 @@ class Qwen38Engine:
         returns the logits."""
         cfg = self.cfg
         T = tokens.numel()
-        self.kv.ensure(start + T)                # SRV-307
+        jg = self._jg
+        if jg is None:
+            self.kv.ensure(start + T)            # SRV-307 (a joint graph's rows are ensured before its replay)
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())
         s0 = start + self.pos_delta
-        positions = s0 + self.tree.depths
+        # SPD-163: in a joint graph the positions are a static buffer, filled before each replay
+        positions = jg.pos if jg is not None else s0 + self.tree.depths
         use_state = self.state.primed
         n = cfg.num_hidden_layers
         if FUSED_ADDNORM and FUSED["norm"]:
@@ -2109,60 +2123,67 @@ def forward_tree_multi(items: list) -> list:
         for eng, tokens, parents, start in items:
             sts.append(eng._tree_begin(tokens, parents, start))
             gens.append(eng._forward_steps(tokens, start))
-        reqs = [next(g) for g in gens]
-        eng0 = items[0][0]
-        gdn_pass: dict = {}          # SPD-163: the grouped GDN launch's table and check, per engine set
-        done: list = [None] * len(gens)
-        live = list(range(len(gens)))
-        while live:
-            groups: dict = {}
-            for j in live:
-                kind, name, _ = reqs[j]
-                groups.setdefault((kind, name), []).append(j)
-            answers: dict = {}
-            for (kind, name), js in groups.items():
-                xs = [reqs[j][2] for j in js]
-                if kind == "gdn":
-                    # SPD-163: per-engine payloads, not rows to join (`_run_gdn`), one table a pass
-                    for j, r in zip(js, _run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
-                        answers[j] = r
-                    continue
-                if len(xs) == 1:
-                    answers[js[0]] = _run_request(eng0, kind, name, xs[0])
-                    continue
-                # the MLP, the head and the add-norms take [1, T, H] (their row axis is 1), the
-                # projections [T, H]; a tuple payload (SPD-163: the row-wise steps) is joined part by part
-                dim = 1 if kind in ("mlp", "head", "addnorm") else 0
-                if isinstance(xs[0], tuple):
-                    joined = tuple(torch.cat([x[k] for x in xs], dim=dim) for k in range(len(xs[0])))
-                    sizes = [x[0].shape[dim] for x in xs]
-                else:
-                    joined = torch.cat(xs, dim=dim)
-                    sizes = [x.shape[dim] for x in xs]
-                if kind == "gated":
-                    # the gated norm's rows are a head's; its output projection's rows are a token's
-                    heads = eng0.cfg.linear_num_value_heads
-                    sizes = [n // heads for n in sizes]
-                out = _run_request(eng0, kind, name, joined)
-                if isinstance(out, tuple):
-                    parts = list(zip(*(o.split(sizes, dim=dim) for o in out)))
-                else:
-                    parts = out.split(sizes, dim=dim)
-                for j, part in zip(js, parts):
-                    answers[j] = part
-            nxt = []
-            for j in live:
-                try:
-                    reqs[j] = gens[j].send(answers[j])
-                    nxt.append(j)
-                except StopIteration as fin:
-                    done[j] = fin.value
-            live = nxt
+        done = joint_steps(items[0][0], gens)
         return [eng._tree_end(st, lg) for (eng, *_), st, lg in zip(items, sts, done)]
     except BaseException:
         for eng, *_ in items:
             eng._tree_abort()
         raise
+
+
+def joint_steps(eng0, gens: list) -> list:
+    """`forward_tree_multi`'s loop: run the engines' step generators, each request for the same weight as
+    one call over every engine's rows; returns each generator's value (its logits). The joint graphs
+    (engine/models/qwen3_5/joint_graphs.py) capture the same loop."""
+    reqs = [next(g) for g in gens]
+    gdn_pass: dict = {}          # SPD-163: the grouped GDN launch's table and check, per engine set
+    done: list = [None] * len(gens)
+    live = list(range(len(gens)))
+    while live:
+        groups: dict = {}
+        for j in live:
+            kind, name, _ = reqs[j]
+            groups.setdefault((kind, name), []).append(j)
+        answers: dict = {}
+        for (kind, name), js in groups.items():
+            xs = [reqs[j][2] for j in js]
+            if kind == "gdn":
+                # SPD-163: per-engine payloads, not rows to join (`_run_gdn`), one table a pass
+                for j, r in zip(js, _run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
+                    answers[j] = r
+                continue
+            if len(xs) == 1:
+                answers[js[0]] = _run_request(eng0, kind, name, xs[0])
+                continue
+            # the MLP, the head and the add-norms take [1, T, H] (their row axis is 1), the
+            # projections [T, H]; a tuple payload (SPD-163: the row-wise steps) is joined part by part
+            dim = 1 if kind in ("mlp", "head", "addnorm") else 0
+            if isinstance(xs[0], tuple):
+                joined = tuple(torch.cat([x[k] for x in xs], dim=dim) for k in range(len(xs[0])))
+                sizes = [x[0].shape[dim] for x in xs]
+            else:
+                joined = torch.cat(xs, dim=dim)
+                sizes = [x.shape[dim] for x in xs]
+            if kind == "gated":
+                # the gated norm's rows are a head's; its output projection's rows are a token's
+                heads = eng0.cfg.linear_num_value_heads
+                sizes = [n // heads for n in sizes]
+            out = _run_request(eng0, kind, name, joined)
+            if isinstance(out, tuple):
+                parts = list(zip(*(o.split(sizes, dim=dim) for o in out)))
+            else:
+                parts = out.split(sizes, dim=dim)
+            for j, part in zip(js, parts):
+                answers[j] = part
+        nxt = []
+        for j in live:
+            try:
+                reqs[j] = gens[j].send(answers[j])
+                nxt.append(j)
+            except StopIteration as fin:
+                done[j] = fin.value
+        live = nxt
+    return done
 
 
 # the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.
