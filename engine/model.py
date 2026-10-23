@@ -172,6 +172,11 @@ GDN_AB = _S.get("GDN_AB") == "1"
 #: GDN gated norm before its output projection -- once for every engine's rows; each is one program a row,
 #: so a row's bits are its own (0: once per engine)
 JOINT_ROWWISE = _S.get("JOINT_ROWWISE") != "0"
+#: SPD-163: a joint verify pass runs the GDN recurrence of every engine's tree block (the fused WY path at
+#: a 16-row tile) as one launch pair, each engine's program the lone kernels' statements on its own
+#: tensors (tools/gdn_wy_kernels.py `wy_recurrence_grouped`); blocks it does not take run alone (0: every
+#: engine its own launches, as before)
+JOINT_GDN = _S.get("JOINT_GDN") == "1"
 #: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call. Off by default: a window's
 #: partial chunk alone (<= EXL3_CHUNK_UNTIL rows) takes the skinny kernel and inside the joined call the
 #: slab, and NVFP4's 1,024-row chunks take the v2 tile alone and dequant + cuBLAS joined, so a row's bits
@@ -1660,15 +1665,23 @@ class Qwen38Engine:
             fac_out = (fac[0][i], fac[1][i], fac[2][i])
             pend = (other[0][i], other[1][i], other[2][i], self._prows, self._pn)
         s_in, s_out = self.state.S[i], None
-        o, fac, _ = verify_mixer(
-            mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
-            a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
-            s_in,
-            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
-            value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
-            head_v=cfg.linear_value_head_dim,
-            window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
-            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
+        if JOINT_GDN:
+            # SPD-163: the recurrence of every engine's block in one launch pair where they fit
+            # (`_run_gdn`), else this engine's own `verify_mixer` call, the statement below
+            o, fac = yield "gdn", p, dict(
+                mixed=mixed, conv_state=self.state.conv[i], a_raw=a, b_raw=b, state=s_in,
+                window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
+                anc=tree.anc_incl, pend=pend, fac_out=fac_out, store=store)
+        else:
+            o, fac, _ = verify_mixer(
+                mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+                a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
+                s_in,
+                key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
+                value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
+                head_v=cfg.linear_value_head_dim,
+                window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
+                out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
         self.trace.factors[layer] = fac
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
         if JOINT_ROWWISE:
@@ -2038,6 +2051,35 @@ def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
     return linear(x, eng.w.proj(name))
 
 
+def _run_gdn(eng, name: str, xs: list) -> list:
+    """SPD-163: the `gdn` requests of a joint pass (`_gdn_verify_steps`, QWEN38_JOINT_GDN): one grouped
+    WY launch pair when every block fits it (tools/gdn_wy_kernels.py `grouped_ok`), else each engine's
+    own `verify_mixer` call, the lone statement. Returns per request (o, factors)."""
+    from tools.gdn_verify_kernels import WY, WY_FUSED, WY_FUSED_MAXT, WY_MAXT, verify_mixer
+    cfg = eng.cfg
+    conv_w = eng.w.norm(f"{name}.linear_attn.conv1d.weight").squeeze(1)
+    a_log, dt_bias = eng.w.norm(f"{name}.linear_attn.A_log"), eng.w.norm(f"{name}.linear_attn.dt_bias")
+    H, dk, dv = cfg.linear_num_value_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim
+    if len(xs) > 1 and WY and WY_FUSED and min(WY_MAXT, WY_FUSED_MAXT) >= 16:
+        from tools import gdn_wy_kernels as G
+        items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
+                      state=x["state"].reshape(H, dk, dv)) for x in xs]
+        if G.grouped_ok(items):
+            return G.wy_recurrence_grouped(items, key_heads=cfg.linear_num_key_heads, value_heads=H,
+                                           head_k=dk, head_v=dv, conv_w=conv_w, a_log=a_log,
+                                           dt_bias=dt_bias, key_dim=cfg.key_dim)
+    out = []
+    for x in xs:
+        o, fac, _ = verify_mixer(
+            x["mixed"], x["conv_state"], conv_w, x["a_raw"], x["b_raw"], a_log, dt_bias, x["state"],
+            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads, value_heads=H, head_k=dk,
+            head_v=dv, window=x["window"], depths=x["depths"], max_depth=x["max_depth"],
+            out_state=None, pend=x["pend"], store_state=x["store"], fac_out=x["fac_out"],
+            anc=x["anc"])
+        out.append((o, fac))
+    return out
+
+
 def forward_tree_multi(items: list) -> list:
     """Verify the tree blocks of several engines -- sequence slots over ONE copy of the weights --
     with every projection's weights read once for all of them (parallel requests, lockstep rounds).
@@ -2073,6 +2115,11 @@ def forward_tree_multi(items: list) -> list:
             answers: dict = {}
             for (kind, name), js in groups.items():
                 xs = [reqs[j][2] for j in js]
+                if kind == "gdn":
+                    # SPD-163: per-engine payloads, not rows to join (`_run_gdn`)
+                    for j, r in zip(js, _run_gdn(eng0, name, xs)):
+                        answers[j] = r
+                    continue
                 if len(xs) == 1:
                     answers[js[0]] = _run_request(eng0, kind, name, xs[0])
                     continue
