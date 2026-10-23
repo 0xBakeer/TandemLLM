@@ -302,17 +302,20 @@ def _greedy(cfg, w, prompt, n):
     return out
 
 
-def _alone(cfg, w, prompt, full, n, think=None):
+def _alone(cfg, w, prompt, full, n, think=None, sampler=None, sampled_tree=False):
     eng = _engine(cfg, w)
     _setup([eng], [OracleTree(full)])
     _teardown()                     # one slot: no pool, the loop as it always ran
+    app.STATE["sampled_tree"] = sampled_tree
     with torch.no_grad():
-        return list(app.generate_stream(torch.tensor(prompt), n, set(), think=think))
+        return list(app.generate_stream(torch.tensor(prompt), n, set(), think=think, sampler=sampler))
 
 
-def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32, thinks=None):
+def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32, thinks=None, samplers=None,
+              sampled_tree=False):
     engines = [_engine(cfg, w) for _ in prompts]
     pool = _setup(engines, [OracleTree(f) for f in fulls], cut=cut, max_rows=max_rows)
+    app.STATE["sampled_tree"] = sampled_tree
     outs: dict = {}
     errs: list = []
     go = threading.Barrier(len(prompts))
@@ -324,7 +327,8 @@ def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32, thinks=None):
                 with app.LOCK:
                     with torch.no_grad():
                         outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set(),
-                                                           think=thinks[i] if thinks else None))
+                                                           think=thinks[i] if thinks else None,
+                                                           sampler=samplers[i] if samplers else None))
             else:
                 s = pool.slots[i]
                 slots.bind(s)
@@ -333,7 +337,8 @@ def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32, thinks=None):
                 try:
                     with torch.no_grad():
                         outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set(),
-                                                           think=thinks[i] if thinks else None))
+                                                           think=thinks[i] if thinks else None,
+                                                           sampler=samplers[i] if samplers else None))
                     ctx = app.STATE["last_ctx"]
                     assert ctx[-len(outs[i]):] == outs[i], "the slot's own published context"
                 finally:

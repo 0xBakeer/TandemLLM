@@ -712,7 +712,9 @@ class Pool:
 
     def report(self) -> dict:
         limit, why = self.limit()
-        return {"n": self.n, "running": self.running(), "decoding": self.decoding(),
+        # SPD-201: a slot the round runner decodes (phase "runner") is decoding too
+        dec = [s.index for s in self.slots if s.phase in ("decode", "runner")]
+        return {"n": self.n, "running": self.running(), "decoding": dec,
                 "requested": self.requested, "max_running": limit, "max_running_reason": why,
                 "slots": [s.report() for s in self.slots], **self.stats,
                 "turn": self.turn.report() if self.turn is not None else None,

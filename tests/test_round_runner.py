@@ -91,6 +91,59 @@ def test_a_passive_reasoning_block_goes_with_the_runner_and_follows_the_slot_loo
     return f"{k} requests with a passive block: alone texts, block states equal ({seen} opened)"
 
 
+def test_seeded_requests_through_the_runner_write_what_they_write_alone():
+    """Seeded sampled requests (the det sampled tree, keyed draws) through the runner: each its alone text."""
+    from engine.sample import Sampler
+    cfg = T.tiny_config()
+    w = T.FakeWeights(cfg, seed=5)
+    n, k = 40, 3
+    prompts = [[(3 + 7 * i + 11 * j) % 96 + 1 for j in range(10 + 3 * i)] for i in range(k)]
+    refs = [T._greedy(cfg, w, p, n) for p in prompts]
+    fulls = [p + r for p, r in zip(prompts, refs)]
+    mk = lambda i: Sampler(temperature=1.0, top_p=0.95, top_k=20, seed=1000 + i)
+    alone = [T._alone(cfg, w, p, f, n, sampler=mk(i), sampled_tree="det")
+             for i, (p, f) in enumerate(zip(prompts, fulls))]
+    R.RUNNER = None
+    together, _, phases = T._together(cfg, w, prompts, fulls, n, samplers=[mk(i) for i in range(k)],
+                                      sampled_tree="det")
+    bad = [i for i in range(k) if together[i] != alone[i]]
+    assert not bad, [(i, alone[i], together[i]) for i in bad]
+    assert R.RUNNER is not None and R.RUNNER.stats["tasks"] >= k - 1, R.RUNNER.stats
+    return f"{k} seeded requests: each its alone text ({R.RUNNER.stats['joint']} joint passes)"
+
+
+class _Lane:
+    """Slot 0's side lane with one waiting job: `serve` runs it (counted) at the holder's safe point."""
+
+    def __init__(self):
+        self.jobs, self.served = [object()], []      # a job always waits: every safe point serves one
+
+    def serve(self, where):
+        self.served.append(where)
+        return 1
+
+
+def test_slot_0_goes_with_the_runner_and_its_lane_is_served_between_rounds():
+    from server import app
+    lane = _Lane()
+    real = T._setup
+
+    def setup(*a, **kw):
+        pool = real(*a, **kw)
+        app.STATE["lane"] = lane
+        return pool
+    T._setup = setup
+    try:
+        out = _check(2)
+    finally:
+        T._setup = real
+    st = R.RUNNER.stats
+    assert set(lane.served) == {"decode"}, lane.served
+    assert st["lane_jobs"] >= st["rounds"] - 1 and "lane" not in R.SKIPS, (st, R.SKIPS)
+    assert 2 in R.RUNNER.stats["joint_hist"], R.RUNNER.stats["joint_hist"]
+    return out + f"; slot 0's lane served at {st['lane_jobs']} of {st['rounds']} round starts"
+
+
 def test_a_block_that_can_be_closed_keeps_the_slot_loop():
     from engine.spec import ThinkBudget
     R.SKIPS.clear()

@@ -20,8 +20,9 @@ its order, so the tokens are the ones the slot's own loop would have written: th
 tests/test_round_runner.py (texts equal on the CPU) and the board's seeded byte identity.
 
 Not taken (the slot keeps its own loop, `why_not` names the reason, /health counts it): a supervisor, a
-probe, log-probabilities, a reasoning budget or stall arms (something that can close the block), the side
-lane, a request without a tree drafter. A passive reasoning block (`ThinkBudget` with neither) is followed
+probe, log-probabilities, a reasoning budget or stall arms (something that can close the block), a request
+without a tree drafter. Slot 0's side lane (server/preempt.py) is served by the runner at each round's start,
+the safe point the slot loop serves it at (no proposal in flight). A passive reasoning block (`ThinkBudget` with neither) is followed
 as the slot loop follows it: `inside` masks the penalties, every block is observed. QSE_ROUND_RUNNER=1
 turns it on.
 """
@@ -47,7 +48,7 @@ def why_not(*, sup, probe, lpr, think, ahead, drafter, lane, turn) -> str | None
            else "logprobs" if lpr is not None
            else "think_budget" if think is not None and (think.budget or think.arms_cfg is not None)
            else "launched" if ahead is not None else "no_drafter" if drafter is None
-           else "lane" if lane is not None else "no_turn" if turn is None else None)
+           else "no_turn" if turn is None else None)
     if why is not None:
         SKIPS[why] = SKIPS.get(why, 0) + 1
     return why
@@ -84,7 +85,9 @@ class Runner:
         self.lock = threading.Lock()
         self.cv = threading.Condition(self.lock)
         self.thread = None
-        self.stats = {"rounds": 0, "tasks": 0, "joint": 0, "plain": 0, "errors": 0}
+        self.stats = {"rounds": 0, "tasks": 0, "joint": 0, "plain": 0, "errors": 0, "lane_jobs": 0,
+                      # rounds by the slots in their verify pass (the concurrency proof: N rows a round)
+                      "joint_hist": {}}
         # host ms a round by phase (summed; `report`): the proposals to their drafts, the packed draft's
         # issue, the proposals' rest (it reads the draft back), the verify's issue, the walk (it reads the
         # pass back), the tails
@@ -165,6 +168,13 @@ class Runner:
         self.stats["rounds"] += 1
         t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
+        for t in tasks:
+            if t.slot.index == 0 and not t.done:
+                # slot 0's side lane at the round's safe point, as the slot loop serves it between blocks
+                self._bind(t)
+                lane = app.STATE.get("lane")
+                if lane is not None and lane.jobs:
+                    self.stats["lane_jobs"] += lane.serve("decode")
         self._collect = []
         for t in tasks:
             self._bind(t)
@@ -226,6 +236,8 @@ class Runner:
         from server import slots as slots_mod
         meet = self.pool.meeting
         group.sort(key=lambda t: t.slot.index)
+        h = self.stats["joint_hist"]
+        h[len(group)] = h.get(len(group), 0) + 1
         trees = [t.tree for t in group]
         if len(group) > 1 and meet is not None:
             tc = getattr(meet, "tree_cap", None)
