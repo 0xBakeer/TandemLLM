@@ -569,6 +569,9 @@ def _par_health() -> dict:
         out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
     rr = _round_runner.RUNNER
     out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
+    pool = dict.get(STATE, "pool")
+    pl = getattr(getattr(pool, "meeting", None), "planner", None)
+    out["planner"] = pl.report() if pl is not None and hasattr(pl, "report") else None   # SPD-187
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
     return out
@@ -6386,11 +6389,7 @@ def _par_brief() -> dict:
                        "request": s.owner if s.index else None} for s in pool.slots],
             "rounds": meet.get("rounds"), "joint_rounds": meet.get("joint_rounds"),
             "joint_hist": meet.get("joint_hist"), "timeouts": meet.get("timeouts"),
-            "admission": pool.admission.report() if pool.admission is not None else None,
-            # SPD-187: the round planner's measured periods and its buckets' rounds
-            "planner": (pool.meeting.planner.report() if pool.meeting is not None
-                        and getattr(pool.meeting, "planner", None) is not None
-                        and hasattr(pool.meeting.planner, "report") else None)}
+            "admission": pool.admission.report() if pool.admission is not None else None}
 
 
 def start_proxy(a) -> None:

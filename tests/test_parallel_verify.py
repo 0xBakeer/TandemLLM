@@ -506,6 +506,48 @@ def test_spd187_a_planned_round_keeps_each_requests_text():
         assert together[i] == alone[i], (i, alone[i], together[i])
 
 
+def test_spd187_the_online_planner_keeps_each_requests_text():
+    """The online planner (warm-up, measured periods, the prequential acceptance model, the hold zone's
+    accounting) choosing every round's bucket: the texts are each request's alone text, the model has learned
+    from the verified blocks and the report names the rows chosen."""
+    from engine.methods.accept_model import AcceptModel
+    from engine.methods.roundplan import RoundPlanner
+    from engine.methods.staircut import PriceModel
+    planners = []
+
+    class Planned(slots.Meeting):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            rp = RoundPlanner(PriceModel({1024: {"joint2": {4: 30.0, 8: 31.0, 16: 60.0}}}), buckets=(2, 4, 8),
+                              cap=lambda E: 16)
+            rp.mode, rp.explore, rp.nmin = "on", True, 2
+            rp.accept, rp.ref_T = AcceptModel(background=False), (lambda E: 4)
+            rp.snap = rp._freeze()
+            rp.force = lambda T: None
+            planners.append(rp)
+            self.planner, self.ctx_class = rp, (lambda n: 1024)
+            self.plan_keys, self.plan_last = [], None
+    keep = slots.Meeting
+    slots.Meeting = Planned
+    try:
+        cfg = tiny_config()
+        w = FakeWeights(cfg, seed=6)
+        n = 30
+        prompts = [[(5 + 7 * i + 13 * j) % 96 + 1 for j in range(9 + 4 * i)] for i in range(2)]
+        refs = [_greedy(cfg, w, p, n) for p in prompts]
+        fulls = [p + r for p, r in zip(prompts, refs)]
+        alone = [_alone(cfg, w, p, f, n) for p, f in zip(prompts, fulls)]
+        together, stats, _ = _together(cfg, w, prompts, fulls, n, cut="joint", max_rows=16)
+    finally:
+        slots.Meeting = keep
+    for i in range(2):
+        assert together[i] == alone[i], (i, alone[i], together[i])
+    rep = planners[-1].report()
+    # the periods come from the passes' CUDA events: on the CPU there are none, so the warm-up never ends here
+    assert rep["accept"]["blocks"] > 0 and rep["explore"], rep
+    return f"alone texts through the warm-up; the model learned {rep['accept']['blocks']} blocks"
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):
