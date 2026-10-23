@@ -245,6 +245,7 @@ KNOBS: dict[str, tuple] = {
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
     'EXL3_SILU_FUSED': ('0', 'tools/exl3_linear.py'),
+    'EXL3_FRAG': ('0', 'tools/exl3_linear.py'),
     'EXL3_MLP_BRIDGE': ('1', 'tools/exl3_linear.py'),
     'EXL3_STAGES': ('3', 'tools/exl3_linear.py'),
     'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),

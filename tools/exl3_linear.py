@@ -318,6 +318,20 @@ __device__ __forceinline__ void wht128(float& v0, float& v1, float& v2, float& v
 
 constexpr float RSQRT128 = 0.08838834764831845f;
 
+#ifndef EXL3_FRAG
+#define EXL3_FRAG 0
+#endif
+#if EXL3_FRAG
+// SPD-201: the rotated input in the mma's A-fragment order: a member's rows in groups of 16 (zero rows to a
+// multiple of 16), a group's K tiles in order, a tile's 32 lanes, a lane's a0..a3 of m16n8k16, so a lane's
+// operands are one 16-byte load. Only where the values sit moves.
+__device__ __forceinline__ size_t frag_off(int m, int k, int Kin) {
+    const int rg = m >> 4, r_hi = (m >> 3) & 1, r_lo = m & 7;
+    const int kt = k >> 4, k_hi = (k >> 3) & 1, t = (k >> 1) & 3, pr = k & 1;
+    return ((((((size_t)rg * (Kin >> 4) + kt) * 8 + r_lo) * 4 + t) * 2 + k_hi) * 2 + r_hi) * 2 + pr;
+}
+#endif
+
 // ------------------------------------------------------------------------------- input rotation
 // XH[g, m, :] = fp16( H(fp32(X[m, :]) * fp32(SUH[g, :])) / sqrt(128) ). grid (Kin/128/4, M, G), 4 warps.
 __global__ void __launch_bounds__(128) rot_in_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
@@ -372,6 +386,69 @@ __global__ void __launch_bounds__(128) rot_in_silu_kernel(const __nv_bfloat16* _
     uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
     *reinterpret_cast<uint2*>(XH + (size_t)m * Kin + k) = o;
 }
+
+#if EXL3_FRAG
+// rot_in_kernel's values in fragment order; grid (Kin/128/4, Mp, G): rows M..Mp-1 are zeros
+__global__ void __launch_bounds__(128) rot_in_frag_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const __half* __restrict__ SUH, __half* __restrict__ XH, int M, int Mp, int Kin) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int blk = blockIdx.x * 4 + warp;
+    if (blk * 128 >= Kin) return;
+    const int m = blockIdx.y, g = blockIdx.z;
+    const int k = blk * 128 + 4 * lane;
+    uint32_t w0 = 0u, w1 = 0u;
+    if (m < M) {
+        const uint2 xr = *reinterpret_cast<const uint2*>(X + (size_t)m * ldx + k);
+        const uint2 sr = *reinterpret_cast<const uint2*>(SUH + (size_t)g * Kin + k);
+        float v0 = __uint_as_float(xr.x << 16), v1 = __uint_as_float(xr.x & 0xffff0000u);
+        float v2 = __uint_as_float(xr.y << 16), v3 = __uint_as_float(xr.y & 0xffff0000u);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+        v0 *= __low2float(s01); v1 *= __high2float(s01); v2 *= __low2float(s23); v3 *= __high2float(s23);
+        wht128(v0, v1, v2, v3, lane);
+        __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+        __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+        w0 = *reinterpret_cast<uint32_t*>(&o01); w1 = *reinterpret_cast<uint32_t*>(&o23);
+    }
+    __half* xh = XH + (size_t)g * Mp * Kin;
+    *reinterpret_cast<uint32_t*>(xh + frag_off(m, k, Kin)) = w0;
+    *reinterpret_cast<uint32_t*>(xh + frag_off(m, k + 2, Kin)) = w1;
+}
+
+// rot_in_silu_kernel's values in fragment order; grid (Kin/128/4, Mp): rows M..Mp-1 are zeros
+__global__ void __launch_bounds__(128) rot_in_silu_frag_kernel(const __nv_bfloat16* __restrict__ Y, int ldy,
+        const __half* __restrict__ SUH, __half* __restrict__ XH, int M, int Kin) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int blk = blockIdx.x * 4 + warp;
+    if (blk * 128 >= Kin) return;
+    const int m = blockIdx.y;
+    const int k = blk * 128 + 4 * lane;
+    uint32_t w0 = 0u, w1 = 0u;
+    if (m < M) {
+        const uint2 gr = *reinterpret_cast<const uint2*>(Y + (size_t)m * ldy + k);
+        const uint2 ur = *reinterpret_cast<const uint2*>(Y + (size_t)m * ldy + Kin + k);
+        const uint2 sr = *reinterpret_cast<const uint2*>(SUH + k);
+        float gv[4] = {__uint_as_float(gr.x << 16), __uint_as_float(gr.x & 0xffff0000u),
+                       __uint_as_float(gr.y << 16), __uint_as_float(gr.y & 0xffff0000u)};
+        float uv[4] = {__uint_as_float(ur.x << 16), __uint_as_float(ur.x & 0xffff0000u),
+                       __uint_as_float(ur.y << 16), __uint_as_float(ur.y & 0xffff0000u)};
+        float v[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            const float sl = __bfloat162float(__float2bfloat16_rn(gv[e] / (1.0f + ::expf(-gv[e]))));
+            v[e] = __bfloat162float(__float2bfloat16_rn(sl * uv[e]));
+        }
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+        float v0 = v[0] * __low2float(s01), v1 = v[1] * __high2float(s01);
+        float v2 = v[2] * __low2float(s23), v3 = v[3] * __high2float(s23);
+        wht128(v0, v1, v2, v3, lane);
+        __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+        __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+        w0 = *reinterpret_cast<uint32_t*>(&o01); w1 = *reinterpret_cast<uint32_t*>(&o23);
+    }
+    *reinterpret_cast<uint32_t*>(XH + frag_off(m, k, Kin)) = w0;
+    *reinterpret_cast<uint32_t*>(XH + frag_off(m, k + 2, Kin)) = w1;
+}
+#endif
 
 // The MLP of a prefill slab in one pass between the two GEMMs, bit for bit rot_out (gate and up,
 // fp32 products -> bf16), ATen's silu and mul, and rot_in of the down projection: per row and
@@ -490,7 +567,11 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
     const int KT = Kin / 16;               // ldt: tiles a trellis row (a group member is a view)
     const int member = (cb >= b1) + (cb >= b2);
     const int M = min(16 * MT, Mtot - chunk * 16 * MT);
+#if EXL3_FRAG
+    const __half* xh = XH + (size_t)member * ((Mtot + 15) / 16 * 16) * Kin + (size_t)chunk * 16 * MT * Kin;
+#else
     const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 16 * MT * Kin;
+#endif
     Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 16 * MT * ldy)
               : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 16 * MT * ldy);
 
@@ -542,6 +623,14 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
     // the register path's operands, one K tile ahead
     uint32_t xn[MT][4];
     auto load_x = [&](int kt) {
+#if EXL3_FRAG
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            uint4 v = make_uint4(0u, 0u, 0u, 0u);
+            if (16 * a < M) v = __ldg(reinterpret_cast<const uint4*>(xh + (size_t)16 * a * Kin) + (size_t)kt * 32 + lane);
+            xn[a][0] = v.x; xn[a][1] = v.y; xn[a][2] = v.z; xn[a][3] = v.w;
+        }
+#else
         const int kk = kt * 16 + 2 * t;
 #pragma unroll
         for (int a = 0; a < MT; ++a) {
@@ -553,6 +642,7 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
             xn[a][2] = ra < M ? __ldg(pa + 4) : 0u;
             xn[a][3] = rb < M ? __ldg(pb + 4) : 0u;
         }
+#endif
     };
 
 #pragma unroll
@@ -728,7 +818,12 @@ void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tens
     TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
     TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
     TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense, K ", kb);
+#if EXL3_FRAG
+    const int M = y.size(0), Kin = xh.size(2), N = t.size(1) * 16;
+    TORCH_CHECK(xh.size(1) == (M + 15) / 16 * 16 && cfg != 0, "fragment-major xh [G, M to 16, Kin], a register cfg");
+#else
     const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+#endif
     const int ldt = t.stride(0) / t.stride(1);
     TORCH_CHECK(t.size(0) * 16 == Kin, "trellis K tiles vs Kin");
     TORCH_CHECK(N % 128 == 0 && Kin % 128 == 0, "N and Kin must be multiples of 128");
@@ -766,6 +861,36 @@ void exl3_rot_in_silu(torch::Tensor y, torch::Tensor suh, torch::Tensor xh) {
     rot_in_silu_kernel<<<grid, 128, 0, st>>>((const __nv_bfloat16*)y.data_ptr(), (int)y.stride(0),
         (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
 }
+
+#if EXL3_FRAG
+void exl3_rot_in_frag(torch::Tensor x, torch::Tensor suh, torch::Tensor xh) {
+    const at::cuda::OptionalCUDAGuard guard(x.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1, "x bf16 [M, Kin]");
+    TORCH_CHECK(suh.dtype() == torch::kHalf && suh.dim() == 2 && suh.is_contiguous(), "suh fp16 [G, Kin]");
+    const int M = x.size(0), Kin = x.size(1), G = suh.size(0), Mp = (M + 15) / 16 * 16;
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3 && xh.size(0) == G
+                && xh.size(1) == Mp && xh.size(2) == Kin, "xh fp16 [G, M to 16, Kin]");
+    TORCH_CHECK(Kin % 128 == 0 && suh.size(1) == Kin, "Kin");
+    dim3 grid((Kin / 128 + 3) / 4, Mp, G);
+    rot_in_frag_kernel<<<grid, 128, 0, st>>>((const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+        (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Mp, Kin);
+}
+
+void exl3_rot_in_silu_frag(torch::Tensor y, torch::Tensor suh, torch::Tensor xh) {
+    const at::cuda::OptionalCUDAGuard guard(y.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.dim() == 2 && y.stride(1) == 1, "y bf16 [M, 2 Kin]");
+    TORCH_CHECK(suh.dtype() == torch::kHalf && suh.dim() == 2 && suh.size(0) == 1 && suh.is_contiguous(), "suh fp16 [1, Kin]");
+    const int M = y.size(0), Kin = suh.size(1), Mp = (M + 15) / 16 * 16;
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.numel() == (int64_t)Mp * Kin, "xh fp16 [1, M to 16, Kin]");
+    TORCH_CHECK(Kin % 128 == 0 && y.size(1) == 2 * Kin, "shapes");
+    TORCH_CHECK(y.stride(0) % 4 == 0 && ((uintptr_t)y.data_ptr()) % 8 == 0, "y alignment");
+    dim3 grid((Kin / 128 + 3) / 4, Mp, 1);
+    rot_in_silu_frag_kernel<<<grid, 128, 0, st>>>((const __nv_bfloat16*)y.data_ptr(), (int)y.stride(0),
+        (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
+}
+#endif
 
 void exl3_mlp_bridge(torch::Tensor yg, torch::Tensor yu, torch::Tensor svg, torch::Tensor svu,
                      torch::Tensor suh, torch::Tensor xh) {
@@ -840,9 +965,30 @@ _CPP = (
     "void exl3_mlp_bridge(torch::Tensor yg, torch::Tensor yu, torch::Tensor svg, torch::Tensor svu, "
     "torch::Tensor suh, torch::Tensor xh);\n"
     "void exl3_rot_out(torch::Tensor yp, torch::Tensor svh, torch::Tensor y);\n"
-    "void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off);\n")
+    "void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off);\n"
+    "void exl3_rot_in_frag(torch::Tensor x, torch::Tensor suh, torch::Tensor xh);\n"
+    "void exl3_rot_in_silu_frag(torch::Tensor y, torch::Tensor suh, torch::Tensor xh);\n")
 
 _MOD = None
+_FRAG_MOD = None
+
+
+def _frag_module():
+    """The gemm and the input rotations compiled for fragment-major activations (EXL3_FRAG)."""
+    global _FRAG_MOD
+    if _FRAG_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        src = f"#define EXL3_ST {STAGES}\n#define EXL3_FRAG 1\n" + _CUDA
+        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
+        _FRAG_MOD = load_inline(name=f"qwen38_exl3_frag_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
+                                functions=["exl3_gemm", "exl3_rot_in_frag", "exl3_rot_in_silu_frag"],
+                                extra_cuda_cflags=["-O3", "-lineinfo",
+                                                   "-gencode=arch=compute_121a,code=sm_121a"],
+                                verbose=False)
+    return _FRAG_MOD
 
 
 def _module():
@@ -1148,6 +1294,12 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     assert y.dtype == torch.bfloat16 and y.dim() == 2 and y.shape[1] == 2 * w.K and w.suh.shape[0] == 1
     if y.stride(1) != 1 or y.stride(0) % 4 or y.data_ptr() % 8:
         y = y.contiguous()
+    M = y.shape[0]
+    c = _frag_cfg(w, M)
+    if c is not None:
+        xf = torch.empty(1, (M + 15) // 16 * 16, w.K, dtype=torch.float16, device=y.device)
+        _frag_module().exl3_rot_in_silu_frag(y, w.suh, xf)
+        return _frag_gemm(xf, w, M, c, y.device)
     xh = torch.empty(1, y.shape[0], w.K, dtype=torch.float16, device=y.device)
     _module().exl3_rot_in_silu(y, w.suh, xh)
     return exl3_matmul(None, w, xh=xh, M=y.shape[0], dev=y.device)
@@ -1207,6 +1359,12 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
     # slab at any row count (its rows <= 32 run on tools/fn_kernels.dense)
     if M > CHUNK_UNTIL or w.kb >= 10:
         return _slab_matmul(x, w, out, xh=xh)
+    if xh is None and cfg is None and S is None and wk is None:
+        c = _frag_cfg(w, M)
+        if c is not None:
+            xf = torch.empty(w.suh.shape[0], (M + 15) // 16 * 16, w.K, dtype=torch.float16, device=dev)
+            _frag_module().exl3_rot_in_frag(x, w.suh, xf)
+            return _frag_gemm(xf, w, M, c, dev, out)
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
     wk_ = tile["wk"] if wk is None else wk
@@ -1226,6 +1384,58 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
             xs = xh[:, r0:r1].contiguous()
         c = cfg if cfg is not None else (tile["cfg"] if r1 - r0 <= 16 else tile["cfg2"])
         mod.exl3_gemm(xs, w.t, w.svh, out[r0:r1], w.kb, c, wk_, S_, w.bounds[0], w.bounds[1], 1)
+    return out
+
+
+# SPD-201: a call of SKINNY_MAX+1 .. FRAG_MAX rows on the row grid reads its activations in the mma's fragment
+# order (one 16-byte load a lane, `frag_off`), written so by the input rotation: the same values, the same
+# instructions on them, the same bits (`check_frag`). 0 = the row-major activations.
+FRAG = _S.get("EXL3_FRAG") == "1"
+FRAG_MAX = 64
+
+
+def _frag_cfg(w: EXL3Block, M: int) -> int | None:
+    """The register-path cfg a fragment-major call of M rows takes, or None (the usual path)."""
+    if not (FRAG and ROWGRID and SKINNY_MAX < M <= min(FRAG_MAX, CHUNK_UNTIL) and w.kb < 10):
+        return None
+    c = pick(w.tile_n, w.K, w.kb)["cfg2"]
+    return c if c in (2, 3) else None
+
+
+def _frag_gemm(xf: torch.Tensor, w: EXL3Block, M: int, c: int, dev, out: torch.Tensor | None = None) -> torch.Tensor:
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = pick(w.tile_n, w.K, w.kb)
+    _frag_module().exl3_gemm(xf, w.t, w.svh, out, w.kb, c, tile["wk"], tile["S"], w.bounds[0], w.bounds[1],
+                             (M + SKINNY_MAX - 1) // SKINNY_MAX)
+    return out
+
+
+def check_frag(rows=(33, 40, 47, 48, 56, 60, 63, 64)) -> list[str]:
+    """The fragment-major path against the row-major one, bit for bit, on the 27B's projection shapes
+    (plain, a group of two members, and the down projection's silu input). A GPU."""
+    global FRAG
+    out = []
+    keep = FRAG
+    try:
+        for N, K, kb in ((10240, 5120, 4), (5120, 6144, 4), (5120, 17408, 5), (5120, 5120, 3)):
+            w = random_block(N, K, kb, seed=N + K + kb)
+            g = torch.Generator(device="cpu").manual_seed(N)
+            x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+            y = (torch.randn(max(rows), 2 * K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+            bad = []
+            for M in rows:
+                FRAG = False
+                ref, refd = exl3_matmul(x[:M], w), exl3_down_silu(y[:M], w)
+                FRAG = True
+                got, gotd = exl3_matmul(x[:M], w), exl3_down_silu(y[:M], w)
+                if not (torch.equal(ref, got) and torch.equal(refd, gotd)):
+                    bad.append(M)
+            out.append(f"{N}x{K} K{kb}: " + ("rows 33..64 the row-major bits (plain and silu)" if not bad
+                                              else f"DIFFER at {bad}"))
+            assert not bad
+    finally:
+        FRAG = keep
     return out
 
 
