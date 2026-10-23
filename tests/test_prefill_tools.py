@@ -40,3 +40,8 @@ def test_the_adapter_gives_the_engine_cache_state():
     import engine.models.qwen3_5.adapter  # noqa: F401
     from engine.model import Qwen38Engine
     assert callable(getattr(Qwen38Engine, "cache_state", None))
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

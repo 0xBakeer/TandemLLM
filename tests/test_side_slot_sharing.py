@@ -58,3 +58,8 @@ def test_no_head_yet_leaves_the_slot_to_read_its_own(monkeypatch):
     e2 = E()
     serving._share_draft_head(e2)
     assert df2._EXL3_HEADS == {}
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

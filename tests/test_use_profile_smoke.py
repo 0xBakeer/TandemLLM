@@ -75,3 +75,8 @@ def test_two_empty_answers_fail_with_the_body_in_the_log():
 def test_an_answer_in_the_reasoning_field_counts():
     r = _run([{"content": "", "reasoning_content": "ready"}])
     assert r.returncode == 0 and "(in reasoning) ready" in r.stdout
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

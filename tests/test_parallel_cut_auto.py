@@ -49,3 +49,8 @@ def test_an_unbatchable_block_stays_alone():
     m.pending = {0: R(4), 1: R(4), 2: R(1, batchable=False)}
     g = m.batches()
     assert sorted(len(x) for x in g) == [1, 2]
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())
