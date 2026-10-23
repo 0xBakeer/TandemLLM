@@ -294,6 +294,13 @@ class ExecReader:
                 return data
         return None
 
+    def unwatch(self) -> None:
+        """Stop watching the client's socket: the answer is complete, and a client that leaves
+        now changes nothing."""
+        if self.watch is not None:
+            self.poll.unregister(self.watch)
+            self.watch = None
+
     def _client_gone(self) -> bool:
         try:
             peek = self.watch.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)

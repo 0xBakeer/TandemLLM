@@ -598,7 +598,7 @@ def stream_chat():
 def stream_app():
     """A dev server with the answers a preview app streams or holds: /events (SSE, one event every
     0.3 s; ?n=N ends after N, else until the client goes), /poll?s=S (a long-poll held S seconds),
-    /page?kb=K (an HTML page of K KiB with an absolute script URL), /chunked.js (a module sent in
+    /poll?s=S&linger=L (closed L seconds after its answer), /page?kb=K (an HTML page of K KiB with an absolute script URL), /chunked.js (a module sent in
     chunks), /hang (never answers), /stall (Content-Length 1000, 10 bytes, then nothing).
     `state` counts the event streams still open."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -640,6 +640,9 @@ def stream_app():
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                self.wfile.flush()
+                # ?linger=S: the app closes S seconds after its answer, after the client has it
+                time.sleep(float(q.get("linger", 0)))
             elif u.path == "/page":
                 body = (b'<html><head><title>t</title></head><body><script src="/app.js"></script>'
                         + b"x" * (int(q.get("kb", 1)) * 1024) + b"</body></html>")
@@ -776,6 +779,9 @@ def test_a_long_poll_answers_when_the_app_does_and_a_client_that_leaves_ends_it(
         st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/poll?s=1.2")
         assert st == 200 and body == {"event": "done"} and h["Content-Length"] == "16"
         assert 1.1 < time.monotonic() - t0 < 5
+        # the answered poll's relay ends on its own (the app closes after its answer), whether the
+        # client closed its connection before that or after: chatd ends none of it
+        assert until(lambda: boxes.box(cid).busy == 0, 5) and boxes.ended == [], boxes.ended
         # the client leaves while the app holds the request: noticed before the app answers
         s, f = raw_get(c, f"/conversations/{cid}/sandbox/ports/{port}/poll?s=20")
         assert until(lambda: boxes.box(cid).busy == 1)
@@ -784,6 +790,27 @@ def test_a_long_poll_answers_when_the_app_does_and_a_client_that_leaves_ends_it(
         f.close()
         assert until(lambda: boxes.box(cid).busy == 0, 3)
         assert boxes.ended == ["exec-relay-2"], boxes.ended
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_a_client_that_closes_after_its_answer_leaves_the_relay_to_end_on_its_own():
+    """#120: the client read its whole answer and closed before the app closed its side; chatd's
+    drain took that for a client that left and ended the relay, so a loaded runner saw a relay ended
+    that was about to end by itself. The drain now waits for the app's close whatever the client does."""
+    c = stream_chat()
+    app, _ = stream_app()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        boxes = c.svc.sandboxes
+        for i in range(3):
+            st, body, _ = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/poll?s=0.1&linger=0.5")
+            assert st == 200 and body == {"event": "done"}, (st, body)
+            assert until(lambda: boxes.box(cid).busy == 0, 5), "busy stays above 0"
+        assert boxes.ended == [] and not boxes.live, (boxes.ended, boxes.live)
     finally:
         app.shutdown()
         c.close()

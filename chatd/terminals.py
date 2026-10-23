@@ -596,7 +596,11 @@ def _port_head(handler, status: int, ctype: str | None, headers: tuple, length: 
 
 
 def _drain(reader: ExecReader, wait: float) -> None:
-    """Up to `wait` s for the relay to end on its own, what it still writes dropped."""
+    """Up to `wait` s for the relay to end on its own, what it still writes dropped. The client
+    has its whole answer, so its leaving does not cut the wait short: a client that read the answer
+    and closed before the app closed its side had the relay ended for nothing, the app's close then
+    racing chatd's kill (a loaded runner, #120)."""
+    reader.unwatch()
     deadline = time.monotonic() + wait
     try:
         while reader.read(max(0.0, deadline - time.monotonic())):
