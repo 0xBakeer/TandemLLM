@@ -606,6 +606,12 @@ def test_10_page_check():
     srv, url = _serve_dir(d)
     before = set(_pids_with("laya-drive-chrome-"))
     try:
+        # #120: Chrome's first start on a machine reads its files from the disk, 6 to 19 s on a fresh
+        # runner and 35 s with the suite's other jobs beside it; every start after it took 0.1 to
+        # 0.6 s. One start first, so the bound below measures a start and not that read
+        t_warm = time.monotonic()
+        ld.Browser(url + "/timer.html", headless=True, need_state=False).close()
+        print(f"    Chrome's first start and page: {time.monotonic() - t_warm:.1f} s")
         t0 = time.monotonic()
         code, rep = _page([url + "/timer.html", "--shots", d, "--step", "click:text=Start",
                            "--step", "wait:1200", "--step", "read:document.getElementById('t').textContent",
@@ -626,8 +632,9 @@ def test_10_page_check():
             assert os.path.getsize(os.path.join(os.getcwd(), w["shot"])) > 1000, w
         assert os.path.exists(os.path.join(d, "after-pause.png"))
         assert {c.get("id") for c in rep["controls"]} >= {"start", "pause", "name"}, rep["controls"]
-        # the keyring wait (25 s at the first network request) is gone: the start and the first
-        # load of a page on 127.0.0.1 take a few seconds on a loaded runner, the whole check more
+        # the keyring wait (25 s at the first network request, on every start) is gone: a start and
+        # the first load of a page on 127.0.0.1 take a few seconds on a loaded runner, the whole
+        # check more
         assert rep["start_seconds"] < 20, rep["start_seconds"]
 
         laya = FakeLaya(policy=lambda c, st: "failure")
