@@ -103,6 +103,8 @@ def manifest(eng=None) -> Manifest:
 #: In the joint pass it is verified on the tree path, as every tree block there (`_tree_begin`), so the
 #: exactness rule is the joint pass's own (docs/exactness.md, Parallel requests). 0: the old rule.
 JOINT_CHAINS = _S.get("JOINT_CHAINS") != "0"
+#: SPD-199: the joint pass's row cap below the proven one (`joint_policy`); 0: the proven one
+JOINT_MAX_ROWS = max(0, int(_S.get("JOINT_MAX_ROWS") or 0))
 _tree_batchable_alone = Qwen38Engine.tree_batchable
 
 
@@ -119,9 +121,15 @@ def joint_policy(eng) -> dict:
     skinny kernel takes 33-64 rows as adjacent 32-row chunks of the same arithmetic, and an 8 x 8-row joint
     pass gave each engine's rows bit for bit its own eager verify (2026-10-23, the ThinkingCap EXL3 4.0
     pack): 64 rows. NVFP4 sends 33-64 rows to its prefill tile (tools/nvfp4_linear.py) and FP8 is not
-    proven: 32 rows there. The cut is the auto one either way (it stays within the cap)."""
+    proven: 32 rows there. The cut is the auto one either way (it stays within the cap).
+
+    SPD-199: QWEN38_JOINT_MAX_ROWS lowers the cap (never past the proven one). On the EXL3 4.0 pack a
+    projection's 33-64 rows cost far more than its 32 (10240 x 5120: 86 us at 32 rows, 141 at 48, 143 at 64;
+    the cost stays without the tensor-core step, tools/exl3_tall.py), so 48 buys nothing over 64: the arms
+    are 32 and 64."""
     exl3 = getattr(getattr(eng, "w", None), "exl3_source", None) is not None
-    pol = {"max_rows": 64 if exl3 else 32, "cut": "auto"}
+    proven = 64 if exl3 else 32
+    pol = {"max_rows": min(proven, JOINT_MAX_ROWS) if JOINT_MAX_ROWS else proven, "cut": "auto"}
     from engine.models.qwen3_5 import joint_graphs as JG
     if JG.ON:
         # SPD-163: a joint cut keeps each tree within the graphs' row bucket, so the pass is graphed

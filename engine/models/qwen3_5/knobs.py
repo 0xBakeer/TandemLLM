@@ -11,6 +11,9 @@ KNOBS: dict[str, tuple] = {
     'JOINT_GRAPHS_MAX': ('12', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
     'JOINT_GRAPHS_AFTER': ('3', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-199: the joint pass's row cap, at most the proven one (64 on EXL3, 32 else); empty: the proven one.
+    # The EXL3 4-bit projections cost ~1.6x more from 33 rows on (tools/exl3_tall.py), so 32 is the other arm
+    'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),
     # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
     'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json
