@@ -186,7 +186,8 @@ def test_attn_prep_and_gate_mul():
 
 def test_dense_reference_rows_and_groups():
     out = []
-    for N, Kin, kb in ((16384, 2560, 5), (2560, 6144, 5), (640, 2560, 3), (2560, 2560, 4)):
+    for N, Kin, kb in ((16384, 2560, 5), (2560, 6144, 5), (640, 2560, 3), (2560, 2560, 4), (2560, 2560, 7),
+                       (5120, 2560, 7)):
         w = X.random_block(N, Kin, kb, seed=N + kb)
         x = _x(32, Kin, 51, 0.5)
         y = K.dense(x, w)
@@ -217,7 +218,8 @@ def test_dense_rows_are_the_one_row_calls():
     bytes: Bolt's and the 27B's shapes, M = 1..32 (two row groups), clusters and 8 warps, a group, the fp32 head."""
     out = []
     for N, Kin, kb in ((18560, 4096, 4), (4096, 8192, 4), (1024, 4096, 4), (4096, 1024, 4), (34816, 5120, 5),
-                       (5120, 17408, 5), (2560, 6144, 5), (4096, 4096, 2), (4096, 4096, 35)):
+                       (5120, 17408, 5), (2560, 6144, 5), (4096, 4096, 2), (4096, 4096, 35), (4096, 4096, 7),
+                       (2560, 6144, 7)):
         w = X.random_block(N, Kin, kb, seed=N + kb)
         x = _x(32, Kin, 61, 2.0)
         one = torch.cat([K.dense(x[m:m + 1], w) for m in range(32)])
@@ -314,7 +316,7 @@ def test_moe_reads_only_selected_experts():
 
 def test_moe_every_k():
     out = []
-    for kb in (2, 3, 4, 5, 6, 8):
+    for kb in (2, 3, 4, 5, 6, 7, 8):
         bank, blocks = _bank(12, (kb,), 6 if kb != 6 else 5, seed=100 * kb)
         x = _x(8, H, kb, 0.5)
         ids, w = _ids(8, 12, 10, kb)
