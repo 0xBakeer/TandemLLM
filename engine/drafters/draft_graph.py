@@ -27,6 +27,8 @@ block and the target's head only; anything else takes the eager call.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -285,6 +287,10 @@ class PackedDraftGraph:
         from engine.drafters.dflash2 import PACK_BATCH
         if PACK_BATCH:
             spans = (max(spans),)                   # one padded width for every block
+            if HOST_ONE and temp is None:
+                # the tree's log-probabilities in the graph too (what each block's tree computes alone
+                # after its walk: the same op on the same tensor), so the host's one copy carries them
+                temp = float(self.ds[0].tree_temp)
         key = (spans, temp, VerifyGraphs.signature())
         got = self.graphs.get(key)
         if got is None:
@@ -292,24 +298,63 @@ class PackedDraftGraph:
                 self.graphs.clear()
             self.stream.wait_stream(torch.cuda.current_stream())
             projs = [] if LOG_PROJ else None
-            body = ((lambda pj: _packed_body_batched(list(self.ds), self.scal, spans[0], temp, pj))
-                    if PACK_BATCH else
-                    (lambda pj: _packed_body(list(self.ds), self.scal, list(spans), temp, pj)))
+            inner = ((lambda pj: _packed_body_batched(list(self.ds), self.scal, spans[0], temp, pj))
+                     if PACK_BATCH else
+                     (lambda pj: _packed_body(list(self.ds), self.scal, list(spans), temp, pj)))
+            one = PACK_BATCH and temp is not None and HOST_ONE
+
+            def body(pj):
+                res = inner(pj)
+                if not one:
+                    return res, None
+                # every block's walk blob and log-probabilities in two tensors, for one copy a round
+                from engine.drafters.dflash2 import DFlash2Module
+                return res, (torch.stack([DFlash2Module._blob(c, sc) for c, sc, _ in res]),
+                             torch.stack([lp for _, _, lp in res]))
             with torch.cuda.stream(self.stream):
                 body([] if LOG_PROJ else None)
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(g, pool=self.pool, stream=self.stream):
-                out = body(projs)
-            got = self.graphs[key] = (g, out, projs)
+                out, both = body(projs)
+            got = self.graphs[key] = (g, out, projs, _HostBlobs(*both) if both is not None else None)
             self.stats["captured"] += 1
         got[0].replay()
         self.stats["replayed"] += 1
         if got[2]:
             for d, pj in zip(self.ds, got[2]):
                 d._pred_proj = pj               # this replay's buffers (the round logger reads them)
-        return got[1]
+        hb = got[3]
+        if hb is None:
+            return got[1]
+        hb.fetch()
+        return [r + ((hb, e),) for e, r in enumerate(got[1])]
+
+
+class _HostBlobs:
+    """SPD-201: a packed draft's walk blobs and log-probabilities brought to the host in one copy behind
+    the replay; the first block that reads waits once, the others read what is there. The values are the
+    ones each block's own `walk_host_logp` copies."""
+
+    def __init__(self, blob: torch.Tensor, logp: torch.Tensor):
+        self.blob, self.logp = blob, logp
+        self.hb = torch.empty(blob.shape, dtype=blob.dtype, pin_memory=True)
+        self.hl = torch.empty(logp.shape, dtype=logp.dtype, pin_memory=True)
+        self.ev = torch.cuda.Event()
+        self.lists = None
+
+    def fetch(self) -> None:
+        self.hb.copy_(self.blob, non_blocking=True)
+        self.hl.copy_(self.logp, non_blocking=True)
+        self.ev.record()
+        self.lists = None
+
+    def get(self, e: int) -> tuple[list, list]:
+        if self.lists is None:
+            self.ev.synchronize()
+            self.lists = (self.hb.tolist(), self.hl.tolist())
+        return self.lists[0][e], self.lists[1][e]
 
 
 _PACKED: dict = {}
@@ -324,6 +369,9 @@ PACKED_GRAPH = True
 #: (`_pred_proj`, [L, r]) for the round logger
 from engine.settings import SETTINGS as _S  # noqa: E402
 LOG_PROJ = _S.get("ROUND_LOG_LATTICE") == "1"
+#: SPD-201: the batched packed draft's walk blobs and log-probabilities for every block in one copy and one
+#: wait (`_HostBlobs`), not a copy, a sync and two launches a block. 0: each block's own
+HOST_ONE = os.environ.get("QWEN38_DF2_PACK_HOST1", "1") == "1"
 
 
 def packed_draft(reqs: list, graph: bool | None = None) -> list:

@@ -1757,7 +1757,13 @@ class DFlash2Drafter(Drafter):
                 cand, scores = out[0], out[1]
                 self._lattice = (cand, scores)
                 self._logp_host = None
-                if len(out) > 2 and logp:
+                if len(out) > 3:
+                    # the packed draft's one copy for every block (draft_graph `_HostBlobs`)
+                    blob, lp = out[3][0].get(out[3][1])
+                    toks, self._cand_host = m._walk_blob(blob, *cand.shape)
+                    if logp:
+                        self._logp_host = lp
+                elif len(out) > 2 and logp:
                     toks, self._cand_host, self._logp_host = m.walk_host_logp(cand, scores, out[2])
                 else:
                     toks, self._cand_host = m.walk_host(cand, scores)
