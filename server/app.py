@@ -62,6 +62,7 @@ from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noq
                              answer_items, parse_tool_calls, rewrite_native, schema_types,
                              strip_blocks)
 from server import compat  # noqa: E402
+from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
@@ -1376,9 +1377,12 @@ def _run_round(meet) -> None:
     with meet.cv:
         groups = meet.batches()
         meet.pending.clear()
+    from server import roundlog
+    rlog = roundlog.LOG
     for group in groups:
         tc = getattr(meet, "tree_cap", None)
         cap = tc(len(group), meet.max_rows) if tc is not None and len(group) > 1 else None
+        pre_rows = [r.rows for r in group] if rlog is not None else None
         if (len(group) > 1 and all(r.tree is not None for r in group)
                 and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows
                      or (cap is not None and any(r.rows > cap for r in group)))):
@@ -1395,6 +1399,9 @@ def _run_round(meet) -> None:
         if meet.timing:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
+        ev = rlog.begin() if rlog is not None else None
+        rep = getattr(group[0].eng, "joint_graphs_report", None) if rlog is not None else None
+        g0 = (rep() or {}).get("replayed") if callable(rep) else None
         try:
             if len(group) == 1:
                 r = group[0]
@@ -1406,6 +1413,13 @@ def _run_round(meet) -> None:
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
+        if rlog is not None and err is None:
+            # SPD-187: the pass, timed by its events (read once done, on a later round)
+            g1 = (rep() or {}).get("replayed") if callable(rep) else None
+            rid = rlog.round(group, ev, cap=cap, pre_rows=pre_rows,
+                             graphed=None if g0 is None or g1 is None else g1 > g0)
+            for r in group:
+                r.rid = rid
         if meet.timing and err is None:
             torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1e3
@@ -1469,12 +1483,16 @@ def _run_draft_round(meet) -> None:
             if meet.timing:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
+            from server import roundlog
+            ev = roundlog.LOG.begin() if roundlog.LOG is not None else None
             try:
                 if len(part) == 1:
                     outs = [part[0].drafter.graph_run(part[0].anchor, part[0].pos0)]
                 else:
                     outs = packed_draft([(r.drafter, r.anchor, r.pos0) for r in part])
                 err = None
+                if roundlog.LOG is not None:
+                    roundlog.LOG.draft(part, ev)
             except BaseException as exc:                                # noqa: BLE001
                 outs, err = [None] * len(part), exc
             if meet.timing and err is None:
@@ -1515,6 +1533,15 @@ def _draft_meet(drafter, anchor: int, pos0: int):
     return req.out
 
 
+class _LoneReq:
+    """SPD-187: a lone verify as the round logger reads a round's block."""
+
+    __slots__ = ("slot", "rows", "start")
+
+    def __init__(self, slot: int, rows: int, start: int):
+        self.slot, self.rows, self.start = slot, rows, start
+
+
 def _verify_tree(pool, eng, block, parents, pos, tree=None):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms, tree): `ms` None when it verified alone (the
@@ -1535,6 +1562,7 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
                               tree=tree if meet.cut != "share" else None)
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
+    pool.last_rid[i] = req.rid                            # SPD-187: the round logger's id
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
 
 
@@ -1878,12 +1906,22 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 else:
                     block = h2d(tree.tokens, torch.long, prompt.device)
                     tvt = time.perf_counter()
+                    rlog = _roundlog.LOG
+                    pre_n, rid = len(tree.tokens), None
+                    rev = rlog.begin() if rlog is not None else None
                     if par is None:
                         lg, vms = eng.forward_tree(block, tree.parents, start=pos), None
                     else:
                         lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree)
                         t_post = time.perf_counter()
                         _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
+                    if rlog is not None:
+                        # SPD-187: a lone pass is this slot's round (E = 1); a barrier's by the slot that ran it
+                        if vms is not None:      # it went through the round's barrier: the runner logged it
+                            rid = par.last_rid.get(_par_index())
+                        else:
+                            rid = rlog.round([_LoneReq(_par_index() if par is not None else 0,
+                                                       len(tree.tokens), pos)], rev)
                     if pen is not None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
@@ -1905,6 +1943,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = walk.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
+                    if rlog is not None:
+                        rlog.slot(rid, _par_index() if par is not None else 0,
+                                  (par.last_joint.get(_par_index(), 1) if vms is False else 1),
+                                  pos, tree, path, pre_n, drafter)
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
                         _par_note(par, "accept", f"joint{par.last_joint.get(_par_index(), 1)}"

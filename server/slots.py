@@ -413,13 +413,14 @@ class VerifyReq:
     and `ms`; the submitter reads them when it holds the turn again."""
 
     __slots__ = ("slot", "eng", "tokens", "parents", "start", "rows", "batchable", "out", "ms",
-                 "error", "joint", "tree", "tree_cut")
+                 "error", "joint", "tree", "tree_cut", "rid")
 
     def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True,
                  tree=None):
         self.slot, self.eng, self.tokens, self.parents, self.start = slot, eng, tokens, parents, start
         self.tree = tree                   # the slot's whole tree, for a joint cut (`joint_cut`)
         self.tree_cut = None               # the tree the round verified, when it cut it
+        self.rid = None                    # SPD-187: the round logger's id of the pass that verified it
         self.rows = len(parents)
         self.batchable = bool(batchable)
         self.out = None
@@ -603,6 +604,7 @@ class Pool:
         # until 0.8.2, where it read as a limit ("max_running 2" on three slots, 2026-10-13)
         self.stats = {"side_grants": 0, "slot0_grants": 0, "peak_running": 0}
         self.last_joint: dict = {}             # slot -> blocks in its last joint pass
+        self.last_rid: dict = {}           # SPD-187: slot -> its last joint round's logger id
         # 0.8.2: the slots `--parallel` asked for, and why fewer were built (the memory floor at
         # load, `_build_side_slots`); None when all of them were
         self.requested = len(self.slots)

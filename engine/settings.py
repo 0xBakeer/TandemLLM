@@ -41,6 +41,7 @@ KNOBS: dict[str, tuple] = {
     'SKINNY_TILES_C': (None, 'tools/nvfp4_skinny.py'),
     'SKINNY_TILES_WIDE_B': (None, 'tools/nvfp4_skinny.py'),
     'BLOCKING_SYNC': ('0', 'server/app.py'),
+    'ROUND_LOG': (None, 'server/roundlog.py'),
     'COMMIT_IN_VERIFY': ('0', 'engine/model.py'),
     'CORPUS': ('', 'engine/drafters/ngram.py'),
     'DECODE_ATTN': ('0', 'engine/model.py'),
