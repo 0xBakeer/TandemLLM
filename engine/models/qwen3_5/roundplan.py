@@ -22,6 +22,8 @@ PRICES = _S.get("ROUND_PLAN_PRICES") or ""
 BUCKETS = tuple(int(x) for x in (_S.get("ROUND_PLAN_BUCKETS") or "4,8,16").split(","))
 #: SPD-187: where the planner's learned state is kept ('' : ~/.tandemllm/roundplan/<pack>.<host>.json)
 STATE_PATH = _S.get("ROUND_PLAN_STATE") or ""
+#: SPD-187: rounds between two saves of the learned state
+SAVE_EVERY = int(_S.get("ROUND_PLAN_SAVE_EVERY") or 512)
 
 _PLANNERS: dict = {}
 
@@ -68,10 +70,13 @@ def planner_for(eng, max_rows: int) -> RoundPlanner | None:
         rp.accept = AcceptModel()
         rp.ref_T = lambda E, c=cap: JG.t_pad(E, c)
         rp.state_path = _state_path(eng)
+        rp.save_every = max(1, SAVE_EVERY)
+        rp.warm = False
         try:
             import json
             with open(rp.state_path) as f:
                 rp.load(json.load(f))
+            rp.warm = True                      # warm-started from the saved state (the report says so)
         except (OSError, ValueError):
             pass
         rp.snap = rp._freeze()

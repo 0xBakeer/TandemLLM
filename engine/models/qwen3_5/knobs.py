@@ -26,4 +26,6 @@ KNOBS: dict[str, tuple] = {
     'ROUND_PLAN_BUCKETS': ('4,8,16', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the planner's learned state file ('' : ~/.tandemllm/roundplan/<pack>.<host>.json)
     'ROUND_PLAN_STATE': ('', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: rounds between two saves of the planner's learned state
+    'ROUND_PLAN_SAVE_EVERY': ('512', 'engine/models/qwen3_5/roundplan.py'),
 }

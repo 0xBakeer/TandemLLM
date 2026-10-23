@@ -186,6 +186,7 @@ class RoundPlanner:
             self.held[E] -= 1
         elif r[2] >= 64 and r[0] < (1.0 - self.guard) * r[1]:
             self.held[E] = self.held_rounds     # the plan lost to the reference: its cut, learning goes on
+            self.held_count = getattr(self, "held_count", 0) + 1
             r[2] = 0
 
     # ---- state ---------------------------------------------------------------------------------
@@ -337,7 +338,8 @@ class RoundPlanner:
 
     def report(self) -> dict:
         """/health: the version, the measured round period by (E, T, ctx) and the rounds at each bucket."""
-        return {"version": self.version, "explore": self.explore,
+        return {"version": self.version, "explore": self.explore, "warm_start": getattr(self, "warm", False),
+                "rounds_total": self.rounds, "held_total": getattr(self, "held_count", 0),
                 "periods": {f"E{E} T{T} ctx{c}": [round(v[0], 1), v[1]] for (E, T, c), v in sorted(self.P.items())},
                 "rows_chosen": {f"E{E} rows{E * T}": n for (E, T), n in sorted(self.chosen.items())},
                 "rate": {f"E{E}": {"plan_tok_ms": round(v[0], 4), "ref_tok_ms": round(v[1], 4), "rounds": v[2]}
