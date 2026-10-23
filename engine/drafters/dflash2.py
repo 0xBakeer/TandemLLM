@@ -982,6 +982,126 @@ DRAFT_MEET = None
 #: paid it one after another under the GPU turn, about 21 ms of a 246 ms round at C8. The rows are the same
 #: per-row arithmetic; only the draft K/V's bits can move (the target's output never reads them). 0: at once
 DEFER_SYNC = _S.get("DF2_DEFER_SYNC") == "1"
+#: SPD-177: with the KV pool, the context K/V is committed for a window of rows, not the whole context.
+#: Every layer of the draft is sliding-window attention (2048), so rows more than the window behind the
+#: newest are never read by a draft. Pages wholly below `ctx - window - one page of rows` are given back
+#: and their addresses point at one shared page instead (a cache's copy of them reads and writes
+#: garbage, never a fault); a resume or a restore at an earlier row maps its window again (rows it lost
+#: read as zeros). Below the threshold (window + a page) nothing is given back: the path of today.
+KV_WINDOW = _S.get("DF2_KV_WINDOW") == "1"
+
+
+def _window_buffer(kvp):
+    """`kvpool.PagedBuffer` with a floor: the pages below it alias one shared page (SPD-177)."""
+
+    class WindowBuffer(kvp.PagedBuffer):
+        def __init__(self, *a, window: int = 2048, **kw):
+            super().__init__(*a, **kw)
+            self.window = int(window)
+            self.page_rows = max(1, self.page // self.row_bytes)
+            self.keep = self.window + self.page_rows
+            self.floor = 0                 # rows below it are not committed (page-aligned)
+            self.alias: set = set()        # pages mapped onto `dummy`
+            self.dummy = None              # the shared page's handle
+
+        def _floor_for(self, rows: int) -> int:
+            r = max(0, int(rows) - self.keep)
+            return (r // self.page_rows) * self.page_rows
+
+        def _alias_map(self, pages) -> None:
+            if self.drv is None or not pages:
+                for p in pages:
+                    self.alias.add(p)
+                return
+            L, P = self.drv.lib, self.page
+            if self.dummy is None:
+                import ctypes
+                h = ctypes.c_uint64()
+                self.drv._check(L.cuMemCreate(ctypes.byref(h), P, ctypes.byref(self.drv.prop), 0), "cuMemCreate")
+                self.dummy = int(h.value)
+            import ctypes
+            for p in pages:
+                if p in self.alias or p in self.handles:
+                    continue
+                self.drv._check(L.cuMemMap(self.base + p * P, P, 0, self.dummy, 0), "cuMemMap")
+                self.drv._check(L.cuMemSetAccess(self.base + p * P, P, ctypes.byref(self.drv.access), 1),
+                                "cuMemSetAccess")
+                self.alias.add(p)
+
+        def _alias_unmap(self, pages) -> None:
+            pages = [p for p in pages if p in self.alias]
+            if self.drv is not None and pages:
+                import torch
+                torch.cuda.synchronize()
+                for p in pages:
+                    self.drv._check(self.drv.lib.cuMemUnmap(self.base + p * self.page, self.page), "cuMemUnmap")
+            for p in pages:
+                self.alias.discard(p)
+
+        def set_floor(self, floor: int) -> None:
+            """Move the floor: pages wholly below it alias the shared page; pages it uncovers are
+            unaliased (`ensure` maps them fresh and zeroed)."""
+            floor = (max(0, int(floor)) // self.page_rows) * self.page_rows
+            with self.lock:
+                if floor > self.floor:
+                    gone = [p for p in self._pages_for(0, floor) if p in self.handles]
+                    nbytes = self._release_pages(gone)
+                    self._alias_map(self._pages_for(0, floor))
+                    if self.pool is not None and nbytes:
+                        self.pool._add(self.owner, -nbytes)
+                        self.pool.stats["pages_released"] += len(gone)
+                elif floor < self.floor:
+                    self._alias_unmap(self._pages_for(floor, self.floor))
+                    self.rows = min(self.rows, floor)
+                self.floor = floor
+
+        def need_bytes(self, rows: int) -> int:
+            rows = max(0, min(int(rows), self.max_rows))
+            lo = max(self.floor, self._floor_for(rows)) if KV_WINDOW else self.floor
+            return sum(1 for p in self._pages_for(lo, self.round_rows(rows))
+                       if p not in self.handles) * self.page
+
+        def ensure(self, rows: int) -> int:
+            rows = max(0, min(int(rows), self.max_rows))
+            want = self._floor_for(rows)
+            if want > self.floor:
+                self.set_floor(want)                   # the window moved on: give the old pages back
+            if rows <= self.rows:
+                return 0
+            with self.lock:
+                if rows <= self.rows:
+                    return 0
+                target = self.round_rows(rows)
+                new = [p for p in self._pages_for(self.floor, target) if p not in self.handles]
+                nbytes = len(new) * self.page
+                if self.pool is not None:
+                    self.pool.gate(self.owner, nbytes)
+                self._alias_unmap(new)
+                self._map_pages(new)
+                if self.drv is not None and new:
+                    P = self.page
+                    for a, b in kvp._runs(new):
+                        self._flat[a * P:min(self.nbytes, b * P)].zero_()
+                self.rows = target
+                if self.pool is not None:
+                    self.pool._add(self.owner, nbytes)
+                    self.pool.stats["commits"] += 1
+                    self.pool.stats["pages_mapped"] += len(new)
+                return nbytes
+
+        def trim(self, rows: int = 0) -> int:
+            if int(rows) < self.floor:
+                self.set_floor(self._floor_for(rows))
+            return super().trim(rows)
+
+        def close(self) -> None:
+            self.set_floor(0)
+            super().close()
+            if self.drv is not None and self.dummy is not None:
+                self.drv.lib.cuMemRelease(self.dummy)
+                self.dummy = None
+
+    return WindowBuffer
 #: the longest sync that waits (a block's rows); a prompt's sync runs at once
 DEFER_SYNC_ROWS = 64
 
@@ -1012,6 +1132,8 @@ def flush_syncs(ds) -> None:
                     for i, (k, v) in enumerate(kv):
                         d._ck[i, :, first:first + n] = k[:, r:r + n]
                         d._cv[i, :, first:first + n] = v[:, r:r + n]
+                    if d._cs is not None:
+                        d._cs[first:first + n] = 1
                     r += n
                 d._psync = []
 
@@ -1107,6 +1229,9 @@ class DFlash2Drafter(Drafter):
         self._ck: torch.Tensor | None = None
         self._psync: list = []        # SPD-161: syncs not yet written (`DEFER_SYNC`), in order
         self._cv: torch.Tensor | None = None
+        self._ckb = self._cvb = None   # SPD-177: the window buffers behind _ck / _cv (KV_WINDOW)
+        self._cs: torch.Tensor | None = None   # SPD-177: a row's K/V is real (1) or not (0)
+        self._partial = False          # SPD-177: a resume uncovered rows that are not real
         self.ctx_len = 0
 
         # Sampled drafting. The serving loop calls `drafter.sampler = sampler` when the
@@ -1182,6 +1307,19 @@ class DFlash2Drafter(Drafter):
             # SRV-307: the target's paged set grows and trims this arm's context KV with its own
             # rows (a context row is a position the target has forwarded)
             from engine import kvpool as _kvp
+            if KV_WINDOW and cfg.sliding_window:
+                # SPD-177: the window of rows a draft reads, committed; the rest given back
+                W = _window_buffer(_kvp)
+                self._ckb = pages.add(W(shape, 2, torch.bfloat16, self.eng.device, owner=pages.owner,
+                                        name="draft.k", window=cfg.sliding_window))
+                self._cvb = pages.add(W(shape, 2, torch.bfloat16, self.eng.device, owner=pages.owner,
+                                        name="draft.v", window=cfg.sliding_window))
+                self._ck, self._cv = self._ckb.tensor, self._cvb.tensor
+                # a byte a row: 1 where the row's K/V is this drafter's own, 0 where it is not (never
+                # written, below the floor, or mapped fresh). It is a view like K and V, so every cache
+                # that copies their rows copies whether they are real with them.
+                self._cs = torch.zeros(self.max_len, dtype=torch.uint8, device=self.eng.device)
+                return
             self._ck = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
                                                   owner=pages.owner, name="draft.k")).tensor
             self._cv = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
@@ -1222,6 +1360,7 @@ class DFlash2Drafter(Drafter):
         if free_cache:
             self._ck = None
             self._cv = None
+            self._cs = None
         self.ctx_len = 0
         self._tap_rows = []
         self._psync = []
@@ -1263,6 +1402,7 @@ class DFlash2Drafter(Drafter):
         self._tap_i = 0
         self._tap_rows = []
         self._psync = []
+        self._partial = False
 
     # ---- serving-time state cache ----------------------------------------------------------
     def state_snapshot(self):
@@ -1280,6 +1420,12 @@ class DFlash2Drafter(Drafter):
         n = int(self.ctx_len)
         if self._ck is None or n == 0:
             return ("dflash2", 0, None, None)
+        if self._cs is not None:
+            # SPD-177: the rows from the floor, with whether each is real
+            self._stamps_floor()
+            lo = min(self._ckb.floor, n)
+            return ("dflash2w", n, lo, self._ck[:, :, lo:n].clone(), self._cv[:, :, lo:n].clone(),
+                    self._cs[lo:n].clone())
         return ("dflash2", n, self._ck[:, :, :n].clone(), self._cv[:, :, :n].clone())
 
     def snapshot_bytes_per_token(self) -> int:
@@ -1289,17 +1435,47 @@ class DFlash2Drafter(Drafter):
         return 2 * self._ck[:, :, :1].numel() * self._ck.element_size()
 
     def state_restore(self, snap) -> None:
-        kind, n, ck, cv = snap
-        if kind != "dflash2":
+        kind = snap[0]
+        cs = None
+        if kind == "dflash2w":
+            _, n, lo, ck, cv, cs = snap
+        elif kind == "dflash2":
+            _, n, ck, cv = snap
+            lo = 0
+        else:
             raise ValueError(f"not a dflash2 snapshot: {kind!r}")
         self._flush_sync()
         if n:
             self._build()
             from engine import kvpool as _kvp
+            self._fit_window(n)
             _kvp.ensure_for(self._ck, n)      # SRV-307
-            self._ck[:, :, :n] = ck
-            self._cv[:, :, :n] = cv
+            a = max(lo, self._ckb.floor if self._ckb is not None else 0)
+            self._ck[:, :, a:n] = ck[:, :, a - lo:]
+            self._cv[:, :, a:n] = cv[:, :, a - lo:]
+            if self._cs is not None:
+                self._cs[:n] = 0
+                self._cs[a:n] = cs[a - lo:] if cs is not None else 1
+                self._stamps_floor()
         self.ctx_len = int(n)
+
+    def _fit_window(self, n: int) -> None:
+        """SPD-177: before rows up to `n` are resumed or restored, the window they end in is mapped
+        (rows the floor had given back read as zeros)."""
+        old = self._ckb.floor if self._ckb is not None else 0
+        for b in (self._ckb, self._cvb):
+            if b is not None:
+                f = b._floor_for(n)
+                if f < b.floor:
+                    b.set_floor(f)
+        if self._cs is not None and self._ckb is not None and self._ckb.floor < old:
+            self._cs[self._ckb.floor:old] = 0          # mapped fresh: zeros, not this drafter's rows
+            self._partial = True
+
+    def _stamps_floor(self) -> None:
+        """SPD-177: rows below the floor are not real, whatever a copy wrote into their stamps."""
+        if self._cs is not None and self._ckb is not None and self._ckb.floor:
+            self._cs[:self._ckb.floor] = 0
 
     def state_resume(self, n: int) -> None:
         """The draft KV rows below `n` are already in place, written by an earlier prefill of the
@@ -1308,13 +1484,23 @@ class DFlash2Drafter(Drafter):
         self._flush_sync()
         if n:
             self._build()
+            self._fit_window(n)
+            from engine import kvpool as _kvp
+            _kvp.ensure_for(self._ck, n)
+            self._stamps_floor()
         self.ctx_len = n
         self._tap_rows = []
 
     def kv_views(self) -> list:
-        """The position-indexed buffers a request writes, as (tensor, position axis)."""
+        """The position-indexed buffers a request writes, as (tensor, position axis). With the window
+        (SPD-177) the row stamps are one more: a copy of rows carries whether they are real."""
         self._flush_sync()
-        return [(self._ck, 2), (self._cv, 2)] if self._ck is not None else []
+        if self._ck is None:
+            return []
+        if self._cs is not None:
+            self._stamps_floor()
+            return [(self._ck, 2), (self._cv, 2), (self._cs, 0)]
+        return [(self._ck, 2), (self._cv, 2)]
 
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
              rows: list[int] | None = None) -> None:
@@ -1365,6 +1551,9 @@ class DFlash2Drafter(Drafter):
             for i, (k, v) in enumerate(m.context_kv(ctx_hidden, positions)):
                 self._ck[i, :, first_pos:first_pos + n] = k
                 self._cv[i, :, first_pos:first_pos + n] = v
+            if self._cs is not None:
+                self._cs[first_pos:first_pos + n] = 1
+                self._stamps_floor()
         self.ctx_len = first_pos + n
 
     def _flush_sync(self) -> None:
@@ -1463,6 +1652,12 @@ class DFlash2Drafter(Drafter):
         lo = 0
         if cfg.sliding_window is not None:
             lo = max(0, pos0 - cfg.sliding_window + 1)
+        if self._cs is not None and self.ctx_len > lo and (self._ckb.floor or self._partial):
+            # SPD-177: only the real rows of the window (a resume past the floor left zeros)
+            self._stamps_floor()
+            bad = (self._cs[lo:self.ctx_len] == 0).nonzero()
+            if bad.numel():
+                lo = min(self.ctx_len, lo + int(bad[-1]) + 1)
         ctx_pos = torch.arange(lo, self.ctx_len, device=dev)
         ctx_kv = [(self._ck[i, :, lo:self.ctx_len], self._cv[i, :, lo:self.ctx_len])
                   for i in range(cfg.num_hidden_layers)]

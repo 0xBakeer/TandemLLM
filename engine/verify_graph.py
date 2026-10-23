@@ -40,6 +40,11 @@ from engine import capture_lock  # noqa: E402
 # The longest context a verify is served from a graph at. 32,768 is the code as it was; the 32k
 # probe's prompt (32,795 tokens) was one past it and every verify of it ran eager.
 MAX_CTX = int(_S.get("GRAPH_MAX_CTX"))
+#: SPD-179: the graphs of one fold parity write their kept outputs (logits, taps, the trace's raw
+#: projections and conv tails, the hidden rows) into one set of buffers instead of a set each: a
+#: graph's outputs are read before the next verify, which writes the other parity's set, so 122 graphs
+#: hold two sets (about 0.4 GiB) where they held about 7 GiB. 0 = a set a graph.
+SHARE_OUT = _S.get("GRAPH_SHARE_OUT") == "1"
 MIN_CLASS = 1024
 
 
@@ -78,6 +83,23 @@ class Captured:
         self.taps: list[torch.Tensor] = []
 
 
+class _SharedOut:
+    """One fold parity's output buffers, by name, each sized for the widest verify."""
+
+    def __init__(self, rows: int):
+        self.rows = rows
+        self.bufs: dict = {}
+
+    def put(self, name: str, t, T: int, per_row: bool = True):
+        need = (-(-t.numel() // T) * self.rows) if per_row else t.numel()
+        buf = self.bufs.get(name)
+        if buf is None or buf.dtype != t.dtype or buf.numel() < t.numel():
+            buf = self.bufs[name] = torch.empty(max(need, t.numel()), dtype=t.dtype, device=t.device)
+        view = buf[:t.numel()].view(t.shape)
+        view.copy_(t)
+        return view
+
+
 class VerifyGraphs:
     def __init__(self, eng):
         self.eng = eng
@@ -94,6 +116,8 @@ class VerifyGraphs:
         self.max_lc = 0                           # the class being captured or replayed
         self.last_picks = None                    # the replayed graph's argmax, or None
         self.stats = {"captured": 0, "replayed": 0, "eager": 0}
+        self._shared: dict = {}                    # fold parity -> _SharedOut (SHARE_OUT)
+        self.logits_out = None                     # set while a sharing capture runs its body
 
     @staticmethod
     def signature() -> tuple:
@@ -110,7 +134,8 @@ class VerifyGraphs:
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP, V.WY,
                 V.WY_FUSED, V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT, V.CONV_BLOCK,
                 V.CONV_WARPS, M.HOST_ASYNC, V.WY_KC, nvfp4_skinny.LDW, nvfp4_skinny.WIDE_B,
-                V.TREE_PF, H.HEAD_BN, H.HEAD_WARPS, H.HEAD_STAGES, nvfp4_skinny.WIDE_LDW)
+                V.TREE_PF, H.HEAD_BN, H.HEAD_WARPS, H.HEAD_STAGES, nvfp4_skinny.WIDE_LDW,
+                SHARE_OUT)
 
     @staticmethod
     def ctx_class(lc: int) -> int:
@@ -253,6 +278,15 @@ class VerifyGraphs:
         eng.state.conv.copy_(conv_keep)
         taps: list[torch.Tensor] = []
         eng.tap = taps.append if tap is not None else None
+        share = SHARE_OUT and eng._fold_par is not None
+        if share:
+            sh = self._shared.setdefault(eng._fold_par, _SharedOut(M.VERIFY_ROWS))
+            # the head writes this parity's logits buffer itself: no copy of the widest output
+            if "logits" not in sh.bufs:
+                with torch.cuda.stream(self.stream):
+                    sh.bufs["logits"] = torch.empty(M.VERIFY_ROWS * eng.cfg.vocab_size,
+                                                    dtype=torch.float32, device=eng.device)
+            self.logits_out = lambda n, b=sh.bufs["logits"]: b[:n]
         try:
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(cap.graph, pool=self.pool,
@@ -260,8 +294,24 @@ class VerifyGraphs:
                 logits, trace = self._body(kind, T, tree)
                 # the greedy picks inside the graph, the same argmax kernel the loop ran
                 picks = logits.argmax(-1) if M.HOST_ASYNC else None
+                if share:
+                    # SPD-179: the other outputs a replay leaves for the loop, copied into this
+                    # parity's shared buffers; the graph's own tensors are released after the capture
+                    if logits.untyped_storage().data_ptr() != sh.bufs["logits"].untyped_storage().data_ptr():
+                        logits = sh.put("logits_copy", logits, T)
+                    for layer, tup in list(trace.layers.items()):
+                        if tup and torch.is_tensor(tup[0]):
+                            trace.layers[layer] = (sh.put(f"raw{layer}", tup[0], T),) + tuple(tup[1:])
+                    if torch.is_tensor(trace.conv_entry):
+                        trace.conv_entry = sh.put("conv_entry", trace.conv_entry, T, per_row=False)
+                    taps[:] = [sh.put(f"tap{i}", h, T) for i, h in enumerate(taps)]
+                    if torch.is_tensor(eng.hidden_pre_norm):
+                        eng.hidden_pre_norm = sh.put("hidden_pre", eng.hidden_pre_norm, T)
+                    if torch.is_tensor(eng.hidden_post_norm):
+                        eng.hidden_post_norm = sh.put("hidden_post", eng.hidden_post_norm, T)
         finally:
             eng.tap = tap
+            self.logits_out = None
         eng.state.conv.copy_(conv_keep)
         if pn_keep is not None:
             eng._pn.copy_(pn_keep)

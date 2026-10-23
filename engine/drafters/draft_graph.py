@@ -91,6 +91,8 @@ class DraftGraph:
         idx = lo + torch.arange(span, device=dev)
         valid = idx < ctx_len
         idx = torch.clamp(idx, max=d.max_len - 1)
+        if getattr(d, "_cs", None) is not None:
+            valid = valid & (d._cs.index_select(0, idx) > 0)      # SPD-177: rows that are real
         ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
                   for i in range(cfg.num_hidden_layers)]
         allpos = torch.cat([idx, positions])
@@ -163,6 +165,8 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         idx = lo + torch.arange(span, device=dev)
         valid = idx < ctx_len
         idx = torch.clamp(idx, max=d.max_len - 1)
+        if getattr(d, "_cs", None) is not None:
+            valid = valid & (d._cs.index_select(0, idx) > 0)      # SPD-177: rows that are real
         ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
                   for i in range(cfg.num_hidden_layers)]
         allpos = torch.cat([idx, positions])
