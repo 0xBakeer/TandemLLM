@@ -145,20 +145,75 @@ def test_a_multibyte_char_cut_by_the_seam_still_matches():
     assert len(h2) == 1, h2
 
 
-def test_a_file_at_the_cliff_searches_its_last_chunk_and_says_it_stopped():
+def test_a_file_at_the_cliff_searches_its_last_chunk_and_says_nothing_more():
     # the reported repro: a file of exactly 16,777,216 bytes with the match in
-    # the last 1 MiB. The loop used to drop that chunk before searching it —
-    # no match, nothing said. A cliff chunk gets searched; a cliff says, the
-    # way the budget already says.
+    # the last 20. The loop used to drop that chunk before searching it -- no
+    # match, nothing said. A cliff chunk gets searched; and a file that ENDS
+    # at the cap has no rest, so it gets no "unread" line either (peek first).
     d = tempfile.mkdtemp(prefix="grep-cliff-")
     os.makedirs(d + "/uploads")
     with open(d + "/uploads/big.txt", "wb") as f:
         f.write(b"x\n" * 8388598)             # 16,777,196 bytes of filler lines
         f.write(b"NEEDLE-AT-THE-CLIFF\n")     # the last 20: chunk 16
     h = Workspace(d).grep("NEEDLE-AT-THE-CLIFF", "/workspace/uploads/big.txt")
+    assert len(h) == 1, h
+    assert ":8388599:" in h[0], h
+
+
+def test_a_file_past_the_cliff_says_where_it_stopped():
+    # one byte more than the cap: the note belongs to files that DO have a rest
+    d = tempfile.mkdtemp(prefix="grep-cliff2-")
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/big.txt", "wb") as f:
+        f.write(b"x\n" * 8388598)             # 16,777,196 bytes of filler lines
+        f.write(b"NEEDLE-AT-THE-CLIFF\n")     # the last 20: chunk 16
+        f.write(b"and the rest\n")            # one byte over is enough to say it
+    h = Workspace(d).grep("NEEDLE-AT-THE-CLIFF", "/workspace/uploads/big.txt")
     assert len(h) == 2, h
     assert ":8388599:" in h[0], h
     assert "16 MiB" in h[1] and "unread" in h[1], h
+
+
+def test_unicode_line_boundaries_count_lines_where_splitlines_does():
+    # the reviewer's case: a chunk of pure-'\n' among the ASCII controls takes the
+    # str.split fast path -- but _GREP_EOL (and splitlines) also break on U+0085,
+    # U+2028 and U+2029, so the fast path under-counted and the needle landed one
+    # line early. The decoded head is probed for them before the fast path may run.
+    d = tempfile.mkdtemp(prefix="grep-eol-")
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/u.txt", "w", encoding="utf-8") as f:
+        f.write("line one\u2028line two\nline three NEEDLE")
+    h = Workspace(d).grep("NEEDLE", "/workspace/uploads/u.txt")
+    assert len(h) == 1 and h[0].endswith("line three NEEDLE") and ":3: " in h[0], h
+
+
+def test_a_fuzz_of_unicode_separators_only_agrees_with_splitlines():
+    # 100 files whose lines are separated by '\n' and the three Unicode boundaries
+    # only -- no ASCII control byte anywhere, so every chunk asks for the fast path.
+    # The fuzz that mixed in ASCII separators hid the bug: those files took the
+    # general path anyway.
+    import random
+    rng = random.Random(20261023)
+    seps = ["\n", "\u0085", "\u2028", "\u2029"]
+    d = tempfile.mkdtemp(prefix="grep-fuzz-")
+    os.makedirs(d + "/uploads")
+    want = {}
+    for i in range(100):
+        lines = [f"pad {i} {j}" for j in range(rng.randrange(20, 200))]
+        hit = rng.randrange(len(lines))
+        lines[hit] = f"FUZZNEEDLE-{i}-MARK"
+        text = "".join(ln + rng.choice(seps) for ln in lines)
+        with open(d + f"/uploads/f{i}.txt", "w", encoding="utf-8") as f:
+            f.write(text)
+        want[f"f{i}.txt"] = len(text.splitlines()[:hit]) + 1
+    h = Workspace(d).grep("FUZZNEEDLE-", "/workspace/uploads")
+    got = {}
+    for line in h:
+        path, num, _rest = line.split(":", 2)
+        got[path.rsplit("/", 1)[1]] = int(num)
+    assert sorted(got) == sorted(want), f"{len(got)} hits, expected 100"
+    for name in want:
+        assert got[name] == want[name], f"{name}: grep line {got[name]}, splitlines {want[name]}"
 
 
 def run():

@@ -41,14 +41,19 @@ GREP_LINE_MAX = 64 * 1024           # grep searches a line's first 64 K chars, d
 GREP_FILE_MAX = 16 * 1024 * 1024    # grep scans at most 16 MiB of a file (8x MAX_READ)
 GREP_CHUNK = 1024 * 1024            # grep reads a MiB at a time: one line pass per chunk
 _GREP_EOL = re.compile(r"\r\n|\r|\n|\x0b|\x0c|\x1c|\x1d|\x1e|\x85|\u2028|\u2029")
-# a pure-'\n' chunk — nothing but '\n' among the ASCII control separators —
-# partitions identically under str.split('\n') (C-fast, like main's splitlines)
-# and the general _GREP_EOL.split. Six memchr finds answer it; high bytes are
-# UTF-8 content, never a boundary, so they are not probed. An exotic chunk takes
-# the general path; a chunk boundary cannot fabricate an ASCII control byte.
+# a pure-'\n' chunk -- nothing but '\n' among the ASCII control separators, and none
+# of the three Unicode boundaries either -- partitions identically under str.split('\n')
+# (C-fast, like main's splitlines) and the general _GREP_EOL.split. Six memchr finds
+# answer the ASCII half on the raw bytes; the Unicode half is probed on the DECODED
+# head, because in the bytes E2/80/A8 can sit across the chunk seam. An exotic chunk
+# takes the general path; a chunk boundary cannot fabricate an ASCII control byte.
 _GREP_CTL = (b"\r", b"\x0b", b"\x0c", b"\x1c", b"\x1d", b"\x1e")
-GREP_BUDGET_S = 10                  # one grep call gets 10 s across all files (a catastrophic
-                                    # backtracker cannot wedge the run thread past this line)
+_GREP_HIGH = ("\u0085", "\u2028", "\u2029")   # _GREP_EOL's other boundaries
+GREP_BUDGET_S = 10                  # one grep call gets 10 s across all files; the
+                                    # budget is checked BETWEEN chunks, so a single
+                                    # catastrophic search can run past it (^(a+)+$ on
+                                    # 26 a's and a ! took 1.7 s, and every extra a
+                                    # doubles that) -- the overrun is one search
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".tandem"}
 
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -461,6 +466,9 @@ class Workspace:
                                                         # searched, then the walk goes on
                         if b"\0" in raw:
                             break               # the 4 KiB head sniff missed a binary tail
+                        if cliff and not fh.read(1):
+                            cliff = False       # a file of exactly 16 MiB has no rest to
+                                                # call unread: peek before announcing one
                         # one decode per chunk, incremental so a char cut by the chunk
                         # seam is never mangled: the decoder holds the partial char and
                         # resolves it against the next chunk
@@ -493,9 +501,14 @@ class Workspace:
                         # a split now would count it twice.
                         head = buf[:-1] if buf.endswith("\r") else buf
                         tail_s = buf[len(head):]        # the held \r when there is one
-                        # pure-'\n' chunks take the str.split fast path; the rare
-                        # exotic head pays for the general partition instead
+                        # pure-'\n' chunks take the str.split fast path; the rare exotic
+                        # head pays for the general partition instead. The Unicode halves
+                        # of _GREP_EOL are probed HERE, on the decoded head -- in the raw
+                        # bytes they can straddle the chunk seam and hide from a per-chunk
+                        # scan -- so a chunk of '\n' and U+0085/2028/2029 cannot take the
+                        # fast path and under-count lines splitlines() counts.
                         lines = (head.split("\n") if not exotic and not held
+                                 and not any(u in head for u in _GREP_HIGH)
                                  else _GREP_EOL.split(head))
                         held = tail_s == "\r"
                         buf = lines.pop() + tail_s      # the last line has no boundary yet
