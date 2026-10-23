@@ -20,6 +20,8 @@ MODE = (_S.get("ROUND_PLAN") or "off").strip().lower()
 PRICES = _S.get("ROUND_PLAN_PRICES") or ""
 #: the rows a block may take in a planned round (the joint graphs' tile caps them at 16)
 BUCKETS = tuple(int(x) for x in (_S.get("ROUND_PLAN_BUCKETS") or "4,8,16").split(","))
+#: SPD-187: where the planner's learned state is kept ('' : ~/.tandemllm/roundplan/<pack>.<host>.json)
+STATE_PATH = _S.get("ROUND_PLAN_STATE") or ""
 
 _PLANNERS: dict = {}
 
@@ -30,6 +32,16 @@ def ctx_class(n: int) -> int:
     while c < n:
         c *= 2
     return c
+
+
+def _state_path(eng) -> str:
+    """The planner's learned state, one file per weights pack and box (QWEN38_ROUND_PLAN_STATE: another)."""
+    if STATE_PATH:
+        return os.path.expanduser(STATE_PATH)
+    import socket
+    w = getattr(eng, "w", None)
+    pack = os.path.basename(os.path.normpath(getattr(w, "exl3_source", None) or getattr(w, "snapshot", "") or "pack"))
+    return os.path.join(os.path.expanduser("~/.tandemllm/roundplan"), f"{pack}.{socket.gethostname()}.json")
 
 
 def planner_for(eng, max_rows: int) -> RoundPlanner | None:
@@ -47,6 +59,22 @@ def planner_for(eng, max_rows: int) -> RoundPlanner | None:
         cap = int(max_rows)
         rp = _PLANNERS[key] = RoundPlanner(pm, buckets=BUCKETS, cap=lambda E, c=cap: c)
         rp.mode = MODE
+        # SPD-187, learned online: planning on, every allowed bucket's round period is measured first (a short
+        # warm-up); the payoff from the acceptance model (learned in shadow too); the reference cut is the
+        # fixed rule's bucket (the joint graphs' t_pad); the state is kept per pack and box and warm-started
+        from engine.methods.accept_model import AcceptModel
+        from engine.models.qwen3_5 import joint_graphs as JG
+        rp.explore = MODE == "on"
+        rp.accept = AcceptModel()
+        rp.ref_T = lambda E, c=cap: JG.t_pad(E, c)
+        rp.state_path = _state_path(eng)
+        try:
+            import json
+            with open(rp.state_path) as f:
+                rp.load(json.load(f))
+        except (OSError, ValueError):
+            pass
+        rp.snap = rp._freeze()
         # the rest of a round by E (the packed draft and the slots' tails) from the file, followed online
         try:
             import json

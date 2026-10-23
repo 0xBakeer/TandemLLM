@@ -1398,11 +1398,15 @@ def _run_round(meet) -> None:
                 from engine.methods.roundplan import gain_curve
                 tmax = max(pl.buckets)
                 cc = meet.ctx_class(max(int(r.start) for r in group))
-                curves = [gain_curve(r.q, r.tree.parents, r.tree.scores, tmax) for r in group]
+                acc = getattr(pl, "accept", None)
+                curves = [_plan_curve(pl, r, tmax, len(group)) if acc is not None
+                          else gain_curve(r.q, r.tree.parents, r.tree.scores, tmax) for r in group]
                 plan = pl.plan(len(group), cc, curves)
                 plan["ctx"] = cc
                 if pl.mode == "on" and plan.get("T"):
                     cap = plan["T"]
+                if hasattr(pl, "begin_round") and not plan.get("explore") and cap:
+                    pl.begin_round(len(group), cap, cc)       # SPD-187: the round's tokens vs the reference
                 meet.plan_keys.append((len(group), cc, curves))
                 del meet.plan_keys[:-32]
                 pl.tick(meet.plan_keys)
@@ -1455,7 +1459,10 @@ def _run_round(meet) -> None:
             tp = cap if graphed and cap else None
             rows_cost = E * tp if tp else sum(r.rows for r in group)
             cc = meet.ctx_class(max(int(r.start) for r in group))
-            holder = {"E": E, "t": t0, "ms": None}
+            # a bucket's round counts toward its period only when it ran as it will run: graphed (eager
+            # rounds before the shape is captured, and the capturing round, are not its price)
+            holder = {"E": E, "t": t0, "ms": None, "T": cap if (graphed is not False and not captured) else None,
+                      "cc": cc}
             meet.plan_last = holder
 
             def _seen(ms, E=E, rows=rows_cost, cc=cc, eager=not graphed, skip=captured, holder=holder):
@@ -1553,6 +1560,56 @@ def _row_cap(par, drafter) -> None:
     drafter.row_cap = cap
 
 
+def _tree_feats(tree):
+    """A tree's node depths and ranks by drafter score (rank 0 the root)."""
+    n = len(tree.tokens)
+    order = sorted(range(1, n), key=lambda i: -tree.scores[i])
+    rank = [0] * n
+    for r, i in enumerate(order, start=1):
+        rank[i] = r
+    return tree.depths(), rank
+
+
+def _plan_curve(pl, r, tmax: int, E: int) -> list:
+    """SPD-187: a slot's gain curve from the planner's acceptance model (its tree before the cut)."""
+    from engine.methods.roundplan import curve_class, gain_curve
+    t = r.tree
+    dep, rank = _tree_feats(t)
+    cls = curve_class(gain_curve(r.q, t.parents, t.scores, tmax))
+    p = pl.accept.predict(t.parents, t.scores, r.q, dep, rank, t.source, cls, r.slot, int(r.start), E)
+    return gain_curve(p, t.parents, t.scores, tmax)
+
+
+def _plan_observe(pl, drafter, full, q_full, cut, path, slot: int, pos: int, E: int, request) -> None:
+    """SPD-187: a verified block into the planner: the acceptance model (prequential, on the verified tree's
+    nodes) and the round's accounting (the tokens written, and the reference cut's: exact on the verified
+    rows, the model's estimate past them)."""
+    from engine.methods.roundplan import admission, curve_class, gain_curve
+    q = _roundlog.tree_q(drafter, cut)
+    dep, rank = _tree_feats(cut)
+    cls = curve_class(gain_curve(q, cut.parents, cut.scores, 16))
+    pl.accept.observe(cut.parents, cut.scores, q, dep, rank, cut.source, cls, slot, pos, E, path, request)
+    tokens = float(len(path))                           # the accepted nodes plus the walk's own token
+    ref = tokens
+    T = pl.ref_T(E) if pl.ref_T is not None else None
+    if T is not None:
+        if len(cut.parents) >= T:
+            keep = {0} | {k for k, _ in admission(cut.parents, cut.scores, T)}
+            n_ok = 0
+            for node in path[1:]:
+                if node not in keep:
+                    break
+                n_ok += 1
+            ref = 1.0 + n_ok
+        elif full is not None and len(full.parents) > len(cut.parents):
+            fd, fr = _tree_feats(full)
+            fcls = curve_class(gain_curve(q_full, full.parents, full.scores, 16))
+            p = pl.accept.predict(full.parents, full.scores, q_full, fd, fr, full.source, fcls, slot, pos, E)
+            g = gain_curve(p, full.parents, full.scores, max(T, len(cut.parents)))
+            ref = tokens + max(0.0, g[min(T, len(g)) - 1] - g[len(cut.parents) - 1])
+    pl.add_block(tokens, ref)
+
+
 def _plan_tail(meet, pl, now: float) -> None:
     """SPD-187: the rest of the last round (its start to this one's, less its pass), for the planner's
     tails(E); and the pass timings that are done by now."""
@@ -1563,6 +1620,10 @@ def _plan_tail(meet, pl, now: float) -> None:
         period = (now - last["t"]) * 1e3
         if period < 5000.0:
             pl.observe_tail(last["E"], period - last["ms"])
+            if hasattr(pl, "end_round"):
+                pl.end_round(period)
+            if last.get("T") and hasattr(pl, "observe_period"):
+                pl.observe_period(last["E"], last["T"], last["cc"], period)   # SPD-187: the bucket's round
         meet.plan_last = None
 
 
@@ -2087,6 +2148,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                                 pen.mask = bool(think is not None and think.inside)
                             wspec = {"sampler": sampler if sampler is not None and sampler.on else None,
                                      "pen": pen, "start": len(ctx), "q": tree.q, "tree": tree}
+                        tree_full = tree
                         lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree, q=nq,
                                                      walk=wspec)
                         t_post = time.perf_counter()
@@ -2098,6 +2160,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         else:
                             rid = rlog.round([_LoneReq(_par_index() if par is not None else 0,
                                                        len(tree.tokens), pos)], rev)
+                    pln = getattr(par.meeting, "planner", None) if par is not None and par.meeting is not None else None
                     walked = par.last_walk.get(_par_index()) if par is not None else None
                     if pen is not None and walked is None:
                         pen.mask = bool(think is not None and think.inside)
@@ -2127,6 +2190,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = walk.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
+                    if pln is not None and getattr(pln, "accept", None) is not None and vms is False:
+                        # SPD-187: the planner learns from every verified block (predicted first, then learned)
+                        _plan_observe(pln, drafter, tree_full, nq, tree, path, _par_index(), pos,
+                                      par.last_joint.get(_par_index(), 1), id(ctx))
                     if rlog is not None:
                         rlog.slot(rid, _par_index() if par is not None else 0,
                                   (par.last_joint.get(_par_index(), 1) if vms is False else 1),
@@ -6319,7 +6386,11 @@ def _par_brief() -> dict:
                        "request": s.owner if s.index else None} for s in pool.slots],
             "rounds": meet.get("rounds"), "joint_rounds": meet.get("joint_rounds"),
             "joint_hist": meet.get("joint_hist"), "timeouts": meet.get("timeouts"),
-            "admission": pool.admission.report() if pool.admission is not None else None}
+            "admission": pool.admission.report() if pool.admission is not None else None,
+            # SPD-187: the round planner's measured periods and its buckets' rounds
+            "planner": (pool.meeting.planner.report() if pool.meeting is not None
+                        and getattr(pool.meeting, "planner", None) is not None
+                        and hasattr(pool.meeting.planner, "report") else None)}
 
 
 def start_proxy(a) -> None:
