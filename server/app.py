@@ -567,6 +567,8 @@ def _par_health() -> dict:
     rep = getattr(eng, "joint_graphs_report", None)
     if out["joint_graphs"] is None and callable(rep):
         out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
+    rr = _round_runner.RUNNER
+    out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
     return out

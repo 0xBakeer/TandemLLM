@@ -66,6 +66,10 @@ class Runner:
         self.cv = threading.Condition(self.lock)
         self.thread = None
         self.stats = {"rounds": 0, "tasks": 0, "joint": 0, "plain": 0, "errors": 0}
+        # host ms a round by phase (summed; `report`): the proposals to their drafts, the packed draft's
+        # issue, the proposals' rest (it reads the draft back), the verify's issue, the walk (it reads the
+        # pass back), the tails
+        self.ms = {k: 0.0 for k in ("prop", "packed", "rest", "verify", "walk", "tails", "round")}
         self._collect: list | None = None    # the runner thread's pending draft calls, while proposals run
 
     # ---- registration (the slot's thread) ---------------------------------------------------
@@ -124,12 +128,22 @@ class Runner:
         from server import slots as slots_mod
         slots_mod.bind(None if t.slot.index == 0 else t.slot)
 
+    def report(self) -> dict:
+        n = max(1, self.stats["rounds"])
+        return dict(self.stats, ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()})
+
+    def _t(self, key, t0):
+        t1 = time.perf_counter()
+        self.ms[key] += (t1 - t0) * 1e3
+        return t1
+
     def _round(self, tasks: list[Task]) -> None:
         app = self.app
         from engine.drafters import tree_steps
         from engine.model import h2d
         from server import slots as slots_mod
         self.stats["rounds"] += 1
+        t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
         self._collect = []
         for t in tasks:
@@ -141,7 +155,9 @@ class Runner:
             t.steps, t.tree = app._launch(tree_steps(t.drafter, t.ctx, min(t.k, t.max_new - t.n_out)))
         calls, self._collect = self._collect, None
         self._bind_none()
+        t0 = self._t("prop", t0)
         self._packed(calls)
+        t0 = self._t("packed", t0)
         for t in tasks:
             if t.done:
                 continue
@@ -151,6 +167,7 @@ class Runner:
             if t.tree is not None:
                 t.tree = t.tree.truncate(t.eng.max_len - t.pos)
         # 2. the joint verify pass (a task without a draft takes its plain step alone)
+        t0 = self._t("rest", t0)
         group = [t for t in tasks if not t.done and t.tree is not None and t.tree.n_draft > 0]
         for t in tasks:
             if not t.done and t not in group:
@@ -159,6 +176,9 @@ class Runner:
         if group:
             self._verify(group)
         self._bind_none()
+        self._t("round", t_r)
+        if self.stats["rounds"] % 200 == 0:
+            print(f"[runner] {self.report()}", flush=True)
 
     def _bind_none(self):
         from server import slots as slots_mod
@@ -194,6 +214,7 @@ class Runner:
                     cap is not None and any(len(x.parents) > cap for x in trees)) or meet.joint_for(len(group)):
                 keeps = slots_mod.joint_cut(trees, meet.max_rows, cap)
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
+        t0 = time.perf_counter()
         blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
         if len(group) == 1:
             t = group[0]
@@ -203,6 +224,7 @@ class Runner:
             multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
             outs = multi([(t.eng, b, x.parents, t.pos) for t, b, x in zip(group, blocks, trees)])
             self.stats["joint"] += 1
+        t0 = self._t("verify", t0)
         # 3. the walks in one batch, each slot's penalties first
         specs = []
         for t, x, lg in zip(group, trees, outs):
@@ -213,6 +235,7 @@ class Runner:
             specs.append({"sampler": sm, "rows": lg, "tokens": x.tokens, "parents": x.parents,
                           "start": len(t.ctx), "q": x.q, "picks": None})
         walked = round_walks(specs)
+        t0 = self._t("walk", t0)
         # 4. each task's tail, as the slot loop runs it
         for t, x, lg, w in zip(group, trees, outs, walked):
             self._bind(t)
@@ -225,6 +248,7 @@ class Runner:
             else:
                 path, new = t.eng.accept_tree(x, lg.argmax(-1).tolist())
             self._tail(t, x, path, new)
+        self._t("tails", t0)
 
     def _tail(self, t: Task, tree, path, new) -> None:
         from engine.model import h2d
