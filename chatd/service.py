@@ -35,6 +35,7 @@ import time
 from chatd import attach as attach_mod
 from chatd import compaction as comp
 from chatd import context as ctx_mod
+from chatd import ocr
 from chatd import render
 from chatd import tools as tools_mod
 from chatd.agent import AgentMixin
@@ -1761,7 +1762,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         branch, _ = self._branch(conv, parent)          # an edit goes on the parent's branch
         left = attach_mod.budget(window, _branch_tokens(branch))
         ws_dir = self.workspace(conv.id).root
-        for a in atts:
+        for a in list(atts):
             try:
                 _, data = self.attachment(a["id"])
             except (ApiError, OSError):
@@ -1773,7 +1774,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 # without the file in the workspace, and the prompt says why (chatd/attach.py)
                 a["unplaced"] = attach_mod.unplaced_words(exc)
                 self.log(f"[attach] {a['id']} not saved under uploads/: {a['unplaced']}")
-            if a.get("kind") != "text":
+            if a.get("kind") in ("image", "pdf") and a.get("path"):
+                # a scanned page is a picture of text: read it once, now (chatd/ocr.py). Its
+                # markdown becomes a text attachment of its own, appended for this message,
+                # and the code below is then the only flow it knows: whole while it fits
+                # the budget, one line and paged by read_file past it.
+                extra = self._ocr_ws(conv, ws_dir, a)
+                if extra is None:
+                    continue
+                atts.append(extra)
+                a = extra
+            elif a.get("kind") != "text":
                 continue
             tokens = int(a.get("tokens") or 0)
             a["inline"] = tokens <= left
@@ -1783,6 +1794,38 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 where = f"at {a['path']}" if a.get("path") else f"not saved: {a.get('unplaced')}"
                 self.log(f"[attach] {a['id']} {tokens} tokens over the budget: one line, the file "
                          f"{where}")
+
+    def _ocr_ws(self, conv, ws_dir: str, a: dict) -> dict | None:
+        """One OCR pass over a placed PDF or image (chatd/ocr.py), its text as an attachment.
+
+        The markdown goes next to the upload as `uploads/<name>.md` — the file the model
+        pages through when the text is over the inline budget — and into the blob store as
+        an ordinary text attachment with the name suffixed `.md`, which is all the renderer
+        needs to run it through the decisions that already exist (chatd/render.py).
+
+        None when there is nothing to read, nothing readable, or anything fails: a message
+        is never lost because a scan could not be read, it only goes unscanned.
+        """
+        name = (a.get("name") or "file") + ".md"
+        host = os.path.join(ws_dir, attach_mod.UPLOADS, os.path.basename(a["path"]))
+        try:
+            text = ocr.convert(host)
+        except Exception as exc:                       # an engine's surprise is not the user's
+            self.log(f"[ocr] {a['id']}: {type(exc).__name__}: {exc}")
+            return None
+        if not text:
+            self.log(f"[ocr] {a['id']}: {name}: nothing readable")
+            return None
+        data = text.encode("utf-8")
+        try:
+            path = attach_mod.save_upload(ws_dir, name, data)
+        except (PathError, OSError) as exc:
+            self.log(f"[ocr] {a['id']}: {name} not saved: {attach_mod.unplaced_words(exc)}")
+            return None
+        att = self.store_blob(conv.id, name, "text/markdown", data)
+        att["path"] = path
+        self.log(f"[ocr] {a['id']}: {name}: {len(text):,} characters, the file at {path}")
+        return att
 
     # ================================================================== the stream
     def attach(self, cid: str, after: int | None) -> tuple[Subscriber | None, list]:
