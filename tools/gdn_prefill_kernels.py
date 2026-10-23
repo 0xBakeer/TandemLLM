@@ -283,7 +283,7 @@ def fused_prefill_refusal(chunk: int, have_triton: bool = HAVE_TRITON) -> str:
 def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: int = CHUNK,
                         bv: int | None = None, prec: str | None = None,
                         series: bool | None = None, prec_scan: str | None = None,
-                        prec_a: str | None = None):
+                        prec_a: str | None = None, normed: bool = False):
     """The chunked gated delta rule over a whole sequence, two kernels, no chunk-shaped temporaries.
 
     Signature and shapes are `engine.gdn.chunk_gated_delta_rule`'s: `[B, T, H, D]` in, `[B, T, H,
@@ -314,8 +314,12 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
     # does it: two elementwise passes over a bf16 tensor, against a state that sums over the whole
     # sequence and would carry any difference in them to the end of it.
     from engine import gdn as _gdn
-    q = _gdn.l2norm(query, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
-    k = _gdn.l2norm(key, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
+    if normed:
+        # SPD-175: q and k come l2-normalised and contiguous (tools/gdn_prep_kernels.py)
+        q, k = query.reshape(T, Hk, Dk), key.reshape(T, Hk, Dk)
+    else:
+        q = _gdn.l2norm(query, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
+        k = _gdn.l2norm(key, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
     v = value.reshape(T, H, Dv).contiguous()
     gg = g.reshape(T, H).contiguous()
     bb = beta.reshape(T, H).contiguous()
