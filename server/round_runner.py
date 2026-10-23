@@ -19,8 +19,11 @@ Every statement of a task's round is the slot loop's (server/app.py `_generate_s
 its order, so the tokens are the ones the slot's own loop would have written: the proof is
 tests/test_round_runner.py (texts equal on the CPU) and the board's seeded byte identity.
 
-Not taken (the slot keeps its own loop): a supervisor, a probe, log-probabilities, a reasoning budget, the
-side lane, a request without a tree drafter. QSE_ROUND_RUNNER=1 turns it on.
+Not taken (the slot keeps its own loop, `why_not` names the reason, /health counts it): a supervisor, a
+probe, log-probabilities, a reasoning budget or stall arms (something that can close the block), the side
+lane, a request without a tree drafter. A passive reasoning block (`ThinkBudget` with neither) is followed
+as the slot loop follows it: `inside` masks the penalties, every block is observed. QSE_ROUND_RUNNER=1
+turns it on.
 """
 
 from __future__ import annotations
@@ -34,12 +37,28 @@ import torch
 
 ON = os.environ.get("QSE_ROUND_RUNNER", "0") == "1"
 
+#: requests the runner did not take, by reason (`why_not`), for /health
+SKIPS: dict = {}
+
+
+def why_not(*, sup, probe, lpr, think, ahead, drafter, lane, turn) -> str | None:
+    """None when the runner may take this slot's decode, else the reason it may not (counted)."""
+    why = ("supervisor" if sup is not None else "probe" if probe is not None
+           else "logprobs" if lpr is not None
+           else "think_budget" if think is not None and (think.budget or think.arms_cfg is not None)
+           else "launched" if ahead is not None else "no_drafter" if drafter is None
+           else "lane" if lane is not None else "no_turn" if turn is None else None)
+    if why is not None:
+        SKIPS[why] = SKIPS.get(why, 0) + 1
+    return why
+
 
 class Task:
     """One slot's decode state, owned by the runner while the request is registered."""
 
     def __init__(self, slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
-                 deadline, device):
+                 deadline, device, think=None):
+        self.think = think                  # a passive reasoning block (no budget, no arms) or None
         self.slot, self.eng, self.drafter, self.sampler, self.pen, self.pstop = slot, eng, drafter, sampler, pen, pstop
         self.ctx, self.pos, self.tok, self.n_out, self.max_new, self.eos = ctx, pos, tok, n_out, max_new, eos
         self.bs, self.k, self.deadline, self.device = bs, k, deadline, device
@@ -130,7 +149,8 @@ class Runner:
 
     def report(self) -> dict:
         n = max(1, self.stats["rounds"])
-        return dict(self.stats, ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()})
+        return dict(self.stats, skips=dict(SKIPS),
+                    ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()})
 
     def _t(self, key, t0):
         t1 = time.perf_counter()
@@ -220,6 +240,10 @@ class Runner:
             t = group[0]
             self._bind(t)
             outs = [t.eng.forward_tree(blocks[0], trees[0].parents, start=t.pos)]
+            on_verify = getattr(t.drafter, "on_verify", None)
+            if on_verify is not None:
+                # a lone block's time, as the slot loop hands it (a joint round's is the round's)
+                on_verify(trees[0].n_draft + 1, (time.perf_counter() - t0) * 1e3)
         else:
             multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
             outs = multi([(t.eng, b, x.parents, t.pos) for t, b, x in zip(group, blocks, trees)])
@@ -229,7 +253,7 @@ class Runner:
         specs = []
         for t, x, lg in zip(group, trees, outs):
             if t.pen is not None:
-                t.pen.mask = False
+                t.pen.mask = bool(t.think is not None and t.think.inside)
                 t.pen.apply_tree(lg, x)
             sm = t.sampler if t.sampler is not None and t.sampler.on else None
             specs.append({"sampler": sm, "rows": lg, "tokens": x.tokens, "parents": x.parents,
@@ -280,22 +304,28 @@ class Runner:
             t.end("stop")
         elif any(x in t.eos for x in new) or t.n_out >= t.max_new or t.pos >= t.eng.max_len - 1:
             t.end("eos" if any(x in t.eos for x in new) else "length")
+        elif t.think is not None:
+            t.think.observe(new)            # the slot loop looks at a block it goes on after
 
     def _plain(self, t: Task) -> None:
         """A task with no draft this round: the slot loop's plain step (one row, alone)."""
         from engine.model import h2d
         self.stats["plain"] += 1
         eng, d = t.eng, t.drafter
+        on_plain = getattr(d, "on_plain", None) if d is not None else None
+        t_plain = time.perf_counter()
         logits = eng.forward(h2d([t.tok], torch.long, t.device), start=t.pos, last_only=True)
         if d is not None and hasattr(d, "sync"):
             d.sync([t.tok], eng.hidden_post_norm[0], t.pos)
         t.pos += 1
         t.bs.block()
         if t.pen is not None:
-            t.pen.mask = False
+            t.pen.mask = bool(t.think is not None and t.think.inside)
             t.pen.apply_single(logits[0, -1])
         tok = (t.sampler(logits[0, -1], index=len(t.ctx)) if t.sampler is not None and t.sampler.on
                else int(logits[0, -1].argmax()))
+        if on_plain is not None:
+            on_plain((time.perf_counter() - t_plain) * 1e3)
         t.ctx.append(tok)
         t.n_out += 1
         t.tok = tok
@@ -304,6 +334,8 @@ class Runner:
         if d is not None:
             d.observe([tok])
         stop_now = t.pstop is not None and t.pstop.observe([tok])
+        if t.think is not None and not stop_now and tok not in t.eos:
+            t.think.observe([tok])          # the slot loop's plain step: past a stop or an end token, not
         t.push([tok])
         if stop_now:
             t.end("stop")

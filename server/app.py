@@ -1635,13 +1635,13 @@ def _run_draft_round(meet) -> None:
 
 
 def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
-                   deadline, device):
+                   deadline, device, think=None):
     """SPD-201: hand this slot's decode to the round runner and stream what it pushes. The turn is the
     runner's while it decodes; this thread takes it back before the request's bookkeeping."""
     i = _par_index()
     slot = par.slots[i]
     task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
-                              bs, k, deadline, device)
+                              bs, k, deadline, device, think)
     slot.phase = "runner"
     par.wake()
     runner = _round_runner.runner_for(par, sys.modules[__name__])
@@ -2004,14 +2004,16 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
         ahead = None                  # the next proposal, launched before the last stream
         par = dict.get(STATE, "pool")
         t_post = None                 # parallel requests: when this slot's last verify returned
-        if (_round_runner.ON and par is not None and tree_mode and sup is None and probe is None
-                and lpr is None and think is None and ahead is None and drafter is not None
-                and STATE.get("lane") is None and par.turn is not None and n_out < max_new):
+        if _round_runner.ON and par is not None and tree_mode and n_out < max_new:
             # SPD-201: the runner-owned round takes this slot's decode from here (server/round_runner.py);
-            # this thread streams what it pushes and takes the turn back at the end
-            yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
-                                      max_new, eos, bs, k, deadline, prompt.device)
-            return
+            # this thread streams what it pushes and takes the turn back at the end. A reasoning
+            # block's bookkeeping goes with it while nothing can close the block (no budget, no arms)
+            why = _round_runner.why_not(sup=sup, probe=probe, lpr=lpr, think=think, ahead=ahead,
+                                        drafter=drafter, lane=STATE.get("lane"), turn=par.turn)
+            if why is None:
+                yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
+                                          max_new, eos, bs, k, deadline, prompt.device, think)
+                return
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
