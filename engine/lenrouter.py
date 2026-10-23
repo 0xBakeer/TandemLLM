@@ -393,6 +393,9 @@ class LengthRouter(Drafter):
         # the chosen arm's per-token q rows when the request samples.
         self.last_q = None
         self.last_key = None
+        # SPD-161: the rows a joint round keeps of this slot's tree (set by the server before each
+        # proposal; None alone): at or under the narrow arm's width, the wide arm is not drafted
+        self.row_cap = None
         self.last_width = 0
         self.last_depth = 0
         self.last_expected = 0.0
@@ -1794,6 +1797,12 @@ class LengthRouter(Drafter):
         self.k_left = k
         self._ctx = context
         key = self._choose(min(k, self.w_large - 1))
+        if (key == "l" and self.row_cap is not None and self.row_cap <= self.w_small
+                and self.idle != "s"):
+            # SPD-161: a joint round keeps at most `row_cap` rows of this tree (server/app.py, the
+            # family's tree cap); the wide arm's extra rows would be drafted and cut
+            key = "s"
+            self.stats["row_capped"] = self.stats.get("row_capped", 0) + 1
         if self.switch:
             self._use(key)
         child = self.small if key == "s" else self.large

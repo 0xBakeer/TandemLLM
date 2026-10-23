@@ -200,7 +200,11 @@ class Sampler:
         drop[..., 0] = False
         out = torch.full_like(flat, float("-inf")).scatter_(-1, idx, vals.masked_fill(drop, float("-inf")))
         wide = cumulative[:, -1] <= self.top_p    # the nucleus is wider than k0: the sort
-        if k0 < V and bool(wide.any()):
+        # SPD-161: after a top-k of at most k0 every finite logit is among the k0 taken, so their mass is the
+        # row's (1 to a few ulp) and above any top-p <= 0.999: no row is wide, and the host need not ask
+        # (a synchronize a walk). Bit for bit the asked path (tests/test_sample_batch.py).
+        confined = 0 < self.top_k <= k0 and self.top_p <= 0.999
+        if k0 < V and not confined and bool(wide.any()):
             rows = wide.nonzero().flatten()
             sorted_logits, order = torch.sort(flat[rows], descending=True, dim=-1)
             probs = torch.softmax(sorted_logits, dim=-1)

@@ -1532,6 +1532,24 @@ def _round_walk(group, outs) -> None:
             r.walked = g                  # else the slot walks itself (its penalties, if any, are applied)
 
 
+#: SPD-161: a slot drafts no wider than its joint round keeps (the family's tree cap at the slots decoding now)
+ROW_CAP = os.environ.get("QSE_PARALLEL_ROW_CAP", "1") != "0"
+
+
+def _row_cap(par, drafter) -> None:
+    """Hand the drafter the rows its next joint round keeps of its tree (`row_cap`, engine/lenrouter.py):
+    the family's tree cap at the decoding slots, None alone or without a cap."""
+    if not hasattr(drafter, "row_cap"):
+        return
+    cap = None
+    meet = par.meeting if par is not None else None
+    tc = getattr(meet, "tree_cap", None) if meet is not None else None
+    n = len(par.decoding()) if par is not None else 0
+    if ROW_CAP and tc is not None and n > 1:
+        cap = tc(n, meet.max_rows)
+    drafter.row_cap = cap
+
+
 def _plan_tail(meet, pl, now: float) -> None:
     """SPD-187: the rest of the last round (its start to this one's, less its pass), for the planner's
     tails(E); and the pass timings that are done by now."""
@@ -1984,6 +2002,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 if ahead is not None:
                     tree, ahead = _collect(*ahead), None
                 else:
+                    _row_cap(par, drafter)
                     tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
                 if par is not None:
                     _par_note(par, "draft_ms", len(par.decoding()), (time.perf_counter() - t_dr) * 1e3)
@@ -2119,6 +2138,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                             close = _sp1(sup, think, n_out + len(new), eng.max_len - pos,
                                          len(ctx))
                         if (think is None or not think.hit) and close is None:
+                            _row_cap(par, drafter)
                             ahead = _launch(tree_steps(drafter, ctx,
                                                        min(k, max_new - n_out - len(new))))
                         sent = 0

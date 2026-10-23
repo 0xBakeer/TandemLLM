@@ -270,6 +270,35 @@ def test_spd161_a_rounds_walks_in_one_batch_are_each_slots_own():
     return "40 rounds of 2-6 slots of mixed kinds: every slot's path, tokens and generator state its own"
 
 
+def test_spd161_a_top_k_row_is_never_wide_so_the_sync_is_skipped():
+    """`_top_p_fast` after a top-k of at most TOPP_K: every finite logit is in the k0 taken, so no row is
+    wider than k0 and the skipped `wide.any()` would have been False; the filter equals the path that asks."""
+    keep = S.TOPP_K
+    S.TOPP_K = 64
+    try:
+        g = torch.Generator().manual_seed(3)
+        for trial in range(300):
+            k = int(torch.randint(1, 65, (1,), generator=g))
+            tp = float(torch.empty(1).uniform_(0.3, 0.999, generator=g))
+            sm = S.Sampler(temperature=float(torch.empty(1).uniform_(0.3, 1.5, generator=g)), top_p=tp, top_k=k)
+            rows = torch.randn(6, 500, generator=g) * float(torch.empty(1).uniform_(0.5, 8.0, generator=g))
+            got = sm._filter(rows)
+            x = rows / sm.temperature
+            cut = torch.topk(x, k, dim=-1).values[..., -1, None]
+            x = torch.where(x < cut, torch.full_like(x, float("-inf")), x)
+            vals = torch.topk(x, 64, dim=-1, sorted=True).values
+            cum = torch.cumsum(torch.exp(vals - torch.logsumexp(x, -1, keepdim=True)), -1)
+            assert not bool((cum[:, -1] <= tp).any()), (trial, k, tp)
+            # the asked path: k0 past the vocabulary's top-k bound forces the check (and it finds nothing)
+            sm2 = S.Sampler(temperature=sm.temperature, top_p=tp, top_k=k)
+            S.TOPP_K = 64
+            ref = sm2._top_p_fast(x, 64)
+            assert torch.equal(got, torch.softmax(ref, dim=-1)), trial
+    finally:
+        S.TOPP_K = keep
+    return "300 profiles: no top-k row is wide; the filter with the skip equals the asked path"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
