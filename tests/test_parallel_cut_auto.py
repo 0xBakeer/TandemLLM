@@ -51,6 +51,22 @@ def test_an_unbatchable_block_stays_alone():
     assert sorted(len(x) for x in g) == [1, 2]
 
 
+def test_the_27b_family_takes_64_rows_on_exl3_and_32_otherwise():
+    """SPD-159: the row cap is the family's, by the weights it serves; no other family has a policy."""
+    from engine.models.qwen3_5 import adapter
+
+    class W:
+        def __init__(self, src):
+            self.exl3_source = src
+
+    class E:
+        def __init__(self, src):
+            self.w = W(src)
+    assert adapter.joint_policy(E("/packs/exl3")) == {"max_rows": 64, "cut": "auto"}
+    assert adapter.joint_policy(E(None)) == {"max_rows": 32, "cut": "auto"}
+    assert adapter.Qwen38Engine.joint_policy is adapter.joint_policy
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())

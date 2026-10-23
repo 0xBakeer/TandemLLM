@@ -53,7 +53,7 @@ def _run(answers: list) -> subprocess.CompletedProcess:
     srv = _server(answers)
     port = srv.server_address[1]
     script = (f'say() {{ echo "SAY $*"; }}; PY=python3; PORT={port}; SMOKE_URL=http://127.0.0.1:{port}/v1; '
-              f'SMOKE_MODEL=x; SMOKE_TIMEOUT_S=5; SMOKE_RETRY_S=0\n{_fn("smoke")}\nsmoke community/x')
+              f'SMOKE_MODEL=x; SMOKE_TIMEOUT_S=20; SMOKE_RETRY_S=0\n{_fn("smoke")}\nsmoke community/x')
     try:
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
     finally:

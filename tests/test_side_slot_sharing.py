@@ -26,12 +26,14 @@ def test_a_side_slot_gets_the_replaced_dict_and_reads_no_checkpoint(monkeypatch)
     assert getattr(df2.load_weights, "shared", False)
     first = df2.load_weights("/ckpt/b8", "cpu")                      # slot 0: read
     assert reads == ["/ckpt/b8"] and "fc.weight" in first
-    built = {"fc.weight": torch.ones(1), "fc.exl3": "blk"}
+    built = {"fc.weight": torch.ones(1, dtype=torch.bfloat16), "fc.exl3": "blk"}
     df2._EXL3_PROJ["/ckpt/b8|/exl3/b8.safetensors"] = built          # slot 0's arm built
     assert df2.load_weights("/ckpt/b8", "cpu") is built              # a side slot: no read
-    df2._QUANTISED["/ckpt/b16"] = q = {"fc.weight": 2}
+    df2._QUANTISED["/ckpt/b16"] = q = {"fc.weight": torch.ones(1, dtype=torch.bfloat16)}
     assert df2.load_weights("/ckpt/b16", "cpu") is q
     assert reads == ["/ckpt/b8"]
+    df2.load_weights("/ckpt/b8", "cpu", torch.float32)               # another dtype: read
+    assert reads == ["/ckpt/b8", "/ckpt/b8"]
     serving._share_drafter_weights()                                  # idempotent
 
 
@@ -44,6 +46,19 @@ def test_a_side_slot_takes_the_draft_head_slot_0_holds(monkeypatch):
     e2 = E()
     serving._share_draft_head(e2)
     assert df2._EXL3_HEADS[(id(e2), "/heads/k4")] == "blk"
+
+
+def test_slot_0s_head_is_read_before_a_side_slot_takes_it(monkeypatch):
+    monkeypatch.setattr(df2, "DRAFT_HEAD_EXL3", "/heads/k4")
+    heads = {}
+    monkeypatch.setattr(df2, "_EXL3_HEADS", heads)
+
+    class E:
+        pass
+    e0, e2 = E(), E()
+    monkeypatch.setattr(df2, "exl3_draft_head", lambda eng: heads.setdefault((id(eng), "/heads/k4"), "blk0"))
+    serving._share_draft_head(e2, e0)
+    assert heads[(id(e2), "/heads/k4")] == "blk0" and heads[(id(e0), "/heads/k4")] == "blk0"
 
 
 def test_no_head_yet_leaves_the_slot_to_read_its_own(monkeypatch):

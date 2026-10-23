@@ -89,10 +89,10 @@ def tile_width(kb: int) -> int:
     return 16 * (kb // 10) + 8 if kb >= 10 else 16 * kb
 SKINNY_MAX = 32                           # rows the decode-in-registers kernel takes in one call
 # rows up to which a call runs the skinny kernel in 32-row chunks instead of decoding a slab
-# (one weight read per chunk against a 2-byte write and read of the slab per weight). SPD-171: 512 since
-# 2026-10-23 (was 128). On GB10, the 27B's cached prefill (1,024-row chunks) of a 160-token prompt took
-# 0.596 s at 128 and 0.237 s at 512, 384 tokens 0.759 -> 0.561 s, 512 tokens 0.871 -> 0.718 s; 768 and
-# longer prompts are unchanged; 1,024 made 1,024-token prompts slower (1.38 -> 1.68 s)
+# (one weight read per chunk against a 2-byte write and read of the slab per weight). SPD-171: the 27B's EXL3
+# profiles set 512 (ops/profiles/_exl3.env, its community packs' profiles): its cached prefill of a
+# 160-token prompt took 0.596 s at 128 and 0.237 s at 512 on GB10, 384 tokens 0.759 -> 0.561 s, 512 tokens
+# 0.871 -> 0.718 s, 768 and longer unchanged, 1,024 slower; the other families keep 128 until measured
 CHUNK_UNTIL = int(_S.get("EXL3_CHUNK_UNTIL"))
 # 33..CHUNK_UNTIL rows in one launch whose 32-row chunks are adjacent CTAs (ENG-213); 0 = one launch a chunk
 ROWGRID = _S.get("EXL3_ROWGRID") == "1"

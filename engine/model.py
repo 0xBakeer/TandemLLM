@@ -172,8 +172,11 @@ GDN_AB = _S.get("GDN_AB") == "1"
 #: GDN gated norm before its output projection -- once for every engine's rows; each is one program a row,
 #: so a row's bits are its own (0: once per engine)
 JOINT_ROWWISE = _S.get("JOINT_ROWWISE") != "0"
-#: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call (0: one call a chunk)
-WINDOW_MLP = _S.get("WINDOW_MLP") != "0"
+#: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call. Off by default: a window's
+#: partial chunk alone (<= EXL3_CHUNK_UNTIL rows) takes the skinny kernel and inside the joined call the
+#: slab, and NVFP4's 1,024-row chunks take the v2 tile alone and dequant + cuBLAS joined, so a row's bits
+#: would depend on the window it was read in (a cold prompt against the same prompt resumed at an anchor)
+WINDOW_MLP = _S.get("WINDOW_MLP") == "1"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
@@ -2031,8 +2034,10 @@ def forward_tree_multi(items: list) -> list:
     engines' rows and are split back. The convolutions, recurrences, attention over each engine's
     own KV, the norms and the commits stay each engine's own, at its own row count. Returns each
     engine's logits, as `forward_tree` would. Every matrix-product kernel fixes its reduction order
-    by the weight's shape, never by the row count, up to 32 rows (docs/kernels.md), so a row's
-    projection is the bits it is alone; the caller keeps the joint pass at or under 32 rows."""
+    by the weight's shape, never by the row count, up to the family's row cap (32, or 64 for EXL3
+    weights: `joint_policy`, docs/kernels.md), so a row's projection is the bits it is alone; the
+    caller keeps the joint pass at or under that cap. The row-wise steps (`addnorm`, `gated`) are one
+    program a row and run once for all engines too (SPD-163)."""
     if not items:
         return []
     sts, gens = [], []

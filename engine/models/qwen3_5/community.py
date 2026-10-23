@@ -36,6 +36,9 @@ def env(m: dict, c: dict, d: str) -> str:
         lines.append('QSE_ENGINE_FLAGS="' + ("--model ${QSE_WEIGHTS_DIR} " if c["load"] == "standalone"
                                              else "") + '--drafter none"')
     lines += _parallel(m)
+    if c.get("format") == "exl3":
+        # SPD-171: the 27B's EXL3 prefill takes up to 512 rows on the skinny kernel (ops/profiles/_exl3.env)
+        lines.append("QWEN38_EXL3_CHUNK_UNTIL=512")
     lines += ["QWEN38_SAMPLE_NUCLEUS=1",
               f"VISION={'on' if c['modalities']['image'] else 'off'}",
               # SPD-167: a text-only pack's limit, which setup.env cannot turn back on (ops/serve.env)

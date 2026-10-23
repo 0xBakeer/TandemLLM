@@ -107,22 +107,35 @@ def _share_drafter_weights() -> None:
 
     def load_weights(snapshot: str, device: str = "cuda", dtype=None):
         import torch
+        dtype = torch.bfloat16 if dtype is None else dtype
+
+        def fits(w) -> bool:
+            # the built dict serves only the device and dtype it was read for
+            t = w.get("fc.weight") if isinstance(w, dict) else None
+            return (t is not None and torch.is_tensor(t) and t.dtype == dtype
+                    and t.device == torch.device(device))
         for k, w in df2._EXL3_PROJ.items():
-            if k.startswith(f"{snapshot}|"):
+            if k.startswith(f"{snapshot}|") and fits(w):
                 return w
-        if snapshot in df2._QUANTISED:
-            return df2._QUANTISED[snapshot]
-        return orig(snapshot, device, torch.bfloat16 if dtype is None else dtype)
+        w = df2._QUANTISED.get(snapshot)
+        if w is not None and fits(w):
+            return w
+        return orig(snapshot, device, dtype)
 
     load_weights.shared = True
     df2.load_weights = load_weights
 
 
-def _share_draft_head(e2) -> None:
-    """SPD-165: a side slot's drafters read the EXL3 draft head slot 0 already holds (`dflash2.exl3_draft_head`
-    keys it by engine, so every side slot read its own 0.64 GB copy). Read-only weights, as the target's."""
+def _share_draft_head(e2, eng0=None) -> None:
+    """SPD-165: a side slot's drafters read the EXL3 draft head slot 0 holds (`dflash2.exl3_draft_head` keys
+    it by engine, so every side slot read its own 0.64 GB copy). Slot 0 reads its head at its first draft;
+    side slots are built before that, so slot 0's is read here first. Read-only weights, as the target's."""
     from engine.drafters import dflash2 as df2
     path = df2.DRAFT_HEAD_EXL3
+    if not path:
+        return
+    if eng0 is not None:
+        df2.exl3_draft_head(eng0)
     for (_, p), blk in list(df2._EXL3_HEADS.items()):
         if p == path:
             df2._EXL3_HEADS.setdefault((id(e2), path), blk)
@@ -210,7 +223,7 @@ def side_slots(a, ctx, cfg, w) -> dict:
         from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
         e2 = Qwen38Engine(cfg, w, max_len=L)
         e2.graphs_off = a.side_graphs == "off"
-        _share_draft_head(e2)
+        _share_draft_head(e2, getattr(drafter0, "eng", None))
         ng0 = getattr(drafter0, "ngram", None)
         d2 = make_lenrouter(a, e2, L, ctx, corpus_from=ng0) if a.drafter == "lenrouter" else None
         return e2, d2

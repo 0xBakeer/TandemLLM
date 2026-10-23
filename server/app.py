@@ -1308,6 +1308,7 @@ def _phased(gen):
         yield from gen
     finally:
         slot.phase = ""
+        pool.wake()                    # SPD-161: the others' barrier set may be complete now
 
 
 def _par_chunks(on_chunk):
@@ -1327,7 +1328,10 @@ def _par_block(pool, tree_mode: bool) -> None:
     go through `_verify_tree`; a chain loop verifies alone and is not waited for -- and the GPU is
     offered to a waiting slot."""
     slot = _par_slot(pool)
+    was = slot.phase
     slot.phase = "decode" if tree_mode else "solo"
+    if was == "decode" and slot.phase != "decode":
+        pool.wake()                    # SPD-161: it left the barrier's set
     if pool.turn is not None and pool.turn.waiting():
         pool.turn.pause(slot.index)
 
@@ -10201,18 +10205,18 @@ def parser() -> argparse.ArgumentParser:
                     default=float(os.environ.get("QSE_PARALLEL_SWITCH_MS", "0") or 0),
                     help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
                          "Python's 5 ms); a woken slot waits up to this long for the GIL")
-    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "auto"),
-                    choices=("share", "joint", "auto"),
+    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", ""),
+                    choices=("", "share", "joint", "auto"),
                     help="how a joint pass's rows are shared: share (each slot cuts its tree to a "
                          "fixed share before it submits: 16 at two slots, 10 at three, 8 at four), "
                          "joint (the round cuts every slot's whole tree together, best nodes first), or "
-                         "auto (SPD-155, the default: joint from QSE_PARALLEL_AUTO_N decoding slots, "
-                         "share below)")
+                         "auto (SPD-155: joint from QSE_PARALLEL_AUTO_N decoding slots, share below); "
+                         "empty (the default): the model family's (`joint_policy`, else share)")
     ap.add_argument("--parallel-max-rows", type=int,
-                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "64") or 64),
-                    help="rows of a joint pass at most (32: the row-invariant kernels' range; SPD-159: "
-                         "64 measured row-invariant too on the 27B EXL3 pack, each engine's joint rows "
-                         "bit for bit its own eager verify)")
+                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "0") or 0),
+                    help="rows of a joint pass at most; 0 (the default): the model family's "
+                         "(`joint_policy`, else 32, the row-invariant kernels' range). SPD-159: the 27B "
+                         "on EXL3 weights takes 64, each engine's joint rows bit for bit its own verify")
     ap.add_argument("--parallel-draft-rows", type=int,
                     default=int(os.environ.get("QSE_PARALLEL_DRAFT_ROWS", "128") or 128),
                     help="rows of a packed draft pass at most (SPD-157): drafting decides speed only, "
@@ -11060,8 +11064,13 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
               f"the side slots ({_gib(mem.ceiling)} / {_gib(mem.peak)} GiB)", flush=True)
     settle = torch.cuda.synchronize if a.parallel_settle == "on" else None
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
-    meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3,
-                              cut=a.parallel_cut)
+    # SPD-159/155: the joint pass's row cap and cut are the model family's (`joint_policy`: what its
+    # kernels keep row-invariant), unless the flags name them
+    pol_fn = getattr(STATE["engine"], "joint_policy", None)
+    pol = dict(pol_fn() or {}) if callable(pol_fn) else {}
+    max_rows = int(a.parallel_max_rows or pol.get("max_rows") or 32)
+    cut = a.parallel_cut or pol.get("cut") or "share"
+    meet = (slots_mod.Meeting(max_rows, a.batch_timeout_ms / 1e3, cut=cut)
             if a.parallel_batch == "on" and STATE["engine"].caps.joint_verify else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
@@ -11088,7 +11097,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         WINDOW_TURN[0] = True                           # SRV-321, in `_window_layer`
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
-          f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "
+          f"{'up to ' + str(max_rows) + ' rows, cut ' + cut if meet else 'off'}; packed draft "
           f"{'on' if dmeet is not None else 'off'}; admission floor "
           f"{a.parallel_floor_gb:g} GiB MemAvailable", flush=True)
 

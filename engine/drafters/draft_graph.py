@@ -228,6 +228,9 @@ class PackedDraftGraph:
 
 
 _PACKED: dict = {}
+#: SPD-157: packed-draft graph sets kept at most (one per ordered set of drafters); the least recently used
+#: goes first. With slots packed in slot order a box sees few sets, but subsets of 8 slots are 247
+_PACKED_MAX = 24
 
 
 #: the packed draft from CUDA graphs (False: eager, for the board check's comparison)
@@ -250,9 +253,12 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     graph = PACKED_GRAPH if graph is None else graph
     if graph and torch.cuda.is_available():
         key = tuple(id(d) for d in ds)
-        pg = _PACKED.get(key)
+        pg = _PACKED.pop(key, None)
         if pg is None or pg.ptrs != tuple(d._ck.data_ptr() for d in ds):
-            pg = _PACKED[key] = PackedDraftGraph(tuple(ds))
+            pg = PackedDraftGraph(tuple(ds))
+        _PACKED[key] = pg                          # most recently used last
+        while len(_PACKED) > _PACKED_MAX:
+            _PACKED.pop(next(iter(_PACKED)))
         return pg.run(reqs, temp)
     dev = ds[0].eng.device
     scals = [torch.tensor([a, p, d.ctx_len], dtype=torch.long, device=dev) for d, a, p in reqs]

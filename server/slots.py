@@ -445,9 +445,10 @@ class DraftReq:
         self.joint = 1
 
 
-#: Tree nodes a slot may verify in a joint round, by how many slots decode: the joint pass stays at
-#: or under the 32 rows where every projection kernel is row-invariant (docs/kernels.md). A slot
-#: alone keeps the router's own budget.
+#: Tree nodes a slot may verify in a joint round under the share cut, by how many slots decode: the
+#: joint pass stays at or under the family's row cap (`joint_policy`, 32 unless the family proved more),
+#: where every projection kernel is row-invariant (docs/kernels.md). A slot alone keeps the router's own
+#: budget.
 SHARES = {2: 16, 3: 10, 4: 8}
 
 
@@ -488,8 +489,8 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
     return keep
 
 
-#: SPD-163: how long a barrier waiter sleeps while a decoding slot holds the GPU turn (it is woken by
-#: the round's end or a submit before that); `QSE_PARALLEL_BUSY_WAIT_MS`
+#: SPD-161: how long a barrier waiter sleeps while a decoding slot holds the GPU turn; it is woken before
+#: that by the round's end, a submit, or a slot leaving decode (`Pool.wake`); `QSE_PARALLEL_BUSY_WAIT_MS`
 BUSY_WAIT_S = float(os.environ.get("QSE_PARALLEL_BUSY_WAIT_MS", "20") or 20) / 1e3
 
 #: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
@@ -671,6 +672,13 @@ class Pool:
                           else ""))
         return n, why
 
+    def wake(self) -> None:
+        """SPD-161: the barriers' waiters look again (a slot left decode: their set may be complete)."""
+        for m in (self.meeting, self.draft_meeting):
+            if m is not None:
+                with m.cv:
+                    m.cv.notify_all()
+
     def release_side(self, slot: Slot) -> None:
         slot.owner = None
         slot.served += 1
@@ -707,6 +715,7 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
     with meet.cv:
         meet.pending[slot_index] = req
         meet.stats["submitted"] += 1
+        meet.cv.notify_all()            # a waiter asleep on a busy turn (BUSY_WAIT_S) looks again
         dec = pool.decoding()
         now = time.monotonic()
         last = meet._last_submit.get(slot_index)
@@ -722,7 +731,7 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
         try:
             with meet.cv:
                 while req.out is None and req.error is None:
-                    # SPD-163: a waiter polls at half the barrier's timeout only while the turn could
+                    # SPD-161: a waiter polls at half the barrier's timeout only while the turn could
                     # be idle; while a decoding slot holds it (the round's runner, or a slot on its
                     # way to submit) it sleeps until notified, up to BUSY_WAIT_S. Seven waiters that
                     # woke every millisecond took the GIL from the thread issuing the joint pass:

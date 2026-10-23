@@ -114,8 +114,19 @@ def tree_batchable(eng, parents) -> bool:
     return 2 <= len(parents) <= VERIFY_ROWS
 
 
+def joint_policy(eng) -> dict:
+    """SPD-159/155: the joint verify pass this family's kernels keep row-invariant. On EXL3 weights the
+    skinny kernel takes 33-64 rows as adjacent 32-row chunks of the same arithmetic, and an 8 x 8-row joint
+    pass gave each engine's rows bit for bit its own eager verify (2026-10-23, the ThinkingCap EXL3 4.0
+    pack): 64 rows. NVFP4 sends 33-64 rows to its prefill tile (tools/nvfp4_linear.py) and FP8 is not
+    proven: 32 rows there. The cut is the auto one either way (it stays within the cap)."""
+    exl3 = getattr(getattr(eng, "w", None), "exl3_source", None) is not None
+    return {"max_rows": 64 if exl3 else 32, "cut": "auto"}
+
+
 Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
 Qwen38Engine.tree_batchable = tree_batchable
+Qwen38Engine.joint_policy = joint_policy
 Qwen38Engine.cost = cost
 Qwen38Engine.discard_pending = discard_pending
 Qwen38Engine.cache_state = cache_state

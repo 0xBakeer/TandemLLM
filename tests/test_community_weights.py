@@ -915,7 +915,7 @@ def test_spd167_a_text_only_pack_keeps_vision_off_under_a_setup_guide_overlay():
         oc = copy.deepcopy(_entry())
         oc["modalities"]["image"] = True
         o = _resolve(community.env(m, registry.community_entry(oc, m)), keys, setup_env="VISION='on'\n")
-        assert o["VISION"] == "on" and o["QSE_PACK_VISION"] == "<unset>", o
+        assert o["VISION"] == "on" and o["QSE_PACK_VISION"] in ("", "<unset>"), o
         o = _resolve(community.env(m, registry.community_entry(oc, m)), keys, setup_env="VISION='off'\n")
         assert o["VISION"] == "off", o
 

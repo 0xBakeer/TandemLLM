@@ -66,9 +66,9 @@ MODEL_ID = r"^[a-z0-9][a-z0-9.-]{0,63}$"
 # a string field without a pattern of its own: what a value written into serve.env may hold
 SAFE_VALUE = r"^[A-Za-z0-9._:-]{1,64}$"
 #: VIS-199: the most parallel chats (sequence slots) the guide and apply take, whatever a card
-#: measured. A joint verify pass holds at most 32 rows (server/slots.py `Meeting`,
-#: `--parallel-max-rows`) and a decoding chat keeps at least 2 of them (`share`), so 16 is the most
-#: that verify in one pass. A card's `slots.max` is how far it was measured; above it the guide says
+#: measured. A joint verify pass holds at most the family's row cap (32 by default, 64 for the 27B on
+#: EXL3; server/slots.py `Meeting`, `--parallel-max-rows`) and a decoding chat keeps at least 2 of them
+#: (`share`), so 16 is the most that verify in one pass at 32. A card's `slots.max` is how far it was measured; above it the guide says
 #: untested, and memory decides the rest (the estimate's `fits`).
 ENGINE_MAX_SLOTS = 16
 
