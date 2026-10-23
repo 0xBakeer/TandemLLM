@@ -34,6 +34,9 @@
 // 455.1): its own Now in the Context panel, a row per worker in the Now dock, the rate on its card,
 // and the mock's two workers at once.
 // #130 (2026-10-23): the size is pako's gzip at level 6 (scripts/gzip-size.mjs), the same on every Node, OS and CPU.
+// 462 KB since the guide learned a simple mode (#103, 2026-10-23: 460.6 KB on the pako measure): the mode's own
+// chunk (the three-page flow, the folded settings page, the card tiles and their note-line trim) and the Finish
+// gate's plan-check round trip.
 import { BUDGET, distSizes } from './gzip-size.mjs';
 
 const dist = new URL('../dist/', import.meta.url).pathname;

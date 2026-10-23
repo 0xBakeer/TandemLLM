@@ -4309,3 +4309,61 @@ qse-wren-figure::before {
     min-height: 44px;
   }
 }
+
+/* the simple guide: the mode switch rides above the page, the settings folds are the
+   review page's own cards, and the Advanced escape hatch sits at the bottom */
+.setup-mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.setup-mode-note {
+  margin-left: 6px;
+  font-size: var(--fs-xs);
+}
+
+.setup-folds {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.setup-fold-head {
+  cursor: pointer;
+  padding: 9px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  list-style: none;
+}
+
+.setup-fold-head::-webkit-details-marker {
+  display: none;
+}
+
+.setup-fold-head::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--ink-3);
+  transition: transform 0.12s ease;
+}
+
+.setup-fold[open] .setup-fold-head::before {
+  transform: rotate(90deg);
+}
+
+.setup-fold-body {
+  padding: 10px 12px 4px;
+}
+
+.setup-simple-advanced {
+  margin: 16px 0 0;
+  text-align: center;
+}

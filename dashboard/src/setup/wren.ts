@@ -328,6 +328,8 @@ export class QseWren extends LightElement {
         // the tool calls run in order; a valid one hops and highlights, a refused one only goes
         // back to the model, and none of them moves the phone's sheet
         for (const call of calls) {
+          // Stop means stop: buffered tool calls must not run after it.
+          if (signal.aborted) break;
           const out = await host.execute(call, turnStartedAt);
           if (out.ok) {
             this.emit('tool-call');

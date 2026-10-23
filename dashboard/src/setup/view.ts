@@ -34,7 +34,9 @@ import './measure-table';
 import './memory-bar';
 import './reset';
 import './signin';
-import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, windowMax, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
+import { activeSteps, clearSaved, emptyState, normalizeStep, readSaved, safeStorage, setupReducer, stepPos, windowMax, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
+import { setSimple, simpleDefaultsActions, simpleFold, simpleOn, simpleSwitch } from './simple';
+import { SIMPLE } from './strings';
 import { parseSlots, slotsBlocker, slotsRange, slotsVerdict, stepSlots, type SlotsParse } from './slots';
 import { checkWindow, shortTokens, stepWindow, windowRange, type WindowKey, type WindowParse } from './window';
 import { S, STEP_INTRO, STEP_LABEL, STEP_SHORT, STEP_TITLE } from './strings';
@@ -70,6 +72,8 @@ export class QseSetup extends LightElement {
   @state() private resetOpen = false;
   @state() private unauthorized = false;
   @state() private winNarrow = false;
+  /** the simple mode of the guide (src/setup/simple.ts): a browser memory, default on */
+  @state() private simple = simpleOn();
   /** VIS-199: what is typed in the parallel-chats field while it is not a count the engine takes
    *  (empty, 0, 2.5, 40): kept as typed with the reason, never clamped; null when the field shows
    *  the selection's count */
@@ -190,8 +194,11 @@ export class QseSetup extends LightElement {
   /** open a model: this browser's progress for it, else what the box runs now (the server's
    *  reading of serve.env), else the recommended setup */
   private async openModel(m: SetupModel, step: SetupStepId | undefined): Promise<void> {
+    const fresh = !(this.wiz.model === m.id && this.wiz.selection);
+    // simple mode has no overview page: the quant cards are page 2, and page 2 is where you land
+    if (this.simple && (step === undefined || step === 'overview')) step = 'weights';
     let seed: SetupSelection | null = null;
-    if (!(this.wiz.model === m.id && this.wiz.selection)) {
+    if (fresh) {
       try {
         seed = (await setupApi.current(m.id)).selection;
       } catch {
@@ -203,6 +210,13 @@ export class QseSetup extends LightElement {
     if (!(this.model?.state === 'ready' && this.model.data.id === m.id)) return;
     this.dispatch({ type: 'open', model: m, step, seed }, false);
     if (this.wiz.step === 'weights') void this.syncCommunity();
+    // a first-opened model with nothing running yet gets the simple answers (full window, up
+    // to four chats, deciders + cache on) — as ordinary actions, so the reducer's clamps and
+    // the memory bar see a plain click. A box that already serves this model keeps its own
+    // window, chats and components: opening the guide in a new browser must not change them.
+    if (this.simple && fresh && !seed && this.wiz.selection) {
+      for (const a of simpleDefaultsActions(m, this.wiz.selection)) this.dispatch(a, false);
+    }
   }
 
   private get m(): SetupModel | null {
@@ -223,7 +237,9 @@ export class QseSetup extends LightElement {
   private syncFromRoute(): void {
     const [id, stepRaw] = this.path;
     if (!id) {
-      if (this.wiz.step !== 'models') this.wiz = { ...this.wiz, step: 'models' };
+      // the tiles are a step, not a render detail: it goes through the reducer so the saved
+      // progress says 'models' too — an abandoned wizard that resumes must start at the top
+      if (this.wiz.step !== 'models') this.dispatch({ type: 'tiles' }, false);
       return;
     }
     const m = this.m;
@@ -236,9 +252,9 @@ export class QseSetup extends LightElement {
       return;
     }
     let step: SetupStepId = isStepId(stepRaw) ? stepRaw : 'overview';
-    if (step === 'install' && !this.wiz.job) step = 'review';
+    if (step === 'install' && (!this.wiz.job || this.wiz.job_model !== this.wiz.model)) step = 'review';
     if (step === 'models') step = 'overview';
-    if (step !== this.wiz.step) this.dispatch({ type: 'go', step }, false);
+    if (step !== this.wiz.step) this.dispatch({ type: 'go', step }, false);   // the reducer normalises it for the mode
   }
 
   private hashFor(st: WizardState): string {
@@ -247,7 +263,7 @@ export class QseSetup extends LightElement {
 
   /** every change: reduce, save, keep the hash in step (a push, so Back walks the steps) */
   private dispatch(a: SetupAction, push = true): void {
-    const next = setupReducer(this.wiz, a, this.m);
+    const next = setupReducer(this.wiz, a, this.m, this.simple);
     if (next === this.wiz) return;
     const stepChanged = next.step !== this.wiz.step;
     this.wiz = next;
@@ -472,8 +488,11 @@ export class QseSetup extends LightElement {
     if (tokenBlocked(m, sel, this.device)) out.push(S.blockedToken);
     const bad = (Object.keys(this.issues()) as SetupStepId[]).filter((s) => s !== 'review');
     if (bad.length) out.push(S.blockedInvalid(bad.map((s) => STEP_TITLE[s].toLowerCase())));
-    // the plan's own errors show in its card; here only what is not said above already
-    if (this.plan?.state === 'ready' && !this.plan.data.ok && !out.length) out.push(...this.plan.data.errors);
+    // the plan's own errors show in its card too — but they ride beside the Finish button as
+    // well, and never only when nothing else said something: a disk error behind an over-budget
+    // sentence is still the reason the box cannot install
+    if (this.plan?.state === 'ready' && !this.plan.data.ok)
+      for (const e of this.plan.data.errors) if (!out.includes(e)) out.push(e);
     return out;
   }
 
@@ -506,6 +525,15 @@ export class QseSetup extends LightElement {
     }
   }
 
+  /** the Simple|Advanced switch, from either place it lives: the mode is browser memory
+   *  (simple.ts — never server state, a shared box has beginners and an owner at once), and the
+   *  step is re-derived by the reducer through the pages of the mode being entered */
+  private setMode(v: boolean): void {
+    this.simple = v;
+    setSimple(v);
+    this.dispatch({ type: 'mode', simple: v });
+  }
+
   /** apply's refusals (server/setup_api.py apply_route): another job, requests in flight, or the
    *  plan's own errors (409 over_budget, 412 missing_token, ...), whose plan comes along and
    *  replaces the review's */
@@ -533,6 +561,7 @@ export class QseSetup extends LightElement {
       <div class="setup">
         <div class="setup-main">
           ${this.renderBanners()}
+          ${simpleSwitch(this.simple, (v) => this.setMode(v))}
           ${this.unauthorized ? html`<qse-setup-signin></qse-setup-signin>` : inModel ? this.renderModelArea() : this.renderTiles()}
           <footer class="setup-foot">
             <button class="btn btn-ghost btn-sm" aria-expanded=${this.resetOpen} aria-controls="setup-reset" @click=${() => (this.resetOpen = !this.resetOpen)}>${icon('trash')} ${S.resetLink}</button>
@@ -601,7 +630,7 @@ export class QseSetup extends LightElement {
     const lm = this.model;
     // VIS-211: an install in progress does not wait for the model's card: while the engine restarts
     // the card cannot load, and the job is all the page needs
-    if (this.wiz.step === 'install' && this.wiz.job && lm?.state !== 'ready') {
+    if (this.wiz.step === 'install' && this.wiz.job && this.wiz.job_model === this.wiz.model && lm?.state !== 'ready') {
       return html`<section class="setup-step" data-step="install" aria-labelledby="setup-step-title">
         <header class="step-head"><h1 class="step-title" id="setup-step-title" tabindex="-1">${STEP_TITLE.install}</h1></header>
         ${this.stepInstall()}
@@ -614,6 +643,7 @@ export class QseSetup extends LightElement {
     const sel = this.wiz.selection;
     const est = this.currentEstimate();
     const step = this.wiz.step;
+    const pos = stepPos(step, this.simple);
     const over = est && !est.fits ? overSentence(m, sel, est) : null;
     return html`
       <div class="setup-sticky">
@@ -623,13 +653,17 @@ export class QseSetup extends LightElement {
       ${this.renderRail(m)}
       <section class="setup-step" data-step=${step} aria-labelledby="setup-step-title">
         <header class="step-head">
-          <p class="step-kicker muted num">${S.stepOf(stepIndex(step) + 1, STEP_IDS.length)}</p>
-          <h1 class="step-title" id="setup-step-title" tabindex="-1">${STEP_TITLE[step]}</h1>
-          <p class="step-intro">${STEP_INTRO[step]}</p>
+          <p class="step-kicker muted num">${this.simple ? SIMPLE.of3(pos.n) : S.stepOf(pos.n, STEP_IDS.length)}</p>
+          ${this.simple && step === 'review'
+            ? html`<h1 class="step-title" id="setup-step-title" tabindex="-1">${SIMPLE.settingsTitle}</h1>
+                <p class="step-intro">${SIMPLE.settingsIntro}</p>`
+            : html`<h1 class="step-title" id="setup-step-title" tabindex="-1">${STEP_TITLE[step]}</h1>
+                <p class="step-intro">${STEP_INTRO[step]}</p>`}
         </header>
-        ${this.renderStep(m, sel, est)}
+        ${this.simple && step === 'review' ? this.stepSimpleSettings(m, sel, est) : this.renderStep(m, sel, est)}
       </section>
       ${this.renderNav()}
+      ${this.simple ? html`<p class="setup-simple-advanced"><button class="btn btn-ghost btn-sm" data-advanced-here @click=${() => this.setMode(false)}>${icon('sliders')} ${SIMPLE.showAll}</button></p>` : nothing}
     `;
   }
 
@@ -637,6 +671,11 @@ export class QseSetup extends LightElement {
     const cur = this.wiz.step;
     const issues = this.issues();
     const i = stepIndex(cur);
+    if (this.simple) {
+      // no rail at all: the three pages carry their own headings, and a numbered rail
+      // above a page that already names itself only repeats the count
+      return nothing as unknown as TemplateResult;
+    }
     return html`<nav class="rail-steps" aria-label="Setup steps">
       <div class="rail-phone" aria-hidden="true">
         <span class="num">${S.stepOf(i + 1, STEP_IDS.length)}</span><span class="rail-phone-label">${STEP_TITLE[cur]}</span>
@@ -648,7 +687,7 @@ export class QseSetup extends LightElement {
           const bad = visited && (issues[id]?.length ?? 0) > 0;
           const isCur = id === cur;
           const done = visited && !bad && n < i;
-          const reachable = id !== 'install' || !!this.wiz.job;
+          const reachable = id !== 'install' || (!!this.wiz.job && this.wiz.job_model === this.wiz.model);
           const href = id === 'models' ? '#/setup' : `#/setup/${m.id}/${id}`;
           return html`<li class="steps-item ${isCur ? 'is-current' : ''} ${done ? 'is-done' : ''} ${bad ? 'is-bad' : ''} ${visited ? 'is-visited' : ''}" data-rail=${id}>
             ${reachable
@@ -667,15 +706,21 @@ export class QseSetup extends LightElement {
   private renderNav(): TemplateResult | typeof nothing {
     const step = this.wiz.step;
     if (step === 'install') return nothing;
-    const i = stepIndex(step);
+    const list = activeSteps(this.simple);
+    const pos = stepPos(step, this.simple);
+    const i = Math.max(0, list.indexOf(normalizeStep(step, this.simple)));
     const why = this.nextRefused ? this.nextBlocker() : null;
     return html`<nav class="setup-nav ${why ? 'has-why' : ''}" aria-label="Step navigation">
       ${why ? html`<p class="setup-nav-why" id="setup-nav-why" role="alert" data-next-refused>${icon('info')} <span>${S.nextRefused(why)}</span></p>` : nothing}
-      <button class="btn setup-prev" @click=${() => (i <= 1 ? this.dispatch({ type: 'tiles' }) : this.dispatch({ type: 'previous' }))}>${S.previous}</button>
-      <span class="setup-nav-mid muted small num">${S.stepOf(i + 1, STEP_IDS.length)}</span>
+      <button class="btn setup-prev" @click=${() =>
+        i <= 0 ? this.dispatch({ type: 'tiles' }) : this.dispatch({ type: 'previous' })}>${S.previous}</button>
+      <span class="setup-nav-mid muted small num">${this.simple ? SIMPLE.of3(pos.n) : S.stepOf(pos.n, STEP_IDS.length)}</span>
+      ${step === 'review' && (this.finishBlockers().length > 0 || this.plan?.state !== 'ready')
+        ? html`<p class="setup-nav-why" role="alert" data-finish-why>${icon('warn')} <span>${this.finishBlockers()[0] ?? (this.plan?.state === 'error' ? S.finishPlanFailed : S.finishWaiting)}</span></p>`
+        : nothing}
       ${step === 'review'
         ? html`<button class="btn btn-primary setup-finish" ?disabled=${this.finishBlockers().length > 0 || this.plan?.state !== 'ready'} @click=${() => (this.confirmOpen = true)}>${S.finish}</button>`
-        : html`<button class="btn btn-primary setup-next" aria-describedby=${why ? 'setup-nav-why' : nothing} @click=${() => this.next()}><span>${S.next}<span class="setup-next-to">: ${STEP_LABEL[STEP_IDS[i + 1]]}</span></span></button>`}
+        : html`<button class="btn btn-primary setup-next" aria-describedby=${why ? 'setup-nav-why' : nothing} @click=${() => this.next()}><span>${S.next}<span class="setup-next-to">: ${this.simple ? SIMPLE.stepSettings : STEP_LABEL[list[i + 1]]}</span></span></button>`}
     </nav>`;
   }
 
@@ -712,6 +757,17 @@ export class QseSetup extends LightElement {
     }
     this.nextRefused = false;
     this.dispatch({ type: 'next' });
+  }
+
+  /** the third simple page: every other step behind its own title bar; the review is the last
+   *  fold and the Finish gate in the nav is the same gate the eighth step uses. */
+  private stepSimpleSettings(m: SetupModel, sel: SetupSelection, est: SetupEstimate | null): TemplateResult {
+    return html`<div class="setup-folds" data-simple-settings>
+      ${simpleFold(STEP_LABEL.components, 'components', this.stepComponents(m, sel))}
+      ${simpleFold(STEP_LABEL.parallelism, 'parallelism', this.stepParallel(m, sel, est))}
+      ${simpleFold(STEP_LABEL.methods, 'methods', this.stepMethods(m, sel))}
+      ${simpleFold(STEP_LABEL.review, 'review', this.stepReview(m, sel, est))}
+    </div>`;
   }
 
   private renderStep(m: SetupModel, sel: SetupSelection, est: SetupEstimate | null): TemplateResult {
@@ -801,7 +857,7 @@ export class QseSetup extends LightElement {
               <span><span class="wcard-k">${S.weightsDisk}</span> ${here ? S.onDisk : S.toDownload(p.disk_gb)}</span>
             </span>
             ${this.renderSource(p)}
-            ${p.note ? html`<span class="wcard-note">${p.note}</span>` : nothing}
+            ${p.note && !this.simple ? html`<span class="wcard-note">${p.note}</span>` : nothing}
             ${p.hf_private && !here && dev?.hf_token_present === false ? html`<span class="wcard-private is-blocked" data-private>${icon('warn')} ${S.privateNoTokenShort}</span>` : nothing}
           </label>`;
         })}

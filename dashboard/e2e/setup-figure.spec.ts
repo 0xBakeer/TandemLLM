@@ -3,11 +3,18 @@
 // tells the states apart, nothing names an animal. Screenshots go to $PW_SHOTS_DIR (default
 // screenshots/figure): the states sheet in dark, light and reduced motion, the desktop panel, the
 // 390 px sheet and the mini box landing on a changed field. @mock
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setupMock } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the figure specs drive the mock (POST /__mock/setup)');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 // pictures at 2x, so the cut edge and the dots can be judged
 test.use({ deviceScaleFactor: 2 });
 

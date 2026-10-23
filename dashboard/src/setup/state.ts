@@ -23,12 +23,14 @@ export interface WizardState {
   updatedAt: number;
   /** the install job this browser started (a reload during the install resumes it) */
   job: string | null;
+  /** the model that job was started for: the progress page belongs to it and only it */
+  job_model: string | null;
   /** a one-line note for the user (a cascade, a clamp); not saved */
   notice: string | null;
 }
 
 export function emptyState(): WizardState {
-  return { model: null, step: 'models', selection: null, visited: ['models'], chat: [], updatedAt: 0, job: null, notice: null };
+  return { model: null, step: 'models', selection: null, visited: ['models'], chat: [], updatedAt: 0, job: null, job_model: null, notice: null };
 }
 
 /** The recommended setup of a model: what the wizard shows on a first visit. */
@@ -111,11 +113,44 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
 
 export type ParallelKey = 'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb';
 
+// The active mode's page list, in one place: the reducer walks it, the counter reads it, and a
+// saved or routed step is normalised through it. Simple mode's pages are the model cards (the
+// tiles, page 1), the quant cards, and the one folded settings page (simple.ts's design); the
+// install job lives on the folded page too. Before this, each view branch carried its own
+// ternary over 'weights'/3, and a step that belonged to the other mode (a resumed
+// 'parallelism', a route-synced 'overview') rendered simple pages under a standard counter and
+// let Previous/Next walk out of the mode; the one list in one place closes that.
+
+const SIMPLE_FLOW: readonly SetupStepId[] = ['models', 'weights', 'review'];
+
+/** The page list of the active mode. */
+export function activeSteps(simple: boolean): readonly SetupStepId[] {
+  return simple ? SIMPLE_FLOW : STEP_IDS;
+}
+
+/** The step as the active mode understands it. The install job is outside both walks (Finish
+ *  owns it); everything the simple fold holds collapses onto the folded page, and the tiles'
+ *  twin — the standard intro — opens on the quant cards, the first in-model simple page. */
+export function normalizeStep(step: SetupStepId, simple: boolean): SetupStepId {
+  if (!simple || step === 'models' || step === 'weights' || step === 'review' || step === 'install') return step;
+  return step === 'overview' ? 'weights' : 'review';
+}
+
+/** Where a step counts in the active mode's pages, 1-based — the single source of the "n of m"
+ *  counter. An install under simple mode counts as the folded page. */
+export function stepPos(step: SetupStepId, simple: boolean): { n: number; of: number } {
+  const list = activeSteps(simple);
+  const s = step === 'install' && simple ? 'review' : normalizeStep(step, simple);
+  const i = list.indexOf(s);
+  return { n: (i < 0 ? 0 : i) + 1, of: list.length };
+}
+
 export type SetupAction =
   /** seed: what the box runs now (GET .../current), used when this browser has no progress for
    *  the model; checked like a saved selection */
   | { type: 'open'; model: SetupModel; step?: SetupStepId; seed?: SetupSelection | null }
   | { type: 'go'; step: SetupStepId }
+  | { type: 'mode'; simple: boolean }
   | { type: 'next' }
   | { type: 'previous' }
   | { type: 'tiles' }
@@ -150,8 +185,10 @@ export function clampWindow(m: SetupModel, key: 'window' | 'side_window', n: num
   return { value: v, clamped: v !== n };
 }
 
-/** The pure reducer. `m` is the open model (null on the tiles). */
-export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | null): WizardState {
+/** The pure reducer. `m` is the open model (null on the tiles); `simple` is the browser's mode
+ *  (simple.ts's localStorage bit) — every step-bearing action is normalised against it, so a
+ *  resumed or routed step can never belong to the other mode. */
+export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | null, simple = false): WizardState {
   const now = Date.now();
   const done = (next: Partial<WizardState>): WizardState => ({ ...st, notice: null, ...next, updatedAt: now });
   switch (a.type) {
@@ -162,23 +199,38 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
         : a.seed
           ? seeded(a.model, a.seed)
           : { selection: defaults(a.model), notices: [] as string[] };
-      const step = a.step && a.step !== 'models' ? a.step : same && st.step !== 'models' ? st.step : 'overview';
+      const step = normalizeStep(a.step && a.step !== 'models' ? a.step : same && st.step !== 'models' ? st.step : 'overview', simple);
+      // the install job belongs to the model it was started for: opening another model keeps
+      // the job where it is (the progress page shows for its own model only), and opening the
+      // same model again resumes it untouched.
       return done({ model: a.model.id, selection, step, visited: visit(same ? st.visited : ['models'], step), notice: notices.length ? notices.join(' ') : null });
     }
-    case 'go':
+    case 'go': {
       if (a.step !== 'models' && !st.selection) return st;
-      return done({ step: a.step, visited: visit(st.visited, a.step) });
+      const step = normalizeStep(a.step, simple);
+      return done({ step, visited: visit(st.visited, step) });
+    }
+    case 'mode': {
+      // the Simple|Advanced switch: the step is re-derived from the mode being entered — a
+      // standard step the fold holds lands on the folded page, and the other way on the
+      // quant cards; the tiles and the running install are pages of both modes. `a.simple` is
+      // the mode being entered; the reducer's `simple` is the one being left.
+      const step = normalizeStep(st.step, a.simple);
+      return done({ step, visited: visit(st.visited, step) });
+    }
     case 'next': {
-      const i = stepIndex(st.step);
+      const list = activeSteps(simple);
+      const i = list.indexOf(normalizeStep(st.step, simple));
       // Next never starts the install: that is Finish, the user's own button
-      if (!st.selection || i >= stepIndex('review')) return st;
-      const step = STEP_IDS[i + 1];
+      if (!st.selection || i < 0 || i >= list.indexOf('review')) return st;
+      const step = list[i + 1];
       return done({ step, visited: visit(st.visited, step) });
     }
     case 'previous': {
-      const i = stepIndex(st.step);
+      const list = activeSteps(simple);
+      const i = list.indexOf(normalizeStep(st.step, simple));
       if (i <= 0) return st;
-      const step = STEP_IDS[i - 1];
+      const step = list[i - 1];
       return done({ step, visited: visit(st.visited, step) });
     }
     case 'tiles':
@@ -190,7 +242,9 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
     case 'chat':
       return { ...st, chat: capChat(a.chat), updatedAt: now };
     case 'job':
-      return a.id ? done({ job: a.id, step: 'install', visited: visit(st.visited, 'install') }) : done({ job: null, step: st.step === 'install' ? 'review' : st.step });
+      return a.id
+        ? done({ job: a.id, job_model: st.model, step: 'install', visited: visit(st.visited, 'install') })
+        : done({ job: null, job_model: null, step: st.step === 'install' ? 'review' : st.step });
   }
   if (!m || !st.selection) return st;
   const sel = st.selection;
@@ -264,6 +318,7 @@ export interface Saved {
   updatedAt: number;
   chat: SetupChatMessage[];
   job?: string | null;
+  job_model?: string | null;
 }
 
 /** localStorage, or null where the browser refuses it (private mode, blocked storage). */
@@ -306,7 +361,8 @@ export function readSaved(store: Storage | null): { state: WizardState; problem:
   st.chat = Array.isArray(data.chat) ? capChat(data.chat.filter(isChatMessage)) : [];
   st.updatedAt = typeof data.updatedAt === 'number' ? data.updatedAt : 0;
   st.job = typeof data.job === 'string' ? data.job : null;
-  if (st.step === 'install' && !st.job) st.step = 'review';
+  st.job_model = typeof data.job_model === 'string' ? data.job_model : st.job ? st.model : null;
+  if (st.step === 'install' && (!st.job || st.job_model !== st.model)) st.step = 'review';
   if (!st.model || !st.selection) {
     st.model = null;
     st.selection = null;
@@ -324,7 +380,7 @@ export function toSaved(st: WizardState): Saved {
     const clean = (o: Record<string, SetupValue>) => Object.fromEntries(Object.entries(o).filter(([k, v]) => !SECRET.test(k) || v === 'keep' || v === 'generate'));
     selection = { ...selection, methods: clean(selection.methods), advanced: clean(selection.advanced) };
   }
-  return { v: 1, model: st.model, step: st.step === 'install' && !st.job ? 'review' : st.step, selection, visited: st.visited, updatedAt: st.updatedAt, chat: capChat(st.chat), job: st.job };
+  return { v: 1, model: st.model, step: st.step === 'install' && (!st.job || st.job_model !== st.model) ? 'review' : st.step, selection, visited: st.visited, updatedAt: st.updatedAt, chat: capChat(st.chat), job: st.job, job_model: st.job_model };
 }
 
 export function writeSaved(store: Storage | null, st: WizardState): boolean {

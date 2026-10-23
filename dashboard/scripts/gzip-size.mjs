@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import pako from 'pako';
 
 /** The budget for the total gzip size of dist/, in bytes. */
-export const BUDGET = 460 * 1024;
+export const BUDGET = 462 * 1024;
 
 /** The gzip size of one file's bytes, pako at level 6. */
 export const gzipSize = (bytes) => pako.gzip(bytes, { level: 6 }).length;
