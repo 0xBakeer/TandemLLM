@@ -92,6 +92,16 @@ class Runner:
         # issue, the proposals' rest (it reads the draft back), the verify's issue, the walk (it reads the
         # pass back), the tails
         self.ms = {k: 0.0 for k in ("prop", "packed", "rest", "verify", "walk", "tails", "round")}
+        # the same phases on the GPU's timeline (SPD-201 host cut, step a): a CUDA event at the round's start and
+        # at each phase's end, read one round later (never waited on). A segment's GPU time is its end event
+        # minus the one before: the packed draft and the verify pass are the GPU's own work, the others the
+        # time the GPU waited for the host (or ran its small kernels); `between` is one round's end to the next
+        # round's start
+        self.gpu = {k: 0.0 for k in ("prop", "packed", "rest", "verify", "walk", "tails", "between", "period")}
+        self.gpu_n = 0
+        self._ev: list = []                 # this round's (label, event)
+        self._ev_done: list = []            # finished rounds' event lists, read when complete
+        self._ev_last = None                # the last round's final event
         self._collect: list | None = None    # the runner thread's pending draft calls, while proposals run
 
     # ---- registration (the slot's thread) ---------------------------------------------------
@@ -152,13 +162,38 @@ class Runner:
 
     def report(self) -> dict:
         n = max(1, self.stats["rounds"])
+        g = max(1, self.gpu_n)
         return dict(self.stats, skips=dict(SKIPS),
-                    ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()})
+                    ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
+                    gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n)
 
     def _t(self, key, t0):
         t1 = time.perf_counter()
         self.ms[key] += (t1 - t0) * 1e3
+        self._mark(key)
         return t1
+
+    def _mark(self, label) -> None:
+        if torch.cuda.is_available():
+            ev = torch.cuda.Event(enable_timing=True)
+            ev.record()
+            self._ev.append((label, ev))
+
+    def _gpu_read(self) -> None:
+        """The finished rounds' GPU segments into `gpu` (a round whose last event is not done waits)."""
+        keep = []
+        for rnd, prev in self._ev_done:
+            if not rnd[-1][1].query():
+                keep.append((rnd, prev))
+                continue
+            for (_, a), (lab, b) in zip(rnd, rnd[1:]):
+                if lab in self.gpu:
+                    self.gpu[lab] += a.elapsed_time(b)
+            if prev is not None and prev.query():
+                self.gpu["between"] += prev.elapsed_time(rnd[0][1])
+                self.gpu["period"] += prev.elapsed_time(rnd[0][1]) + rnd[0][1].elapsed_time(rnd[-1][1])
+            self.gpu_n += 1
+        self._ev_done = keep[-8:]
 
     def _round(self, tasks: list[Task]) -> None:
         app = self.app
@@ -166,6 +201,9 @@ class Runner:
         from engine.model import h2d
         from server import slots as slots_mod
         self.stats["rounds"] += 1
+        self._gpu_read()
+        self._ev = []
+        self._mark("start")
         t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
         for t in tasks:
@@ -207,6 +245,9 @@ class Runner:
             self._verify(group)
         self._bind_none()
         self._t("round", t_r)
+        if self._ev:
+            self._ev_done.append((self._ev, self._ev_last))
+            self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
             print(f"[runner] {self.report()}", flush=True)
 
