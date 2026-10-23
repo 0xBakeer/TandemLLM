@@ -244,7 +244,9 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     `reqs` = [(drafter, anchor, pos0)]; returns each one's `(cand, scores[, logp])` -- static
     graph buffers with `graph` (read them before the same set's next packed call)."""
     from engine import model as M
+    from engine.drafters.dflash2 import flush_syncs
     ds = [r[0] for r in reqs]
+    flush_syncs(ds)                    # SPD-161: every slot's pending sync in one call, before the read
     # each drafter builds its own module object over the one cached weight dict (dflash2
     # `load_weights`); a module holds nothing but those weights, so one set of weights is one module
     if any(d.module.w is not ds[0].module.w for d in ds):

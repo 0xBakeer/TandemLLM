@@ -955,6 +955,45 @@ def forward_block_multi(module: "DFlash2Module", items: list) -> list:
 #: graph's outputs, or None to draft alone. None outside a server with side slots (`--parallel N`).
 DRAFT_MEET = None
 
+#: SPD-161: with the packed draft on (`DRAFT_MEET` set, side slots), a block's sync -- the draft K/V of its
+#: committed positions, `project_context` and `context_kv` -- is kept until this drafter's next read of its
+#: cache and then run for every pending slot in one call (`flush_syncs`, at the packed draft): eight slots
+#: paid it one after another under the GPU turn, about 21 ms of a 246 ms round at C8. The rows are the same
+#: per-row arithmetic; only the draft K/V's bits can move (the target's output never reads them). 0: at once
+DEFER_SYNC = _S.get("DF2_DEFER_SYNC") == "1"
+#: the longest sync that waits (a block's rows); a prompt's sync runs at once
+DEFER_SYNC_ROWS = 64
+
+
+def flush_syncs(ds) -> None:
+    """Run the pending syncs (`DEFER_SYNC`) of the drafters `ds` -- one `project_context` and one
+    `context_kv` call over every pending row of the drafters that share a checkpoint -- and write each
+    one's rows into its own cache."""
+    groups: dict = {}
+    for d in ds:
+        if getattr(d, "_psync", None):
+            groups.setdefault(id(d.module.w), []).append(d)
+    for grp in groups.values():
+        m = grp[0]._build()
+        parts, pos = [], []
+        for d in grp:
+            for fused, first, n in d._psync:
+                parts.append(fused)
+                pos.extend(range(first, first + n))
+        from engine.model import h2d
+        with torch.no_grad():
+            ctx_hidden = m.project_context(torch.cat(parts).to(m.dtype))
+            positions = h2d(pos, torch.long, grp[0].eng.device)
+            kv = m.context_kv(ctx_hidden, positions)
+            r = 0
+            for d in grp:
+                for _, first, n in d._psync:
+                    for i, (k, v) in enumerate(kv):
+                        d._ck[i, :, first:first + n] = k[:, r:r + n]
+                        d._cv[i, :, first:first + n] = v[:, r:r + n]
+                    r += n
+                d._psync = []
+
 
 class DFlash2Drafter(Drafter):
     """Wires `DFlash2Module` to `Qwen38Engine` through the tap and the drafter interface."""
@@ -1045,6 +1084,7 @@ class DFlash2Drafter(Drafter):
 
         # The draft's own KV cache, one entry per committed target position.
         self._ck: torch.Tensor | None = None
+        self._psync: list = []        # SPD-161: syncs not yet written (`DEFER_SYNC`), in order
         self._cv: torch.Tensor | None = None
         self.ctx_len = 0
 
@@ -1163,6 +1203,7 @@ class DFlash2Drafter(Drafter):
             self._cv = None
         self.ctx_len = 0
         self._tap_rows = []
+        self._psync = []
 
     # ---- tap -------------------------------------------------------------------
     def attach(self) -> None:
@@ -1200,6 +1241,7 @@ class DFlash2Drafter(Drafter):
         self.ctx_len = 0
         self._tap_i = 0
         self._tap_rows = []
+        self._psync = []
 
     # ---- serving-time state cache ----------------------------------------------------------
     def state_snapshot(self):
@@ -1213,6 +1255,7 @@ class DFlash2Drafter(Drafter):
         rounding error it was assumed to be when this was written, and still the cheapest quarter
         of a snapshot: without it the prefill is warm and the decode is cold.
         """
+        self._flush_sync()
         n = int(self.ctx_len)
         if self._ck is None or n == 0:
             return ("dflash2", 0, None, None)
@@ -1228,6 +1271,7 @@ class DFlash2Drafter(Drafter):
         kind, n, ck, cv = snap
         if kind != "dflash2":
             raise ValueError(f"not a dflash2 snapshot: {kind!r}")
+        self._flush_sync()
         if n:
             self._build()
             from engine import kvpool as _kvp
@@ -1240,6 +1284,7 @@ class DFlash2Drafter(Drafter):
         """The draft KV rows below `n` are already in place, written by an earlier prefill of the
         same tokens (`engine/cache.py::ResidentPrefix`): pick up from there without a copy."""
         n = int(n)
+        self._flush_sync()
         if n:
             self._build()
         self.ctx_len = n
@@ -1247,6 +1292,7 @@ class DFlash2Drafter(Drafter):
 
     def kv_views(self) -> list:
         """The position-indexed buffers a request writes, as (tensor, position axis)."""
+        self._flush_sync()
         return [(self._ck, 2), (self._cv, 2)] if self._ck is not None else []
 
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
@@ -1287,12 +1333,23 @@ class DFlash2Drafter(Drafter):
                 sel = h2d(rows, torch.long, taps[0].device)
                 picked = [r[sel] for r in taps]
             fused = torch.cat(picked, dim=-1)
+            if DEFER_SYNC and DRAFT_MEET is not None and n <= DEFER_SYNC_ROWS:
+                # SPD-161: written at this drafter's next cache read, with the other slots' (`flush_syncs`)
+                self._psync.append((fused, first_pos, n))
+                self.ctx_len = first_pos + n
+                return
+            self._flush_sync()
             ctx_hidden = m.project_context(fused.to(m.dtype))
             positions = torch.arange(first_pos, first_pos + n, device=self.eng.device)
             for i, (k, v) in enumerate(m.context_kv(ctx_hidden, positions)):
                 self._ck[i, :, first_pos:first_pos + n] = k
                 self._cv[i, :, first_pos:first_pos + n] = v
         self.ctx_len = first_pos + n
+
+    def _flush_sync(self) -> None:
+        """This drafter's pending syncs into its cache, before anything reads it (`DEFER_SYNC`)."""
+        if self._psync:
+            flush_syncs([self])
 
     def propose(self, context: list[int], k: int) -> list[int]:
         return run_steps(self._propose_steps(context, k))
@@ -1381,6 +1438,7 @@ class DFlash2Drafter(Drafter):
         noise = F.embedding(ids, self.eng.w.norm("embed_tokens.weight")).to(m.dtype)
         positions = torch.arange(pos0, pos0 + bs, device=dev)
 
+        self._flush_sync()
         lo = 0
         if cfg.sliding_window is not None:
             lo = max(0, pos0 - cfg.sliding_window + 1)
@@ -1413,6 +1471,7 @@ class DFlash2Drafter(Drafter):
     def graph_run(self, anchor: int, pos0: int):
         """The lone draft call from this drafter's graph."""
         from engine.drafters.draft_graph import DraftGraph
+        self._flush_sync()
         g = getattr(self, "_graph", None)
         if g is None or g.ck_ptr != self._ck.data_ptr():
             g = self._graph = DraftGraph(self)

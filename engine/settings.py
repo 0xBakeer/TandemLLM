@@ -55,6 +55,7 @@ KNOBS: dict[str, tuple] = {
     'DEEP_AFTER': ('2', 'server/app.py'),
     'DF2_TEMP': ('1.0', 'engine/drafters/dflash2.py'),
     'DF2_TREE_MODE': ('paths', 'engine/drafters/dflash2.py'),
+    'DF2_DEFER_SYNC': ('0', 'engine/drafters/dflash2.py'),
     'DFLASH2': (None, 'engine/drafters/dflash2.py'),
     'DRAFT_FC_NVFP4': ('0', 'engine/drafters/dflash2.py'),
     'DRAFT_GRAPH': ('0', 'engine/drafters/dflash2.py'),
