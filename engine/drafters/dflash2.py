@@ -751,7 +751,15 @@ class DFlash2Module:
                 k = torch.cat([ck[None], k], dim=2)
                 v = torch.cat([cv[None], v], dim=2)
             mask = masks[1] if cfg.is_sliding(i) else masks[0]
-            if PACK_GQA:
+            if PACK_FOLD:
+                # SPD-203: each key/value head's query group folded into the query rows ([1, nkv, rep t,
+                # hd]): the heads are read in place, no copy of the window to nh heads (the drafter's
+                # bits may move by the kernel's row tiling; the target verifies every token)
+                L = k.shape[2]
+                qf = q.reshape(1, nkv, rep * t, hd)
+                mf = None if mask is None else mask.expand(t, L).repeat(rep, 1)
+                o = F.scaled_dot_product_attention(qf, k, v, attn_mask=mf).reshape(1, nh, t, hd)
+            elif PACK_GQA:
                 # SPD-161: the key/value heads read in place by the query groups (no copy to nh heads)
                 o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
             else:
@@ -931,6 +939,8 @@ class DFlash2Module:
 #: drafter's rows may move by an ulp (a library GEMM's rows and another attention path); the target's never
 PACK_KP = _S.get("DF2_PACK_KP") == "1"
 PACK_GQA = _S.get("DF2_PACK_GQA") == "1"
+#: SPD-203: the packed draft's attention with each query group folded into its key/value head's rows
+PACK_FOLD = _S.get("DF2_PACK_FOLD") == "1"
 PACK_TOPK = _S.get("DF2_PACK_TOPK") == "1"
 
 

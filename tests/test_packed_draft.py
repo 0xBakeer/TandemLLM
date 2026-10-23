@@ -123,6 +123,33 @@ def test_the_step_form_equals_forward_block_alone():
         D._lin = real
 
 
+def test_the_folded_attention_is_the_expanded_one():
+    """SPD-203, DF2_PACK_FOLD: the query groups folded into their key/value head's rows give the
+    expanded attention's blocks (within float rounding: the drafter's bits may move), with the window mask."""
+    real, fold = D._lin, D.PACK_FOLD
+    D._lin = _lin
+    try:
+        m, embed = _quantised(block=16, seed=4)
+        g = torch.Generator().manual_seed(11)
+        items = [_item(m, embed, 200 + 7 * j, 30 + 9 * j, g) for j in range(3)]
+        bs = m.cfg.block_size
+        masked = []
+        for it in items:
+            noise, positions, ctx_kv, ctx_pos, _ = it
+            allpos = torch.cat([ctx_pos, positions])
+            mask = (positions[:, None] - allpos[None, :]) < 40          # a window that cuts the context
+            masked.append((noise, positions, ctx_kv, ctx_pos, (mask, mask)))
+        out = {}
+        for f in (False, True):
+            D.PACK_FOLD = f
+            out[f] = D.forward_block_multi(m, items + masked)
+        worst = max(float((a - b).abs().max()) for a, b in zip(out[False], out[True]))
+        assert worst < 1e-5, worst
+    finally:
+        D._lin, D.PACK_FOLD = real, fold
+    return f"6 blocks (3 masked): folded = expanded within {worst:.1e}"
+
+
 def test_bf16_weights_are_not_handed_out():
     """A plain tensor weight runs inside the block (cuBLAS may pick another algorithm by M): the
     generator yields nothing for an all-bf16 module."""
