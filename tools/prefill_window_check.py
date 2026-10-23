@@ -94,12 +94,15 @@ def run(eng, lr, ids, chunk: int, cached: bool):
         got[f"cv{j}"] = digest(h._cv[:, :, :h.ctx_len])
         got[f"ctx{j}"] = h.ctx_len
     if res is not None:
-        for b, (S, conv) in res.anchors.items():
-            got[f"anchor{b}.S"], got[f"anchor{b}.conv"] = digest(S), digest(conv)
+        for b, st in res.anchors.items():
+            for j, t in enumerate(st):
+                got[f"anchor{b}.{j}"] = digest(t)
     if store is not None:
         for key, e in store._d.items():
             s = e.snap
-            got[f"snap{s.length}.S"], got[f"snap{s.length}.k"] = digest(s.S), digest(s.k)
+            # the snapshot's sections and views (cache.StateSnapshot, ENG-E8), each digested
+            for j, t in enumerate(tuple(s.state) + tuple(s.views)):
+                got[f"snap{s.length}.{j}"] = digest(t)
             if s.drafter is not None:
                 got[f"snap{s.length}.d"] = _tree_digest(s.drafter)
     return got, dt, peak
