@@ -22,3 +22,12 @@ def test_token_counts_in_band():
         lo, hi = p["token_counts"][k]
         assert 1250 <= lo <= hi <= 1360
     assert "{nonce}" in p["nonce_line"]
+
+
+if __name__ == "__main__":
+    n = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            n += 1
+    print(f"{n} passed")
