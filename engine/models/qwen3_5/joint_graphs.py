@@ -26,6 +26,8 @@ class, a chain on its chain kernel, fp8 KV) runs the eager joint pass, unchanged
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import torch
 
@@ -284,11 +286,9 @@ class JointGraphs:
         tr.layers = cap.layers[e]
         if fold:
             par = eng._fold_par
-            fac = eng._fac[par]
-            tr.factors = {layer: (fac[0][eng.state.slot[layer]][None, :, :n],
-                                  fac[1][eng.state.slot[layer]][None, :, :n],
-                                  fac[2][eng.state.slot[layer]][None, :, :n])
-                          for layer in cap.layers[e]}
+            # the factors live in this parity's static buffers; the fold's commit names them by parity
+            # and never reads these views, so they are made only if something asks (`_Factors`)
+            tr.factors = _Factors(eng, eng._fac[par], cap.layers[e], n)
             tr.fold_par = par
         else:
             tr.factors = {layer: tuple(f[..., :n, :] if f.dim() == 4 else f[..., :n] for f in fs)
@@ -392,6 +392,30 @@ class JointGraphs:
 
 class _NotGraphable(Exception):
     pass
+
+
+class _Factors(Mapping):
+    """A folding pass's factors by layer, as views of the parity's static buffers, made on access.
+
+    A view is cut from the slot map at access time; the pass's own commit reads the buffers by parity, so
+    the views only serve a caller that reads them in the same round."""
+
+    __slots__ = ("eng", "fac", "layers", "n")
+
+    def __init__(self, eng, fac, layers, n):
+        self.eng, self.fac, self.layers, self.n = eng, fac, layers, n
+
+    def __getitem__(self, layer):
+        if layer not in self.layers:
+            raise KeyError(layer)
+        i, n, f = self.eng.state.slot[layer], self.n, self.fac
+        return (f[0][i][None, :, :n], f[1][i][None, :, :n], f[2][i][None, :, :n])
+
+    def __iter__(self):
+        return iter(self.layers)
+
+    def __len__(self):
+        return len(self.layers)
 
 
 _GRAPHS: dict = {}
