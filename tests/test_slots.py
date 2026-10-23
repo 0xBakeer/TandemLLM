@@ -245,6 +245,16 @@ def test_shares_keep_a_joint_pass_under_32_rows():
     assert slots.share(2) == 16 and slots.share(4) == 8
 
 
+def test_spd163_a_familys_policy_sets_its_shares_and_auto_n():
+    assert slots.share(2, 64, {2: 32}) == 32 and slots.share(4, 64, {2: 32}) == 8
+    assert slots.share(2, 32, {2: 32}) == 16, "never past the row cap"
+    m = slots.Meeting(64, 0.002, cut="auto", auto_n=2, shares={2: 32})
+    if not slots.AUTO_JOINT_N_SET:
+        assert m.auto_n == 2 and m.joint_for(2) and not m.joint_for(1)
+    assert slots.Meeting(64, 0.002, cut="auto").auto_n == slots.AUTO_JOINT_N, "no policy: as before"
+    assert m.shares == {2: 32} and slots.Meeting(32).shares == {}
+
+
 def test_batches_cut_at_max_rows_and_keep_unbatchable_blocks_alone():
     meet = slots.Meeting(32, 0.002)
     meet.pending = {0: slots.VerifyReq(0, None, None, list(range(16)), 0),

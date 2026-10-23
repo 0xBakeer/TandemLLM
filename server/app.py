@@ -1344,7 +1344,7 @@ def _share_trim(pool, tree):
     meet = pool.meeting
     if meet is None or meet.joint_for(len(pool.decoding())):
         return tree                    # a joint cut is the round's (`_run_round`)
-    budget = slots_mod.share(len(pool.decoding()), meet.max_rows)
+    budget = slots_mod.share(len(pool.decoding()), meet.max_rows, getattr(meet, "shares", None))
     if budget is None or len(tree.parents) <= budget:
         return tree
     order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
@@ -11070,7 +11070,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     pol = dict(pol_fn() or {}) if callable(pol_fn) else {}
     max_rows = int(a.parallel_max_rows or pol.get("max_rows") or 32)
     cut = a.parallel_cut or pol.get("cut") or "share"
-    meet = (slots_mod.Meeting(max_rows, a.batch_timeout_ms / 1e3, cut=cut)
+    meet = (slots_mod.Meeting(max_rows, a.batch_timeout_ms / 1e3, cut=cut, auto_n=pol.get("auto_n"),
+                              shares={int(k): int(v) for k, v in (pol.get("shares") or {}).items()})
             if a.parallel_batch == "on" and STATE["engine"].caps.joint_verify else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:

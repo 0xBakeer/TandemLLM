@@ -497,12 +497,16 @@ BUSY_WAIT_S = float(os.environ.get("QSE_PARALLEL_BUSY_WAIT_MS", "20") or 20) / 1
 #: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
 #: in one pass (`QSE_PARALLEL_AUTO_N`): below it each slot cuts its own share
 AUTO_JOINT_N = int(os.environ.get("QSE_PARALLEL_AUTO_N", "3") or 3)
+#: SPD-163 step 6: the environment named it (it then wins over a family's `joint_policy` "auto_n")
+AUTO_JOINT_N_SET = bool(os.environ.get("QSE_PARALLEL_AUTO_N"))
 
 
-def share(n_decoding: int, max_rows: int = 32) -> int | None:
+def share(n_decoding: int, max_rows: int = 32, shares: dict | None = None) -> int | None:
+    """A slot's node budget under the share cut; `shares` a family's own table (`joint_policy`
+    "shares"), in place of SHARES for the slot counts it names."""
     if n_decoding <= 1:
         return None
-    s = SHARES.get(n_decoding, max(2, max_rows // n_decoding))
+    s = (shares or {}).get(n_decoding) or SHARES.get(n_decoding, max(2, max_rows // n_decoding))
     return max(2, min(s, max_rows // n_decoding))
 
 
@@ -514,14 +518,17 @@ class Meeting:
     slots run in lockstep, because they all get their logits from the same pass. `cv` guards
     `pending` and the results."""
 
-    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002, cut: str = "share"):
+    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002, cut: str = "share",
+                 auto_n: int | None = None, shares: dict | None = None):
         self.max_rows = int(max_rows)
         self.timeout = float(timeout_s)
         # "share": each slot cuts its own tree to its share before it submits; "joint": the slots
         # submit their whole trees and the round cuts them together (`joint_cut`); "auto" (SPD-155):
         # joint from `auto_n` decoding slots on, share below
         self.cut = cut
-        self.auto_n = AUTO_JOINT_N
+        # SPD-163: a family's own `auto_n` / `shares` (`joint_policy`), unless QSE_PARALLEL_AUTO_N is set
+        self.auto_n = AUTO_JOINT_N if auto_n is None or AUTO_JOINT_N_SET else int(auto_n)
+        self.shares = dict(shares or {})
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken
