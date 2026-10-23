@@ -94,6 +94,7 @@ KNOBS: dict[str, tuple] = {
     'GDNV_WY_MAXT': ('32', 'tools/gdn_verify_kernels.py'),
     'GDN_AB': ('0', 'engine/model.py'),
     'WINDOW_MLP': ('1', 'engine/model.py'),
+    'JOINT_ROWWISE': ('1', 'engine/model.py'),
     'GDN_CHUNK': ('64', 'engine/model.py'),
     'GDN_PREFILL_NOREP': ('0', 'engine/model.py'),
     'ATTN_STAGES3': ('1', 'tools/attn_kernels.py'),

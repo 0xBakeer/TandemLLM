@@ -168,6 +168,10 @@ FUSED_ATTN_PREP = _S.get("FUSED_ATTN_PREP") == "1"
 # library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
 # verify, the graphed verify and the decode step.
 GDN_AB = _S.get("GDN_AB") == "1"
+#: SPD-163: a joint verify pass runs the row-wise steps between the projections -- the add-norms and the
+#: GDN gated norm before its output projection -- once for every engine's rows; each is one program a row,
+#: so a row's bits are its own (0: once per engine)
+JOINT_ROWWISE = _S.get("JOINT_ROWWISE") != "0"
 #: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call (0: one call a chunk)
 WINDOW_MLP = _S.get("WINDOW_MLP") != "0"
 
@@ -1653,6 +1657,10 @@ class Qwen38Engine:
             out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
         self.trace.factors[layer] = fac
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
+        if JOINT_ROWWISE:
+            out = yield "gated", p, (o.reshape(-1, cfg.linear_value_head_dim),
+                                     z.reshape(-1, cfg.linear_value_head_dim))
+            return out.view(B, T, -1)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
                            z.reshape(-1, cfg.linear_value_head_dim),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
@@ -1744,12 +1752,17 @@ class Qwen38Engine:
             for layer in range(n):
                 p = f"layers.{layer}"
                 a = yield from self._mixer_steps(x, p, layer, start, positions, use_state, T)
-                h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
-                                    cfg.rms_norm_eps)
-                m = yield "mlp", p, x
                 nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                        else "norm.weight")
-                h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+                if JOINT_ROWWISE:
+                    h, x = yield "addnorm", f"{p}.post_attention_layernorm.weight", (h, a)
+                    m = yield "mlp", p, x
+                    h, x = yield "addnorm", nxt, (h, m)
+                else:
+                    h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
+                                        cfg.rms_norm_eps)
+                    m = yield "mlp", p, x
+                    h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
                 if self.tap is not None:
                     self.tap(h[0].detach())
             self.state.primed = True
@@ -1994,6 +2007,16 @@ def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
         return head_logits(x, eng.w.norm(name))
     if kind == "grp":
         return matmul_group(x, eng.w.group(name))
+    if kind == "addnorm":
+        # SPD-163: `h + a` and its norm, one launch for every engine's rows (one program a row)
+        from tools.norm_kernels import add_rms_norm
+        return add_rms_norm(x[0], x[1], eng.w.norm(name), eng.cfg.rms_norm_eps)
+    if kind == "gated":
+        # SPD-163: the GDN gated norm (one program a row) and the output projection of its rows
+        cfg = eng.cfg
+        o = rms_norm_gated(x[0], x[1], eng.w.norm(f"{name}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(-1, cfg.linear_num_value_heads * cfg.linear_value_head_dim),
+                      eng.w.proj(f"{name}.linear_attn.out_proj"))
     return linear(x, eng.w.proj(name))
 
 
@@ -2032,10 +2055,25 @@ def forward_tree_multi(items: list) -> list:
                 if len(xs) == 1:
                     answers[js[0]] = _run_request(eng0, kind, name, xs[0])
                     continue
-                # the MLP and the head take [1, T, H] (their row axis is 1), the projections [T, H]
-                dim = 1 if kind in ("mlp", "head") else 0
-                out = _run_request(eng0, kind, name, torch.cat(xs, dim=dim))
-                for j, part in zip(js, out.split([x.shape[dim] for x in xs], dim=dim)):
+                # the MLP, the head and the add-norms take [1, T, H] (their row axis is 1), the
+                # projections [T, H]; a tuple payload (SPD-163: the row-wise steps) is joined part by part
+                dim = 1 if kind in ("mlp", "head", "addnorm") else 0
+                if isinstance(xs[0], tuple):
+                    joined = tuple(torch.cat([x[k] for x in xs], dim=dim) for k in range(len(xs[0])))
+                    sizes = [x[0].shape[dim] for x in xs]
+                else:
+                    joined = torch.cat(xs, dim=dim)
+                    sizes = [x.shape[dim] for x in xs]
+                if kind == "gated":
+                    # the gated norm's rows are a head's; its output projection's rows are a token's
+                    heads = eng0.cfg.linear_num_value_heads
+                    sizes = [n // heads for n in sizes]
+                out = _run_request(eng0, kind, name, joined)
+                if isinstance(out, tuple):
+                    parts = list(zip(*(o.split(sizes, dim=dim) for o in out)))
+                else:
+                    parts = out.split(sizes, dim=dim)
+                for j, part in zip(js, parts):
                     answers[j] = part
             nxt = []
             for j in live:
