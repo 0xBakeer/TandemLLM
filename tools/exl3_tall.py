@@ -107,7 +107,7 @@ def _module():
 # too), so every output element is the production kernel's ((s0 + s1) + s2) ... over the same K tiles in the
 # same mma chain; the cluster fold and the output rotation are the production kernel's lines.
 _T64 = r"""
-template <int KB, int MT, int WN, int WK, int ST, bool OF32, int MINB>
+template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32, int MINB>
 __global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
         const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
         void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
@@ -124,27 +124,29 @@ __global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
     const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 16 * MT * Kin;
     Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 16 * MT * ldy)
               : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 16 * MT * ldy);
-    uint32_t* stage = smem + (size_t)wn * ST * TW;
-    float* red = reinterpret_cast<float*>(smem + (size_t)WN * ST * TW);
+    uint32_t* stage = smem + (size_t)wn * ST * NTW * TW;
+    float* red = reinterpret_cast<float*>(smem + (size_t)WN * ST * NTW * TW);
 
     const int per_r = (KT + S - 1) / S;
     const int r0 = min(KT, rank * per_r), r1 = min(KT, r0 + per_r);
     const int per_w = (r1 - r0 + WK - 1) / WK;      // the production kernel's warp slices
-    const int nt0 = cb * 8 + wn;
+    const int nt0 = cb * 8 + wn * NTW;
 
-    float acc[MT][2][4];
+    float acc[MT][NTW][2][4];
 #pragma unroll
     for (int a = 0; a < MT; ++a)
 #pragma unroll
-        for (int h = 0; h < 2; ++h)
+        for (int j = 0; j < NTW; ++j)
 #pragma unroll
-            for (int c = 0; c < 4; ++c) acc[a][h][c] = 0.f;
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[a][j][h][c] = 0.f;
 
     auto issue = [&](int kt, int buf) {
         if (kt < r1) {
             const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
-            uint4* dst = reinterpret_cast<uint4*>(stage + buf * TW);
-            for (int c = lane; c < TW / 4; c += 32) cp_async16(dst + c, src + c);
+            uint4* dst = reinterpret_cast<uint4*>(stage + buf * NTW * TW);
+            for (int c = lane; c < NTW * TW / 4; c += 32) cp_async16(dst + c, src + c);
         }
         cp_commit();
     };
@@ -167,19 +169,21 @@ __global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
 #pragma unroll
         for (int a = 0; a < MT; ++a)
 #pragma unroll
+            for (int j = 0; j < NTW; ++j)
+#pragma unroll
             for (int h = 0; h < 2; ++h) {
-                const int col = wn * 16 + h * 8 + 2 * t;
+                const int col = (wn * NTW + j) * 16 + h * 8 + 2 * t;
                 float* r_lo = red + (16 * a + g) * RP + col;
                 float* r_hi = red + (16 * a + 8 + g) * RP + col;
                 if (s == 0) {
-                    r_lo[0] = acc[a][h][0]; r_lo[1] = acc[a][h][1];
-                    r_hi[0] = acc[a][h][2]; r_hi[1] = acc[a][h][3];
+                    r_lo[0] = acc[a][j][h][0]; r_lo[1] = acc[a][j][h][1];
+                    r_hi[0] = acc[a][j][h][2]; r_hi[1] = acc[a][j][h][3];
                 } else {
-                    r_lo[0] += acc[a][h][0]; r_lo[1] += acc[a][h][1];
-                    r_hi[0] += acc[a][h][2]; r_hi[1] += acc[a][h][3];
+                    r_lo[0] += acc[a][j][h][0]; r_lo[1] += acc[a][j][h][1];
+                    r_hi[0] += acc[a][j][h][2]; r_hi[1] += acc[a][j][h][3];
                 }
 #pragma unroll
-                for (int c = 0; c < 4; ++c) acc[a][h][c] = 0.f;
+                for (int c = 0; c < 4; ++c) acc[a][j][h][c] = 0.f;
             }
     };
 
@@ -204,13 +208,16 @@ __global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
         issue(kt + ST - 1, (i + ST - 1) % ST);
         cp_wait<ST - 1>();
         __syncwarp();
-        FragB f0, f1;
-        dq_tile<KB>(stage + (i % ST) * TW, lane * 8, f0, f1);
 #pragma unroll
-        for (int a = 0; a < MT; ++a) {
-            if (16 * a < M) {
-                mma(acc[a][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
-                mma(acc[a][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+        for (int j = 0; j < NTW; ++j) {
+            FragB f0, f1;
+            dq_tile<KB>(stage + (i % ST) * NTW * TW + j * TW, lane * 8, f0, f1);
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                if (16 * a < M) {
+                    mma(acc[a][j][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
+                    mma(acc[a][j][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+                }
             }
         }
         __syncwarp();
@@ -257,12 +264,12 @@ __global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
     }
 }
 
-template <int KB, int MT, int WK, bool OF32>
+template <int KB, int MT, int NTW, int WK, bool OF32>
 void launch_t64(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
                 int M, int Kin, int N, int ldt, int S, int b1, int b2, int st_, cudaStream_t stream) {
-    constexpr int TW = 8 * KB, WN = 8, ST = EXL3_T64_ST;
-    const size_t smem = (size_t)WN * ST * TW * 4 + (size_t)16 * MT * 132 * 4;
-    auto kern = gemm_t64_kernel<KB, MT, WN, WK, ST, OF32, (MT <= 4 ? 2 : 1)>;
+    constexpr int TW = 8 * KB, WN = 8 / NTW, ST = EXL3_T64_ST;
+    const size_t smem = (size_t)WN * ST * NTW * TW * 4 + (size_t)16 * MT * 132 * 4;
+    auto kern = gemm_t64_kernel<KB, MT, NTW, WN, WK, ST, OF32, (MT * NTW <= 4 ? 2 : 1)>;
     static bool attr = false;
     if (!attr) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -286,13 +293,18 @@ void launch_t64(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh
     TORCH_CHECK(e == cudaSuccess, "exl3 t64 launch: ", cudaGetErrorString(e));
 }
 
-#define T64_WK(KB, MT, OF32) switch (wk) { \
-    case 4: launch_t64<KB, MT, 4, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
-    case 8: launch_t64<KB, MT, 8, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
+#define T64_WK(KB, MT, NTW, OF32) switch (wk) { \
+    case 4: launch_t64<KB, MT, NTW, 4, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
+    case 8: launch_t64<KB, MT, NTW, 8, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
     default: TORCH_CHECK(false, "t64: wk must be 4 or 8, got ", wk); }
+#define T64_NTW(KB, MT, OF32) switch (ntw) { \
+    case 1: T64_WK(KB, MT, 1, OF32) \
+    case 2: T64_WK(KB, MT, 2, OF32) \
+    case 4: T64_WK(KB, MT, 4, OF32) \
+    default: TORCH_CHECK(false, "t64: ntw must be 1, 2 or 4, got ", ntw); }
 #define T64_MT(KB, OF32) switch (mt) { \
-    case 4: T64_WK(KB, 4, OF32) \
-    case 8: T64_WK(KB, 8, OF32) \
+    case 4: T64_NTW(KB, 4, OF32) \
+    case 8: T64_NTW(KB, 8, OF32) \
     default: TORCH_CHECK(false, "t64: mt must be 4 or 8, got ", mt); }
 #define T64_KB(OF32) switch (kb) { \
     case 3: T64_MT(3, OF32) \
@@ -302,7 +314,7 @@ void launch_t64(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh
     default: TORCH_CHECK(false, "t64: K bits 3..6, got ", kb); }
 
 void exl3_gemm_t64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
-                   int64_t kb, int64_t mt, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+                   int64_t kb, int64_t mt, int64_t ntw, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
     const at::cuda::OptionalCUDAGuard guard(xh.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
@@ -319,7 +331,9 @@ void exl3_gemm_t64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::
 }
 """
 _T64_CPP = ("void exl3_gemm_t64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
-            "int64_t kb, int64_t mt, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+            "int64_t kb, int64_t mt, int64_t ntw, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+#: column tiles a T64 warp owns (WN = 8 / NTW warps a CTA); the order is the same at any NTW
+T64_NTW = int(os.environ.get("QWEN38_EXL3_T64_NTW", "2") or 2)
 #: cp.async stages a T64 warp keeps in flight (one 16x16 tile a stage; a function of nothing that moves bits)
 T64_ST = int(os.environ.get("QWEN38_EXL3_T64_ST", "8") or 8)
 _T64_MOD = None
@@ -341,7 +355,7 @@ def _t64_module():
     return _T64_MOD
 
 
-def t64_matmul(x: torch.Tensor, w, *, mt: int = 4, xh: torch.Tensor | None = None,
+def t64_matmul(x: torch.Tensor, w, *, mt: int = 4, ntw: int | None = None, xh: torch.Tensor | None = None,
                out: torch.Tensor | None = None) -> torch.Tensor:
     """`exl3_matmul(x, w)` with each trellis tile decoded once for 16 mt rows (the same bits)."""
     M = x.shape[0] if x is not None else xh.shape[1]
@@ -350,7 +364,7 @@ def t64_matmul(x: torch.Tensor, w, *, mt: int = 4, xh: torch.Tensor | None = Non
         out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
     tile = X.pick(w.tile_n, w.K, w.kb)
     _t64_module().exl3_gemm_t64(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, mt,
-                                tile["wk"], tile["S"], w.bounds[0], w.bounds[1])
+                                T64_NTW if ntw is None else ntw, tile["wk"], tile["S"], w.bounds[0], w.bounds[1])
     return out
 
 
@@ -367,8 +381,9 @@ def check_t64(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 12
         for M in rows:
             ref = X.exl3_matmul(x[:M], w)
             for mt in (4, 8):
-                assert torch.equal(t64_matmul(x[:M], w, mt=mt), ref), ("t64", N, K, kb, M, mt)
-        line = f"{N}x{K} K{kb}: rows {min(rows)}..{max(rows)} through T64 (mt 4, 8) = the production bits"
+                for ntw in (1, 2, 4):
+                    assert torch.equal(t64_matmul(x[:M], w, mt=mt, ntw=ntw), ref), ("t64", N, K, kb, M, mt, ntw)
+        line = f"{N}x{K} K{kb} ST{T64_ST}: rows {min(rows)}..{max(rows)} through T64 (mt 4/8, ntw 1/2/4) = the production bits"
         if bench:
             line += "; " + _bench_t64(x, w)
         out.append(line)
@@ -380,8 +395,9 @@ def _bench_t64(x, w) -> str:
     res = []
     for M in (32, 64, 128):
         xs = x[:M]
-        for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)), ("t64", lambda: t64_matmul(xs, w, mt=4)),
-                         ("t128", lambda: t64_matmul(xs, w, mt=8))):
+        for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)),) + tuple(
+                (f"t{16 * mt}n{ntw}", (lambda mt=mt, ntw=ntw: t64_matmul(xs, w, mt=mt, ntw=ntw)))
+                for mt in (4, 8) for ntw in (1, 2, 4)):
             for _ in range(3):
                 fn()
             torch.cuda.synchronize()

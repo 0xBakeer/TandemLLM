@@ -145,9 +145,10 @@ def _span(pos0: int, win: int) -> int:
     return min(c, win)
 
 
-def _packed_body(ds: list, scals: list, spans: list, temp):
+def _packed_body(ds: list, scals: list, spans: list, temp, projs: list | None = None):
     """`DraftGraph._body` for several drafters over one module, each block's inputs from its own
-    device scalars (anchor, pos0, ctx_len), the projections and the head once for all rows."""
+    device scalars (anchor, pos0, ctx_len), the projections and the head once for all rows. `projs`
+    (QWEN38_ROUND_LOG_LATTICE): each block's selector-projected hidden [L, r] is appended to it."""
     from engine.drafters.dflash2 import forward_block_multi
     from engine.model import head_logits
     d0 = ds[0]
@@ -184,6 +185,9 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         anchors.append(anchor)
     hidden = forward_block_multi(m, items)
     preds = [h[1:] for h in hidden]
+    if projs is not None:
+        wp = m.w["candidate_selector.hidden_projection.weight"]
+        projs.extend(F.linear(p, wp) for p in preds)
     logits = head_logits(torch.cat(preds, dim=0), dflash2_head(eng))
     out = []
     sizes = [p.shape[0] for p in preds]
@@ -231,17 +235,21 @@ class PackedDraftGraph:
             if len(self.graphs) > 32:
                 self.graphs.clear()
             self.stream.wait_stream(torch.cuda.current_stream())
+            projs = [] if LOG_PROJ else None
             with torch.cuda.stream(self.stream):
-                _packed_body(list(self.ds), self.scal, list(spans), temp)
+                _packed_body(list(self.ds), self.scal, list(spans), temp, [] if LOG_PROJ else None)
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(g, pool=self.pool, stream=self.stream):
-                out = _packed_body(list(self.ds), self.scal, list(spans), temp)
-            got = self.graphs[key] = (g, out)
+                out = _packed_body(list(self.ds), self.scal, list(spans), temp, projs)
+            got = self.graphs[key] = (g, out, projs)
             self.stats["captured"] += 1
         got[0].replay()
         self.stats["replayed"] += 1
+        if got[2]:
+            for d, pj in zip(self.ds, got[2]):
+                d._pred_proj = pj               # this replay's buffers (the round logger reads them)
         return got[1]
 
 
@@ -253,6 +261,10 @@ _PACKED_MAX = 24
 
 #: the packed draft from CUDA graphs (False: eager, for the board check's comparison)
 PACKED_GRAPH = True
+#: SPD-201 (QWEN38_ROUND_LOG_LATTICE): each packed block's selector-projected hidden kept on its drafter
+#: (`_pred_proj`, [L, r]) for the round logger
+from engine.settings import SETTINGS as _S  # noqa: E402
+LOG_PROJ = _S.get("ROUND_LOG_LATTICE") == "1"
 
 
 def packed_draft(reqs: list, graph: bool | None = None) -> list:
@@ -283,4 +295,8 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     dev = ds[0].eng.device
     scals = [torch.tensor([a, p, d.ctx_len], dtype=torch.long, device=dev) for d, a, p in reqs]
     spans = [_span(p, int(ds[0].cfg.sliding_window)) for _, _, p in reqs]
-    return _packed_body(ds, scals, spans, temp)
+    projs = [] if LOG_PROJ else None
+    out = _packed_body(ds, scals, spans, temp, projs)
+    for d, pj in zip(ds, projs or []):
+        d._pred_proj = pj
+    return out

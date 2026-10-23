@@ -164,6 +164,7 @@ class RoundLog:
         rec["cand"], rec["lat_lp"] = cand, lat
         if LATTICE:
             rec["lat_scores"] = lattice_scores(drafter)
+            rec["pred_proj"] = pred_proj(drafter)
             sm = sampler if sampler is not None and getattr(sampler, "on", False) else None
             rec["samp"] = (None if sm is None else
                            {"seed": sm.seed, "t": sm.temperature, "top_p": sm.top_p, "top_k": sm.top_k,
@@ -262,6 +263,19 @@ def lattice_scores(drafter):
     sc = lt[1].float().cpu()
     return [[[round(float(v), 3) for v in row] for row in sl] for sl in sc.tolist()] if sc.dim() == 3 else \
         [[round(float(v), 3) for v in row] for row in sc.tolist()]
+
+
+def pred_proj(drafter):
+    """The proposing arm's selector-projected block hidden of this block ([L, r] fp16, base64), or None (a
+    lone draft, or no packed draft this round)."""
+    arm = _arm(drafter)
+    d2 = getattr(arm, "mtp", arm)
+    pj = getattr(d2, "_pred_proj", None)
+    if pj is None:
+        return None
+    import base64
+    t = pj.detach().to(torch.float16).cpu().contiguous()
+    return {"shape": list(t.shape), "b64": base64.b64encode(t.numpy().tobytes()).decode()}
 
 
 def node_q(drafter, tree, dep, rank):

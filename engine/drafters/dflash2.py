@@ -1668,6 +1668,7 @@ class DFlash2Drafter(Drafter):
             if DraftGraph.eligible(self):
                 # parallel requests: with other slots decoding, this draft call joins their packed
                 # draft (`DRAFT_MEET`, server/app.py); alone, or outside such a server, the graph
+                self._pred_proj = None          # set by a packed draft for the round logger
                 out = DRAFT_MEET(self, anchor, pos0) if DRAFT_MEET is not None else None
                 if out is None:
                     out = self.graph_run(anchor, pos0)

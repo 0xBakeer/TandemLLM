@@ -83,6 +83,7 @@ def test_the_lattice_and_the_sampling_profile_with_round_log_lattice():
         d2 = D2()
         sc = torch.tensor([[[0.5, -1.25], [2.0, 0.0]], [[1.0, 1.5], [-0.5, 0.25]]])
         d2._lattice = (torch.tensor([[11, 12], [13, 14]]), sc)
+        d2._pred_proj = torch.arange(6, dtype=torch.float32).reshape(2, 3)
         arm = LenRouter()
         arm.large.mtp = d2
         with tempfile.TemporaryDirectory() as d:
@@ -100,7 +101,12 @@ def test_the_lattice_and_the_sampling_profile_with_round_log_lattice():
     assert s["lat_scores"] == sc.tolist(), s["lat_scores"]
     assert s["samp"] == {"seed": 1042, "t": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0}, s["samp"]
     assert s2["samp"] is None, "a greedy request"
-    return "the whole lattice and the sampling profile, greedy logged as null"
+    import base64
+    import numpy as np
+    pj = s["pred_proj"]
+    assert pj["shape"] == [2, 3] and np.frombuffer(base64.b64decode(pj["b64"]), np.float16).tolist() == \
+        [0, 1, 2, 3, 4, 5], pj
+    return "the whole lattice, the projected block hidden and the sampling profile, greedy logged as null"
 
 
 if __name__ == "__main__":
