@@ -699,7 +699,7 @@ def gen_ledger(root: str) -> str:
         names = [p.split()[0] for p in re.split(r",\s*", ev.group(1)) if p.split()]
         lines.append(r"{\hbadness=3000 \noindent The conductor's journal shares the file: \texttt{conductor\_events} has "
                      + str(len(names)) + r" columns (" + ", ".join(code(n) for n in names)
-                     + r"), and \texttt{conductor\_texts} keeps every hidden text once, by its hash.")
+                     + r"), and \texttt{conductor\_texts} keeps every hidden text once, by its hash.\par}")
     return "\n".join(lines) + "\n"
 
 
