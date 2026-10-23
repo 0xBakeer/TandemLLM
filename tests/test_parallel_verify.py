@@ -461,6 +461,44 @@ def test_a_joint_cut_shares_one_row_budget_and_keeps_the_text():
         assert together[i] == alone[i], (i, alone[i], together[i])
 
 
+
+def test_spd187_a_planned_round_keeps_each_requests_text():
+    """The round planner acting (QWEN38_ROUND_PLAN=on's path): each round's bucket T from the planner,
+    every tree cut to T rows; the texts are each request's alone text (a plan changes which rows are
+    verified, never what a row computes), and no pass exceeds E x T rows."""
+    from engine.methods.roundplan import RoundPlanner
+    from engine.methods.staircut import PriceModel
+    plans = []
+
+    class Planned(slots.Meeting):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            rp = RoundPlanner(PriceModel({1024: {"joint2": {4: 30.0, 8: 31.0, 16: 60.0}}}), buckets=(2, 4, 8),
+                              cap=lambda E: 16)
+            rp.mode = "on"
+            rp.force = lambda T: plans.append(T)
+            self.planner, self.ctx_class = rp, (lambda n: 1024)
+            self.plan_keys, self.plan_last = [], None
+    keep = slots.Meeting
+    slots.Meeting = Planned
+    try:
+        cfg = tiny_config()
+        w = FakeWeights(cfg, seed=6)
+        n = 30
+        prompts = [[(5 + 7 * i + 13 * j) % 96 + 1 for j in range(9 + 4 * i)] for i in range(2)]
+        refs = [_greedy(cfg, w, p, n) for p in prompts]
+        fulls = [p + r for p, r in zip(prompts, refs)]
+        alone = [_alone(cfg, w, p, f, n) for p, f in zip(prompts, fulls)]
+        together, stats, _ = _together(cfg, w, prompts, fulls, n, cut="joint", max_rows=16)
+    finally:
+        slots.Meeting = keep
+    assert plans and all(T is None or T in (2, 4, 8) for T in plans), plans
+    forced = [T for T in plans if T is not None]
+    assert forced and max(int(r) for r in stats["rows_hist"]) <= 2 * max(forced), (stats["rows_hist"], forced)
+    for i in range(2):
+        assert together[i] == alone[i], (i, alone[i], together[i])
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

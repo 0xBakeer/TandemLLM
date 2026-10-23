@@ -11,4 +11,10 @@ KNOBS: dict[str, tuple] = {
     'JOINT_GRAPHS_MAX': ('12', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
     'JOINT_GRAPHS_AFTER': ('3', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
+    'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json
+    'ROUND_PLAN_PRICES': (None, 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: the rows a block may take in a planned round
+    'ROUND_PLAN_BUCKETS': ('4,8,16', 'engine/models/qwen3_5/roundplan.py'),
 }

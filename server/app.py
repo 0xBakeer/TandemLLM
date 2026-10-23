@@ -1387,6 +1387,22 @@ def _run_round(meet) -> None:
         tc = getattr(meet, "tree_cap", None)
         cap = tc(len(group), meet.max_rows) if tc is not None and len(group) > 1 else None
         pre_rows = [r.rows for r in group] if rlog is not None else None
+        pl, plan = getattr(meet, "planner", None), None
+        if pl is not None:
+            _plan_tail(meet, pl, time.perf_counter())
+            if len(group) > 1 and all(r.tree is not None for r in group):
+                # SPD-187: the round planner's bucket for this round (shadow: logged; on: the cut and graph)
+                from engine.methods.roundplan import gain_curve
+                tmax = max(pl.buckets)
+                cc = meet.ctx_class(max(int(r.start) for r in group))
+                curves = [gain_curve(r.q, r.tree.parents, r.tree.scores, tmax) for r in group]
+                plan = pl.plan(len(group), cc, curves)
+                plan["ctx"] = cc
+                if pl.mode == "on" and plan.get("T"):
+                    cap = plan["T"]
+                meet.plan_keys.append((len(group), cc, curves))
+                del meet.plan_keys[:-32]
+                pl.tick(meet.plan_keys)
         if (len(group) > 1 and all(r.tree is not None for r in group)
                 and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows
                      or (cap is not None and any(r.rows > cap for r in group)))):
@@ -1404,8 +1420,13 @@ def _run_round(meet) -> None:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
         ev = rlog.begin() if rlog is not None else None
-        rep = getattr(group[0].eng, "joint_graphs_report", None) if rlog is not None else None
-        g0 = (rep() or {}).get("replayed") if callable(rep) else None
+        pev = roundlog.PassTimer.begin() if pl is not None else None
+        rep = (getattr(group[0].eng, "joint_graphs_report", None)
+               if rlog is not None or pl is not None else None)
+        r0 = (rep() or {}) if callable(rep) else {}
+        g0, c0 = r0.get("replayed"), r0.get("captures")
+        if pl is not None and pl.mode == "on" and plan is not None and plan.get("T"):
+            pl.force(plan["T"])
         try:
             if len(group) == 1:
                 r = group[0]
@@ -1417,11 +1438,31 @@ def _run_round(meet) -> None:
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
+        finally:
+            if pl is not None and pl.mode == "on":
+                pl.force(None)
+        r1 = (rep() or {}) if callable(rep) and err is None else {}
+        g1 = r1.get("replayed")
+        graphed = None if g0 is None or g1 is None else g1 > g0
+        captured = c0 is not None and (r1.get("captures") or 0) > c0
+        if pl is not None and err is None and len(group) > 1:
+            # SPD-187: the pass's price, learned from its events once they are done (no synchronize): a
+            # graphed pass costs its bucket's E x T rows, an eager one its rows
+            E = len(group)
+            tp = cap if graphed and cap else None
+            rows_cost = E * tp if tp else sum(r.rows for r in group)
+            cc = meet.ctx_class(max(int(r.start) for r in group))
+            holder = {"E": E, "t": t0, "ms": None}
+            meet.plan_last = holder
+
+            def _seen(ms, E=E, rows=rows_cost, cc=cc, eager=not graphed, skip=captured, holder=holder):
+                holder["ms"] = ms
+                if not skip:                 # a round that captured its graph is not a price
+                    pl.observe_pass(E, rows, ms, cc, eager=eager)
+            roundlog.PassTimer.end(pev, _seen)
         if rlog is not None and err is None:
             # SPD-187: the pass, timed by its events (read once done, on a later round)
-            g1 = (rep() or {}).get("replayed") if callable(rep) else None
-            rid = rlog.round(group, ev, cap=cap, pre_rows=pre_rows,
-                             graphed=None if g0 is None or g1 is None else g1 > g0)
+            rid = rlog.round(group, ev, cap=cap, pre_rows=pre_rows, graphed=graphed, plan=plan)
             for r in group:
                 r.rid = rid
         if meet.timing and err is None:
@@ -1451,6 +1492,19 @@ def _run_round(meet) -> None:
                 r.joint = len(group)
                 meet.transit.add(r.slot)
             meet.cv.notify_all()
+
+
+def _plan_tail(meet, pl, now: float) -> None:
+    """SPD-187: the rest of the last round (its start to this one's, less its pass), for the planner's
+    tails(E); and the pass timings that are done by now."""
+    from server import roundlog
+    roundlog.PassTimer.drain()
+    last = getattr(meet, "plan_last", None)
+    if last is not None and last["ms"] is not None:
+        period = (now - last["t"]) * 1e3
+        if period < 5000.0:
+            pl.observe_tail(last["E"], period - last["ms"])
+        meet.plan_last = None
 
 
 def _par_note(pool, key: str, n, value: float) -> None:
@@ -1546,7 +1600,7 @@ class _LoneReq:
         self.slot, self.rows, self.start = slot, rows, start
 
 
-def _verify_tree(pool, eng, block, parents, pos, tree=None):
+def _verify_tree(pool, eng, block, parents, pos, tree=None, q=None):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms, tree): `ms` None when it verified alone (the
     caller times it), the lone verify's time when another slot ran it, False for a joint pass;
@@ -1564,6 +1618,7 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
                               tree=tree if meet.cut != "share" else None)
+    req.q = q
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
     pool.last_rid[i] = req.rid                            # SPD-187: the round logger's id
@@ -1916,7 +1971,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if par is None:
                         lg, vms = eng.forward_tree(block, tree.parents, start=pos), None
                     else:
-                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree)
+                        # SPD-187: the nodes' calibrated q for the round planner (its gain curves)
+                        nq = (_roundlog.tree_q(drafter, tree)
+                              if getattr(par.meeting, "planner", None) is not None else None)
+                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree, q=nq)
                         t_post = time.perf_counter()
                         _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
                     if rlog is not None:
@@ -11135,6 +11193,10 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         # SPD-163: the family's per-tree cap of a joint cut (`joint_policy` "tree_cap": a callable of the
         # block count and the row cap), e.g. the row bucket of its joint graphs
         meet.tree_cap = pol.get("tree_cap")
+        # SPD-187: the family's round planner (`joint_policy` "planner") and its context classes
+        meet.planner = pol.get("planner")
+        meet.ctx_class = pol.get("ctx_class") or (lambda n: 1024)
+        meet.plan_keys, meet.plan_last = [], None
     dmeet = None
     if meet is not None and a.parallel_draft == "on" and a.drafter == "lenrouter":
         # the packed draft: the decoding slots' draft calls in one pass over the drafter

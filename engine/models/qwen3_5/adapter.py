@@ -126,6 +126,11 @@ def joint_policy(eng) -> dict:
     if JG.ON:
         # SPD-163: a joint cut keeps each tree within the graphs' row bucket, so the pass is graphed
         pol["tree_cap"] = JG.t_pad
+    from engine.models.qwen3_5 import roundplan as RP
+    rp = RP.planner_for(eng, pol["max_rows"])
+    if rp is not None:
+        # SPD-187: the round planner (shadow: logged only; on: the round's bucket)
+        pol["planner"], pol["ctx_class"] = rp, RP.ctx_class
     return pol
 
 

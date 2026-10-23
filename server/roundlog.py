@@ -58,7 +58,7 @@ class RoundLog:
         e0.record()
         return e0, e1
 
-    def round(self, group, ev, cap=None, pre_rows=None, graphed=None) -> int:
+    def round(self, group, ev, cap=None, pre_rows=None, graphed=None, plan=None) -> int:
         """Log one verify pass over `group` (server/slots.py VerifyReq) timed by `ev`; returns its id."""
         now = time.perf_counter()
         with self.lock:
@@ -71,6 +71,11 @@ class RoundLog:
                    "pre_rows": pre_rows, "cap": cap, "ctx": [int(r.start) for r in group],
                    "graphed": graphed, "pass_ms": None,
                    "period_ms": None if period is None else round(period, 3)}
+            if plan is not None:
+                # SPD-187: the round planner's choice and its own prediction (shadow mode: not acted on)
+                rec["plan"] = {"T": plan.get("T"), "gain": _r(plan.get("gain")), "ms": _r(plan.get("ms")),
+                               "key": list(plan.get("key") or ()), "version": plan.get("version"),
+                               "ctx": plan.get("ctx")}
             if ev is not None and ev[0] is not None:
                 ev[1].record()
                 self.pending.append((rec, ev[0], ev[1]))
@@ -156,6 +161,57 @@ class RoundLog:
         with self.lock:
             self._write(rec)
             self._drain()
+
+
+def _r(x):
+    return None if x is None else round(float(x), 3)
+
+
+class PassTimer:
+    """SPD-187: a pass timed by two CUDA events, its ms handed to a callback once the events are done
+    (`drain`, called on a later round): no synchronize."""
+
+    pending: list = []
+    lock = threading.Lock()
+
+    @staticmethod
+    def begin():
+        if not torch.cuda.is_available():
+            return None
+        e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        e0.record()
+        return e0, e1
+
+    @classmethod
+    def end(cls, ev, cb) -> None:
+        if ev is None:
+            return
+        ev[1].record()
+        with cls.lock:
+            cls.pending.append((ev[0], ev[1], cb))
+
+    @classmethod
+    def drain(cls) -> None:
+        with cls.lock:
+            keep, done = [], []
+            for e0, e1, cb in cls.pending:
+                (done if e1.query() else keep).append((e0, e1, cb))
+            cls.pending = keep
+        for e0, e1, cb in done:
+            cb(e0.elapsed_time(e1))
+
+
+def tree_q(drafter, tree):
+    """Per node the proposing arm's calibrated q (`node_q`), for the round planner."""
+    if tree is None:
+        return None
+    n = len(tree.tokens)
+    dep = tree.depths()
+    order = sorted(range(1, n), key=lambda i: -tree.scores[i])
+    rank = [0] * n
+    for r, i in enumerate(order, start=1):
+        rank[i] = r
+    return node_q(drafter, tree, dep, rank)
 
 
 def _arm(drafter):

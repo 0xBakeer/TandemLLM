@@ -42,6 +42,8 @@ CAP = int(_S.get("JOINT_GRAPHS_MAX") or 12)
 AFTER = int(_S.get("JOINT_GRAPHS_AFTER") or 3)
 #: the most rows a block keeps in a graphed pass (the grouped WY tile)
 MAX_T = 16
+#: SPD-187: set by the round planner for the pass about to run (server/app.py `_run_round`): its bucket
+FORCE_T = None
 #: the factor columns of the GDN offset table a replay rewrites for an engine's parity (gc, kk, delta, and
 #: the pending commit's kk, u, gc: tools/gdn_wy_kernels.py NOFF)
 _PAR_COLS = [1, 3, 10, 12, 13, 14]
@@ -171,7 +173,10 @@ class JointGraphs:
             return self._no("flags")
         E = len(items)
         ns = [len(p) for _, _, p, _ in items]
-        T = t_pad(E, int(items[0][0].joint_policy()["max_rows"]))
+        cap_rows = int(items[0][0].joint_policy()["max_rows"])
+        T = t_pad(E, cap_rows)
+        if FORCE_T is not None and 2 <= FORCE_T <= MAX_T and E * FORCE_T <= cap_rows:
+            T = FORCE_T                     # SPD-187: the round planner's bucket
         if max(ns) > T:
             # the joint cut keeps trees within T_pad (`tree_cap`); a pass made otherwise runs eager
             return self._no("rows")

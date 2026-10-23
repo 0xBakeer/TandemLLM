@@ -413,7 +413,7 @@ class VerifyReq:
     and `ms`; the submitter reads them when it holds the turn again."""
 
     __slots__ = ("slot", "eng", "tokens", "parents", "start", "rows", "batchable", "out", "ms",
-                 "error", "joint", "tree", "tree_cut", "rid")
+                 "error", "joint", "tree", "tree_cut", "rid", "q")
 
     def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True,
                  tree=None):
@@ -421,6 +421,7 @@ class VerifyReq:
         self.tree = tree                   # the slot's whole tree, for a joint cut (`joint_cut`)
         self.tree_cut = None               # the tree the round verified, when it cut it
         self.rid = None                    # SPD-187: the round logger's id of the pass that verified it
+        self.q = None                      # SPD-187: the tree's per-node calibrated q (the round planner)
         self.rows = len(parents)
         self.batchable = bool(batchable)
         self.out = None
