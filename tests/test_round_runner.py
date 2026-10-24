@@ -156,6 +156,72 @@ def test_a_block_that_can_be_closed_keeps_the_slot_loop():
     return "a budget or stall arms: the slot's own loop (counted); a passive block or none: the runner"
 
 
+def test_a_stream_read_half_way_and_closed_after_its_slot_went_back_leaves_the_turn_free():
+    """SRV-709: a stream that ends at a stop string stops reading its generation half way. Its slot is
+    given back (`_par_end`: the turn released, the slot's phase and owner cleared), and the generation is
+    closed only later (when the handler's frame goes away). The runner's generator then must not take the
+    slot's turn back: held for good, every lane waited (Ornith, 8 lanes, 2026-10-24)."""
+    import threading
+    import torch
+    from server import app, slots
+    cfg = T.tiny_config()
+    w = T.FakeWeights(cfg, seed=5)
+    n = 40
+    prompts = [[(3 + 7 * i + 11 * j) % 96 + 1 for j in range(10 + 3 * i)] for i in range(2)]
+    fulls = [p + T._greedy(cfg, w, p, n) for p in prompts]
+    R.RUNNER = None
+    pool = T._setup([T._engine(cfg, w) for _ in prompts], [T.OracleTree(f) for f in fulls])
+    out0, errs = [], []
+    go = threading.Barrier(2)
+    left = threading.Event()
+
+    def slot0():
+        try:
+            go.wait()
+            with app.LOCK:
+                with torch.no_grad():
+                    for t in app.generate_stream(torch.tensor(prompts[0]), n, set()):
+                        out0.append(t)
+        except BaseException as exc:                               # noqa: BLE001
+            errs.append(exc)
+
+    def slot1():
+        s = pool.slots[1]
+        try:
+            go.wait()
+            slots.bind(s)
+            s.owner = "req-1"
+            pool.turn.reset(1)
+            pool.turn.acquire(1)
+            gen = app.generate_stream(torch.tensor(prompts[1]), n, set())
+            with torch.no_grad():
+                for j, _ in enumerate(gen):
+                    if j == 4:
+                        break                                     # a stop string
+            if pool.turn.held_by(1):                              # `_par_end`
+                pool.turn.release(1)
+            s.phase, s.owner = "", None
+            slots.bind(None)
+            left.set()
+            gen.close()                                           # the frame went away
+        except BaseException as exc:                               # noqa: BLE001
+            errs.append(exc)
+
+    ths = [threading.Thread(target=slot0, daemon=True), threading.Thread(target=slot1, daemon=True)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(60)
+    owner = pool.turn.owner
+    alive = [th.is_alive() for th in ths]
+    T._teardown()
+    assert not errs, errs
+    assert left.is_set() and alive == [False, False], alive
+    assert owner is None, f"the turn held by {owner!r} after both requests ended"
+    assert len(out0) == n, len(out0)
+    return f"slot 1 read 5 of {n} tokens and closed late; slot 0 wrote its {len(out0)}; the turn free"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

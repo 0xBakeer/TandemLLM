@@ -1736,6 +1736,7 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
     task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
                               bs, k, deadline, device, think)
     slot.phase = "runner"
+    owner = slot.owner
     par.wake()
     runner = _round_runner.runner_for(par, sys.modules[__name__])
     par.turn.release(i)
@@ -1749,8 +1750,11 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
                 yield t
     finally:
         task.cancel = True
-        par.turn.acquire(i)
-        slot.phase = ""
+        # SRV-709: the turn back only while the slot is still this request's; a generator closed
+        # after its request gave the slot back (`_par_end`) would hold the turn for good
+        if slot.phase == "runner" and slot.owner == owner:
+            par.turn.acquire(i)
+            slot.phase = ""
     if task.err is not None:
         raise task.err
 
@@ -8577,6 +8581,7 @@ class Handler(BaseHTTPRequestHandler):
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
         mm_end = None                      # SRV-629: the served images' context, for the view keep
+        source = None                      # the token source the answer reads (`open_source`)
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
             if int(prompt.numel()) == 0:
@@ -9892,6 +9897,16 @@ class Handler(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
         finally:
+            if source is not None:
+                # SRV-709: a stream that ends at its end token or a stop string leaves its source
+                # half read; closed here, its generation ends (the round runner's task cancelled,
+                # the slot's turn taken back) before the bookkeeping below and `_par_end`. Closed
+                # when this frame went away instead, it took the turn after `_par_end` gave the slot
+                # back and held it for good: every lane waited (Ornith, 8 lanes, 2026-10-24)
+                try:
+                    source.close()
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
             if micro:
                 # the side lane never held the engine past its job (server/preempt.py)
                 with QUEUE:
