@@ -29,8 +29,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from engine.models.flashnext.engine import (CAPTURE_ROWS, DENSE_MAX, CommitGraph, DecodeGraph,  # noqa: F401
-                                            FlashNextEngine, MTPChainGraph, VerifyGraph)
+from engine.models.flashnext.engine import (CAPTURE_ROWS, DENSE_MAX, JOINT_MOE_GROUP, CommitGraph,  # noqa: F401
+                                            DecodeGraph, FlashNextEngine, MTPChainGraph, VerifyGraph)
 from engine.models.flashnext.ref import MTP
 from engine.models.qwen3_5_moe import kernels as AK
 from engine.models.qwen3_5_moe.ref import Qwen35MoeRef
@@ -203,7 +203,7 @@ class Qwen35MoeEngine(FlashNextEngine):
         if write and self.taps and st.ring is not None:
             st.ring.index_copy_(0, rb["d"]["pidx"], rb["taps"])
         if self.fold:
-            self._pend_n.zero_()
+            self._pend_of(st)[1].zero_()
         self.rec["stack"] = self.stack
         return rb["logits"]
 
@@ -218,7 +218,6 @@ class Qwen35MoeEngine(FlashNextEngine):
         from tools import fn_kernels as K
         c = self.cfg
         H, eps = c.hidden_size, c.rms_norm_eps
-        self.flush()
         cx = []
         for j, (tokens, parents, st) in enumerate(items):
             M = len(tokens)
@@ -264,7 +263,13 @@ class Qwen35MoeEngine(FlashNextEngine):
             h, n = K.inject_norm(h, out, zd, 0, self.W[p + "post_attention_layernorm.weight"], 1, eps)
             nxt = self._site_norm(li + 1)
             if total <= self.MOE_ROWS:
-                yd, ids, wts = self.moe_parts(n, li)
+                # SPD-217: the experts through the grouped kernels (QWEN38_FN_JOINT_MOE_GROUP, as Flash-Next's
+                # joint pass): an expert's weights read once for every pair of the pass, each pair's bits its own
+                grp, K.MOE_GROUP = K.MOE_GROUP, K.MOE_GROUP or JOINT_MOE_GROUP
+                try:
+                    yd, ids, wts = self.moe_parts(n, li)
+                finally:
+                    K.MOE_GROUP = grp
                 for j, x in enumerate(cx):
                     x["rec"][("ids", li)] = ids[rows[j]]
                 h, n = K.combine_inject_norm(h, yd, ids, wts, zd, 0, nxt, 1, eps)
@@ -285,7 +290,7 @@ class Qwen35MoeEngine(FlashNextEngine):
                 x["rec"]["taps"] = rb["taps"]
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], n[rows[j]]))
-        self._pend_owner = None
+        self._applied([x["st"] for x in cx])
         return out
 
     # ------------------------------------------------------------------------- attention

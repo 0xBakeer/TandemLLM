@@ -71,12 +71,12 @@ class FlashNextEngine(FlashNextRef):
         self.host_ms: dict = {}                                          # host staging time by part
         # the commit folded into the next call (QWEN38_FN_FOLD_COMMIT): the accepted path's GDN rows,
         # parked a layer, applied by the next verify block or decode step to each state tile as it
-        # loads it (bit for bit the commit's own walk); `_pend_owner` is the state they belong to
+        # loads it (bit for bit the commit's own walk). SPD-229: each state parks in its own buffers
+        # (`_pend_of`), so a joint pass's lanes each fold their own rows into their walk; one set of
+        # buffers made every lane's commit land the lane before's rows first, a walk of its own a layer
         self.fold = _S.get("FN_FOLD_COMMIT") == "1"
-        self._pend: dict = {}
-        self._pend_n = torch.zeros(max(len(cfg.linear_layers), 1), dtype=torch.int32, device=device)
         self._lin_idx = {li: i for i, li in enumerate(cfg.linear_layers)}
-        self._pend_owner = None
+        self._pending: dict = {}         # id(state) -> the state, while it has parked rows
         self._joint: dict = {}          # id(state) -> (block, rec, class) of its block in the last joint pass
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
         self.joint_timing = None        # a dict: `verify_multi` adds each part's GPU ms (a measurement)
@@ -160,9 +160,7 @@ class FlashNextEngine(FlashNextRef):
                         c.rms_norm_eps, out=st.pool[li][:nb])
 
     def reset(self, st: FNState) -> None:
-        if self._pend_owner is st:
-            self._pend_n.zero_()
-            self._pend_owner = None
+        self.drop_parked(st)
         st.reset_inplace()
         for d in (st.k, st.v, st.ik, st.pool):
             for v in d.values():
@@ -805,7 +803,7 @@ class FlashNextEngine(FlashNextRef):
         torch.argmax(rb["logits"], dim=-1, out=rb["next"])
         rb["next_h"].copy_(rb["next"], non_blocking=True)
         if self.fold:
-            self._pend_n.zero_()                   # every GDN layer applied its parked rows
+            self._pend_of(st)[1].zero_()           # every GDN layer applied its parked rows
         self.rec["stack"] = self.stack
         return rb["logits"]
 
@@ -845,7 +843,7 @@ class FlashNextEngine(FlashNextRef):
             gr.replay()
         else:
             self.rows_step(st, M, cls=cls)
-        self._pend_owner = None
+        self._pending.pop(id(st), None)
         torch.cuda.current_stream().synchronize()
         return self._rb[M]["next_h"].tolist()
 
@@ -859,7 +857,8 @@ class FlashNextEngine(FlashNextRef):
         lone verify runs them. The projections and the experts give a row the bits it gets alone up to
         32 rows (the self-check's widths), so each state's tokens are its lone verify's; the caller
         keeps a pass at or under 32 rows. Parked GDN rows are applied first (`flush`): each state's
-        walk then starts from its own state. Eager; each state commits its block (`commit`)."""
+        walk then starts from its own state (SPD-229: each state's walk folds in its own parked rows, as its
+        lone verify does). Eager; each state commits its block (`commit`)."""
         from tools import fn_kernels as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
@@ -874,7 +873,6 @@ class FlashNextEngine(FlashNextRef):
                 ev.record()
                 marks.append((name, ev))
         mark("stage")
-        self.flush()
         cx = []
         for j, (tokens, parents, st) in enumerate(items):
             M = len(tokens)
@@ -973,7 +971,7 @@ class FlashNextEngine(FlashNextRef):
             torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], hs[j]))
-        self._pend_owner = None
+        self._applied([x["st"] for x in cx])
         if jt is not None:
             mark("end")
             torch.cuda.synchronize()
@@ -1062,7 +1060,7 @@ class FlashNextEngine(FlashNextRef):
             torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], Hs[rows[j]]))
-        self._pend_owner = None
+        self._applied([x["st"] for x in cx])
         if jt is not None:
             mark("end")
             torch.cuda.synchronize()
@@ -1105,7 +1103,7 @@ class FlashNextEngine(FlashNextRef):
                                           dtype=torch.long)
         st.length += len(path)
         if self.fold:
-            self._pend_owner = st
+            self._pending[id(st)] = st
         return self._commit_bufs(key)["stack"]
 
     def _commit_bufs(self, key) -> dict:
@@ -1179,7 +1177,7 @@ class FlashNextEngine(FlashNextRef):
         for li in c.linear_layers:
             qkvz, y, gg, beta = rec[li]
             if self.fold:
-                py, pg, pb = self._pend_bufs(li)
+                py, pg, pb = self._pend_bufs(li, st)
                 torch.index_select(y, 0, idx, out=py[:key[1]])
                 torch.index_select(gg, 0, idx, out=pg[:key[1]])
                 torch.index_select(beta, 0, idx, out=pb[:key[1]])
@@ -1206,47 +1204,73 @@ class FlashNextEngine(FlashNextRef):
             st.ple_conv[li][0].copy_(hist.index_select(1, d["c9"]))
         torch.index_select(rec["stack"], 0, idx, out=cb["stack"])
         if self.fold:
-            self._pend_n.fill_(key[1])
+            self._pend_of(st)[1].fill_(key[1])
 
-    def _pend_bufs(self, li: int):
-        b = self._pend.get(li)
+    def _pend_of(self, st: FNState) -> tuple:
+        """`st`'s parked GDN rows (SPD-229): ({layer: (y [33, conv], g, beta [33, Hv])}, the rows a layer int32
+        [linear layers] on the device), made on first use and kept with the state (a graph holds them)."""
+        p = getattr(st, "pend", None)
+        if p is None:
+            p = st.pend = ({}, torch.zeros(max(len(self.cfg.linear_layers), 1), dtype=torch.int32,
+                                           device=self.device))
+        return p
+
+    def _pend_bufs(self, li: int, st: FNState):
+        d = self._pend_of(st)[0]
+        b = d.get(li)
         if b is None:
             c = self.cfg
-            b = self._pend[li] = (torch.zeros(33, c.conv_dim, dtype=self.dtype, device=self.device),
-                                  torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device),
-                                  torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device))
+            b = d[li] = (torch.zeros(33, c.conv_dim, dtype=self.dtype, device=self.device),
+                         torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device),
+                         torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device))
         return b
 
-    def _parked(self, li: int):
-        """The parked rows of GDN layer li for its next kernel call (None without the fold)."""
+    def _parked(self, li: int, st: FNState):
+        """`st`'s parked rows of GDN layer li for its next kernel call (None without the fold)."""
         if not self.fold:
             return None
         i = self._lin_idx[li]
-        return self._pend_bufs(li) + (self._pend_n[i:i + 1],)
+        return self._pend_bufs(li, st) + (self._pend_of(st)[1][i:i + 1],)
+
+    def parked(self, st: FNState) -> bool:
+        """`st` has GDN rows parked for its next call."""
+        return id(st) in self._pending
+
+    def drop_parked(self, st: FNState) -> None:
+        """Forget `st`'s parked rows (its state was replaced or reset)."""
+        if self._pending.pop(id(st), None) is not None:
+            self._pend_of(st)[1].zero_()
+
+    def _applied(self, states) -> None:
+        """A call on these states walked their parked rows into their state (verify_multi): none left."""
+        for st in states:
+            if self._pending.pop(id(st), None) is not None and self.fold:
+                self._pend_of(st)[1].zero_()
 
     @torch.no_grad()
-    def flush(self) -> None:
+    def flush(self, st: FNState | None = None) -> None:
         """Apply the parked GDN rows to their state now (before anything that reads the state other
-        than a verify block or a decode step: the reference forward, a snapshot)."""
-        st = self._pend_owner
-        if st is None:
-            return
+        than a verify block or a decode step: the reference forward, a snapshot): `st`'s, or every
+        state's with parked rows."""
         from tools import fn_seq_kernels as SK
         c = self.cfg
         z = self._chain_ctl(1)[:0]
-        for li in c.linear_layers:
-            py = self._pend_bufs(li)[0]
-            SK.gdn_rows(py[:0], c.key_dim, self._pend_bufs(li)[1][:0], self._pend_bufs(li)[2][:0], st.S[li],
-                        self._scratch(), z, c.num_v_per_k, False,
-                        out=torch.empty(0, c.linear_num_value_heads, 128, dtype=torch.bfloat16, device=self.device),
-                        pre=self._parked(li))
-        self._pend_n.zero_()
-        self._pend_owner = None
+        for s in ([st] if st is not None else list(self._pending.values())):
+            if id(s) not in self._pending:
+                continue
+            for li in c.linear_layers:
+                py, pg, pb = self._pend_bufs(li, s)
+                SK.gdn_rows(py[:0], c.key_dim, pg[:0], pb[:0], s.S[li], self._scratch(), z, c.num_v_per_k, False,
+                            out=torch.empty(0, c.linear_num_value_heads, 128, dtype=torch.bfloat16,
+                                            device=self.device),
+                            pre=self._parked(li, s))
+            self._pend_of(s)[1].zero_()
+            del self._pending[id(s)]
 
     def settle(self, st: FNState) -> None:
-        """Before a call on `st`: parked rows of another state are applied to that state first."""
-        if self._pend_owner is not None and self._pend_owner is not st:
-            self.flush()
+        """Before a call on `st`. SPD-229: every state keeps its own parked rows, which its next call
+        folds in, so nothing of another state's lands first."""
+        return
 
     @staticmethod
     def _tail_cols(path: list[int], w: int) -> list[int]:
@@ -1312,7 +1336,7 @@ class FlashNextEngine(FlashNextRef):
         y, gg, beta = SK.gdn_pre(qkvz, st.conv[li], self._wc[li], d["csrc"], ab, self._wc[("alog", li)],
                                  self._wc[("dtb", li)], shift=self._write)
         o = SK.gdn_rows(y, c.key_dim, gg, beta, st.S[li], self._scratch(), d["gctl"], c.num_v_per_k, self._write,
-                        pre=self._parked(li))
+                        pre=self._parked(li, st))
         if not self._write:
             self.rec[li] = (qkvz, y, gg, beta)
         z = qkvz[:, c.conv_dim:]
@@ -1562,7 +1586,7 @@ class FlashNextEngine(FlashNextRef):
         "ref" (the reference's batched forward); default `prefill_path`. `keep_stack`: every row's
         pre-final-mixer streams in `self.prompt_stack` [T, hc H] (the MTP layer's input; `self.stack`
         holds the last chunk's only)."""
-        self.flush()
+        self.flush(st)
         path = path or self.prefill_path
         if path != "kernels" and (st.mm is not None or st.delta):
             raise NotImplementedError("images on the reference prefill path (QWEN38_FN_PREFILL=ref): the "
@@ -1638,7 +1662,7 @@ class FlashNextEngine(FlashNextRef):
         self.settle(st)
         self.stage(token, st)
         out = self.step(st)
-        self._pend_owner = None
+        self._pending.pop(id(st), None)
         st.length += 1
         return out
 
@@ -1662,7 +1686,7 @@ class DecodeGraph:
         cls = eng.qsa_class(st.length) if cls is None else cls
         eng.settle(st)
         saved = _state_saved(eng, st)
-        saved_n = eng._pend_n.clone()
+        saved_n = eng._pend_of(st)[1].clone()
         pctx = dict(st.ple_ctx)
         length = st.length
         s = torch.cuda.Stream()
@@ -1678,7 +1702,7 @@ class DecodeGraph:
         self.stacks[cls] = eng.stack
         torch.cuda.synchronize()
         _state_restore(saved)                           # the warm-up steps wrote the state: undo
-        eng._pend_n.copy_(saved_n)
+        eng._pend_of(st)[1].copy_(saved_n)
         st.ple_ctx.clear()
         st.ple_ctx.update(pctx)
         st.length = length
@@ -1701,7 +1725,7 @@ class DecodeGraph:
         eng.stage(token, st)
         eng.host_ms["stage"] = eng.host_ms.get("stage", 0.0) + 1e3 * (time.perf_counter() - t0)
         self.graph.replay()
-        eng._pend_owner = None
+        eng._pending.pop(id(st), None)
         st.length += 1
         torch.cuda.current_stream().synchronize()
         return int(eng.g["next_h"][0])
@@ -1713,7 +1737,7 @@ class DecodeGraph:
         eng.settle(st)
         eng.stage(token, st)
         self.graph.replay()
-        eng._pend_owner = None
+        eng._pending.pop(id(st), None)
         st.length += 1
         return eng.g["logits"]
 
@@ -1760,7 +1784,7 @@ class CommitGraph:
     def capture(self) -> None:
         eng, st = self.eng, self.st
         saved = _state_saved(eng, st)
-        saved_n = eng._pend_n.clone()
+        saved_n = eng._pend_of(st)[1].clone()
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -1771,7 +1795,7 @@ class CommitGraph:
             eng.commit_dev(st, self.key)
         torch.cuda.synchronize()
         _state_restore(saved)
-        eng._pend_n.copy_(saved_n)
+        eng._pend_of(st)[1].copy_(saved_n)
 
 
 class MTPChainGraph:

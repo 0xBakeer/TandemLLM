@@ -52,14 +52,19 @@ class _FN:
         self.primed: list = []
         self.resets = 0
         self.commits: list = []
-        self._pend_owner = None
-        self._pend_n = torch.ones(2, dtype=torch.int32)
+        self._pending: dict = {}          # id(state) -> state with parked GDN rows (SPD-229: each its own)
         self.flushes = 0
 
-    def flush(self):
-        self.flushes += 1
-        self._pend_n.zero_()
-        self._pend_owner = None
+    def parked(self, st):
+        return id(st) in self._pending
+
+    def drop_parked(self, st):
+        self._pending.pop(id(st), None)
+
+    def flush(self, st=None):
+        for s in ([st] if st is not None else list(self._pending.values())):
+            if self._pending.pop(id(s), None) is not None:
+                self.flushes += 1
 
     def new_state(self, cap=None, paged=False):
         cap = cap or 64
@@ -555,18 +560,18 @@ def test_pending_verbs():
     assert s.trim_pending(12) and not s.trim_pending(11) and s.st.length == 12   # absorbed: refused
     s._chain = 2
     assert not s.trim_pending(20) and s.st.length == 12 and s._chain == 2       # past the chain: no
-    fn._pend_owner = s.st                              # parked GDN rows of this state
+    fn._pending[id(s.st)] = s.st                       # parked GDN rows of this state
     s.settle()
-    assert fn.commits[-1] == [0, 1] and fn.flushes == 1 and fn._pend_owner is None and s.st.length == 14
-    fn._pend_owner, fn._pend_n[:] = s.st, 3
+    assert fn.commits[-1] == [0, 1] and fn.flushes == 1 and not fn.parked(s.st) and s.st.length == 14
+    fn._pending[id(s.st)] = s.st
     s._chain, s.picks = 2, [1, 2]
     s.discard_pending()
-    assert s._chain is None and s.picks is None and fn._pend_owner is None and int(fn._pend_n.sum()) == 0
+    assert s._chain is None and s.picks is None and not fn.parked(s.st)
     other = FNState(cap=8)
-    fn._pend_owner = other                             # another state's parked rows are not ours
+    fn._pending[id(other)] = other                     # another state's parked rows are not ours
     s.discard_pending()
     s.settle()
-    assert fn._pend_owner is other and fn.flushes == 1
+    assert fn.parked(other) and fn.flushes == 1
     return "trim inside a pending chain, drop it, refuse absorbed rows; settle lands chain and parked rows; discard"
 
 

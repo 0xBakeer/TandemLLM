@@ -317,8 +317,8 @@ class FlashNextServing:
         """Land what is pending, so the state's sections are the sequence's whole (before a
         snapshot): a chain block's commit, and the GDN rows the folded commit parked for the next call."""
         self._settle_chain()
-        if self.fn._pend_owner is self.st:
-            self.fn.flush()
+        if self.fn.parked(self.st):
+            self.fn.flush(self.st)
 
     def cache_state(self) -> FlashNextCacheState:
         return self.state
@@ -377,9 +377,7 @@ class FlashNextServing:
         last verify's picks and the GDN rows parked for the state that was there."""
         self._chain = None
         self.picks = None
-        if self.fn._pend_owner is self.st:
-            self.fn._pend_n.zero_()
-            self.fn._pend_owner = None
+        self.fn.drop_parked(self.st)
 
     def trim_pending(self, n: int) -> bool:
         """Bring the state back to length `n` inside work not yet committed: a chain block
@@ -414,10 +412,7 @@ class FlashNextServing:
         differently from a cold prefill, 67 of 75 sections wrong)."""
         self._chain = None
         self.picks = None
-        fn = self.fn
-        if fn._pend_owner is self.st:
-            fn._pend_n.zero_()
-            fn._pend_owner = None
+        self.fn.drop_parked(self.st)
         self.st.reset_inplace()
 
     # --- a context class's graphs, captured while the server is idle -----------------------------
