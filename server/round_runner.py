@@ -356,7 +356,8 @@ class Runner:
         # SRV-709: every lane's pages before the joint pass, so a pool that cannot give them stops that
         # lane alone (its request gives way and goes on: server/app.py `Handler._recomputing`), not the round
         from engine import kvpool
-        if kvpool.POOL is not None:
+        if kvpool.POOL is not None and all(callable(getattr(t.eng.kv, "ensure", None)) for t in group):
+            # a family whose KV has no `ensure` (its pages are committed inside the pass) is left as it was
             kept = []
             for t, x in zip(group, trees):
                 self._bind(t)
