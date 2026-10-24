@@ -33,7 +33,7 @@ The admin password is the admin token, `QSE_ADMIN_TOKEN` in `secrets.env` (mode 
 
 The dashboard has no sign-in screen in this release. With a password set, its reads still work while the login is off, but its edits and the memory views show the server's 401 as an error and the page shows a banner. The sign-in for that case comes later; until then, use the API with the bearer header or leave the password unset.
 
-The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by default) matters only with a password set: then `on` makes `/v1/dashboard/*` need the token or a session too. With no password it changes nothing. [dashboard.md](dashboard.md#access) says what the dashboard shows.
+The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by default) matters only with a password set: then `on` makes `/v1/dashboard/*` need the token or a session too. With no password it changes nothing. Failed logins are throttled per client: a fronting proxy's `X-Real-IP` is believed only when the TCP peer is loopback (a proxy on this box) or names itself in `TANDEM_TRUSTED_PROXY` — the LAN shape, where every real client shares the one peer; any other peer is keyed as itself (server/auth.py). [dashboard.md](dashboard.md#access) says what the dashboard shows.
 
 ## What the API supports
 
@@ -183,6 +183,8 @@ TandemLLM holds one sequence, so requests wait for it in a bounded queue.
 | `--request-timeout` | 3,600 s | a generation that runs that long ends with `finish_reason: "timeout"` |
 | `--max-len` | 262,144 tokens | a prompt that does not fit gets a 400; `max_tokens` is clamped to what fits |
 | `--default-max-tokens` | 32,768; 131,072 on Ornith | used when the request sends no `max_tokens`; a request's own `max_tokens` wins |
+| `QSE_MAX_BODY_MB` | 512 MiB | a body that promises more is a 413 before its first byte is read; a chunked body hits the same line as it passes it (server/http_body.py) |
+| `QSE_HANDLER_TIMEOUT_S` | 60 s | a client that stalls mid-request gets a 408 and the connection closes; the clock restarts at every socket op that makes progress, as nginx's `*_read_timeout` |
 
 At load the server allocates the KV buffer for the whole context, so the context length is a memory decision taken before the first request ([operations.md](operations.md)).
 

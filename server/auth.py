@@ -93,6 +93,7 @@ LOGIN_ENV = "QSE_DASHBOARD_LOGIN"
 LOGIN_DEFAULT = "off"
 LOGIN_FAILS = 5
 LOGIN_WINDOW_S = 60.0
+LOGIN_MAX_KEYS = 10_000               # a memory bound on `_fails`, not a ban reset
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
@@ -102,7 +103,8 @@ def _eq(a: str | None, b: str | None) -> bool:
 
 class Auth:
     def __init__(self, admin_token: str | None = None, metrics_token: str | None = None, *,
-                 trust_loopback: bool = True, login: bool = True, clock=time.time):
+                 trust_loopback: bool = True, login: bool = True, clock=time.time,
+                 trusted_proxies=()):
         for name, tok in (("QSE_ADMIN_TOKEN", admin_token), ("QSE_METRICS_TOKEN", metrics_token)):
             if tok is not None and len(tok) < MIN_TOKEN:
                 raise SystemExit(f"[auth] {name} is shorter than {MIN_TOKEN} characters; make a "
@@ -116,6 +118,7 @@ class Auth:
         self.clock = clock
         self._key = (hmac.new(self.admin.encode(), b"qse-dash-session-v1", hashlib.sha256).digest()
                      if self.admin else None)
+        self.trusted_proxies = frozenset(p.strip() for p in trusted_proxies if p and p.strip())
         self._fails: dict = collections.defaultdict(collections.deque)
         self._revoked: dict[str, int] = {}          # logged-out cookie values, until they expire
         self._lock = threading.Lock()
@@ -124,6 +127,8 @@ class Auth:
     def from_env(cls, env=None, **kw) -> "Auth":
         env = os.environ if env is None else env
         kw.setdefault("login", env.get(LOGIN_ENV, LOGIN_DEFAULT) == "on")
+        kw.setdefault("trusted_proxies",
+                      (env.get("TANDEM_TRUSTED_PROXY") or "").split(","))
         return cls(env.get("QSE_ADMIN_TOKEN") or None, env.get("QSE_METRICS_TOKEN") or None, **kw)
 
     @property
@@ -227,11 +232,51 @@ class Auth:
                 q.popleft()
             return len(q) >= LOGIN_FAILS
 
+    def login_key(self, peer: str, headers) -> str:
+        """The throttle key for one login attempt -- the one rule BOTH servers run.
+        `X-Real-IP` is the client's to write, so it counts ONLY from a proxy this box
+        trusts: loopback by default (the documented single-box shape -- an nginx on this
+        box fronts the server and every real client shares the 127.0.0.1 peer; keying on
+        the peer there lets one user's five wrong passwords lock out every user), plus
+        TANDEM_TRUSTED_PROXY naming a proxy's own address for the LAN shape (docs/proxy.md).
+        From any other peer the header is ignored and the peer itself is the key.
+        Never both at once: a spoofable value must not merge with real IPs. A trusted
+        proxy that sends no header leaves the attempt keyed on the peer."""
+        if peer in self.trusted_proxies or peer in LOOPBACK:
+            v = (headers.get("X-Real-IP") or "").strip() if headers is not None else ""
+            if v:
+                return v
+        return peer
+
     def login_failed(self, who: str) -> None:
+        now = self.clock()
         with self._lock:
-            self._fails[who].append(self.clock())
-            if len(self._fails) > 10_000:
-                self._fails.clear()
+            self._fails[who].append(now)
+            if len(self._fails) <= LOGIN_MAX_KEYS:
+                return
+            # the old `self._fails.clear()` handed an attacker a free pass: a flood of
+            # one-shot keys (one per rotating peer) wiped every ACTIVE ban at the moment
+            # the table overflowed. Stale keys go first -- the window prunes them away --
+            # then the OLDEST-SEEN keys, one bucket at a time; the cap is a memory bound,
+            # never a reset of who is banned.
+            for key, q in list(self._fails.items()):
+                while q and now - q[0] > LOGIN_WINDOW_S:
+                    q.popleft()
+                if not q:
+                    del self._fails[key]
+            if len(self._fails) > LOGIN_MAX_KEYS:
+                # one sweep per 10 % of the table, not one per login: at the cap every
+                # further failed login would otherwise rescan and sort all 10k keys
+                # under the lock (2 ms each, measured)
+                banned = {k for k, q in self._fails.items() if len(q) >= LOGIN_FAILS}
+                oldest = sorted(self._fails, key=lambda k: self._fails[k][0])
+                target = LOGIN_MAX_KEYS - LOGIN_MAX_KEYS // 10
+                excess = len(self._fails) - target
+                drop = [k for k in oldest if k not in banned][:excess]   # spare the active
+                seen = set(drop)   # a set: with most keys banned, scanning the list per
+                drop += [k for k in oldest if k not in seen][:excess - len(drop)]  # key is
+                for key in drop:                                         # millions of scans
+                    del self._fails[key]
 
     # ----------------------------------------------------------------- the policy
     def decide(self, route: str, peer: str, headers) -> str:
