@@ -46,11 +46,11 @@ from engine.settings import SETTINGS as _S  # noqa: E402
 #: on (1): tree verifies, the fold and the commits advance the GDN state one token at a time (this module)
 ON = _S.get("GDN_SEQ") == "1"
 #: the value block and warps of the state kernels: one fixed launch, the reductions' order with it
-BV = int(os.environ.get("QWEN38_GDN_SEQ_BV", "16"))
-WARPS = int(os.environ.get("QWEN38_GDN_SEQ_WARPS", "1"))
+BV = int(_S.get("GDN_SEQ_BV"))
+WARPS = int(_S.get("GDN_SEQ_WARPS"))
 #: a launch of at most this many blocks walks node by node in parallel programs (the chain is a path's steps);
 #: past it a program walks all its nodes (the work once). The same steps either way: the same bits
-BY_NODE_E = int(os.environ.get("QWEN38_GDN_SEQ_BYNODE", "0"))
+BY_NODE_E = int(_S.get("GDN_SEQ_BYNODE"))
 
 if HAVE_TRITON:
     from tools.gdn_wy_kernels import NOFF, _conv_rows, _qk_rows

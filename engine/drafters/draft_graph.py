@@ -33,6 +33,7 @@ import torch
 import torch.nn.functional as F
 
 from engine import capture_lock
+from engine.settings import SETTINGS as _S
 
 
 
@@ -142,7 +143,7 @@ class DraftGraph:
 
 #: SPD-201: the draft window's gathered span in steps of this many rows (0: a power of two from 512); a block attends
 #: over the rows it would at any span (the rows past its context are masked)
-SPAN_STEP = int(os.environ.get("QWEN38_DF2_SPAN_STEP", "0") or 0)
+SPAN_STEP = int(_S.get("DF2_SPAN_STEP") or 0)
 
 
 def _span(pos0: int, win: int) -> int:
@@ -387,7 +388,7 @@ from engine.settings import SETTINGS as _S  # noqa: E402
 LOG_PROJ = _S.get("ROUND_LOG_LATTICE") == "1"
 #: SPD-201: the batched packed draft's walk blobs and log-probabilities for every block in one copy and one
 #: wait (`_HostBlobs`), not a copy, a sync and two launches a block. 0: each block's own
-HOST_ONE = os.environ.get("QWEN38_DF2_PACK_HOST1", "1") == "1"
+HOST_ONE = _S.get("DF2_PACK_HOST1") == "1"
 
 
 def packed_draft(reqs: list, graph: bool | None = None) -> list:

@@ -86,7 +86,7 @@ KEYED_KERNEL = _S.get("SAMPLE_KEYED_KERNEL") == "1"
 # no [n, V] distribution or noise rows. Rows with top_k in 1..48 and a temperature; the rest as before. The
 # draws are the dense walk's but where a softmax or cumulative sum of the kept values rounds differently
 # (another summation order): an ulp, at a tie. 0 = the dense walk
-SPARSE_KEYED = os.environ.get("QWEN38_SAMPLE_SPARSE_KEYED", "0") == "1"
+SPARSE_KEYED = _S.get("SAMPLE_SPARSE_KEYED") == "1"
 
 
 _MASK64 = (1 << 64) - 1

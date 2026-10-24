@@ -18,6 +18,8 @@ KNOBS: dict[str, tuple] = {
     'JOINT_ROWS_A_SLOT': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-199: the 27B's EXL3 projections at 33+ rows through the decode-once tile: '' off, '64' or '128' rows
     'EXL3_TALL': ('', 'engine/models/qwen3_5/tall.py'),
+    # SPD-201: the 27B's EXL3 projections at 33..64 rows read fragment-major activations (the same bits)
+    'EXL3_FRAG': ('0', 'engine/models/qwen3_5/frag.py'),
     # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
     'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json

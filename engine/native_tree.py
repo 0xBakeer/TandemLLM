@@ -15,7 +15,9 @@ import hashlib
 import os
 import sys
 
-ON = os.environ.get("QWEN38_TREE_NATIVE", "0") == "1"
+from engine.settings import SETTINGS as _S  # noqa: E402
+
+ON = _S.get("TREE_NATIVE") == "1"
 
 _CPP = r"""
 #include <torch/extension.h>

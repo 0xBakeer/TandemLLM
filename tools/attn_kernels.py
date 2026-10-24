@@ -321,9 +321,9 @@ INV_BM = 16
 #: tokens a program of `_attn_inv2`, one K/V read of the cache blocks for all of them (0: `_attn_inv`, a program a
 #: token). 4 at 4 warps measured best on this board: a layer at 16,000 columns and 16 rows 993 -> 464 us (the shared
 #: kernel 365), at 4,000 and 8 rows 125 -> 56 (56)
-INV_NT = int(os.environ.get("QWEN38_ATTN_INV_NT", "4"))
+INV_NT = int(_S.get("ATTN_INV_NT"))
 #: the position from which a token takes `_attn_inv2` (below: `_attn_inv`)
-INV_SPLIT = int(os.environ.get("QWEN38_ATTN_INV_SPLIT", "1024"))
+INV_SPLIT = int(_S.get("ATTN_INV_SPLIT"))
 
 
 def attention_inv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start, block_mask: torch.Tensor,

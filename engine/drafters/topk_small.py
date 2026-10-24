@@ -9,11 +9,11 @@ the one thing `torch.topk` leaves unspecified). Sorted descending.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
-ON = os.environ.get("QWEN38_DF2_TOPK_FAST", "0") == "1"
+from engine.settings import SETTINGS as _S
+
+ON = _S.get("DF2_TOPK_FAST") == "1"
 CHUNK = 4096
 
 _K = None
