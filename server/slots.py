@@ -208,6 +208,13 @@ class Admission:
             t = self.waiting[key]
             return 1 + sum(1 for v in self.waiting.values() if v < t)
 
+    def first(self, key) -> None:
+        """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
+        mid-answer resumes before any request that has not started); among such lanes, the one
+        that gave way first."""
+        with self.lock:
+            self.waiting[key] = min([0.0] + list(self.waiting.values())) - 1.0
+
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
@@ -566,7 +573,10 @@ class Meeting:
         if self.joint_for(len(pend)):
             joint = [r for r in pend if r.batchable and r.tree is not None]
             if len(joint) > 1:
-                out.append(joint)
+                # SRV-707: past `per_pass()` trees (more lanes than one pass holds at two rows each)
+                # the trees go in passes of that many, in arrival order, so no pass exceeds `max_rows`
+                k = self.per_pass()
+                out += [joint[i:i + k] for i in range(0, len(joint), k)]
                 pend = [r for r in pend if r not in joint]
         for r in pend:
             if not r.batchable:
@@ -580,6 +590,12 @@ class Meeting:
         if cur:
             out.append(cur)
         return out
+
+    def per_pass(self) -> int:
+        """SRV-707: the most trees one joint pass verifies: each keeps its anchor and one node at
+        least, so `max_rows // 2` (16 at 32 rows). More decoding lanes verify in more passes a
+        round, each pass reading the weights once."""
+        return max(1, self.max_rows // 2)
 
     def report(self) -> dict:
         with self.cv:

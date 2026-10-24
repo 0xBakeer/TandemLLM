@@ -574,6 +574,10 @@ def _par_health() -> dict:
     out["planner"] = pl.report() if pl is not None and hasattr(pl, "report") else None   # SPD-187
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
+    # SRV-709: lanes that gave their memory back mid-answer and went on (`Handler._recomputing`)
+    out["recompute"] = {"on": KV_RECOMPUTE, "admit_rows": KV_ADMIT_ROWS,
+                        **(dict.get(STATE, "kv_recompute") or {"gave_way": 0, "resumed": 0,
+                                                              "gave_up": 0, "freed_gib": 0.0})}
     return out
 
 
@@ -607,6 +611,15 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 #: SRV-305: a request waiting for memory gets its line again this often (s)
 MEM_LINE_EVERY_S = 15.0
+#: SRV-709: a lane whose next pages the KV pool refuses while other lanes run gives its memory back
+#: and goes on as soon as memory is free: its prompt and the text it wrote are read again, as a
+#: continuation of the same answer (`Handler._recomputing`); off: it ends with `memory_full`
+KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
+#: SRV-709: the most of a request's max_tokens its admission reserves KV pages for (0: all of it). A
+#: lane that writes past it and finds the pool full gives way and continues later (KV_RECOMPUTE)
+KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
+#: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
+KV_RECOMPUTE_MAX = 16
 
 #: The least output a side slot's window must leave a request (its prompt and the margins
 #: taken): below it the request waits for slot 0, at or above it the request runs there with its
@@ -5082,6 +5095,45 @@ def _kv_reclaim_side(want: int, owner) -> int:
     return got
 
 
+def _kv_give_back_own() -> int:
+    """SRV-709: the calling request's slot gives every page back to the pool (it continues later by
+    reading its prompt and its text again): slot 0's conversation goes to the NVMe first when the
+    spill is on, as when the pool reclaims it idle. Bytes given back."""
+    eng = dict.get(STATE, "engine")
+    pages = getattr(getattr(eng, "kv", None), "pages", None)
+    if pages is None:
+        return 0
+    res = dict.get(STATE, "resident")
+    if res is not None:
+        try:
+            if getattr(res, "_stash", None) is not None:
+                res.settle_guest(eng)
+            sp = getattr(res, "spiller", None)
+            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
+                res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+        res.clear()
+    eng.kv.length = 0
+    return int(pages.trim(0))
+
+
+def _keep_think(think) -> None:
+    """SRV-709: the thinking budget's count and state survive a lane's continuation: the generation
+    that reads prompt + text again arms it with `start`, which would count the thinking from 0 and
+    read `inside` from the last six tokens only. Its next `start` restores the state instead."""
+    if think is None or not hasattr(think, "start"):
+        return
+    saved = {k: (list(v) if isinstance(v, list) else v) for k, v in vars(think).items()
+             if k != "start"}
+
+    def start(_ids):
+        del think.start
+        vars(think).update(saved)
+        return think
+    think.start = start
+
+
 def _kv_reclaim_slot0(want: int, owner) -> int:
     """Pool reclaim, level 4: slot 0's idle conversation, to the NVMe first when the spill is on
     (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
@@ -5409,6 +5461,27 @@ def _finishing(rec, step: str) -> None:
         rec.end_state = activity_mod.state_of(rec, ignore_step=True)
         rec.t_finishing = time.perf_counter()
     rec.step = step
+
+
+#: SRV-709: when a request stopped for memory is worth sending again (the Retry-After)
+MEMORY_FULL_RETRY_S = 30
+
+
+def memory_full_error(exc, generated: int | None = None) -> dict | None:
+    """SRV-709: the error body of a request the KV pool's gate stopped (engine/kvpool.py
+    `PoolFull`: its next pages would have taken MemAvailable under the hard floor after every
+    reclaim), or None for any other failure. Code `memory_full`, type `server_busy`: the box is
+    full, not broken. The rows were never written, so the text so far is good; a client that sends
+    the same request again with the text as a continuation (the Chat tab does) waits for memory at
+    the admission and goes on from there. A streamed answer ends with it beside `finish_reason`
+    "error"; one not streamed yet gets it as a 503 with Retry-After."""
+    if not isinstance(exc, kvpool.PoolFull):
+        return None
+    done = f" after {int(generated):,} tokens" if generated else ""
+    return {"message": (f"memory is full: this request stopped{done} to keep the box above its "
+                        f"memory floor; send it again to continue once memory is free"),
+            "type": "server_busy", "code": "memory_full", "retry_after": MEMORY_FULL_RETRY_S,
+            "detail": str(exc)}
 
 
 def _stop_detail(finish: str, ids: list, eos, cut: bool, pstop) -> str | None:
@@ -6434,7 +6507,7 @@ def _engine_own_settings() -> dict:
     pool = dict.get(STATE, "pool")
     a = dict.get(STATE, "args") or {}
     par = {"n": 1, "requested": int(a.get("parallel") or 1), "side_max_len": None,
-           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb")}
+           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb"), "max_len": a.get("max_len")}
     if pool is not None and getattr(pool, "n", 1) > 1:
         side = pool.side()
         par.update(n=pool.n, side_max_len=side[0].max_len if side else None,
@@ -6570,9 +6643,13 @@ class Handler(BaseHTTPRequestHandler):
             if ev is not None:                   # SRV-249: no status line left shimmering
                 self.wfile.write(_chunk(e["cid"], e["model"], e["created"], None,
                                         extra={"event": ev}).encode())
+            # the refusal's own code where it names one (SRV-709 `memory_full`), else the status
+            named = err.get("code") if isinstance(err.get("code"), str) else None
             self._early_write(_chunk(e["cid"], e["model"], e["created"], {}, finish="error",
                                      error={"message": str(err.get("message") or code),
-                                            "type": err.get("type") or "error", "code": code}))
+                                            "type": err.get("type") or "error",
+                                            "code": named or code,
+                                            **({"status": code} if named else {})}))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -6893,7 +6970,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
-                   stream: bool = False, rows: int | None = None) -> bool:
+                   stream: bool = False, rows: int | None = None, respond: bool = True) -> bool:
         """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
         worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
         shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
@@ -6919,7 +6996,11 @@ class Handler(BaseHTTPRequestHandler):
 
         SRV-629: `rows`, the prompt's rows once its images are expanded (`_mm_rows`), where the
         text prompt has one placeholder an image: the workspace and the KV pages are reserved for
-        what the prefill writes."""
+        what the prefill writes.
+
+        SRV-709: the KV pages are reserved for at most `KV_ADMIT_ROWS` of `max_new` while lanes
+        that outgrow it give way (`KV_RECOMPUTE`), so more lanes start; `respond=False` (a lane
+        resuming inside its own answer) sends nothing on a refusal."""
         self._mem_wait = False
         adm = pool.admission
         if adm is None:
@@ -6935,7 +7016,10 @@ class Handler(BaseHTTPRequestHandler):
             if pages is not None:
                 # the served prompt carries the router's notes and the anchors' replay beyond the
                 # client's tokens: PLAN_MARGIN rows of room for them
-                rows = min(int(eng.kv.max_len), n + int(max_new) + PLAN_MARGIN + SIDE_MARGIN)
+                grow = int(max_new)
+                if KV_RECOMPUTE and KV_ADMIT_ROWS > 0:
+                    grow = min(grow, KV_ADMIT_ROWS)
+                rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
                 kv = pages.need_bytes(rows)
                 owner = pages.owner
         need = ws + kv
@@ -7006,12 +7090,66 @@ class Handler(BaseHTTPRequestHandler):
               f"{slots_mod.Admission.describe(d)}", flush=True)
         if rec is not None:
             rec.stop_detail = "memory_wait_timeout"
+        if not respond:
+            return False
         self._send_bytes(503, json.dumps({"error": {
             "message": (f"memory is almost full; {running} request(s) are running; "
                         f"try again in about 30 s"),
             "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
             extra_headers=(("Retry-After", "30"),))
         return False
+
+    def _recomputing(self, pool, cid: str, rec, stream: bool, prompt, max_new: int, think, make):
+        """SRV-709: the tokens of `make(prompt, max_new)`; when the KV pool refuses this lane's next
+        pages and other lanes run, the lane gives its memory back (`_kv_give_back_own`), waits at
+        the head of the admission's line (`Admission.first`) and goes on with `make(prompt + its
+        text, what is left)`: the same answer, read again from its prompt and text. A streamed
+        client gets an SSE comment while the lane waits (no client reads it as a token). Alone, or
+        after `KV_RECOMPUTE_MAX` times, the refusal stands (`memory_full`)."""
+        produced: list[int] = []
+        cur, left, gave = prompt, int(max_new), 0
+        while True:
+            gen = make(cur, left)
+            try:
+                for t in gen:
+                    produced.append(int(t))
+                    yield t
+                return
+            except kvpool.PoolFull:
+                adm = pool.admission
+                if adm is None or pool.running() <= 1 or gave >= KV_RECOMPUTE_MAX:
+                    raise
+                gen.close()
+                gave += 1
+                freed = _kv_give_back_own()
+                st = STATE.setdefault("kv_recompute", {"gave_way": 0, "resumed": 0, "gave_up": 0,
+                                                       "freed_gib": 0.0})
+                st["gave_way"] += 1
+                st["freed_gib"] = round(st["freed_gib"] + freed / (1 << 30), 3)
+                if rec is not None:
+                    rec.gave_way = gave
+                print(f"[kv-pool] {cid} gives way after {len(produced):,} tokens: {_gib(freed)} GiB "
+                      f"back to the pool, {pool.running() - 1} lane(s) go on; it continues when "
+                      f"memory is free", flush=True)
+                adm.release(cid)
+                adm.first(cid)
+                cur = torch.cat([prompt, torch.tensor(produced, dtype=prompt.dtype,
+                                                      device=prompt.device)])
+                left = int(max_new) - len(produced)
+
+                def paused(short: float, place: int = 1) -> None:
+                    if stream:
+                        self.wfile.write(f": paused: waiting for memory ({short:.1f} GiB short)\n\n"
+                                         .encode())
+                        self.wfile.flush()
+                if not self._par_admit(pool, cid, cur, rec=rec, say=paused, max_new=left,
+                                       stream=True, respond=False):
+                    st["gave_up"] += 1
+                    raise
+                _keep_think(think)
+                st["resumed"] += 1
+                print(f"[kv-pool] {cid} goes on: reads its {int(cur.numel()):,} tokens again",
+                      flush=True)
 
     def _prefill_watch(self, stream: bool, rec=None):
         """`on_prefill` for this request. After every prefill chunk: raise `ClientGone` if
@@ -7544,6 +7682,10 @@ class Handler(BaseHTTPRequestHandler):
             if fault is not None:
                 # SRV-671: the CUDA context is lost; the reason in words, not the driver's text
                 return self._fail_gpu()
+            full = memory_full_error(exc)
+            if full is not None and self._early is not None and not self._early["done"] \
+                    and not self._early_body:
+                return self._early_end(503, json.dumps({"error": full}).encode())
             if self._early is not None and not self._early["done"] and not self._early_body:
                 # a stream opened early that failed before its generation: closed, with the reason
                 return self._early_end(500, json.dumps({"error": {
@@ -7554,6 +7696,10 @@ class Handler(BaseHTTPRequestHandler):
                 # truncation without the reason -- which is precisely bug 2's symptom.
                 return
             try:
+                if full is not None:
+                    # SRV-709: the box at its floor is a wait, not a failure: 503 and when to retry
+                    return self._send_bytes(503, json.dumps({"error": full}).encode(),
+                                            extra_headers=(("Retry-After", str(MEMORY_FULL_RETRY_S)),))
                 if isinstance(exc, grammar_mod.GrammarError):
                     # the constraint left no legal token -- the request's own doing
                     return self._json(400, compat.Refusal(compat.constraint_field(body),
@@ -8887,6 +9033,13 @@ class Handler(BaseHTTPRequestHandler):
                     kw["stay"] = True                  # ENG-371: never a guest of the resident
                 if cold:
                     kw["cold"] = True                  # #98
+                if KV_RECOMPUTE and par is not None:
+                    # SRV-709: a lane the pool refuses gives way and goes on (`_recomputing`)
+                    return rec.track(self._recomputing(
+                        par, cid, rec, stream, prompt, max_new, budget_state,
+                        lambda p, n: generate_stream(p, n, eos, budget_state, conv_id, deadline,
+                                                     pen=pen, pstop=guard, sampler=samp,
+                                                     on_prefill=watch, **kw)))
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -9694,6 +9847,8 @@ class Handler(BaseHTTPRequestHandler):
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             if aloop is not None:
                 rec.stop_detail = "tool_arg_loop"
+            if isinstance(failed, kvpool.PoolFull):
+                rec.stop_detail = "memory_full"            # SRV-709
             if sup is not None:
                 _outcome(sup, tbuf.calls if tbuf is not None else [], ids, in_think, finish)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
@@ -9711,7 +9866,8 @@ class Handler(BaseHTTPRequestHandler):
                     put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
                     put(_chunk(cid, model, created, {}, finish=finish,
-                               error={"message": str(failed), "type": type(failed).__name__},
+                               error=memory_full_error(failed, len(ids)) or
+                               {"message": str(failed), "type": type(failed).__name__},
                                extra=on_finish, **(lp_take() if lpr is not None else NO_LP)))
                 else:
                     put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish,
@@ -10494,9 +10650,10 @@ def parser() -> argparse.ArgumentParser:
                          "drafter stack over the one copy of the weights, `--side-max-len` long), "
                          "and two or more decoding requests verify their trees in one pass")
     ap.add_argument("--side-max-len", type=int,
-                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "65536") or 65536),
-                    help="a side slot's window in tokens; slot 0 keeps --max-len (262,144). A "
-                         "request whose prompt + max_tokens does not fit waits for slot 0")
+                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "0") or 0),
+                    help="a side slot's window in tokens; 0 (the default, SRV-707): --max-len, every "
+                         "slot the same window. A shorter one is kept for old setups; a request whose "
+                         "prompt + max_tokens does not fit it waits for slot 0")
     ap.add_argument("--parallel-floor-gb", type=float,
                     default=float(os.environ.get("QSE_PARALLEL_FLOOR_GB", "15") or 15),
                     help="admission: MemAvailable less the caches' growth, the requests in flight "
@@ -11174,7 +11331,7 @@ def _par_fake_slots(a, engine_cls) -> None:
     """`--parallel N` on the fake engine: N - 1 side slots with their own fake engines, the turn,
     and the admission on `FAKE_MEMAVAILABLE_GIB` (none: every request is admitted). No joint verify:
     the fake has no tree to verify."""
-    L = int(min(a.side_max_len, a.max_len))
+    L = side_window(a)
     gib = slots_mod.GiB
     avail = float(os.environ.get("FAKE_MEMAVAILABLE_GIB") or 0)
     meminfo = (lambda: {"MemAvailable": int(avail * gib)}) if avail else (lambda: None)
@@ -11188,6 +11345,16 @@ def _par_fake_slots(a, engine_cls) -> None:
     STATE["pool"] = slots_mod.Pool(slots, turn=turn, meeting=None, admission=adm)
     LOCK.turn = turn
     print(f"[parallel] FAKE: {len(slots)} slots, side window {L}", flush=True)
+
+
+def side_window(a) -> int:
+    """SRV-707: a side slot's window: `--side-max-len` when it is set and shorter, else `--max-len`.
+    Every slot gets the one window the setup names; with the KV pool on a slot's window is
+    addresses and its pages are committed as its conversation grows, so a full window per slot
+    costs no memory at load (engine/kvpool.py). With the pool off each window is allocated at load
+    and a slot is built only while the floor holds (`_build_side_slots`)."""
+    n = int(getattr(a, "side_max_len", 0) or 0)
+    return int(a.max_len) if n <= 0 else min(n, int(a.max_len))
 
 
 #: A side slot's bytes beyond its window with `--side-graphs off`: its drafter stack's scratch,
@@ -11288,7 +11455,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         if not hooks:
             raise SystemExit(f"[parallel] --parallel {n}: this model's builder gives no side slots")
         hooks["check"]()
-    L = int(min(a.side_max_len, a.max_len))
+    L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)

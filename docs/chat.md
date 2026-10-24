@@ -117,8 +117,9 @@ A live tab that loses chatd shows one banner, "The chat service stopped", and re
 `?chat=mock` (and the Vite dev server) loads the in-browser mock, with a "mock data" badge; it is
 for dashboard development only.
 
-At most 2 runs talk to the
-engine at once (`QSE_CHAT_MAX_RUNS`); the others wait as `queued`. A run that waits for a
+As many runs talk to the engine at once as it has lanes (its `/health` `parallel.n`; 8 until
+chatd has read it, SRV-707); `QSE_CHAT_MAX_RUNS` fixes the number instead. The others wait as
+`queued`. chatd's own `/health` says how many (`runs`). A run that waits for a
 permission prompt gives its slot back until the answer comes, and takes one again for its next call. A run on a
 cloud model takes no slot: its calls run at the provider, not on the box.
 

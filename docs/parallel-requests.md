@@ -1,6 +1,6 @@
 # Parallel requests
 
-The engine serves one request at a time unless it is told otherwise. With `--parallel N` it holds N sequences over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. It is off by default, because the gain is modest at today's kernels and every slot costs memory.
+With `--parallel N` the engine holds N sequences (lanes) over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. The flag's own default is 1; the shipped `ops/serve.env`, the profiles of every family with side slots and the Setup Guide run 8 lanes (SRV-707), every lane with the same window.
 
 How it works inside (slots, the GPU turn, lockstep rounds, admission) is in [server.md](server.md), section Parallel requests. This page is about using it.
 
@@ -9,8 +9,9 @@ How it works inside (slots, the GPU turn, lockstep rounds, admission) is in [ser
 In `ops/serve.env` (or `local.env`):
 
 ```bash
-QSE_PARALLEL=2            # 1 (the default) is one sequence; N builds N - 1 side slots
-QSE_SIDE_MAX_LEN=65536    # a side slot's window in tokens; slot 0 keeps the full 262,144
+QSE_PARALLEL=8            # lanes: slot 0 and N - 1 side slots; 1 is one sequence
+QSE_SIDE_MAX_LEN=0        # 0: every side slot has MAX_LEN, slot 0's window (a shorter value is kept)
+QSE_KV_POOL=on            # windows are addresses, pages are committed as conversations grow
 QSE_PARALLEL_FLOOR_GB=15  # admission keeps MemAvailable at or above this
 ```
 
@@ -18,21 +19,36 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 
 | flag | default | what it does |
 |-|-|-|
-| `--parallel N` | 1 | sequence slots; N - 1 side slots beside the engine |
-| `--side-max-len` | 65,536 | a side slot's window; a request whose prompt plus `max_tokens` does not fit waits for slot 0 |
+| `--parallel N` | 1 (serve.env: 8) | sequence slots; N - 1 side slots beside the engine |
+| `--side-max-len` | 0 | a side slot's window; 0 is `--max-len`, every lane the same window (SRV-707). A shorter one is kept for old setups; a request whose prompt plus `max_tokens` does not fit it waits for slot 0 |
 | `--parallel-floor-gb` | 15 | a request in flight beside others waits while its own prefill workspace, the others' and what the caches may still grow into (together at most the engine's room to `--mem-peak-gib`) would push MemAvailable under this; a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
 | `--parallel-cut` | the family's | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first; `auto` (SPD-155): `joint` from `QSE_PARALLEL_AUTO_N` (3) decoding slots, `share` below. Unset, the model family's `joint_policy` decides (the 27B: `auto`), else `share` |
 | `--parallel-draft-rows` | 128 | rows of a packed draft pass (SPD-157): eight slots' 16-row draft blocks in one pass; drafting decides speed only |
-| `--parallel-max-rows` | the family's | rows of a joint pass at most (`QSE_PARALLEL_MAX_ROWS`; 0 or unset: the model family's `joint_policy`, else 32). SPD-159: the 27B on EXL3 weights takes 64, each engine's rows in an 8 x 8-row joint pass bit for bit its own eager verify; on NVFP4 and FP8 it keeps 32, since NVFP4 sends 33-64 rows to another tile |
+| `--parallel-max-rows` | the family's | rows of a joint pass at most (`QSE_PARALLEL_MAX_ROWS`; 0 or unset: the model family's `joint_policy`, else 32). SPD-159: the 27B on EXL3 weights takes 64, each engine's rows in an 8 x 8-row joint pass bit for bit its own eager verify; on NVFP4 and FP8 it keeps 32, since NVFP4 sends 33-64 rows to another tile; past `max_rows // 2` decoding lanes (2 rows each) a round runs more passes |
 | `--side-precapture` | off | capture a side slot's verify graphs at start (about a minute a slot) instead of at first use |
 | `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
 | `--side-slot-const-gb` | 7.5, or 1.5 with side graphs off | a side slot's bytes beyond its window in the build's estimate (`QSE_SIDE_SLOT_CONST_GB`) |
 
-Tested up to 4 slots.
+Measured up to 4 slots on the 27B and 3 on Flash-Next and LFM2.5; 8 by default is not measured on the GPU yet.
 
-The shipped `ops/serve.env` keeps one sequence (`QSE_PARALLEL=1`). The box the measurements on these pages come from runs two (`QSE_PARALLEL=2`) with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`; every cache and memory setting it uses is the shipped one.
+The shipped `ops/serve.env` runs 8 lanes on the pool with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`, the values the Setup Guide writes for the 27B. Until SRV-707 it kept one sequence, and the box the older measurements come from ran two with a 65,536-token side window.
+
+## One window for every lane (SRV-707)
+
+Every lane has the window the setup names (`MAX_LEN`); the Setup Guide has no side window of its own any more, and writes `QSE_SIDE_MAX_LEN` equal to the window. With the KV pool on a lane's window is addresses: a side slot built at 262,144 tokens takes its constant part and nothing of its window at load (engine/models/*/serving.py `side_slot_bytes`: no bytes a token when paged), and its pages come from the one pool as its conversation grows. With the pool off (the families whose pool is not verified yet: NemotronH, LFM2.5, Flint, Ornith) every lane's window is memory at load, and a lane is built only while the floor holds.
+
+The guide counts how many lanes can all hold the full window at once, the guarantee (`lanes_full` in the estimate): `min(lanes, floor(room / (window x KV bytes a token)))`, where room is what the budget leaves after the weights, the tools and every lane's constant part. With the pool off it is every lane whenever the selection fits. Past the guarantee the lanes share what is left, in this order:
+
+1. A new request waits for memory before its prefill (the admission reserves its prompt and up to `QSE_KV_ADMIT_ROWS` of its `max_tokens` in pages): its stream says "waiting: memory is almost full", the Lanes view shows it as `waiting_memory`, a streamed request waits up to `--request-timeout`.
+2. Before anyone waits, idle conversations give their pages back: the caches' levels, the small models, idle side slots' conversations (oldest first), slot 0's idle conversation (to the NVMe first with the spill on).
+3. A running lane whose next pages would take the box under `QSE_KV_HARD_FLOOR_GB` while other lanes run gives way (SRV-709, `QSE_KV_RECOMPUTE=on`): it gives every page back, waits at the head of the line for memory (before any request that has not started) and goes on in the same stream by reading its prompt and the text it wrote again. A streamed client sees an SSE comment (`: paused: waiting for memory`) meanwhile, no token. `/health` `parallel.recompute` counts the lanes that gave way, resumed and gave up. Reading again costs a prefill; the text goes on where it stopped, and a sampled or near-tie token after the resume may differ from the one an uninterrupted run would write.
+4. A lane alone, or one that gave way `KV_RECOMPUTE_MAX` (16) times, stops with `memory_full` instead of a bare error; the Chat tab keeps its text and continues it once memory is free.
+
+Admission reserves KV pages for the prompt and at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens` (0: all of it), so more lanes start than the worst case allows; a lane that writes past its reservation and finds the pool full gives way as above.
+
+A round with more than 16 decoding lanes verifies in more than one pass of 32 rows (2 rows a lane), so each lane gets less speculation; the guide says so above 16 and takes up to 64.
 
 ## What a slot costs
 
@@ -191,8 +207,8 @@ The limits, the serve.env defaults unless the profile sets them:
 
 | setting | value |
 |-|-|
-| sequence slots (`QSE_PARALLEL`) | 3 |
-| side window (`QSE_SIDE_MAX_LEN`) | 65,536, capped by `MAX_LEN` (40,960 on the reference box's :8000) |
+| sequence slots (`QSE_PARALLEL`) | 8 (3 measured) |
+| side window (`QSE_SIDE_MAX_LEN`) | 0: `MAX_LEN`, every lane the same window (65,536 before SRV-707) |
 | admission floor (`QSE_PARALLEL_FLOOR_GB`) | 15 GiB |
 | joint verify | up to 32 rows |
 | turn quantum, batch timeout | 50 ms, 2 ms |

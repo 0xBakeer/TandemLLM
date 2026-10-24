@@ -17,7 +17,7 @@ export async function setSlots(page: Page, n: number | string): Promise<void> {
   await page.locator('#pf-slots-in').fill(String(n));
 }
 
-/** VIS-199: a window stepper's field (window or side_window): type tokens, as a person would. */
-export async function setWindow(page: Page, key: 'window' | 'side_window', v: number | string): Promise<void> {
-  await page.locator(key === 'window' ? '#pf-win-in' : '#pf-side-in').fill(String(v));
+/** VIS-199: the window stepper's field (SRV-707: one window for every chat): type tokens, as a person would. */
+export async function setWindow(page: Page, _key: 'window', v: number | string): Promise<void> {
+  await page.locator('#pf-win-in').fill(String(v));
 }

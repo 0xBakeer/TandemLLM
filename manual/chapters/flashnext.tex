@@ -168,7 +168,7 @@ Parallel requests work on Flash-Next without changing any answer, and its profil
 setting & value \\
 \midrule
 sequence slots (\code{QSE_PARALLEL}) & 3 \\
-side window (\code{QSE_SIDE_MAX_LEN}) & 65,536, capped by \code{MAX_LEN} \\
+side window (\code{QSE_SIDE_MAX_LEN}) & 0: \code{MAX_LEN}, every lane the same window (65,536 before SRV-707) \\
 admission floor (\code{QSE_PARALLEL_FLOOR_GB}) & 15~GiB \\
 joint verify & up to 32 rows \\
 turn quantum, batch timeout & 50~ms, 2~ms \\

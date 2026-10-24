@@ -302,7 +302,7 @@ export class MockSetup {
     const p = M.parallelism;
     env[p.knobs.slots] = String(sel.slots);
     env[p.knobs.window] = String(sel.window);
-    env[p.knobs.side_window] = String(sel.side_window ?? sel.window);
+    env[p.knobs.side_window] = String(sel.window); // SRV-707: every lane the window
     env[p.knobs.kv_pool] = sel.kv_pool ? 'on' : 'off';
     env[p.knobs.floor_gb] = String(sel.floor_gb);
     for (const [k, v] of Object.entries(p.fixed ?? {})) env[k] = v;
