@@ -272,7 +272,17 @@ class Runner:
                 t.tree = t.tree.truncate(t.eng.max_len - t.pos)
         # 2. the joint verify pass (a task without a draft takes its plain step alone)
         t0 = self._t("rest", t0)
-        group = [t for t in tasks if not t.done and t.tree is not None and t.tree.n_draft > 0]
+        live = [t for t in tasks if not t.done]
+        if len(live) > 1:
+            from engine.tree import DraftTree
+            for t in live:
+                if ((t.tree is None or t.tree.n_draft == 0) and getattr(t.eng.caps, "joint_plain", False)):
+                    # ENG-241: no draft this round, other lanes decoding: the plain step joins the round's
+                    # pass as its anchor alone, so the lanes read the weights once (the slot loop's
+                    # `joint_anchor`; NemotronH, Flint, LFM2.5 serve it as one joint decode)
+                    t.tree = DraftTree(tokens=[int(t.tok)], parents=[-1])
+        group = [t for t in live if t.tree is not None and (t.tree.n_draft > 0 or (
+            len(live) > 1 and getattr(t.eng.caps, "joint_plain", False)))]
         for t in tasks:
             if not t.done and t not in group:
                 self._bind(t)
