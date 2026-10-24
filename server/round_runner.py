@@ -425,16 +425,18 @@ class Runner:
             self._tail(t, x, path, new)
 
     def _paths(self, group, trees, outs, walked):
+        # ENG-E8: the walk every model's blocks take (a family's engine need not carry `accept_tree`)
+        from engine.methods import walk as walk_mod
         for t, x, lg, w in zip(group, trees, outs, walked):
             self._bind(t)
             if w is not None and w[0] == "walk":
                 path, new = w[1]
             elif w is not None:
-                path, new = t.eng.accept_tree(x, w[1])
+                path, new = walk_mod.accept_tree(x, w[1])
             elif t.sampler is not None and t.sampler.on:
                 path, new = t.sampler.tree_walk_logits(lg, x.tokens, x.parents, start=len(t.ctx), q=x.q)
             else:
-                path, new = t.eng.accept_tree(x, lg.argmax(-1).tolist())
+                path, new = walk_mod.accept_tree(x, lg.argmax(-1).tolist())
             yield t, x, path, new
 
     def _tail(self, t: Task, tree, path, new) -> None:
