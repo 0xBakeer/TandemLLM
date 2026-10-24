@@ -48,6 +48,10 @@ ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "1") == "1"
 #: accepted tokens, positions, the drafter syncs, which tasks end), then the draft is queued, then the rest (the
 #: target's commit, penalties, stop patterns, the stream) runs on the host while the GPU drafts; 0: one tail a task
 PIPE = os.environ.get("QSE_RUNNER_PIPE", "1") == "1"
+#: SRV-709 (a test knob): the pool refuses a lane once after it wrote this many tokens (0: never), so a test
+#: can watch a lane give way and go on; QSE_KV_TEST_REFUSE_SLOTS limits it to these slots (comma list)
+TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
+TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
@@ -354,6 +358,12 @@ class Runner:
             for t, x in zip(group, trees):
                 self._bind(t)
                 try:
+                    if (TEST_REFUSE_AFTER and t.n_out >= TEST_REFUSE_AFTER
+                            and (not TEST_REFUSE_SLOTS or t.slot.index in TEST_REFUSE_SLOTS)
+                            and not getattr(t.eng, "_test_refused", False)):
+                        t.eng._test_refused = True
+                        raise kvpool.PoolFull(f"QSE_KV_TEST_REFUSE_AFTER: slot {t.slot.index} after "
+                                              f"{t.n_out} tokens")
                     t.eng.kv.ensure(t.pos + len(x.tokens))
                 except kvpool.PoolFull as exc:
                     t.err = exc
