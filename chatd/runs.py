@@ -575,10 +575,14 @@ class Run:
                 return "broken"
             if kind != "data" or not isinstance(obj, dict):
                 continue
-            if obj.get("error") and not obj.get("choices"):
+            if obj.get("error"):
+                # an error is recorded whatever else the frame carries: a stream can deliver an
+                # error frame with choices still on it, and dropping the text lost the reason
                 err = obj["error"]
                 self.error = str(err.get("message") if isinstance(err, dict) else err)[:300]
-                return "failed"
+                if not obj.get("choices"):
+                    return "failed"
+                # with choices the frame is still a live delta: keep streaming it
             if self.request_id is None and obj.get("id"):
                 self.request_id = str(obj["id"])
                 self.request_ids.add(self.request_id)
@@ -638,7 +642,16 @@ class Run:
         if self.carry:
             self._add("thinking" if self.in_tag else "text", self.carry)
             self.carry = ""
-        return "completed" if finished or self.usage is not None else "broken"
+        out = "completed" if finished or self.usage is not None else "broken"
+        if out == "completed" and self.error and not self.remark:
+            # an error that rode a frame with choices did not end anything: the answer
+            # streamed and the run completes. It must still arrive as suspect — as a
+            # persisted remark part (service renders run.remark at the answer's end),
+            # never as a second end-of-run event: finish_run owns the run's end, and
+            # a run.error mid-run makes the reducer close a live run.
+            self.remark = (f"The engine reported '{self.error}' mid-stream; this answer "
+                           f"may be incomplete.")
+        return out
 
     def _stopped(self) -> str:
         return "interrupted" if self.stop_mode == "shutdown" else "cancelled"
