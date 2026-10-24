@@ -1690,6 +1690,10 @@ class Qwen38Engine:
             kk = torch.stack([f[0][0] for f in per])
             u = torch.stack([f[1][0] for f in per])
             gc = torch.stack([f[2][0] for f in per])
+        from tools import gdn_seq_kernels as Q
+        if Q.ON:
+            Q.seq_commit(S, kk, u, gc, rows)        # SPD-201: the walk's own steps, replayed
+            return
         fused_commit(S, S, kk, u, gc, rows)
 
     def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
@@ -2202,7 +2206,14 @@ class Qwen38Engine:
         kk = torch.stack([f[0][0] for f in facs])
         u = torch.stack([f[1][0] for f in facs])
         gc = torch.stack([f[2][0] for f in facs])
-        fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
+        from tools import gdn_seq_kernels as Q
+        if Q.ON:
+            # SPD-201: the walk's own steps replayed from the entry state
+            if trace.S_entry is not self.state.S:
+                self.state.S.copy_(trace.S_entry)
+            Q.seq_commit(self.state.S, kk, u, gc, rows)
+        else:
+            fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
         raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
         conv_commit(trace.conv_entry, self.state.conv, raw, rows)
 
@@ -2285,6 +2296,14 @@ def _run_gdn(eng, name: str, xs: list, reuse: dict | None = None) -> list:
     # SPD-201 (QSE_RUNNER_JOINT1): one block through the grouped launch too, so a one-block pass is graphed
     # (the grouped launch of one engine is the lone kernel's bits: gdn_wy_kernels `check_grouped`)
     one = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
+    from tools import gdn_seq_kernels as Q
+    if Q.ON and all(x["anc"] is not None and x["mixed"].shape[0] <= 32 for x in xs):
+        # SPD-201: the recurrence one node at a time along its path, every block in one launch pair
+        items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
+                      state=x["state"].reshape(H, dk, dv)) for x in xs]
+        return Q.seq_recurrence_grouped(items, key_heads=cfg.linear_num_key_heads, value_heads=H, head_k=dk,
+                                        head_v=dv, conv_w=conv_w, a_log=a_log, dt_bias=dt_bias,
+                                        key_dim=cfg.key_dim, reuse=reuse)
     if (len(xs) > 1 or one) and WY and WY_FUSED and min(WY_MAXT, WY_FUSED_MAXT) >= 16:
         from tools import gdn_wy_kernels as G
         items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),

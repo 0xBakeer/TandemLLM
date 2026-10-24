@@ -104,6 +104,7 @@ KNOBS: dict[str, tuple] = {
     'GDNV_WY_KC': ('0', 'tools/gdn_verify_kernels.py'),
     'GDNV_WY_MAXT': ('32', 'tools/gdn_verify_kernels.py'),
     'GDN_AB': ('0', 'engine/model.py'),
+    'GDN_SEQ': ('0', 'tools/gdn_seq_kernels.py'),
     'WINDOW_MLP': ('0', 'engine/model.py'),
     'WINDOW_ROWWISE': ('1', 'engine/model.py'),
     'GDN_PREP': ('1', 'engine/model.py'),
