@@ -44,8 +44,12 @@ from engine.models.flashnext.ple import decode_rows
 # rows up to which an EXL3 projection runs on tools/fn_kernels.dense (the kernel's limit);
 # QWEN38_FN_DENSE=0: the library path of tools/exl3_linear for every row count (an A/B)
 DENSE_MAX = 32 if _S.get("FN_DENSE") == "1" else 0
-#: SPD-215: the joint pass runs its row-wise parts once over every state's rows (`_verify_multi_rowwise`)
+#: SPD-215: the joint pass runs its row-wise parts once over every state's rows (`_verify_multi_rowwise`;
+#: 8 states x 4 rows: 159 -> 150 ms, every state's logits its lone verify's bits)
 ROWWISE = _S.get("FN_JOINT_ROWWISE") == "1"
+#: SPD-215: the joint pass's experts through the grouped kernels (a block's pairs of one expert share a CTA;
+#: tools/fn_kernels.py MOE_GROUP); a lone verify keeps its kernels
+JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -1030,7 +1034,11 @@ class FlashNextEngine(FlashNextRef):
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
             mark("moe")
-            yd, ids, wts = self.moe_parts(XM, li)
+            grp, K.MOE_GROUP = K.MOE_GROUP, K.MOE_GROUP or JOINT_MOE_GROUP
+            try:
+                yd, ids, wts = self.moe_parts(XM, li)
+            finally:
+                K.MOE_GROUP = grp
             mark("mix")
             for j, x in enumerate(cx):
                 x["rec"][("ids", li)] = ids[rows[j]]

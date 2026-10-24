@@ -17,5 +17,6 @@ ARCH = register(Arch(
     spec=ServeSpec(side_slots=False),
     uses=("engine/models/flashnext/engine.py", "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py",
           "engine/models/flashnext/vision.py", "engine/models/flashnext/config.py", "engine/models/flashnext/pack.py",
-          "engine/models/flashnext/ple.py", "engine/models/flashnext/serving.py"),
+          "engine/models/flashnext/ple.py", "engine/models/flashnext/serving.py",
+          "engine/models/flashnext/knobs.py"),
 ))

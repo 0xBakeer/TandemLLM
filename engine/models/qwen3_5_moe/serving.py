@@ -33,7 +33,7 @@ MODULES = ("engine/models/qwen3_5_moe/__init__.py", "engine/models/qwen3_5_moe/c
            "engine/models/qwen3_5_moe/load.py", "engine/models/qwen3_5_moe/pack.py",
            "engine/models/qwen3_5_moe/ref.py", "engine/models/flashnext/engine.py",
            "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py", "engine/models/flashnext/vision.py",
-           "engine/settings.py")
+           "engine/models/flashnext/knobs.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 #: the model's name in ops/prices/ and models/

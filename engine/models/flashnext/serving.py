@@ -49,7 +49,8 @@ MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/confi
            "engine/models/flashnext/engine.py", "engine/models/flashnext/load.py",
            "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
            "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py",
-           "engine/models/flashnext/vision.py", "engine/settings.py")
+           "engine/models/flashnext/vision.py", "engine/models/flashnext/knobs.py",
+           "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 
