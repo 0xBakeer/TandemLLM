@@ -351,13 +351,17 @@ class Run:
                 self.svc.finish_guard(self, outcome, exc)
 
     def _slot(self) -> bool:
-        """One of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one),
-        before each model call: a run that waits for the user's permission gives its slot back
+        """One of the run slots (as many as the engine has lanes, SRV-707; QSE_CHAT_MAX_RUNS fixes
+        them), before each model call: a run that waits for the user's permission gives its slot back
         (agent.py `_permit`). A cloud model's call takes none (`takes_slot`) and gives back the one
         an earlier call on our engine held. False when the run is stopped meanwhile."""
         if not self.svc.takes_slot(self):
             self.svc.slots.release_if(self)
             return True
+        try:
+            self.svc._refresh()          # the engine's lanes (SRV-707), at most CAPS_TTL_S old
+        except Exception:                                           # noqa: BLE001
+            pass
         while not self.svc.slots.acquire(self, timeout=1.0):
             if self.stop_mode:
                 return False

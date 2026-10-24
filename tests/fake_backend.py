@@ -178,6 +178,8 @@ class Fake:
         # fn() -> the rows of GET /v1/dashboard/live?follow=0 (None: 404, a server without the
         # route); the stream itself answers 429, so a reader polls
         self.live = None
+        # SRV-707: what /health adds (our engine's: max_len, parallel); None: {"status": "ok"} alone
+        self.health: dict | None = None
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -249,7 +251,7 @@ def make_handler(fake: Fake):
                     return self._json(429, {"error": {"message": "too many live streams"}})
                 return self._json(200, {"requests": fake.live(), "engine": {}})
             if p in ("/health", "/v1/health"):
-                return self._json(200, {"status": "ok"})
+                return self._json(200, {"status": "ok", **(fake.health or {})})
             if p == "/version" and fake.dialect == "vllm":
                 return self._json(200, {"version": "0.30.0"})
             if p == "/server_info" and (fake.dialect or "").startswith("sglang"):

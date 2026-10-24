@@ -154,13 +154,54 @@ class Conv:
         self.task_id: str | None = None
 
 
-class Slots:
-    """At most `n` runs talk to the engine at once (QSE_CHAT_MAX_RUNS, default 2)."""
+#: SRV-707: the runs chatd lets talk to the engine at once before it has read the engine's lanes
+#: (and with an engine that names none: another server, or ours unreachable): the shipped 8 lanes
+FALLBACK_RUNS = 8
 
-    def __init__(self, n: int):
-        self.n = max(1, n)
+
+def engine_lanes(facts: dict) -> int | None:
+    """SRV-707: the lanes our engine serves at once, from its facts (Engine.facts): `parallel.n`
+    of /health or of /v1/dashboard/system's `queue` (the slots built, slot 0 and its side slots);
+    1 for our engine without side slots; None from any other server or none at all."""
+    if not isinstance(facts, dict) or not facts:
+        return None
+    for src in ((facts.get("queue") or {}), (facts.get("engine") or {})):
+        par = src.get("parallel") if isinstance(src, dict) else None
+        if isinstance(par, dict):
+            try:
+                return max(1, int(par.get("n") or 1))
+            except (TypeError, ValueError):
+                return None
+    eng = facts.get("engine") or {}
+    return 1 if isinstance(eng, dict) and eng.get("max_len") else None
+
+
+class Slots:
+    """At most `n` runs talk to the engine at once. SRV-707: `n` follows the engine's lanes
+    (`follow`, `engine_lanes`; FALLBACK_RUNS until they are known) unless QSE_CHAT_MAX_RUNS fixes it
+    (`fixed`). Until SRV-707 it was a fixed 2 whatever the engine served: two chats ran and the
+    rest said "Waiting for a free run slot" with idle lanes on the engine."""
+
+    def __init__(self, n: int | None = None):
+        self.fixed = n is not None and n > 0
+        self.n = max(1, n) if self.fixed else FALLBACK_RUNS
+        self.source = "QSE_CHAT_MAX_RUNS" if self.fixed else "fallback"
         self.holders: set = set()
         self.cv = threading.Condition()
+
+    def follow(self, lanes: int | None) -> bool:
+        """The engine's lane count read anew; True when `n` changed. A fixed count stays."""
+        if self.fixed or lanes is None:
+            return False
+        with self.cv:
+            old, self.n, self.source = self.n, max(1, int(lanes)), "engine"
+            if self.n > old:
+                self.cv.notify_all()             # runs waiting for a run slot take the new ones
+        return self.n != old
+
+    def report(self) -> dict:
+        with self.cv:
+            return {"max": self.n, "source": self.source, "held": len(self.holders)}
 
     def acquire(self, run, timeout: float) -> bool:
         run = getattr(run, "slot_owner", run)          # a worker runs in its parent's slot
@@ -201,7 +242,7 @@ def device_label(ua: str | None) -> str | None:
 class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
               WebSearchMixin, VerifyMixin, TasksMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
-                 max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
+                 max_runs: int | None = None, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
                  sandboxes: Sandboxes | None = None):
         self.data_dir = data_dir
@@ -1579,6 +1620,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             f = self.engine.facts()
             self._facts = (time.monotonic(), f)
             self._caps = (time.monotonic(), self._build_caps(f))
+            if self.slots.follow(engine_lanes(f)):      # SRV-707: as many runs as engine lanes
+                self.log(f"[chatd] run slots follow the engine: {self.slots.n}")
         finally:
             self._refreshing = False
 
