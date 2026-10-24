@@ -6092,7 +6092,7 @@ def _engine_own_settings() -> dict:
     pool = dict.get(STATE, "pool")
     a = dict.get(STATE, "args") or {}
     par = {"n": 1, "requested": int(a.get("parallel") or 1), "side_max_len": None,
-           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb")}
+           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb"), "max_len": a.get("max_len")}
     if pool is not None and getattr(pool, "n", 1) > 1:
         side = pool.side()
         par.update(n=pool.n, side_max_len=side[0].max_len if side else None,
@@ -10149,9 +10149,10 @@ def parser() -> argparse.ArgumentParser:
                          "drafter stack over the one copy of the weights, `--side-max-len` long), "
                          "and two or more decoding requests verify their trees in one pass")
     ap.add_argument("--side-max-len", type=int,
-                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "65536") or 65536),
-                    help="a side slot's window in tokens; slot 0 keeps --max-len (262,144). A "
-                         "request whose prompt + max_tokens does not fit waits for slot 0")
+                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "0") or 0),
+                    help="a side slot's window in tokens; 0 (the default, SRV-707): --max-len, every "
+                         "slot the same window. A shorter one is kept for old setups; a request whose "
+                         "prompt + max_tokens does not fit it waits for slot 0")
     ap.add_argument("--parallel-floor-gb", type=float,
                     default=float(os.environ.get("QSE_PARALLEL_FLOOR_GB", "15") or 15),
                     help="admission: MemAvailable less the caches' growth, the requests in flight "
@@ -10819,7 +10820,7 @@ def _par_fake_slots(a, engine_cls) -> None:
     """`--parallel N` on the fake engine: N - 1 side slots with their own fake engines, the turn,
     and the admission on `FAKE_MEMAVAILABLE_GIB` (none: every request is admitted). No joint verify:
     the fake has no tree to verify."""
-    L = int(min(a.side_max_len, a.max_len))
+    L = side_window(a)
     gib = slots_mod.GiB
     avail = float(os.environ.get("FAKE_MEMAVAILABLE_GIB") or 0)
     meminfo = (lambda: {"MemAvailable": int(avail * gib)}) if avail else (lambda: None)
@@ -10833,6 +10834,16 @@ def _par_fake_slots(a, engine_cls) -> None:
     STATE["pool"] = slots_mod.Pool(slots, turn=turn, meeting=None, admission=adm)
     LOCK.turn = turn
     print(f"[parallel] FAKE: {len(slots)} slots, side window {L}", flush=True)
+
+
+def side_window(a) -> int:
+    """SRV-707: a side slot's window: `--side-max-len` when it is set and shorter, else `--max-len`.
+    Every slot gets the one window the setup names; with the KV pool on a slot's window is
+    addresses and its pages are committed as its conversation grows, so a full window per slot
+    costs no memory at load (engine/kvpool.py). With the pool off each window is allocated at load
+    and a slot is built only while the floor holds (`_build_side_slots`)."""
+    n = int(getattr(a, "side_max_len", 0) or 0)
+    return int(a.max_len) if n <= 0 else min(n, int(a.max_len))
 
 
 #: A side slot's bytes beyond its window with `--side-graphs off`: its drafter stack's scratch,
@@ -10933,7 +10944,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         if not hooks:
             raise SystemExit(f"[parallel] --parallel {n}: this model's builder gives no side slots")
         hooks["check"]()
-    L = int(min(a.side_max_len, a.max_len))
+    L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)

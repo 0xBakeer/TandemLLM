@@ -234,6 +234,34 @@ def test_a_window_offers_the_turn_between_layers_only_to_a_waiting_slot():
     assert A.PAR_LAYER_YIELD is True
 
 
+def test_every_side_slot_gets_the_one_window():
+    """SRV-707: `--side-max-len` 0 (the default) is `--max-len` for every side slot; a shorter
+    value is kept (an old setup), a longer one is cut to `--max-len`."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from argparse import Namespace
+
+    from server import app as A
+    old = os.environ.pop("QSE_SIDE_MAX_LEN", None)
+    try:
+        a = A.parser().parse_args(["--max-len", "131072"])
+        assert a.side_max_len == 0 and A.side_window(a) == 131072
+    finally:
+        if old is not None:
+            os.environ["QSE_SIDE_MAX_LEN"] = old
+    assert A.side_window(Namespace(max_len=262144, side_max_len=65536)) == 65536
+    assert A.side_window(Namespace(max_len=40960, side_max_len=65536)) == 40960
+    assert A.side_window(Namespace(max_len=262144, side_max_len=None)) == 262144
+
+
+def test_side_slots_on_the_fake_engine_take_the_full_window():
+    port, proc = _server(("--parallel", "3", "--max-len", "32768"))
+    try:
+        h = _get(port, "/health")["parallel"]
+        assert h["n"] == 3 and [s["max_len"] for s in h["slots"]] == [32768] * 3, h["slots"]
+    finally:
+        _stop(proc)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

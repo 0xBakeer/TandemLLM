@@ -529,10 +529,13 @@ class Meeting:
         `max_rows` rows, every other block in a pass of its own, in arrival order."""
         out, cur, rows = [], [], 0
         if self.cut == "joint":
-            # whole trees: one pass for every batchable block, cut together to `max_rows`
+            # whole trees: one pass for every batchable block, cut together to `max_rows`; past
+            # `per_pass()` trees (SRV-707: more lanes than one pass holds at two rows each) the
+            # trees go in passes of that many, in arrival order, so no pass exceeds `max_rows`
             joint = [r for r in self.pending.values() if r.batchable]
             alone = [[r] for r in self.pending.values() if not r.batchable]
-            return ([joint] if joint else []) + alone
+            k = self.per_pass()
+            return [joint[i:i + k] for i in range(0, len(joint), k)] + alone
         for r in self.pending.values():
             if not r.batchable:
                 out.append([r])
@@ -545,6 +548,12 @@ class Meeting:
         if cur:
             out.append(cur)
         return out
+
+    def per_pass(self) -> int:
+        """SRV-707: the most trees one joint pass verifies: each keeps its anchor and one node at
+        least, so `max_rows // 2` (16 at 32 rows). More decoding lanes verify in more passes a
+        round, each pass reading the weights once."""
+        return max(1, self.max_rows // 2)
 
     def report(self) -> dict:
         with self.cv:

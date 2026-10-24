@@ -73,8 +73,8 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QSE_PAGE_CACHE_KEEP"] == ("ngram_embedding.safetensors" if table == "warm" else ""), e
         assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "on", e
         assert e["QWEN38_FN_LOOKUP"] == "1", e
-        # ENG-241: three slots on the KV pool; the side window serve.env's
-        assert e["QSE_PARALLEL"] == "3" and e["QSE_KV_POOL"] == "on", e
+        # ENG-241: lanes on the KV pool (SRV-707: 8 of them); the side window serve.env's
+        assert e["QSE_PARALLEL"] == "8" and e["QSE_KV_POOL"] == "on", e
         # 0.8.2: Laya beside it, as on the 27B box; its checkpoints where serve.env says
         assert e["QWEN38_DECIDER_MODELS"] == "laya-english,laya-multilingual,laya-typed-decisions", e
         assert e["QWEN38_DECIDER_DIR"] == base["QWEN38_DECIDER_DIR"], e

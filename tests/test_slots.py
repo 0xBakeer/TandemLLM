@@ -256,6 +256,30 @@ def test_batches_cut_at_max_rows_and_keep_unbatchable_blocks_alone():
     assert all(sum(len(meet.pending[i].parents) for i in g) <= 32 for g in groups)
 
 
+def test_more_lanes_than_one_pass_holds_verify_in_more_passes():
+    """SRV-707: past 16 decoding lanes a share is 2 rows and the round runs in passes of at most
+    32 rows; a joint cut groups at most 16 trees a pass (anchor and one node each)."""
+    for n in (16, 17, 24, 32, 48, 64):
+        s = slots.share(n)
+        assert s == 2, (n, s)
+        meet = slots.Meeting(32, 0.002)
+        meet.pending = {i: slots.VerifyReq(i, None, None, list(range(s)), 0) for i in range(n)}
+        groups = meet.batches()
+        assert sorted(r.slot for g in groups for r in g) == list(range(n))
+        assert all(sum(r.rows for r in g) <= 32 for g in groups), n
+        assert len(groups) == -(-n // 16), (n, len(groups))
+        jm = slots.Meeting(32, 0.002, cut="joint")
+        jm.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0) for i in range(n)}
+        jm.pending[n] = slots.VerifyReq(n, None, None, list(range(4)), 0, batchable=False)
+        jg = jm.batches()
+        assert all(len(g) <= jm.per_pass() for g in jg) and jm.per_pass() == 16
+        assert sorted(r.slot for g in jg for r in g) == list(range(n + 1))
+        assert [r.slot for r in jg[-1]] == [n], "an unbatchable block keeps a pass of its own"
+    one = slots.Meeting(32, 0.002, cut="joint")
+    one.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0) for i in range(3)}
+    assert [len(g) for g in one.batches()] == [3], "up to 16 trees stay one joint pass"
+
+
 # ------------------------------------------------------------------ admission
 def test_admission_alone_is_always_admitted():
     adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": 1 * GiB})
