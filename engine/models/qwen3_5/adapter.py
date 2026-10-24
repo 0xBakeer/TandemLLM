@@ -138,6 +138,10 @@ def joint_policy(eng) -> dict:
     exl3 = getattr(getattr(eng, "w", None), "exl3_source", None) is not None
     proven = 64 if exl3 else 32
     pol = {"max_rows": min(proven, JOINT_MAX_ROWS) if JOINT_MAX_ROWS else proven, "cut": "auto"}
+    # SPD-223: the grouped GDN verify carries trees of at most MAXD levels (tools/gdn_verify_kernels.py);
+    # a deeper one (the lookup's deep chain: 32) is cut to it in a joint pass, never handed to the kernel
+    from tools.gdn_verify_kernels import MAXD
+    pol["max_depth"] = int(MAXD)
     from engine.models.qwen3_5 import joint_graphs as JG
     if JG.ON:
         # SPD-163: a joint cut keeps each tree within the graphs' row bucket, so the pass is graphed

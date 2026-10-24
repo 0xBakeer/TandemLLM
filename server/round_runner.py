@@ -350,6 +350,9 @@ class Runner:
                     cap is not None and any(len(x.parents) > cap for x in trees)) or meet.joint_for(len(group)):
                 keeps = slots_mod.joint_cut(trees, meet.max_rows, cap)
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
+            # SPD-223: no tree deeper than the family's joint kernels carry (a 32-deep lookup chain past
+            # the grouped GDN's 16 levels: a ValueError eager, an illegal address from a joint graph)
+            trees = [slots_mod.depth_cut(x, getattr(meet, "max_depth", None)) for x in trees]
         # SRV-709: every lane's pages before the joint pass, so a pool that cannot give them stops that
         # lane alone (its request gives way and goes on: server/app.py `Handler._recomputing`), not the round
         from engine import kvpool

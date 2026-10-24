@@ -1439,6 +1439,17 @@ def _run_round(meet) -> None:
                     r.rows = len(t.parents)
             with meet.cv:
                 meet.stats["trimmed"] += sum(1 for r in group if r.tree_cut is not None)
+        md = getattr(meet, "max_depth", None)
+        if md and len(group) > 1:
+            # SPD-223: no tree deeper than the family's joint kernels carry
+            for r in group:
+                cur = r.tree_cut if r.tree_cut is not None else r.tree
+                t = slots_mod.depth_cut(cur, md)
+                if t is not cur:
+                    r.tree_cut = t
+                    r.tokens = h2d(t.tokens, torch.long, r.tokens.device)
+                    r.parents = t.parents
+                    r.rows = len(t.parents)
         if meet.timing:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -11555,6 +11566,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         # SPD-163: the family's per-tree cap of a joint cut (`joint_policy` "tree_cap": a callable of the
         # block count and the row cap), e.g. the row bucket of its joint graphs
         meet.tree_cap = pol.get("tree_cap")
+        meet.max_depth = pol.get("max_depth")       # SPD-223
         # SPD-187: the family's round planner (`joint_policy` "planner") and its context classes
         # SPD-161: every slot's length router keeps its narrow arm when the joint cap can fall to it
         tcap = meet.tree_cap(len(slots), max_rows) if meet.tree_cap is not None else None

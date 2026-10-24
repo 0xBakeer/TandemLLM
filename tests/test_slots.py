@@ -372,6 +372,17 @@ def test_the_overlay_covers_what_the_generation_publishes():
         assert k in slots.OVERLAY, k
 
 
+
+def test_a_joint_pass_never_gets_a_tree_deeper_than_its_kernels():
+    """SPD-223: a 32-deep chain (the lookup's deep chain) is cut to the family's joint depth (16 levels,
+    the anchor included); a shallow tree and a missing cap leave the tree as it is."""
+    from engine.tree import DraftTree
+    chain = DraftTree(list(range(32)), [-1] + list(range(31)), [1.0] * 32)
+    cut = slots.depth_cut(chain, 16)
+    assert len(cut.tokens) == 16 and max(cut.depths()) == 15 and cut.tokens == list(range(16))
+    wide = DraftTree([5, 6, 7, 8], [-1, 0, 0, 1], [1.0, .5, .4, .3])
+    assert slots.depth_cut(wide, 16) is wide and slots.depth_cut(chain, None) is chain
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

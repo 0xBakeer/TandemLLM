@@ -415,6 +415,18 @@ class Slot:
                 "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
 
 
+def depth_cut(tree, max_depth: int | None):
+    """SPD-223: `tree` with no node deeper than `max_depth` levels (the anchor is level 1), or `tree`
+    itself when it fits: a joint pass's kernels carry a fixed depth. A prefix of every path is kept,
+    so the cut costs acceptance only."""
+    if tree is None or not max_depth:
+        return tree
+    d = tree.depths()
+    if max(d) < max_depth:
+        return tree
+    return tree.subset({i for i, x in enumerate(d) if x < max_depth})
+
+
 class VerifyReq:
     """One slot's tree block, submitted to the round. The slot that runs the round fills `out`
     and `ms`; the submitter reads them when it holds the turn again."""
@@ -544,6 +556,8 @@ class Meeting:
         self.shares = dict(shares or {})
         # SPD-163: a family's per-tree cap for an E-block joint cut (`joint_policy` "tree_cap"), or None
         self.tree_cap = None
+        # SPD-223: a family's deepest tree in a joint pass (`joint_policy` "max_depth"), or None
+        self.max_depth = None
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken
