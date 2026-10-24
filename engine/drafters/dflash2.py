@@ -1163,8 +1163,15 @@ def _window_buffer(kvp):
 
         def set_floor(self, floor: int) -> None:
             """Move the floor: pages wholly below it alias the shared page; pages it uncovers are
-            unaliased (`ensure` maps them fresh and zeroed)."""
+            unaliased (`ensure` maps them fresh and zeroed).
+
+            SPD-211: an uncovered page is unmapped until that `ensure`, and the paged set's `ensure`
+            (`kvpool.ensure_for`) returns at once while the set's row count is past the rows asked:
+            the count stayed where it was, so a resume at 28,672 after a 37,387-token session left
+            rows 16,384..24,575 unmapped under `rows` and the next sync, copy or draft read of them
+            was an illegal memory access. The set's count comes down with this buffer's."""
             floor = (max(0, int(floor)) // self.page_rows) * self.page_rows
+            lowered = False
             with self.lock:
                 if floor > self.floor:
                     gone = [p for p in self._pages_for(0, floor) if p in self.handles]
@@ -1176,7 +1183,11 @@ def _window_buffer(kvp):
                 elif floor < self.floor:
                     self._alias_unmap(self._pages_for(floor, self.floor))
                     self.rows = min(self.rows, floor)
+                    lowered = True
                 self.floor = floor
+            ps = kvp._BY_PTR.get(self.tensor.data_ptr()) if lowered and self.tensor is not None else None
+            if ps is not None:
+                ps.lower(self.rows)
 
         def need_bytes(self, rows: int) -> int:
             rows = max(0, min(int(rows), self.max_rows))
@@ -1225,6 +1236,57 @@ def _window_buffer(kvp):
                 self.dummy = None
 
     return WindowBuffer
+
+
+def check_window(device: str = "cpu", rows: int = 37387, resume: int = 28672,
+                 shape=(5, 8, 65536, 128)) -> list[str]:
+    """SPD-211: a resume below a long session's window, through the paged set as the server runs it
+    (`cache.drafter_resume`: `kvpool.ensure_for`, then `state_resume`), leaves every page the drafter
+    then reads or writes committed: rows from the new floor to the resume point plus the pool's margin,
+    in both window buffers. On "cuda" the pages are the driver's and the rows are written and read back
+    (before the fix the write is an illegal memory access); on "cpu" the pool's bookkeeping is checked."""
+    from engine import kvpool as kvp
+    pool = kvp.KVPool(hard_floor=0, margin_rows=256, meminfo=lambda: 1 << 50)
+    saved, kvp.POOL = kvp.POOL, pool
+    W = _window_buffer(kvp)
+    ps = kvp.PagedSet("check", pool=pool)
+    bufs = []
+    try:
+        eng_kv = ps.add(kvp.PagedBuffer((4, 2, shape[2], 256), 2, torch.bfloat16, device, pool=pool, name="kv.k"))
+        ckb = ps.add(W(shape, 2, torch.bfloat16, device, pool=pool, name="draft.k", window=2048))
+        cvb = ps.add(W(shape, 2, torch.bfloat16, device, pool=pool, name="draft.v", window=2048))
+        bufs = [eng_kv, ckb, cvb]
+        d = DFlash2Drafter.__new__(DFlash2Drafter)
+        d._psync, d._partial, d.module, d.ctx_len, d._tap_rows = [], False, object(), 0, []
+        d._ckb, d._cvb, d._ck, d._cv = ckb, cvb, ckb.tensor, cvb.tensor
+        d._cs = torch.zeros(shape[2], dtype=torch.uint8, device=device)
+        ps.ensure(rows)                                   # the first session's prefill and decode
+        d._ck[:, :, rows - 2048:rows] = 1.0
+        d.ctx_len = rows
+        old = ckb.floor
+        kvp.ensure_for(d._ck, resume)                     # the second request: resume earlier
+        d.state_resume(resume)
+        out = [f"session {rows:,} rows: floor {old:,}; resume at {resume:,}: floor {ckb.floor:,}, "
+               f"set rows {ps.rows:,}"]
+        hi = min(shape[2], resume + pool.margin_rows)
+        for b in (ckb, cvb):
+            miss = [p for p in b._pages_for(b.floor, hi) if p not in b.handles]
+            assert not miss, f"{b.name}: {len(miss)} page(s) of rows {b.floor:,}..{hi:,} not committed"
+        out.append(f"rows {ckb.floor:,}..{hi:,} committed in both window buffers")
+        if device != "cpu":
+            for t in (d._ck, d._cv):
+                t[:, :, ckb.floor:hi] = 2.0               # the prefill's sync from the resume point
+            torch.cuda.synchronize()
+            ok = all(bool((t[:, :, ckb.floor:hi] == 2.0).all()) for t in (d._ck, d._cv))
+            assert ok, "rows written above the floor did not read back"
+            out.append("written and read back on the device")
+        return out
+    finally:
+        for b in reversed(bufs):
+            b.close()
+        kvp.POOL = saved
+
+
 #: the longest sync that waits (a block's rows); a prompt's sync runs at once
 DEFER_SYNC_ROWS = 64
 

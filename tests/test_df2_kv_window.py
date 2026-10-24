@@ -154,6 +154,30 @@ def test_an_anchor_copied_from_below_the_floor_resumes_as_not_real():
 
 
 
+def test_a_resume_below_the_window_through_the_paged_set_commits_its_rows():
+    """SPD-211: the server's resume goes through the paged set (`kvpool.ensure_for`), whose fast path
+    compares the set's row count. A resume at 28,672 after a 37,387-token session moves the floor from
+    24,576 down to 16,384; the set's count has to come down with it, or the pages of rows 16,384..24,575
+    stay unmapped and the next sync writes into them (an illegal memory access on the board)."""
+    out = D.check_window("cpu")
+    assert "floor 24,576" in out[0] and "floor 16,384" in out[0], out
+    assert out[1].startswith("rows 16,384..28,928 committed"), out
+
+
+def test_a_trim_below_the_floor_keeps_the_set_count_honest():
+    pool = kvpool.KVPool(hard_floor=0, margin_rows=0, meminfo=lambda: 1 << 50)
+    ps = kvpool.PagedSet("s", pool=pool)
+    W = D._window_buffer(kvpool)
+    w = ps.add(W(SHAPE, 2, torch.bfloat16, "cpu", pool=pool, window=2048))
+    ps.ensure(40000)
+    assert w.floor == 24576 and ps.rows == 40960
+    w.set_floor(8192)                                   # a resume far back, outside the set's own calls
+    assert ps.rows == w.rows == 8192, (ps.rows, w.rows)
+    ps.ensure(20000)
+    assert not [p for p in w._pages_for(w.floor, 20000) if p not in w.handles]
+    ps.trim(5000)
+    assert w.floor == 0 and ps.rows == w.rows
+
 def test_the_window_is_the_27bs_choice_and_off_for_any_other_build():
     import ast
     import inspect

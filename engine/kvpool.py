@@ -589,6 +589,12 @@ class PagedSet:
         self.high = max(self.high, int(rows))
         return got
 
+    def lower(self, rows: int) -> None:
+        """A buffer of this set no longer holds rows past `rows` committed (SPD-211: a draft window's
+        floor moved down and unmapped the pages it uncovered). The set's count follows, so the next
+        `ensure` past `rows` maps them again instead of taking the fast path over a hole."""
+        self.rows = min(self.rows, max(0, int(rows)))
+
     def need_bytes(self, rows: int) -> int:
         want = int(rows) + (self.pool.margin_rows if self.pool is not None else 0)
         return sum(b.need_bytes(want) for b in self.bufs)

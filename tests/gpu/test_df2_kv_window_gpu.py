@@ -49,6 +49,15 @@ def test_window_over_driver_pages():
     return "floor up, rows kept, alias reads/writes, floor down, zeroed, trimmed"
 
 
+def test_a_resume_below_the_window_over_driver_pages():
+    """SPD-211: `check_window` on the device: the rows from the lowered floor are mapped and take a write."""
+    assert kvpool.Driver.get() is not None, "needs CUDA virtual memory management"
+    out = D.check_window("cuda")
+    assert out[-1] == "written and read back on the device", out
+    return "; ".join(out)
+
+
 if __name__ == "__main__":
     print(test_window_over_driver_pages())
-    print("1 passed")
+    print(test_a_resume_below_the_window_over_driver_pages())
+    print("2 passed")
