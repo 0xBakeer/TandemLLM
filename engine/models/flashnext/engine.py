@@ -44,6 +44,8 @@ from engine.models.flashnext.ple import decode_rows
 # rows up to which an EXL3 projection runs on tools/fn_kernels.dense (the kernel's limit);
 # QWEN38_FN_DENSE=0: the library path of tools/exl3_linear for every row count (an A/B)
 DENSE_MAX = 32 if _S.get("FN_DENSE") == "1" else 0
+#: SPD-215: the joint pass runs its row-wise parts once over every state's rows (`_verify_multi_rowwise`)
+ROWWISE = _S.get("FN_JOINT_ROWWISE") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -885,6 +887,8 @@ class FlashNextEngine(FlashNextRef):
 
         def use(x):
             self._cur, self._write, self._cls, self.rec = x["rb"], False, x["cls"], x["rec"]
+        if ROWWISE:
+            return self._verify_multi_rowwise(cx, rows, use, mark, marks, jt, K, H, hc, eps, S)
         mark("mix")
         hs = [self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc) for x in cx]
         ns = [None] * len(cx)
@@ -965,6 +969,91 @@ class FlashNextEngine(FlashNextRef):
             torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], hs[j]))
+        self._pend_owner = None
+        if jt is not None:
+            mark("end")
+            torch.cuda.synchronize()
+            for (name, a), (_, b) in zip(marks, marks[1:]):
+                jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
+            jt["passes"] = jt.get("passes", 0) + 1
+        return out
+
+    def _verify_multi_rowwise(self, cx, rows, use, mark, marks, jt, K, H, hc, eps, S):
+        """SPD-215: `verify_multi`'s layers with the row-wise parts (the mixers' norms, down/up mixes, the
+        injects, the MoE combine, the head's mixer) run once over every state's rows instead of a state at
+        a time; the PLE, the GDN recurrence and the attention still run per state on its own rows and
+        caches. Each row's bits are its own (the kernels are row-wise; tools/fn_joint_check.py compares
+        every state with its lone verify)."""
+        c = self.cfg
+        Hs = torch.cat([self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc)
+                        for x in cx])
+        Ns = None
+        for li in range(c.num_hidden_layers):
+            p = self.pre(li)
+            mark("mix")
+            if li in c.ple_layers:
+                parts = []
+                for j, x in enumerate(cx):
+                    use(x)
+                    parts.append(Hs[rows[j]] + self._ple_step(Hs[rows[j]], li, x["st"]))
+                Hs, Ns = torch.cat(parts), None
+            if Ns is None:
+                Ns = K.hc_norm(Hs, self._site_norm(li), H, eps)
+            X, DI = self._mix(Ns, p + "attn_hyper_connection")
+            mark("proj")
+            if c.is_linear(li):
+                a = p + "linear_attn."
+                qkvz, ab = self.lin(X, self.W[a + "qkvz"]), K.gemv_bf16(X, self.W[a + "ab"])
+                mark("gdn")
+                parts = []
+                for j, x in enumerate(cx):
+                    use(x)
+                    parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                mark("proj")
+                out = self.lin(torch.cat(parts), self.W[a + "out_proj.weight"])
+            else:
+                a = p + "self_attn."
+                qkv = self.lin(X, self.W[a + "qkv"])
+                iqk = self.lin(X, self.W[a + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+                mark("attn")
+                parts = []
+                for j, x in enumerate(cx):
+                    use(x)
+                    parts.append(self._attn1_core(qkv[rows[j]], iqk[rows[j]] if iqk is not None else None, li,
+                                                  x["st"]))
+                mark("proj")
+                out = self.lin(torch.cat(parts), self.W[a + "o_proj.weight"])
+            mark("mix")
+            Hs, Ns = K.inject_norm(Hs, out, DI, self.W[p + "attn_hyper_connection.rank"],
+                                   self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+            XM, DI2 = self._mix(Ns, p + "mlp_hyper_connection")
+            nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
+            R = self.W[p + "mlp_hyper_connection.rank"]
+            mark("moe")
+            yd, ids, wts = self.moe_parts(XM, li)
+            mark("mix")
+            for j, x in enumerate(cx):
+                x["rec"][("ids", li)] = ids[rows[j]]
+            Hs, Ns = K.combine_inject_norm(Hs, yd, ids, wts, DI2, R, nxt, hc, eps)
+        mark("head")
+        if Ns is None:
+            Ns = K.hc_norm(Hs, self._site_norm(c.num_hidden_layers), H, eps)
+        dd = K.gemv(Ns, self.W["hyper_connection_mixer.down_inject"])
+        Xh = K.mix_up(dd, Ns, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc)
+        for j, x in enumerate(cx):
+            x["rec"]["stack"] = Hs[rows[j]]
+        if DENSE_MAX:
+            logits = K.dense(Xh, self.W["lm_head.weight"])
+        else:
+            from tools.exl3_linear import exl3_matmul
+            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        out = []
+        for j, x in enumerate(cx):
+            rb = x["rb"]
+            rb["logits"][:x["M"]].copy_(logits[rows[j]])
+            torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
+            self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
+            out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], Hs[rows[j]]))
         self._pend_owner = None
         if jt is not None:
             mark("end")
