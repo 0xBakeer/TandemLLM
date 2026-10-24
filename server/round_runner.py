@@ -52,6 +52,11 @@ PIPE = os.environ.get("QSE_RUNNER_PIPE", "1") == "1"
 #: can watch a lane give way and go on; QSE_KV_TEST_REFUSE_SLOTS limits it to these slots (comma list)
 #: SPD-215: a joint pass hands each drafter that asks (`joint_priced`) its share of the pass by rows
 JOINT_PRICE = os.environ.get("QSE_RUNNER_JOINT_PRICE", "0") == "1"
+#: SPD-225: a joint round keeps the rows where its expected tokens a ms are the most, on the pass prices the
+#: runner learns from its own rounds (server/slots.py `priced_cut`); every QSE_RUNNER_PRICED_EXPLORE-th priced
+#: round keeps a random row budget instead, so the prices of every row count stay measured
+PRICED_CUT = os.environ.get("QSE_RUNNER_PRICED_CUT", "0") == "1"
+PRICED_EXPLORE = int(os.environ.get("QSE_RUNNER_PRICED_EXPLORE", "8") or 8)
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -126,6 +131,13 @@ class Runner:
         self._steady: dict = {}
         self._round_e = 0
         self._round_tok = 0
+        self._round_rows = 0                # the rows of the round's joint pass (0: none, or more than one)
+        self._round_exp = 0.0               # the kept drafts' expected tokens (scores), for the calibration
+        self._round_acc = 0                 # the drafts the walks accepted
+        from server import slots as slots_mod
+        self.prices = slots_mod.RowPrices()
+        import random
+        self._rng = random.Random(225)
         self._collect: list | None = None    # the runner thread's pending draft calls, while proposals run
 
     # ---- registration (the slot's thread) ---------------------------------------------------
@@ -198,7 +210,7 @@ class Runner:
         return dict(self.stats, skips=dict(SKIPS),
                     ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
                     gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n,
-                    steady=steady)
+                    steady=steady, prices=self.prices.report() if PRICED_CUT else None)
 
     def _t(self, key, t0):
         t1 = time.perf_counter()
@@ -215,9 +227,9 @@ class Runner:
     def _gpu_read(self) -> None:
         """The finished rounds' GPU segments into `gpu` (a round whose last event is not done waits)."""
         keep = []
-        for rnd, prev, e, tok in self._ev_done:
+        for rnd, prev, e, tok, rows in self._ev_done:
             if not rnd[-1][1].query():
-                keep.append((rnd, prev, e, tok))
+                keep.append((rnd, prev, e, tok, rows))
                 continue
             if prev is not None and prev.query() and e:
                 per = prev.elapsed_time(rnd[-1][1])
@@ -225,6 +237,11 @@ class Runner:
                 st.append((per, tok))
                 if len(st) > 512:
                     del st[0]
+                if rows and e > 1:
+                    # SPD-225: the pass's GPU segment (its issue to its end event) at these lanes and rows
+                    seg = [a.elapsed_time(b) for (_, a), (lab, b) in zip(rnd, rnd[1:]) if lab == "verify"]
+                    if len(seg) == 1:
+                        self.prices.note(e, rows, seg[0], per)
             for (_, a), (lab, b) in zip(rnd, rnd[1:]):
                 if lab in self.gpu:
                     self.gpu[lab] += a.elapsed_time(b)
@@ -243,6 +260,7 @@ class Runner:
         self._gpu_read()
         self._ev = []
         self._round_e, self._round_tok = 0, 0
+        self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
         self._mark("start")
         t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
@@ -295,10 +313,15 @@ class Runner:
             k = meet.per_pass() if meet is not None and hasattr(meet, "per_pass") else len(group)
             for i in range(0, len(group), max(1, k)):
                 self._verify(group[i:i + k])
+                passes += 1
+            if passes > 1:
+                self._round_rows = 0
+        if self._round_exp > 0:
+            self.prices.note_accept(self._round_acc, self._round_exp)
         self._bind_none()
         self._t("round", t_r)
         if self._ev:
-            self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok))
+            self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok, self._round_rows))
             self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
             print(f"[runner] {self.report()}", flush=True)
@@ -362,6 +385,24 @@ class Runner:
                     cap is not None and any(len(x.parents) > cap for x in trees)) or meet.joint_for(len(group)):
                 keeps = slots_mod.joint_cut(trees, meet.max_rows, cap)
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
+            if PRICED_CUT and len(group) > 1:
+                # SPD-225: the rows where the round's expected tokens a ms are the most (an exploring round:
+                # a random row budget), on the pass prices measured at these lanes
+                pr = self.prices
+                budget = None
+                if pr.cost(len(group), meet.max_rows) is None or (pr.priced + pr.explored) % PRICED_EXPLORE == 0:
+                    budget = self._rng.randint(len(group), meet.max_rows)
+                alone = all(getattr(t.eng.caps, "joint_plain", False) for t in group)
+                got = slots_mod.priced_cut(trees, pr, meet.max_rows, cap, budget, anchor_alone=alone)
+                if got is not None:
+                    keeps, _, offered = got
+                    if budget is None:
+                        pr.priced += 1
+                        pr.rows_offered += offered
+                        pr.rows_kept += sum(len(kp) for kp in keeps)
+                    else:
+                        pr.explored += 1
+                    trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
             # SPD-223: no tree deeper than the family's joint kernels carry (a 32-deep lookup chain past
             # the grouped GDN's 16 levels: a ValueError eager, an illegal address from a joint graph)
             trees = [slots_mod.depth_cut(x, getattr(meet, "max_depth", None)) for x in trees]
@@ -390,6 +431,9 @@ class Runner:
                 if not kept:
                     return
                 group, trees = [t for t, _ in kept], [x for _, x in kept]
+        if len(group) > 1:
+            self._round_rows = sum(len(x.tokens) for x in trees)
+            self._round_exp += sum(sum(x.scores[1:]) for x in trees)
         t0 = time.perf_counter()
         blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
         if len(group) == 1 and not (JOINT1 and getattr(group[0].eng, "forward_tree_multi", None) is not None):
@@ -458,6 +502,8 @@ class Runner:
                 path, new = t.sampler.tree_walk_logits(lg, x.tokens, x.parents, start=len(t.ctx), q=x.q)
             else:
                 path, new = walk_mod.accept_tree(x, lg.argmax(-1).tolist())
+            if len(group) > 1:
+                self._round_acc += len(path) - 1
             yield t, x, path, new
 
     def _tail(self, t: Task, tree, path, new) -> None:

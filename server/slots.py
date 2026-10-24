@@ -514,6 +514,129 @@ def joint_cut(trees: list, max_rows: int, cap: int | None = None) -> list[set]:
     return keep
 
 
+class RowPrices:
+    """SPD-225: what a joint pass costs by its lanes and rows, and what the rest of a round costs by its
+    lanes, learned from the rounds the runner times on the GPU (exponential averages, `note`). A MoE
+    family's pass grows with its rows (the experts a pass reads are the union of its rows' picks); a dense
+    family's barely does. `cal`: the drafts accepted over the kept nodes' scores (path probabilities)."""
+
+    def __init__(self, alpha: float = 0.1):
+        self.alpha = float(alpha)
+        self.pass_ms: dict = {}            # lanes -> {rows -> ms of the joint pass}
+        self.rest_ms: dict = {}            # lanes -> ms of the round besides its pass
+        self.cal = 1.0
+        self.n = 0
+        self.priced = 0
+        self.explored = 0
+        self.rows_kept = 0
+        self.rows_offered = 0
+
+    def _avg(self, d: dict, k: int, v: float) -> None:
+        d[k] = v if k not in d else d[k] + self.alpha * (v - d[k])
+
+    def note(self, lanes: int, rows: int, pass_ms: float, period_ms: float) -> None:
+        self._avg(self.pass_ms.setdefault(int(lanes), {}), int(rows), float(pass_ms))
+        self._avg(self.rest_ms, int(lanes), max(0.0, float(period_ms) - float(pass_ms)))
+        self.n += 1
+
+    def note_accept(self, accepted: float, expected: float) -> None:
+        if expected > 0:
+            self.cal += self.alpha * (min(2.0, accepted / expected) - self.cal)
+
+    def cost(self, lanes: int, rows: int) -> float | None:
+        """The pass's ms at `rows` with `lanes` lanes: the average there, else a line through the rows
+        measured nearest below and above; past the largest measured, the line of the two largest; below the
+        smallest measured, the smallest's own ms (never a guess of a cheaper pass). None under two rows
+        measured at these lanes."""
+        d = self.pass_ms.get(int(lanes)) or {}
+        if rows in d:
+            return d[rows]
+        ks = sorted(d)
+        if len(ks) < 2:
+            return None
+        if rows < ks[0]:
+            return d[ks[0]]
+        lo = [k for k in ks if k < rows]
+        hi = [k for k in ks if k > rows]
+        a, b = (lo[-1], hi[0]) if hi else (lo[-2], lo[-1])
+        return max(0.0, d[a] + (d[b] - d[a]) * (rows - a) / (b - a))
+
+    def rest(self, lanes: int) -> float:
+        return self.rest_ms.get(int(lanes), 0.0)
+
+    def report(self) -> dict:
+        return {"rounds": self.n, "priced": self.priced, "explored": self.explored, "cal": round(self.cal, 3),
+                "rows_kept": round(self.rows_kept / max(1, self.priced), 1),
+                "rows_offered": round(self.rows_offered / max(1, self.priced), 1),
+                "pass_ms": {e: {r: round(v, 1) for r, v in sorted(d.items())}
+                            for e, d in sorted(self.pass_ms.items())},
+                "rest_ms": {k: round(v, 1) for k, v in sorted(self.rest_ms.items())}}
+
+
+def priced_cut(trees: list, prices: RowPrices, max_rows: int, cap: int | None = None,
+               budget: int | None = None, anchor_alone: bool = True) -> tuple | None:
+    """SPD-225: the round's rows where its expected tokens a ms are the most. Every lane keeps its anchor (one
+    token each); the trees' other nodes are admitted best-first by score (path probabilities, scaled by the
+    measured calibration), each with its ancestors, at most `max_rows` in all and `cap` a tree, as
+    `joint_cut`; the prefix of that order kept is the one whose (lanes + expected drafts) / (rest of the
+    round + the pass at its rows) is the largest. `budget` (an exploring round): the longest prefix within
+    that many rows instead. `anchor_alone` False (a family whose joint pass takes no block of its anchor
+    alone, `caps.joint_plain`): a tree with drafts keeps its best one whatever the prices. Returns (kept node
+    indices a tree, expected tokens, rows offered), or None while the pass at these lanes is not priced."""
+    E = len(trees)
+    big = cap if cap is not None else max_rows
+    rest = prices.rest(E)
+    if budget is None and prices.cost(E, max_rows) is None:
+        return None
+    def path(g, i):
+        p, j = [], i
+        while j not in keep[g]:
+            p.append(j)
+            j = trees[g].parents[j]
+        return p
+
+    keep = [{0} for _ in trees]
+    used, exp = E, float(E)
+    if not anchor_alone:
+        for g, t in enumerate(trees):
+            if len(t.tokens) > 1:
+                p = path(g, max(range(1, len(t.tokens)), key=lambda i: t.scores[i]))
+                keep[g].update(p)
+                used += len(p)
+                exp += prices.cal * sum(t.scores[n] for n in p)
+    base = [set(k) for k in keep]
+    exp0 = exp
+    order = sorted(((-t.scores[i], g, i) for g, t in enumerate(trees) for i in range(1, len(t.tokens))),
+                   key=lambda x: (x[0], x[1], x[2]))
+    c = prices.cost(E, used) if budget is None else None
+    best, best_at, steps = (exp / (rest + c) if c else 0.0), 0, []
+    for _, g, i in order:
+        if used >= max_rows:
+            break
+        if i in keep[g]:
+            continue
+        p = path(g, i)
+        if used + len(p) > max_rows or len(keep[g]) + len(p) > big:
+            continue
+        keep[g].update(p)
+        used += len(p)
+        exp += prices.cal * sum(trees[g].scores[n] for n in p)
+        steps.append((g, p, used))
+        if budget is not None:
+            if used <= budget:
+                best_at = len(steps)
+            continue
+        c = prices.cost(E, used)
+        if c is not None and rest + c > 0 and exp / (rest + c) > best:
+            best, best_at = exp / (rest + c), len(steps)
+    offered = used
+    keep, exp = base, exp0
+    for g, p, _ in steps[:best_at]:
+        keep[g].update(p)
+        exp += prices.cal * sum(trees[g].scores[n] for n in p)
+    return keep, exp, offered
+
+
 #: SPD-161: how long a barrier waiter sleeps while a decoding slot holds the GPU turn; it is woken before
 #: that by the round's end or a slot leaving decode (`Pool.wake`). A submit wakes nobody: the slot whose
 #: submit completes the set runs the round itself (`QSE_PARALLEL_BUSY_WAIT_MS`)
