@@ -16,6 +16,8 @@ It refuses the production ledger (it is a test run).
 Words in the last user message steer it, for the e2e's error and edge states:
 
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
+    FAKE_POOL_FULL  the KV pool's gate refuses after five tokens (engine/kvpool.py `PoolFull`,
+                  SRV-709): the answer ends with the `memory_full` error
     FAKE_CALL_NOTOOLS  the answer calls a tool named `tool`, offered or not (SRV-247)
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
@@ -456,6 +458,10 @@ def load(app, a) -> None:
             for t in block:
                 if "FAKE_ERROR" in user and n == 5:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
+                if "FAKE_POOL_FULL" in user and n == 5:
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot0 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL)")
                 if n == 0:
                     bs.first()
                 if lpr is not None:

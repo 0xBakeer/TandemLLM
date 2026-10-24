@@ -5069,6 +5069,27 @@ def _finishing(rec, step: str) -> None:
     rec.step = step
 
 
+#: SRV-709: when a request stopped for memory is worth sending again (the Retry-After)
+MEMORY_FULL_RETRY_S = 30
+
+
+def memory_full_error(exc, generated: int | None = None) -> dict | None:
+    """SRV-709: the error body of a request the KV pool's gate stopped (engine/kvpool.py
+    `PoolFull`: its next pages would have taken MemAvailable under the hard floor after every
+    reclaim), or None for any other failure. Code `memory_full`, type `server_busy`: the box is
+    full, not broken. The rows were never written, so the text so far is good; a client that sends
+    the same request again with the text as a continuation (the Chat tab does) waits for memory at
+    the admission and goes on from there. A streamed answer ends with it beside `finish_reason`
+    "error"; one not streamed yet gets it as a 503 with Retry-After."""
+    if not isinstance(exc, kvpool.PoolFull):
+        return None
+    done = f" after {int(generated):,} tokens" if generated else ""
+    return {"message": (f"memory is full: this request stopped{done} to keep the box above its "
+                        f"memory floor; send it again to continue once memory is free"),
+            "type": "server_busy", "code": "memory_full", "retry_after": MEMORY_FULL_RETRY_S,
+            "detail": str(exc)}
+
+
 def _stop_detail(finish: str, ids: list, eos, cut: bool, pstop) -> str | None:
     """What refines a `stop`: the end token, a stop string or the repetition guard."""
     if finish != "stop":
@@ -6228,9 +6249,13 @@ class Handler(BaseHTTPRequestHandler):
             if ev is not None:                   # SRV-249: no status line left shimmering
                 self.wfile.write(_chunk(e["cid"], e["model"], e["created"], None,
                                         extra={"event": ev}).encode())
+            # the refusal's own code where it names one (SRV-709 `memory_full`), else the status
+            named = err.get("code") if isinstance(err.get("code"), str) else None
             self._early_write(_chunk(e["cid"], e["model"], e["created"], {}, finish="error",
                                      error={"message": str(err.get("message") or code),
-                                            "type": err.get("type") or "error", "code": code}))
+                                            "type": err.get("type") or "error",
+                                            "code": named or code,
+                                            **({"status": code} if named else {})}))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -7202,6 +7227,10 @@ class Handler(BaseHTTPRequestHandler):
             if fault is not None:
                 # SRV-671: the CUDA context is lost; the reason in words, not the driver's text
                 return self._fail_gpu()
+            full = memory_full_error(exc)
+            if full is not None and self._early is not None and not self._early["done"] \
+                    and not self._early_body:
+                return self._early_end(503, json.dumps({"error": full}).encode())
             if self._early is not None and not self._early["done"] and not self._early_body:
                 # a stream opened early that failed before its generation: closed, with the reason
                 return self._early_end(500, json.dumps({"error": {
@@ -7212,6 +7241,10 @@ class Handler(BaseHTTPRequestHandler):
                 # truncation without the reason -- which is precisely bug 2's symptom.
                 return
             try:
+                if full is not None:
+                    # SRV-709: the box at its floor is a wait, not a failure: 503 and when to retry
+                    return self._send_bytes(503, json.dumps({"error": full}).encode(),
+                                            extra_headers=(("Retry-After", str(MEMORY_FULL_RETRY_S)),))
                 if isinstance(exc, grammar_mod.GrammarError):
                     # the constraint left no legal token -- the request's own doing
                     return self._json(400, compat.Refusal(compat.constraint_field(body),
@@ -9349,6 +9382,8 @@ class Handler(BaseHTTPRequestHandler):
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             if aloop is not None:
                 rec.stop_detail = "tool_arg_loop"
+            if isinstance(failed, kvpool.PoolFull):
+                rec.stop_detail = "memory_full"            # SRV-709
             if sup is not None:
                 _outcome(sup, tbuf.calls if tbuf is not None else [], ids, in_think, finish)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
@@ -9366,7 +9401,8 @@ class Handler(BaseHTTPRequestHandler):
                     put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
                     put(_chunk(cid, model, created, {}, finish=finish,
-                               error={"message": str(failed), "type": type(failed).__name__},
+                               error=memory_full_error(failed, len(ids)) or
+                               {"message": str(failed), "type": type(failed).__name__},
                                extra=on_finish, **(lp_take() if lpr is not None else NO_LP)))
                 else:
                     put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish,

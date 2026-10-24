@@ -47,7 +47,10 @@ and the Now line says the engine has no memory for the chat's context. A 400 tha
 is over the model's context window (a tool result can grow the prompt past the guard's estimate,
 GitHub issue #18) compacts the conversation and sends the call once more when the compaction made
 it smaller; when it cut nothing, or the smaller call is refused too, the run fails with the
-engine's message.
+engine's message. An answer our engine stopped at its memory floor (SRV-709: the `memory_full`
+error beside finish_reason "error", or a 503 with that code before the stream) is no failure: the
+text so far stays, the Now line says the chat waits for memory, and the call goes again as its
+continuation with backoff 1, 2, 4 ... 60 s; the engine's admission holds it until memory is free.
 
 WORKERS (VIS-E15). A worker is a run like any other on a task conversation (chatd/tasks.py): its
 `parent` is the run whose task call started it, it runs in that run's slot (`slot_owner`), its
@@ -98,6 +101,19 @@ def cached_of(u: dict) -> int:
     if isinstance(hit, int) and not isinstance(hit, bool):
         return hit
     return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+
+
+#: SRV-709: the Now line while a chat waits because the engine's memory is full
+MEMORY_PAUSE = ("Memory is full: this chat pauses until a running chat frees memory, then "
+                "continues (next try in {s} s)")
+
+
+def memory_full(err) -> bool:
+    """SRV-709: the engine stopped or refused the call because its memory is full (`memory_full`:
+    a streamed answer's error beside finish_reason "error", or a 503 before the stream). The text
+    so far is good: the call is sent again as a continuation once memory is free."""
+    code = getattr(err, "code", None) if not isinstance(err, dict) else err.get("code")
+    return code == "memory_full"
 
 
 def memory_words(exc: EngineError) -> str | None:
@@ -505,6 +521,17 @@ class Run:
                 if not exc.retryable:
                     self.error = exc.args[0]
                     return "failed"
+                if memory_full(exc):
+                    # SRV-709: refused for memory before the stream: wait and send it again
+                    if time.monotonic() + backoff > deadline:
+                        self.error = exc.args[0]
+                        self.notice = "The engine's memory stayed full. Continue goes on from here."
+                        return "interrupted"
+                    wait = max(backoff, min(exc.retry_after or backoff, BACKOFF_MAX_S))
+                    self.set_phase("queued", MEMORY_PAUSE.format(s=int(wait)))
+                    self.wake.wait(wait)
+                    backoff = min(BACKOFF_MAX_S, backoff * 2)
+                    continue
                 memory = memory_words(exc)
                 if memory and refused == 0:
                     # the chat on the engine's other slot holds memory too: one retry once it may
@@ -546,6 +573,23 @@ class Run:
                 return outcome
             if self.stop_mode:
                 return self._stopped()
+            if outcome == "memory":
+                # SRV-709: the engine stopped this answer at its memory floor; the text so far
+                # stays and the call goes again as its continuation, which waits for memory there
+                if time.monotonic() + backoff > deadline:
+                    self.error = "the engine's memory stayed full"
+                    self.notice = "The engine's memory stayed full. Continue goes on from here."
+                    return "interrupted"
+                self.svc.flush(self)
+                if self.step_parts:                  # a half-written call is not continued
+                    self.svc.drop_step(self)
+                else:
+                    self.continue_final = True
+                self.finish_reason = None
+                self.set_phase("queued", MEMORY_PAUSE.format(s=int(backoff)))
+                self.wake.wait(backoff)
+                backoff = min(BACKOFF_MAX_S, backoff * 2)
+                continue
             # the stream broke with no finish: the engine went away. Retry, continuing the text.
             if time.monotonic() + backoff > deadline:
                 self.error = "the engine stream ended early"
@@ -579,6 +623,8 @@ class Run:
                 return "broken"
             if kind != "data" or not isinstance(obj, dict):
                 continue
+            if memory_full(obj.get("error") if isinstance(obj.get("error"), dict) else {}):
+                return "memory"                      # SRV-709: paused, continued by `_call`
             if obj.get("error") and not obj.get("choices"):
                 err = obj["error"]
                 self.error = str(err.get("message") if isinstance(err, dict) else err)[:300]

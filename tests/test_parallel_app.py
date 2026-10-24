@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -258,6 +259,48 @@ def test_side_slots_on_the_fake_engine_take_the_full_window():
     try:
         h = _get(port, "/health")["parallel"]
         assert h["n"] == 3 and [s["max_len"] for s in h["slots"]] == [32768] * 3, h["slots"]
+    finally:
+        _stop(proc)
+
+
+def test_a_full_pool_stops_the_answer_with_memory_full():
+    """SRV-709: a commit the KV pool refuses after every reclaim (`PoolFull`) is the box at its
+    floor, not a failure: a streamed answer keeps its text and ends with finish_reason "error"
+    beside the `memory_full` error; one not streamed yet gets a 503 with Retry-After."""
+    port, proc = _server(("--parallel", "2"))
+    try:
+        body = {"messages": [{"role": "user", "content": "FAKE_POOL_FULL go"}], "max_tokens": 64,
+                "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        text, last = [], None
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for raw in r:
+                line = raw.decode().strip()
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                d = json.loads(line[6:])
+                for c in d.get("choices") or []:
+                    if (c.get("delta") or {}).get("content"):
+                        text.append(c["delta"]["content"])
+                    if c.get("finish_reason"):
+                        last = d
+        assert last is not None and last["choices"][0]["finish_reason"] == "error", last
+        err = last["error"]
+        assert err["code"] == "memory_full" and err["type"] == "server_busy", err
+        assert "memory is full" in err["message"] and err["retry_after"] == 30, err
+        assert text, "the text before the stop is kept"
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(dict(body, stream=False)).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=60)
+            raise AssertionError("a full pool must not answer 200")
+        except urllib.error.HTTPError as exc:
+            got = json.loads(exc.read())["error"]
+            assert exc.code == 503 and exc.headers.get("Retry-After") == "30", exc.code
+            assert got["code"] == "memory_full", got
     finally:
         _stop(proc)
 

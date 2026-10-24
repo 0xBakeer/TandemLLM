@@ -624,6 +624,26 @@ def test_a_stream_that_drops_is_continued_not_repeated():
         c.close()
 
 
+def test_a_full_memory_pauses_the_answer_and_continues_it():
+    """SRV-709: our engine stops an answer at its memory floor (`memory_full`): the run keeps the
+    text, says it waits for memory, and sends the call again as its continuation."""
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "FAKE_MEMORY_FULL_ONCE hello")
+        seen = []
+        c.wait(lambda: seen.append((c.snap(cid)["run"] or {}).get("now") or "") or
+               any("Memory is full" in x for x in seen) or c.snap(cid)["status"] != "running", 10)
+        s = c.wait_idle(cid, 20)
+        a = s["messages"][-1]
+        assert a["status"] == "done", a
+        assert text_of(a).startswith("w0 w1 w2 ") and "closed0" in text_of(a), text_of(a)
+        assert c.last_body().get("continue_final_message") is True
+        assert any("Memory is full" in x for x in seen), seen
+    finally:
+        c.close()
+
+
 def test_an_error_frame_fails_the_run_with_its_message():
     c = Chat()
     try:
