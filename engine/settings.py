@@ -351,6 +351,7 @@ KNOBS: dict[str, tuple] = {
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
     # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
+    'PROMPT_END': ('1', 'engine/cache.py'),      # SPD-215: the resident prefix keeps the last prompt's end
     # read the n-gram table into the page cache at load (POSIX_FADV_WILLNEED, in the background)
     'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
     # drop the shards' page cache after the load (the table's is kept); 0 = keep it (a warm reload)

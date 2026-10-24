@@ -46,9 +46,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: row copies, two-pass top-k and span step), the sequential GDN verify (tools/gdn_seq_kernels.py) and the
 #: invariant verify attention, every one behind a knob that is off
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
-#: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move
-GOLDEN_V2 = ("78caf289adafa1d34c0341b813e284086977b5b6a5ff64a2055bdd76ea83833e",
-             "febbbe9bac10b8726fc91b32e6e11d5cb1cb1c7d0e6638e4ce7489772da1fdb0")
+#: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
+#: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
+GOLDEN_V2 = ("b44618ca1aad4b497a8b429d80da3f6437af0ffbcd729beeb17697be179f3b56",
+             "1c541b6d0835e69a6aa3dde59092f872dd9e0864181814dcc9cf92ed4f7709bd")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
