@@ -498,7 +498,8 @@ def _tc_kernel():
         import triton
         import triton.language as tl
 
-        @triton.jit
+        # one compile a weight shape: a chunk's row count (the last chunk of a prompt any number) is not specialised
+        @triton.jit(do_not_specialize=["M", "N", "K", "NG", "sxm", "sqn", "ssn", "sym"])
         def mm_i8_kernel(X, Q, S, Y, M, N, K, NG, sxm, sqn, ssn, sym,
                          G: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
             pm, pn = tl.program_id(0), tl.program_id(1)
