@@ -352,18 +352,23 @@ class StairCut:
         _, n, sibs = best
         # DFS pre-order: a depth's sibling leaf before the spine child that continues the chain
         tokens, parents, kind = [anchor], [-1], [None]
+        scores = [1.0]
         spine_row = 0
         for k in range(n + 1):
             if k in sibs:
                 tokens.append(tok[k][1])
                 parents.append(spine_row)
                 kind.append(("sib", k))
+                scores.append(sib_q[k])
             if k < n:
                 tokens.append(tok[k][0])
                 parents.append(spine_row)
                 kind.append(("spine", k))
+                scores.append(spine_q[k])
                 spine_row = len(tokens) - 1
         self.last = (kind, prob, len(tokens), self.cls)
+        # SPD-225: each row's calibrated path probability (its expected acceptance), the tree's scores
+        self.last_scores = scores
         return tokens, parents
 
     def _merged(self, anchor: int, tok: list, prob: list, look: list, conf: float) -> tuple[list[int], list[int]]:
@@ -421,10 +426,13 @@ class StairCut:
                 tokens.append(nodes[i][0])
                 parents.append(prow)
                 kind.append(nodes[i][3])
+                scores.append(nodes[i][2])
                 row[i] = len(tokens) - 1
                 emit(i, row[i])
+        scores = [1.0]
         emit(-1, 0)
         self.last = ("merged", kind, prob, len(tokens), conf, parents, self.cls)
+        self.last_scores = scores
         return tokens, parents
 
     def observe(self, path: list[int], round_ms: float, draft_ms: float) -> None:

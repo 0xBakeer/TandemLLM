@@ -322,7 +322,11 @@ class MTPTreeDrafter:
             look = self._look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
-        tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
+        # SPD-225: the rows' calibrated path probabilities as the tree's scores (a joint round's cut ranks
+        # every lane's nodes by them; without them every draft scored 0 and the cut went by lane order)
+        sc = getattr(self.cut, "last_scores", None)
+        tree = DraftTree(tokens=toks, parents=parents,
+                         scores=list(sc) if sc is not None and len(sc) == len(toks) else []).truncate(int(k) + 1)
         if self.anchor_backoff:
             if len(toks) <= 1:
                 self._anchor_streak += 1
