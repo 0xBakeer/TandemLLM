@@ -45,15 +45,18 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24): and again once: the round host cut (engine/rowcopy.py, engine/native_tree.py, the drafters'
 #: row copies, two-pass top-k and span step), the sequential GDN verify (tools/gdn_seq_kernels.py) and the
 #: invariant verify attention, every one behind a knob that is off
-GOLDEN_V2 = ("7270d41e7f8c9711350d0cbdcf7e6d11634a7c092b635f7819779658b1846d5f",
-             "03bf57d08d79b1f8b3ecfccfd83880f5d87613db79348e6ef08ee0781243e026")
+#: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
+#: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move
+GOLDEN_V2 = ("78caf289adafa1d34c0341b813e284086977b5b6a5ff64a2055bdd76ea83833e",
+             "febbbe9bac10b8726fc91b32e6e11d5cb1cb1c7d0e6638e4ce7489772da1fdb0")
 GOLDEN_FP4 = {
-    "qwen3_5": "532a1f281197b831d95a180e4c94d228ccb54b1af2445af603fc74bf783fc9f8",
-    "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
-    "nemotron_h": "7fdc694358e113492eab5bdf3ac96562937e1282876dd83933c44874627b8d4d",
-    "lfm2_moe": "9a10d58fc924dab2c6e6b74abe07dcd69eea64640401469ed2ecb1dffde20115",
-    "qwen3_5_moe": "b01a8f9a072512bf9f97a691a23eee86b3f0aeb1ef68fa4d146c1262a068a22d",
-    "flint": "cb88704742e3ea32545ffd50d85afc7fe80aac426f01003d447d01cfe17c995b",
+    # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once
+    "qwen3_5": "52027eef3708c238172a5e5bee21ecd4120022314011d2357f04e9d0b5836da6",
+    "qwen4_exp": "861e1d1c8bb49ead09ce8dbe9190a2c92fdc4f27e31cc8c5c3831d648d2fe570",
+    "nemotron_h": "63429f6dba04677b9e7d2f3660976674f43ed8cf0d7daf666eb39af033b434f5",
+    "lfm2_moe": "699a67aff522396da3148d96c35cfe255a932b71aadb26744af087427f649f72",
+    "qwen3_5_moe": "c2e4105d7d4a4b0f448e5e15aa5eb7818d25294df3b4068c9ed27eea41e76544",
+    "flint": "7c5c278ad4a8ba2075c50f14b12a21d2db29aba347bd78ca9617a9985178b73b",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

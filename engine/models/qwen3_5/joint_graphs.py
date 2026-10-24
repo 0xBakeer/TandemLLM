@@ -36,7 +36,8 @@ from engine.models.graph_lru import GraphLRU
 from engine.settings import SETTINGS as _S
 
 #: on (1): a joint pass of the 27B from a CUDA graph where it qualifies; 0: the eager joint pass
-ON = _S.get("JOINT_GRAPHS") == "1"
+#: a host without CUDA (the fake engine, a CPU run) serves the eager pass whatever the knob says
+ON = _S.get("JOINT_GRAPHS") == "1" and torch.cuda.is_available()
 #: joint graphs kept (one per engine set, row bucket and context classes); the least recently replayed go
 CAP = int(_S.get("JOINT_GRAPHS_MAX") or 12)
 #: a pass shape is captured once it has come this many times (an engine set that only exists while the

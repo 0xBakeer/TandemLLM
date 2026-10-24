@@ -226,13 +226,19 @@ def test_bf16_weights_are_not_handed_out():
     generator yields nothing for an all-bf16 module."""
     m, embed, _ = tiny()
     it = _item(m, embed, 30, 10, torch.Generator().manual_seed(1))
-    gen = m._forward_block_steps(*it)
+    # SPD-161's DF2_PACK_KP (on by default since SPD-201) hands the convolutions' kernel projection out by
+    # design (the drafter's rows may move by an ulp); this is the contract without it
+    kp, D.PACK_KP = D.PACK_KP, False
     try:
-        next(gen)
-    except StopIteration as fin:
-        assert torch.equal(fin.value, m.forward_block(it[0], it[1], it[2], it[3]))
-    else:
-        raise AssertionError("a bf16 module must not hand out projections")
+        gen = m._forward_block_steps(*it)
+        try:
+            next(gen)
+        except StopIteration as fin:
+            assert torch.equal(fin.value, m.forward_block(it[0], it[1], it[2], it[3]))
+        else:
+            raise AssertionError("a bf16 module must not hand out projections")
+    finally:
+        D.PACK_KP = kp
 
 
 if __name__ == "__main__":

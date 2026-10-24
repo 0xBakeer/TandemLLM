@@ -136,6 +136,24 @@ lattice(torch::Tensor blob, torch::Tensor logp, int64_t L, int64_t k, int64_t an
 """
 
 _MOD = None
+_READY = None
+
+
+def ready() -> bool:
+    """ON, and the extension built (the first call builds it). A host without a C++ toolchain logs once and
+    runs the Python walk and tree, which build the same tree."""
+    global _READY
+    if _READY is None:
+        if not ON:
+            return False
+        try:
+            module()
+            _READY = True
+        except Exception as e:                 # noqa: BLE001 - no compiler, no headers: the Python path
+            print(f"[drafter] the native tree did not build ({type(e).__name__}: {e}); the Python walk and tree "
+                  f"serve (the same tree)", flush=True)
+            _READY = False
+    return _READY
 
 
 def module():

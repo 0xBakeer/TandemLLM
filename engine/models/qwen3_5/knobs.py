@@ -6,11 +6,11 @@ KNOBS: dict[str, tuple] = {
     # of its own, its chain kernel, while the other slots wait)
     'JOINT_CHAINS': ('1', 'engine/models/qwen3_5/adapter.py'),
     # SPD-163: the joint verify pass from CUDA graphs (engine/models/qwen3_5/joint_graphs.py); 0: eager
-    'JOINT_GRAPHS': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
+    'JOINT_GRAPHS': ('1', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: joint graphs kept, the least recently replayed dropped first
-    'JOINT_GRAPHS_MAX': ('12', 'engine/models/qwen3_5/joint_graphs.py'),
+    'JOINT_GRAPHS_MAX': ('24', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
-    'JOINT_GRAPHS_AFTER': ('3', 'engine/models/qwen3_5/joint_graphs.py'),
+    'JOINT_GRAPHS_AFTER': ('16', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-199: the joint pass's row cap, at most the proven one (64 on EXL3, 32 else); empty: the proven one.
     # The EXL3 4-bit projections cost ~1.6x more from 33 rows on (tools/exl3_tall.py), so 32 is the other arm
     'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),
@@ -19,7 +19,7 @@ KNOBS: dict[str, tuple] = {
     # SPD-199: the 27B's EXL3 projections at 33+ rows through the decode-once tile: '' off, '64' or '128' rows
     'EXL3_TALL': ('', 'engine/models/qwen3_5/tall.py'),
     # SPD-201: the 27B's EXL3 projections at 33..64 rows read fragment-major activations (the same bits)
-    'EXL3_FRAG': ('0', 'engine/models/qwen3_5/frag.py'),
+    'EXL3_FRAG': ('1', 'engine/models/qwen3_5/frag.py'),
     # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
     'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
     # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json

@@ -28,6 +28,8 @@ import threading
 for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK", "GDNTREE", "GDNPRE"):
     os.environ.setdefault(f"QWEN38_FUSED_{_k}", "0")
 os.environ.setdefault("QWEN38_TREE_CHAIN_DELEGATE", "0")
+# the slot loop's meeting (server/slots.py); the round runner, on by default since SPD-201, has tests/test_round_runner.py
+os.environ.setdefault("QSE_ROUND_RUNNER", "0")
 
 import torch  # noqa: E402
 

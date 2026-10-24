@@ -62,8 +62,11 @@ def test_the_27b_family_takes_64_rows_on_exl3_and_32_otherwise():
     class E:
         def __init__(self, src):
             self.w = W(src)
-    assert adapter.joint_policy(E("/packs/exl3")) == {"max_rows": 64, "cut": "auto"}
-    assert adapter.joint_policy(E(None)) == {"max_rows": 32, "cut": "auto"}
+    from engine.models.qwen3_5 import joint_graphs as JG
+    # SPD-163: with the joint graphs on (the default on a GPU since SPD-201) a cut keeps each tree in the graphs' bucket
+    graphs = {"tree_cap": JG.t_pad} if JG.ON else {}
+    assert adapter.joint_policy(E("/packs/exl3")) == {"max_rows": 64, "cut": "auto", **graphs}
+    assert adapter.joint_policy(E(None)) == {"max_rows": 32, "cut": "auto", **graphs}
     assert adapter.Qwen38Engine.joint_policy is adapter.joint_policy
 
 

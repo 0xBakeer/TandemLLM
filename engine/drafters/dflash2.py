@@ -1837,7 +1837,7 @@ class DFlash2Drafter(Drafter):
                 self._lattice = (cand, scores)
                 self._logp_host = None
                 self._native_lat = None
-                if len(out) > 3 and logp and native_tree.ON and not self._want_lattice:
+                if len(out) > 3 and logp and native_tree.ready() and not self._want_lattice:
                     # SPD-201: the walk and the tree read the pinned copy in place (engine/native_tree.py)
                     blob, lp = out[3][0].get_raw(out[3][1])
                     toks = list(native_tree.module().walk(blob, *cand.shape))

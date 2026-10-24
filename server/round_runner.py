@@ -36,18 +36,18 @@ import time
 
 import torch
 
-ON = os.environ.get("QSE_ROUND_RUNNER", "0") == "1"
+ON = os.environ.get("QSE_ROUND_RUNNER", "1") == "1"
 #: SPD-201 (row invariance): a round of one task verifies through the family's joint pass too, so a request's
 #: rows take the same statements alone as among other slots' (the lone pass is another kernel set). 0: the
 #: lone `forward_tree`
 JOINT1 = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
 #: SPD-201: the tails' row copies (the drafters' tap rows, the hidden rows, the cache compaction) recorded and
 #: run as one launch at the end of the tails (engine/rowcopy.py); 0: each its own torch statement
-ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "0") == "1"
+ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "1") == "1"
 #: SPD-201: a round's tails in two halves around the next round's packed draft: what the draft reads first (the
 #: accepted tokens, positions, the drafter syncs, which tasks end), then the draft is queued, then the rest (the
 #: target's commit, penalties, stop patterns, the stream) runs on the host while the GPU drafts; 0: one tail a task
-PIPE = os.environ.get("QSE_RUNNER_PIPE", "0") == "1"
+PIPE = os.environ.get("QSE_RUNNER_PIPE", "1") == "1"
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
