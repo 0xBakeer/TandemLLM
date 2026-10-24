@@ -279,7 +279,9 @@ def test_more_lanes_than_one_pass_holds_verify_in_more_passes():
         assert all(sum(r.rows for r in g) <= 32 for g in groups), n
         assert len(groups) == -(-n // 16), (n, len(groups))
         jm = slots.Meeting(32, 0.002, cut="joint")
-        jm.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0) for i in range(n)}
+        # a joint cut takes the blocks that came with their tree (SPD-155)
+        jm.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0, tree=object())
+                      for i in range(n)}
         jm.pending[n] = slots.VerifyReq(n, None, None, list(range(4)), 0, batchable=False)
         jg = jm.batches()
         assert all(len(g) <= jm.per_pass() for g in jg) and jm.per_pass() == 16

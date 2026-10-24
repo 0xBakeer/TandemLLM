@@ -274,7 +274,11 @@ class Runner:
                 self._bind(t)
                 self._plain(t)
         if group:
-            self._verify(group)
+            # SRV-707: more decoding lanes than one pass holds (two rows each) verify in more passes
+            meet = self.pool.meeting
+            k = meet.per_pass() if meet is not None and hasattr(meet, "per_pass") else len(group)
+            for i in range(0, len(group), max(1, k)):
+                self._verify(group[i:i + k])
         self._bind_none()
         self._t("round", t_r)
         if self._ev:
@@ -342,6 +346,24 @@ class Runner:
                     cap is not None and any(len(x.parents) > cap for x in trees)) or meet.joint_for(len(group)):
                 keeps = slots_mod.joint_cut(trees, meet.max_rows, cap)
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
+        # SRV-709: every lane's pages before the joint pass, so a pool that cannot give them stops that
+        # lane alone (its request gives way and goes on: server/app.py `Handler._recomputing`), not the round
+        from engine import kvpool
+        if kvpool.POOL is not None:
+            kept = []
+            for t, x in zip(group, trees):
+                self._bind(t)
+                try:
+                    t.eng.kv.ensure(t.pos + len(x.tokens))
+                except kvpool.PoolFull as exc:
+                    t.err = exc
+                    t.end("error")
+                    continue
+                kept.append((t, x))
+            if len(kept) < len(group):
+                if not kept:
+                    return
+                group, trees = [t for t, _ in kept], [x for _, x in kept]
         t0 = time.perf_counter()
         blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
         if len(group) == 1 and not (JOINT1 and getattr(group[0].eng, "forward_tree_multi", None) is not None):
