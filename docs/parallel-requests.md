@@ -40,9 +40,12 @@ Every lane has the window the setup names (`MAX_LEN`); the Setup Guide has no si
 
 The guide counts how many lanes can all hold the full window at once, the guarantee (`lanes_full` in the estimate): `min(lanes, floor(room / (window x KV bytes a token)))`, where room is what the budget leaves after the weights, the tools and every lane's constant part. With the pool off it is every lane whenever the selection fits. Past the guarantee the lanes share what is left, in this order:
 
-1. A new request waits for memory before its prefill (the admission reserves its prompt and `max_tokens` of pages): its stream says "waiting: memory is almost full", the Lanes view shows it as `waiting_memory`, a streamed request waits up to `--request-timeout`.
+1. A new request waits for memory before its prefill (the admission reserves its prompt and up to `QSE_KV_ADMIT_ROWS` of its `max_tokens` in pages): its stream says "waiting: memory is almost full", the Lanes view shows it as `waiting_memory`, a streamed request waits up to `--request-timeout`.
 2. Before anyone waits, idle conversations give their pages back: the caches' levels, the small models, idle side slots' conversations (oldest first), slot 0's idle conversation (to the NVMe first with the spill on).
-3. A running lane whose next pages would take the box under `QSE_KV_HARD_FLOOR_GB` stops with `memory_full` (SRV-709) instead of a bare error; the Chat tab keeps its text and continues it once memory is free.
+3. A running lane whose next pages would take the box under `QSE_KV_HARD_FLOOR_GB` while other lanes run gives way (SRV-709, `QSE_KV_RECOMPUTE=on`): it gives every page back, waits at the head of the line for memory (before any request that has not started) and goes on in the same stream by reading its prompt and the text it wrote again. A streamed client sees an SSE comment (`: paused: waiting for memory`) meanwhile, no token. `/health` `parallel.recompute` counts the lanes that gave way, resumed and gave up. Reading again costs a prefill; the text goes on where it stopped, and a sampled or near-tie token after the resume may differ from the one an uninterrupted run would write.
+4. A lane alone, or one that gave way `KV_RECOMPUTE_MAX` (16) times, stops with `memory_full` instead of a bare error; the Chat tab keeps its text and continues it once memory is free.
+
+Admission reserves KV pages for the prompt and at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens` (0: all of it), so more lanes start than the worst case allows; a lane that writes past its reservation and finds the pool full gives way as above.
 
 A round with more than 16 decoding lanes verifies in more than one pass of 32 rows (2 rows a lane), so each lane gets less speculation; the guide says so above 16 and takes up to 64.
 

@@ -305,6 +305,54 @@ def test_a_full_pool_stops_the_answer_with_memory_full():
         _stop(proc)
 
 
+def test_a_lane_the_pool_refuses_gives_way_and_goes_on():
+    """SRV-709: with another lane running, a lane whose next pages the pool refuses gives its
+    memory back, waits at the head of the line and goes on in the same stream from its prompt and
+    its text: no error, the answer finishes, /health counts one give-way and one resume. The other
+    lane is not touched."""
+    port, proc = _server(("--parallel", "2"))
+    try:
+        def ask(content, out, key):
+            body = {"messages": [{"role": "user", "content": content}], "max_tokens": 48,
+                    "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                         data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            text, fin, comments = [], None, []
+            with urllib.request.urlopen(req, timeout=120) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if line.startswith(":"):
+                        comments.append(line)
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    d = json.loads(line[6:])
+                    for c in d.get("choices") or []:
+                        if (c.get("delta") or {}).get("content"):
+                            text.append(c["delta"]["content"])
+                        if c.get("finish_reason"):
+                            fin = d
+            out[key] = ("".join(text), fin, comments)
+
+        out: dict = {}
+        other = threading.Thread(target=ask, args=("FAKE_SLOW tell a long story", out, "other"))
+        other.start()
+        time.sleep(1.0)
+        ask("FAKE_POOL_FULL_ONCE go", out, "lane")
+        other.join(120)
+        text, fin, _ = out["lane"]
+        assert fin is not None and fin["choices"][0]["finish_reason"] != "error", fin
+        assert "error" not in fin, fin
+        assert text, "the lane's text came through"
+        ofin = out["other"][1]
+        assert ofin is not None and ofin["choices"][0]["finish_reason"] != "error", ofin
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as r:
+            rc = json.loads(r.read())["parallel"]["recompute"]
+        assert rc["on"] and rc["gave_way"] == 1 and rc["resumed"] == 1 and rc["gave_up"] == 0, rc
+    finally:
+        _stop(proc)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

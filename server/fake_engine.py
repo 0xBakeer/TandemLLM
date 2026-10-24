@@ -18,6 +18,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
     FAKE_POOL_FULL  the KV pool's gate refuses after five tokens (engine/kvpool.py `PoolFull`,
                   SRV-709): the answer ends with the `memory_full` error
+    FAKE_POOL_FULL_ONCE  the same, the first time per message only (SRV-709: with another lane
+                  running, the lane gives way and goes on)
     FAKE_CALL_NOTOOLS  the answer calls a tool named `tool`, offered or not (SRV-247)
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
@@ -339,6 +341,9 @@ def fake_load(seconds: float, sleep=time.sleep) -> None:
         print(line, flush=True)
 
 
+#: FAKE_POOL_FULL_ONCE: the messages that already met the full pool
+_POOL_FULL_SEEN: set = set()
+
 def load(app, a) -> None:
     """Put the fake in `app.STATE` and replace `app.generate_stream`. Called from `main()`."""
     if float(getattr(a, "fake_load_s", 0.0) or 0.0) > 0:
@@ -458,7 +463,12 @@ def load(app, a) -> None:
             for t in block:
                 if "FAKE_ERROR" in user and n == 5:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
-                if "FAKE_POOL_FULL" in user and n == 5:
+                if "FAKE_POOL_FULL_ONCE" in user and n == 5 and user not in _POOL_FULL_SEEN:
+                    _POOL_FULL_SEEN.add(user)
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot1 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL_ONCE)")
+                if "FAKE_POOL_FULL" in user and "FAKE_POOL_FULL_ONCE" not in user and n == 5:
                     from engine import kvpool
                     raise kvpool.PoolFull("KV pool: committing 64 MiB for slot0 would leave 9.9 GiB "
                                           "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL)")

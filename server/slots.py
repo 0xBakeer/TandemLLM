@@ -208,6 +208,13 @@ class Admission:
             t = self.waiting[key]
             return 1 + sum(1 for v in self.waiting.values() if v < t)
 
+    def first(self, key) -> None:
+        """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
+        mid-answer resumes before any request that has not started); among such lanes, the one
+        that gave way first."""
+        with self.lock:
+            self.waiting[key] = min([0.0] + list(self.waiting.values())) - 1.0
+
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
