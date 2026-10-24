@@ -166,7 +166,10 @@ class FlashNextServing:
     # chunks a cold one runs; side slots: ENG-241; the shadow reader: validated on the 27B's text only
     # side_lane: Borrow keeps the 27B's pending commit, not this engine's chain and folded commit
     # (lending it raised `'FlashNextCacheState' object has no attribute 'primed'`, rc-0.8.0 live)
-    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False)
+    # SPD-215: a lane's plain step joins the round's joint pass as a one-row block (`joint_plain`): the MTP
+    # cut skips drafts often at C8, and each plain step alone held the other lanes' round
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
+                        joint_plain=True)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len

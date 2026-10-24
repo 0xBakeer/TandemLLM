@@ -49,7 +49,8 @@ class Qwen35MoeServing(FlashNextServing):
     slots over the same weights (Flash-Next's `side_slot`, this class) whose blocks verify in one pass
     (`Qwen35MoeEngine.verify_multi`)."""
 
-    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False)
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
+                        joint_plain=True)
 
     def __init__(self, fn, max_len: int):
         super().__init__(fn, max_len)
