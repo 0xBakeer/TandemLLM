@@ -65,7 +65,9 @@ def main() -> None:
     L = max(lens) + (a.rounds + a.timing) * (a.block + 1) + 1024
     eng, _, _ = build(a.pack, L, tok, spec=False, log=lambda s: print(s, flush=True))
     fn = eng.fn
-    prompts = [torch.tensor(class_prompt(tok, kind, n), device="cuda") for kind, n in zip(("prose", "code", "chat"), lens)]
+    # one state a length: the kinds in turn (prose, code, chat, prose, ...), so 8 lengths are 8 states
+    prompts = [torch.tensor(class_prompt(tok, ("prose", "code", "chat")[i % 3], n), device="cuda")
+               for i, n in enumerate(lens)]
     lone = [eng] + [FlashNextServing(fn, L) for _ in prompts[1:]]
     joint = [FlashNextServing(fn, L) for _ in prompts]
     eager = [FlashNextServing(fn, L) for _ in prompts] if a.timing else []
