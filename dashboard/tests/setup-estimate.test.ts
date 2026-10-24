@@ -72,7 +72,7 @@ describe('the estimate fixture (models/estimate-cases.json)', () => {
     }
     expect(err).toBeInstanceOf(SelectionError);
     expect((err as SelectionError).status).toBe(422);
-    expect(estimate(fn, { model: fn.id, profile: 'flashnext-3.05', window: 131_072 } as never).context_tokens_fit).toBe(131_072);
+    expect(estimate(fn, { model: fn.id, profile: 'flashnext-3.05', window: 131_072, slots: 1 } as never).context_tokens_fit).toBe(131_072);
   });
 });
 

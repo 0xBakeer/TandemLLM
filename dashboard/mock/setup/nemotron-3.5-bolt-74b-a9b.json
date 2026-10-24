@@ -875,17 +875,11 @@
   "slots": {
    "min": 1,
    "max": 3,
-   "default": 3,
-   "engine_max": 16,
+   "default": 8,
+   "engine_max": 64,
    "engine_max_reason": null
   },
   "window": {
-   "min": 8192,
-   "max": 262144,
-   "default": 262144,
-   "step": 4096
-  },
-  "side_window": {
    "min": 8192,
    "max": 262144,
    "default": 262144,
@@ -1180,21 +1174,14 @@
    "fields": [
     {
      "field": "slots",
-     "label": "Parallel requests",
+     "label": "Parallel lanes",
      "type": "int",
      "min": 1,
-     "max": 16
+     "max": 64
     },
     {
      "field": "window",
-     "label": "Context window, first slot",
-     "type": "int",
-     "min": 8192,
-     "max": 262144
-    },
-    {
-     "field": "side_window",
-     "label": "Context window, other slots",
+     "label": "Context window, every lane",
      "type": "int",
      "min": 8192,
      "max": 262144

@@ -349,7 +349,9 @@ export class QseBackends extends LightElement {
     if (!e?.embedded || !e.parallel) return nothing;
     const p = e.parallel;
     const par = p.n > 1
-      ? html`<b>${p.n} requests at once</b> (slot 0 at its full window, ${p.n - 1} side slot${p.n > 2 ? 's' : ''} of ${(p.side_max_len ?? 0).toLocaleString('en-US')} tokens)`
+      ? p.side_max_len == null || p.side_max_len === p.max_len
+        ? html`<b>${p.n} requests at once</b> (every lane at the full window)`
+        : html`<b>${p.n} requests at once</b> (slot 0 at its full window, ${p.n - 1} side slot${p.n > 2 ? 's' : ''} of ${(p.side_max_len ?? 0).toLocaleString('en-US')} tokens)`
       : p.requested > 1
         ? html`<b>one request at a time</b> (${p.requested} asked; no side slot fit the ${p.floor_gib} GiB floor)`
         : html`<b>one request at a time</b>`;

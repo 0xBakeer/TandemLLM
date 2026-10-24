@@ -105,8 +105,9 @@ def test_switching_from_lfm25():
         # LFM2.5's setup (narrator on) also turns it off, which the list had not named when it said 16
         assert by["QWEN38_NARRATOR_MODEL"]["current"] == "qwen3.5-2b" and \
             by["QWEN38_NARRATOR_MODEL"]["next"] == "", by["QWEN38_NARRATOR_MODEL"]
-        assert set(by) == {"QSE_PARALLEL", "MAX_LEN", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL", "QSE_SIDE_GRAPHS",
-                           "QSE_SIDE_SLOT_CONST_GB", "QSE_KV_HARD_FLOOR_GB", "QSE_BARRIER_IDLE_OWNER",
+        # SRV-707: serve.env sets the 27B's side-slot keys (graphs off, 1.5 GiB, the hard floor, the
+        # barrier) for its 8 lanes, so the overlay's equal values are no change
+        assert set(by) == {"QSE_PARALLEL", "MAX_LEN", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL",
                            "QWEN38_SUFFIX_STORE", "QWEN38_NARRATOR_MODEL", "QWEN38_NARRATOR_DIR",
                            "QWEN38_SHADOW_MODEL", "VISION", "RESPONSE_CACHE", "QSE_BACKENDS",
                            "TEMPERATURE", "TOP_K", "REP_PENALTY"}, sorted(by)
@@ -143,7 +144,8 @@ def test_the_job_page_lists_the_changes():
         job = apply.read_job(jid)
         # the plan's list, the job's, and the count the check step says are one list
         want = T._plan(sel)["changes"]
-        assert job["changes"] == want and len(want) == 18 and any(c["removed"] for c in job["changes"])
+        # SRV-707: 14, the 27B's four side-slot keys are serve.env's own now
+        assert job["changes"] == want and len(want) == 14 and any(c["removed"] for c in job["changes"])
         apply.Runner(jid, cmd=T.Recorder(), http=T._smoke_ok("exl3-6.0"), ops=box.ops).main()
         check = next(s for s in apply.read_job(jid)["steps"] if s["id"] == "check")
         assert check["detail"] == f"{len(want)} settings change", check

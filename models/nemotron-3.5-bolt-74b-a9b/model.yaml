@@ -588,13 +588,8 @@ parallelism:
   slots:
     min: 1
     max: 3
-    default: 3
+    default: 8
   window:
-    min: 8192
-    max: 262144
-    default: 262144
-    step: 4096
-  side_window:
     min: 8192
     max: 262144
     default: 262144

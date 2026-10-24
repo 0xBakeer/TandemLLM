@@ -1,7 +1,7 @@
-// The two window steppers of the memory step (VIS-199): the longest conversation, and the same for
-// the extra chats. − and + walk a ladder of doublings from 8,192 up to the model's own maximum (the
-// card's window.max, 1,048,576 on Super VL), clipped by the profile and the first chat; the field
-// takes any number of tokens ("131072", "131,072", "128k", "1m").
+// The window stepper of the memory step (VIS-199; SRV-707: one window for every lane). − and + walk a
+// ladder of doublings from 8,192 up to the model's own maximum (the card's window.max, 1,048,576 on
+// Super VL), clipped by the profile; the field takes any number of tokens ("131072", "131,072", "128k",
+// "1m").
 // A typed value outside the range or off the card's step stays as typed with the reason, never
 // clamped, and the selection keeps its last good window (the same rules as the chats stepper).
 
@@ -9,7 +9,7 @@ import type { SetupModel, SetupSelection } from '../api/types';
 import { windowMax } from './state';
 import { S } from './strings';
 
-export type WindowKey = 'window' | 'side_window';
+export type WindowKey = 'window';
 
 export const LADDER_FIRST = 8_192;
 
@@ -17,21 +17,16 @@ export interface WindowRange {
   min: number;
   max: number;
   step: number;
-  /** what the field says above `max`: the model's, the profile's or the first chat's limit */
+  /** what the field says above `max`: the model's or the profile's limit */
   maxWhy: string;
 }
 
-/** The range a window field takes now. The extra chats never hold more than the first chat: the
- *  engine cuts a side slot's window to slot 0's (server/app.py min(side_max_len, max_len)). */
-export function windowRange(m: SetupModel, sel: SetupSelection, key: WindowKey): WindowRange {
-  const card = m.parallelism[key];
-  if (key === 'window') {
-    const max = windowMax(m, sel.profile);
-    const prof = m.profiles.find((p) => p.id === sel.profile);
-    return { min: card.min, max, step: card.step, maxWhy: max < card.max && prof ? S.windowAboveProfile(prof.label, max) : S.windowAtMost(max) };
-  }
-  const max = Math.min(card.max, sel.window);
-  return { min: card.min, max, step: card.step, maxWhy: sel.window < card.max ? S.sideWindowAboveMain(sel.window) : S.windowAtMost(max) };
+/** The range the window field takes now: the card's, up to the profile's largest window. */
+export function windowRange(m: SetupModel, sel: SetupSelection, _key: WindowKey = 'window'): WindowRange {
+  const card = m.parallelism.window;
+  const max = windowMax(m, sel.profile);
+  const prof = m.profiles.find((p) => p.id === sel.profile);
+  return { min: card.min, max, step: card.step, maxWhy: max < card.max && prof ? S.windowAboveProfile(prof.label, max) : S.windowAtMost(max) };
 }
 
 /** A number of tokens as typed: digits with , _ ' or spaces between them, or a k (1,024) or m

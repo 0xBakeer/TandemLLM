@@ -3,9 +3,10 @@ fixture that pins them for the dashboard's copy, models/estimate-cases.json.
 
 The test matrix:
 
-  1  the worked example, by hand from the registry's numbers: exl3-4.5, the recommended tools, 4 slots
-     of 262,144 with the pool: 67.35 GiB of a 106.63 budget, fits; every slot full would need 104.25
-     GiB of KV, so fits_worst is false and a note says what happens then
+  1  the worked example, by hand from the registry's numbers: exl3-4.5, the recommended tools, 4 lanes
+     of 262,144 with the pool: 67.35 GiB of a 106.63 budget, fits; every lane full would need 104.25
+     GiB of KV, so fits_worst is false, 2 of the 4 lanes can hold the full window (lanes_full) and a
+     note says what happens past it
                                                          test_the_worked_example
   2  the live memory split of the reference box (exl3-6.0, 4 slots, the small models, 0.56 GiB of KV
      committed, 59.34 GiB in use) is what the parts add up to, within 0.1 GiB
@@ -16,9 +17,9 @@ The test matrix:
   5  the context that fits is floor(room / bytes a token) over all slots, and a note gives a slot's
      share capped by the window                          test_the_context_that_fits
   6  the selection check: unknown ids are 400s, a tool whose dependency is off, a required tool off,
-     slots (past the engine's 16) or windows out of range, an unknown key, a field value that is not the field's are 422s
-     with a code and the field; what the body leaves out is the registry's default, the side window
-     the window                                          test_the_selection_check
+     slots (past the setup's 64) or windows out of range, an unknown key, a field value that is not the field's are 422s
+     with a code and the field; what the body leaves out is the registry's default (8 lanes); an
+     older page's side window is read as nothing (SRV-707)  test_the_selection_check
   7  the fixture: at least 30 cases over every profile, every tool, slots 1 to 4, five windows, the
      pool on and off, over and at the budget, and the refusals; each equals what the code computes
      now, and its model is the registry's payload       test_the_fixture
@@ -30,6 +31,10 @@ The test matrix:
  11  #104, Ornith (no side slots): one chat fits, two are a 422 in both copies of the check   test_the_fixture
  10  SPD-150, Flint's e4m3 cache: the fixture holds Flint with the cache off and on, so the page's copy
      counts the component's 14,784 KV bytes a token as the server does   test_the_fixture
+
+ 12  SRV-707, one window for every lane: the KV is lanes x window (worst) and lanes x min(window, fill)
+     with the pool; lanes_full is min(lanes, floor(room / one lane at the full window)), every lane
+     with the pool off whenever the selection fits     test_lanes_full
 
 Run: python tests/test_setup_estimate.py            (--write regenerates the fixture)
 """
@@ -79,7 +84,7 @@ REF = {"narrator": True}
 
 
 def test_the_worked_example():
-    e = _est(components=REF)
+    e = _est(components=REF, slots=4)
     # by hand: os 10.0, weights 16.14, graphs 6.63, engine 1.28, allocator 2.6, 3 side slots x
     # 1.19, drafters 5.41, lookup 0.19, narrator 3.6, laya 1.6, shadow 1.52, vision 0.86, prompt
     # cache 0.43, state store 0.49; KV 4 x 32,768 x 106,752 bytes
@@ -89,8 +94,8 @@ def test_the_worked_example():
     assert abs(e["total_gb"] - (fixed + kv)) < 0.006, (e["total_gb"], fixed + kv)
     assert e["total_gb"] == 67.35 and e["budget_gb"] == 106.63 and e["device_gb"] == 121.63
     assert e["fits"] is True and e["fits_worst"] is False
-    assert e["kv_worst_gb"] == 104.25
-    assert any("waits for room" in n for n in e["notes"]), e["notes"]
+    assert e["kv_worst_gb"] == 104.25 and e["lane_full_gb"] == 26.06 and e["lanes_full"] == 2
+    assert any("2 of 4 lanes can hold the full" in n and "waits for memory" in n for n in e["notes"]), e["notes"]
     kinds = {p["id"]: p["kind"] for p in e["parts"]}
     assert kinds["kv"] == "kv" and kinds["allocator"] == "reserve" and kinds["weights"] == "fixed"
     assert next(p for p in e["parts"] if p["id"] == "prompt_cache")["worst_gb"] == 11.5
@@ -101,7 +106,7 @@ def test_the_worked_example():
 def test_the_parts_match_the_live_split():
     # memory.split of /v1/dashboard/system, 2026-10-10 22:30: in_use 63,713,701,888 bytes of
     # which 603,979,776 committed KV; the estimate of the same selection with that KV
-    e = _est(profile="exl3-6.0", components=REF)
+    e = _est(profile="exl3-6.0", components=REF, slots=4)
     kv = next(p for p in e["parts"] if p["id"] == "kv")["gb"]
     est = e["total_gb"] - kv + 603_979_776 / GIB
     live = 63_713_701_888 / GIB
@@ -109,7 +114,7 @@ def test_the_parts_match_the_live_split():
 
 
 def test_over_the_budget():
-    e = _est(kv_pool=False, profile="exl3-6.0", components={"response_cache": True})
+    e = _est(kv_pool=False, profile="exl3-6.0", components={"response_cache": True}, slots=4)
     assert e["fits"] is False and e["total_gb"] > e["budget_gb"]
     text = " ".join(e["notes"])
     assert "Over the budget by" in text and "Conversations (KV)" in text
@@ -119,7 +124,7 @@ def test_over_the_budget():
 
 
 def _at_budget() -> tuple[dict, float]:
-    sel = {"kv_pool": False, "slots": 2, "window": 262_144, "side_window": 131_072}
+    sel = {"kv_pool": False, "slots": 2, "window": 196_608}
     total = _est(**sel)["total_gb"]
     return sel, round(121.63 - total, 2)
 
@@ -140,10 +145,32 @@ def test_the_context_that_fits():
     assert abs(e["context_tokens_fit"] - room * GIB / 106_752) < 400, e["context_tokens_fit"]
     assert e["room_gb"] == round(room, 2)
     note = next(n for n in e["notes"] if n.startswith("About"))
-    assert f"{min(262_144, e['context_tokens_fit']):,} a slot" in note, note
-    e = _est(slots=4, window=8192, side_window=8192)
+    assert f"{min(262_144, e['context_tokens_fit']):,} a lane" in note, note
+    e = _est(slots=4, window=8192)
     note = next(n for n in e["notes"] if n.startswith("About"))
-    assert "8,192 a slot" in note, note
+    assert "8,192 a lane" in note, note
+
+
+def test_lanes_full():
+    e = _est(slots=4, window=65_536)
+    lane = 65_536 * 106_752 / GIB
+    assert e["lane_full_gb"] == round(lane, 2)
+    assert e["kv_worst_gb"] == round(4 * lane, 2), "every lane the one window"
+    assert e["lanes_full"] == 4 and e["fits_worst"] is True
+    assert any(n.startswith("All 4 lanes can hold the full 65,536-token window") for n in e["notes"])
+    e = _est()                                   # the default: 8 lanes of 262,144 on the pool
+    assert e["lanes_full"] == min(8, int(e["room_gb"] // e["lane_full_gb"])) == 1, e
+    kv = next(p for p in e["parts"] if p["id"] == "kv")
+    assert kv["gb"] == round(8 * 32_768 * 106_752 / GIB, 2) and kv["worst_gb"] == round(8 * lane * 4, 2)
+    assert any("1 of 8 lanes" in n and "memory_full" in n for n in e["notes"]), e["notes"]
+    off = _est(kv_pool=False, slots=2, window=65_536)
+    assert off["fits"] and off["lanes_full"] == 2, "pool off: every window is memory at load"
+    big = _est(kv_pool=False)
+    assert not big["fits"] and big["lanes_full"] < 8
+    assert _est(slots=1)["lanes_full"] == 1
+    m = _m()
+    assert E.check(m, {"model": m["id"], "window": 32_768, "side_window": 8192}) == \
+        E.check(m, {"model": m["id"], "window": 32_768}), "an older page's side window is nothing"
 
 
 def _refused(body: dict, status: int, code: str, field: str | None = None) -> None:
@@ -169,12 +196,12 @@ def test_the_selection_check():
     _refused(dict(base, components={"drafters": False}), 422, "invalid_combination", "drafters")
     _refused(dict(base, components={"disk_tier": False}), 422, "invalid_combination", "nvme_spill")
     _refused(dict(base, components={"vision": "yes"}), 422, "invalid_selection")
-    _refused(dict(base, slots=17), 422, "out_of_range", "slots")
+    _refused(dict(base, slots=65), 422, "out_of_range", "slots")
     assert E.check(m, dict(base, slots=16))["slots"] == 16     # past the card's measured 4: memory decides
+    assert E.check(m, dict(base, slots=17))["slots"] == 17     # SRV-707: more passes a round, no cap
     _refused(dict(base, slots=0), 422, "out_of_range", "slots")
     _refused(dict(base, slots=2.5), 422, "out_of_range", "slots")
     _refused(dict(base, window=512), 422, "out_of_range", "window")
-    _refused(dict(base, side_window=10 ** 9), 422, "out_of_range", "side_window")
     _refused(dict(base, floor_gb=5), 422, "out_of_range", "floor_gb")
     _refused(dict(base, kv_pool="on"), 422, "invalid_selection", "kv_pool")
     _refused(dict(base, steps=["rm -rf /"]), 422, "unknown_field", "steps")
@@ -185,11 +212,10 @@ def test_the_selection_check():
     _refused(dict(base, advanced={"secret_path": "/etc"}), 422, "unknown_field")
     _refused("not an object", 422, "invalid_selection")
     s = E.check(m, dict(base, window=65_536))
-    assert s["side_window"] == 65_536 and s["profile"] == "exl3-4.5" and s["slots"] == 4
-    # the side window is clamped to the window, and both keep the 8,192 step
-    assert E.check(m, dict(base, window=32_768, side_window=262_144))["side_window"] == 32_768
+    assert "side_window" not in s and s["profile"] == "exl3-4.5" and s["slots"] == 8
+    # SRV-707: an older page's side window, any value, is read as nothing; the window keeps its step
+    assert E.check(m, dict(base, window=32_768, side_window=10 ** 9)) == E.check(m, dict(base, window=32_768))
     _refused(dict(base, window=100_000), 422, "off_step", "window")
-    _refused(dict(base, side_window=20_000), 422, "off_step", "side_window")
     # SRV-534: the narrator is off by default (0.11.3)
     assert s["components"]["narrator"] is False and s["components"]["response_cache"] is False
     assert s["methods"]["sampled_tree"] == "det" and s["advanced"]["port"] == 8000
@@ -219,11 +245,13 @@ def _cases() -> list[dict]:
             comps.update(nvme_spill=False)
         case(f"{c['id']} {'on' if on else 'off'}", components=comps)
     for n in range(1, 5):
-        case(f"{n} slot(s)", slots=n)
+        case(f"{n} lane(s)", slots=n)
+    case("8 lanes, the default", slots=8)
     for w in (8192, 32_768, 65_536, 131_072, 262_144):
-        case(f"window {w:,} on every slot", window=w)
-    case("one long window, three short ones", window=262_144, side_window=32_768)
-    case("pool off, 4 x 262,144: over the budget", kv_pool=False)
+        case(f"window {w:,} on every lane", window=w)
+    case("an older page's side window is read as nothing", window=262_144, side_window=32_768)
+    case("4 lanes of 65,536: every lane can hold the full window", slots=4, window=65_536)
+    case("pool off, 4 x 262,144: over the budget", kv_pool=False, slots=4)
     case("pool off, 2 x 65,536", kv_pool=False, slots=2, window=65_536)
     case("pool off, 1 x 262,144, exl3-2.5", kv_pool=False, slots=1, profile="exl3-2.5")
     case("floor 10", floor_gb=10)
@@ -238,13 +266,11 @@ def _cases() -> list[dict]:
     case("methods and advanced fields do not move the memory", methods={"reasoning_effort": "low"},
          advanced={"port": 8080})
     case("5 slots, past the card's measured 4: memory decides", slots=5, window=32_768)
-    case("16 slots, the engine's limit, pool off: over the budget", slots=16, kv_pool=False)
-    case("refused: slots 17, above the engine's limit", slots=17)
+    case("16 slots, pool off: over the budget", slots=16, kv_pool=False)
+    case("24 lanes of 32,768: past one joint pass, memory decides", slots=24, window=32_768)
+    case("refused: slots 65, above the setup's limit", slots=65)
     case("refused: window 512", window=512)
     case("refused: a window off the 8,192 step", window=100_000)
-    case("refused: a side window off the step", side_window=20_000)
-    case("a side window longer than the window is the window", window=32_768,
-         side_window=262_144)
     case("refused: the narrator without the conductor", components={"conductor": False})
     case("refused: an unknown profile", profile="exl3-9.9")
     case("refused: an unknown key", cmd="reboot")
@@ -253,7 +279,9 @@ def _cases() -> list[dict]:
         for w in (131_072, 262_144):
             out.append({"name": f"Flash-Next {p['id']}, window {w:,}",
                         "selection": {"model": f["id"], "profile": p["id"], "window": w}})
-    out.append({"name": "Flash-Next, two slots (measured up to one)", "selection": {"model": f["id"], "slots": 2}})
+    out.append({"name": "Flash-Next, two lanes", "selection": {"model": f["id"], "slots": 2}})
+    out.append({"name": "Flash-Next, 8 lanes on the pool (measured up to three)",
+                "selection": {"model": f["id"], "slots": 8}})
     fl = _fl()
     for on in (False, True):
         out.append({"name": f"Flint, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
@@ -322,7 +350,7 @@ def test_the_fixture():
     assert len(fx["cases"]) == len(want["cases"])
     sels = [c["selection"] for c in fx["cases"] if c["selection"].get("model") == fx["model"]["id"]]
     assert {s.get("profile", "exl3-4.5") for s in sels} >= {p["id"] for p in fx["model"]["profiles"]}
-    assert {s.get("slots", 4) for s in sels} >= {1, 2, 3, 4}
+    assert {s.get("slots", 8) for s in sels} >= {1, 2, 3, 4, 8}
     assert {s.get("window") for s in sels} >= {8192, 32_768, 65_536, 131_072, 262_144}
     assert {s.get("kv_pool", True) for s in sels} == {True, False}
     toggled = {k for s in sels for k in (s.get("components") or {})}
@@ -338,7 +366,7 @@ def test_flash_next_packs():
 
     def est(**kw):
         return E.estimate(f, E.check(f, dict({"model": f["id"]}, **kw)))
-    e = est(profile="flashnext-3.05", window=262_144)
+    e = est(profile="flashnext-3.05", window=262_144, slots=1)
     parts = {x["id"]: x for x in e["parts"]}
     # SPD-99: 3.05 reads its table cold (the row cache), and its prefill workspace was measured at 256k
     assert parts["table"]["gb"] == 2.0 and "row cache" in parts["table"]["label"]
@@ -360,7 +388,8 @@ def test_flash_next_packs():
         raise AssertionError("a window above the profile's largest must be refused")
     except E.SelectionError as exc:
         assert (exc.status, exc.code) == (422, "out_of_range"), exc.body()
-    capped = E.estimate(g, E.check(g, {"model": f["id"], "profile": "flashnext-3.05", "window": 131_072}))
+    capped = E.estimate(g, E.check(g, {"model": f["id"], "profile": "flashnext-3.05", "window": 131_072,
+                                     "slots": 1}))
     assert capped["context_tokens_fit"] == 131_072
     return "warm table and score buffer as parts; 3.05 fits 262,144; 6.05 fits none; a profile's window caps and refuses"
 

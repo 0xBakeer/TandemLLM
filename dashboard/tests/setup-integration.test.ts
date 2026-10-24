@@ -150,7 +150,7 @@ describe('the second model (OPS-97)', () => {
   });
 });
 describe('the third model (VIS-125)', () => {
-  it('the mock lists LFM2.5-24B-A2B as a third tile with its measured speed, and its estimate fits the whole context in each of its three slots', async () => {
+  it('the mock lists LFM2.5-24B-A2B as a third tile with its measured speed, and its estimate fits the whole context in each of its 8 lanes (SRV-707)', async () => {
     const ms = new MockSetup();
     const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; best_speed: unknown; pitch: string }[];
     expect(tiles[2].id).toBe('lfm2.5-24b-a2b');
@@ -163,7 +163,8 @@ describe('the third model (VIS-125)', () => {
     for (const profile of ['lfm25-exl3-3.5', 'lfm25-bf16']) {
       const est = (await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(m), model: m.id, profile } })).body;
       expect(est.fits).toBe(true);
-      expect(est.context_tokens_fit).toBe(3 * 131_072);
+      expect(est.context_tokens_fit).toBe(8 * 131_072);
+      expect(est.lanes_full).toBe(8);
       expect(est.kv_bytes_per_token).toBe(20_480);
     }
   });
