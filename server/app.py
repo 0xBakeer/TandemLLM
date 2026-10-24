@@ -11582,6 +11582,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         # block count and the row cap), e.g. the row bucket of its joint graphs
         meet.tree_cap = pol.get("tree_cap")
         meet.max_depth = pol.get("max_depth")       # SPD-223
+        # SPD-233: the rows a pass keeps by lanes (the family's measured table, under the cap)
+        meet.rows_at = {int(k): int(v) for k, v in (pol.get("rows_at") or {}).items()}
         # SPD-187: the family's round planner (`joint_policy` "planner") and its context classes
         # SPD-161: every slot's length router keeps its narrow arm when the joint cap can fall to it
         tcap = meet.tree_cap(len(slots), max_rows) if meet.tree_cap is not None else None

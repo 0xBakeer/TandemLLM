@@ -57,6 +57,9 @@ JOINT_PRICE = os.environ.get("QSE_RUNNER_JOINT_PRICE", "0") == "1"
 #: round keeps a random row budget instead, so the prices of every row count stay measured
 PRICED_CUT = os.environ.get("QSE_RUNNER_PRICED_CUT", "0") == "1"
 PRICED_EXPLORE = int(os.environ.get("QSE_RUNNER_PRICED_EXPLORE", "8") or 8)
+#: SPD-235: a round's MTP drafts in one packed pass (engine/methods/draft_meet.py): the lanes' heads stage their
+#: drafts and the runner runs them together after the proposals; 0: each head its own graph
+MTP_PACK = os.environ.get("QSE_RUNNER_MTP_PACK", "0") == "1"
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -139,6 +142,10 @@ class Runner:
         import random
         self._rng = random.Random(225)
         self._collect: list | None = None    # the runner thread's pending draft calls, while proposals run
+        self._mtp_collect: list | None = None    # SPD-235: draft heads whose drafts the runner packs
+        if MTP_PACK:
+            from engine.methods import draft_meet
+            draft_meet.MEET = self.mtp_meet
 
     # ---- registration (the slot's thread) ---------------------------------------------------
     def add(self, task: Task) -> None:
@@ -159,6 +166,14 @@ class Runner:
         out: list = []
         self._collect.append((drafter, anchor, pos0, out))
         return out
+
+    def mtp_meet(self, head) -> bool:
+        """SPD-235 (`draft_meet.MEET`): from the runner thread while it collects, the head's draft joins the
+        round's packed pass."""
+        if self._mtp_collect is None or threading.current_thread() is not self.thread:
+            return False
+        self._mtp_collect.append(head)
+        return True
 
     # ---- the loop ---------------------------------------------------------------------------
     def _loop(self) -> None:
@@ -332,6 +347,8 @@ class Runner:
         from engine.drafters import tree_steps
         app = self.app
         self._collect = []
+        if MTP_PACK and sum(1 for t in tasks if not t.done) > 1:
+            self._mtp_collect = []
         for t in tasks:
             if t.done:
                 continue
@@ -342,8 +359,15 @@ class Runner:
             app._row_cap(self.pool, t.drafter)
             t.steps, t.tree = app._launch(tree_steps(t.drafter, t.ctx, min(t.k, t.max_new - t.n_out)))
         calls, self._collect = self._collect, None
+        heads, self._mtp_collect = self._mtp_collect, None
         self._bind_none()
         t0 = self._t("prop", t0)
+        if heads:
+            by: dict = {}
+            for h in heads:
+                by.setdefault((type(h), id(h.fn)), []).append(h)
+            for grp in by.values():
+                type(grp[0]).run_packed(grp)
         if calls:
             self._packed(calls)
         return self._t("packed", t0)
@@ -381,19 +405,22 @@ class Runner:
         if (len(group) > 1 or JOINT1) and meet is not None:
             tc = getattr(meet, "tree_cap", None)
             cap = tc(len(group), meet.max_rows) if tc is not None else None
-            if sum(len(x.parents) for x in trees) > meet.max_rows or (
+            # SPD-233: the family's rows at this many lanes (`joint_policy` "rows_at"), never above the cap
+            rows = min(meet.max_rows, max(2 * len(group),
+                                          (getattr(meet, "rows_at", None) or {}).get(len(group), meet.max_rows)))
+            if sum(len(x.parents) for x in trees) > rows or (
                     cap is not None and any(len(x.parents) > cap for x in trees)) or meet.joint_for(len(group)):
-                keeps = slots_mod.joint_cut(trees, meet.max_rows, cap)
+                keeps = slots_mod.joint_cut(trees, rows, cap)
                 trees = [x.subset(kp) if len(kp) < len(x.tokens) else x for x, kp in zip(trees, keeps)]
             if PRICED_CUT and len(group) > 1:
                 # SPD-225: the rows where the round's expected tokens a ms are the most (an exploring round:
                 # a random row budget), on the pass prices measured at these lanes
                 pr = self.prices
                 budget = None
-                if pr.cost(len(group), meet.max_rows) is None or (pr.priced + pr.explored) % PRICED_EXPLORE == 0:
-                    budget = self._rng.randint(len(group), meet.max_rows)
+                if pr.cost(len(group), rows) is None or (pr.priced + pr.explored) % PRICED_EXPLORE == 0:
+                    budget = self._rng.randint(len(group), rows)
                 alone = all(getattr(t.eng.caps, "joint_plain", False) for t in group)
-                got = slots_mod.priced_cut(trees, pr, meet.max_rows, cap, budget, anchor_alone=alone)
+                got = slots_mod.priced_cut(trees, pr, rows, cap, budget, anchor_alone=alone)
                 if got is not None:
                     keeps, _, offered = got
                     if budget is None:

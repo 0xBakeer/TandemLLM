@@ -9,4 +9,6 @@ KNOBS: dict[str, tuple] = {
     # SPD-231: M > 1 rows of the mixers' GEMV (gemv_split) and mix_up on the register-blocked kernels (several
     # weight rows a CTA, each row's bits the one-row kernels'); 0: the one-row-a-CTA kernels for every M
     'FN_GEMV_NB': ('0', 'tools/fn_kernels.py'),
+    # SPD-233: the rows an 8-lane joint pass keeps (24: the best of 8/16/24/32 at C8); 0: the cap, 32
+    'FN_JOINT_ROWS8': ('24', 'engine/models/flashnext/serving.py'),
 }

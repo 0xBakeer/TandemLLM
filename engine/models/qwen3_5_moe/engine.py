@@ -341,9 +341,8 @@ class Qwen35MoeEngine(FlashNextEngine):
         c = self.cfg
         eps = c.rms_norm_eps
         M = stack_in.shape[0]
-        rb = self._rows_buffers(M, key)
-        self._cur, self._write, self.rec, self._cls = rb, False, {}, cls
-        x = self._mtp_in(self.W["embed_tokens.weight"].index_select(0, rb["d"]["tok"]), stack_in)
+        tok = self._mtp_begin(M, key, cls)
+        x = self._mtp_in(self.W["embed_tokens.weight"].index_select(0, tok), stack_in)
         p = self.pre(MTP)
         zd = self._zero(M)
         n = K.hc_norm(x, self.W[p + "input_layernorm.weight"], c.hidden_size, eps)

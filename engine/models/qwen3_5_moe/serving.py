@@ -49,6 +49,7 @@ class Qwen35MoeServing(FlashNextServing):
     slots over the same weights (Flash-Next's `side_slot`, this class) whose blocks verify in one pass
     (`Qwen35MoeEngine.verify_multi`)."""
 
+    JOINT_ROWS_AT: dict = {}           # SPD-233: Flash-Next's 8-lane row count is not measured here
     caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
                         joint_plain=True)
 

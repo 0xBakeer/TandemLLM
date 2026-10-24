@@ -38,6 +38,7 @@ from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
+from engine.settings import SETTINGS as _S
 from engine.models.flashnext.engine import CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
@@ -225,6 +226,16 @@ class FlashNextServing:
     def pos_delta(self, d: int) -> None:
         for st in self._states():
             st.delta = int(d)
+
+    #: SPD-233: the rows a joint pass of 8 lanes keeps (QWEN38_FN_JOINT_ROWS8; 0: the cap, 32), the best
+    #: lanes' nodes by score: served 2026-10-25, Flash-Next 3.05 at C8, 8 / 16 / 24 / 32 rows a pass:
+    #: 63.1 / 73.4 / 75.3 / 72.2 tok/s
+    JOINT_ROWS_AT = {8: int(_S.get("FN_JOINT_ROWS8") or 0)}
+
+    def joint_policy(self) -> dict:
+        """The joint pass of this family: 32 rows (the row-invariant widths of its kernels, `tree_batchable`)
+        and, by lanes, the rows a pass keeps (`JOINT_ROWS_AT`, a class's measured table)."""
+        return {"max_rows": 32, "rows_at": {e: n for e, n in self.JOINT_ROWS_AT.items() if n}}
 
     def price_class(self, n: int) -> int:
         """The draft prices' context class of a round at context length `n` (engine/methods/staircut.py):

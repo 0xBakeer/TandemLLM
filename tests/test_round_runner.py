@@ -222,6 +222,29 @@ def test_a_stream_read_half_way_and_closed_after_its_slot_went_back_leaves_the_t
     return f"slot 1 read 5 of {n} tokens and closed late; slot 0 wrote its {len(out0)}; the turn free"
 
 
+def test_the_familys_rows_at_a_lane_count_bound_the_joint_cut():
+    """SPD-233: `joint_policy` "rows_at" (the meeting's `rows_at`): a joint round of that many lanes cuts its
+    trees to those rows (never above the cap, never under 2 a lane), the texts stay the lanes' alone texts."""
+    from server import slots
+    real_cut, real_setup, seen = slots.joint_cut, T._setup, []
+
+    def cut(trees, max_rows, cap=None):
+        seen.append((len(trees), max_rows))
+        return real_cut(trees, max_rows, cap)
+
+    def setup(*a, **kw):
+        pool = real_setup(*a, **kw)
+        pool.meeting.rows_at = {2: 4}
+        return pool
+    slots.joint_cut, T._setup = cut, setup
+    try:
+        out = _check(2)
+    finally:
+        slots.joint_cut, T._setup = real_cut, real_setup
+    assert seen and all(r == 4 for e, r in seen if e == 2), seen
+    return f"{out}; {len(seen)} cuts at 2 lanes to 4 rows"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

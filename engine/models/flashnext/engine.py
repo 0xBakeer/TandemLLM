@@ -79,6 +79,7 @@ class FlashNextEngine(FlashNextRef):
         self._pending: dict = {}         # id(state) -> the state, while it has parked rows
         self._joint: dict = {}          # id(state) -> (block, rec, class) of its block in the last joint pass
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
+        self._multi = None              # SPD-235: [(rows buffers, MTP state, rows, class)] of a packed MTP step
         self.joint_timing = None        # a dict: `verify_multi` adds each part's GPU ms (a measurement)
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
@@ -1352,6 +1353,14 @@ class FlashNextEngine(FlashNextRef):
         p = self.pre(li) + "self_attn."
         qkv = self.lin(x, self.W[p + "qkv"])
         iqk = self.lin(x, self.W[p + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+        if self._multi is not None:
+            # SPD-235: a packed MTP step: the projections once over every lane's rows, the core per lane
+            parts, r0 = [], 0
+            for rb, st_i, m, cls in self._multi:
+                self._cur, self._cls = rb, cls
+                parts.append(self._attn1_core(qkv[r0:r0 + m], iqk[r0:r0 + m] if iqk is not None else None, li, st_i))
+                r0 += m
+            return self.lin(torch.cat(parts), self.W[p + "o_proj.weight"])
         return self.lin(self._attn1_core(qkv, iqk, li, st), self.W[p + "o_proj.weight"])
 
     def _attn1_core(self, qkv, iqk, li, st):
@@ -1432,10 +1441,8 @@ class FlashNextEngine(FlashNextRef):
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         M = stack_in.shape[0]
-        rb = self._rows_buffers(M, key)
-        self._cur, self._write, self.rec, self._cls = rb, False, {}, cls
-        d = rb["d"]
-        e = self.rms(self.W["embed_tokens.weight"].index_select(0, d["tok"]).to(self.dtype),
+        tok = self._mtp_begin(M, key, cls)
+        e = self.rms(self.W["embed_tokens.weight"].index_select(0, tok).to(self.dtype),
                      self.W["mtp.pre_fc_norm_embedding.weight"], eps)
         e = self.lin(e, self.W["mtp.fc_embedding.weight"])
         hs = self.rms(stack_in, self.W["mtp.pre_fc_norm_hidden.weight"], eps)
@@ -1454,6 +1461,71 @@ class FlashNextEngine(FlashNextRef):
         dd = K.gemv(n, self.W["mtp.hyper_connection_mixer.down_inject"])
         x = K.mix_up(dd, n, self.W["mtp.hyper_connection_mixer.input_mix_weight_up.weight"], hc)
         return x, h
+
+    def _mtp_begin(self, M: int, key, cls: int) -> torch.Tensor:
+        """The rows' tokens for an MTP step: the staged buffers of `key` (the attention reads them), or under
+        a packed step (`_multi`, SPD-235) every lane's tokens in lane order."""
+        self._write, self.rec = False, {}
+        if self._multi is not None:
+            return torch.cat([rb["d"]["tok"] for rb, _, _, _ in self._multi])
+        rb = self._rows_buffers(M, key)
+        self._cur, self._cls = rb, cls
+        return rb["d"]["tok"]
+
+    @torch.no_grad()
+    def mtp_chain_multi(self, items: list) -> None:
+        """SPD-235: `mtp_chain_dev` of several heads over these weights at once: [(head key, MTP state, n fed
+        rows, depth, class)], each staged (`stage_mtp`, its streams in its `_mtp_bufs()["stack"]`). Every step
+        runs the MTP layer once over all lanes' rows (the attention on each lane's own cache), the draft head
+        once over each lane's last row; each lane's top-2 tokens and probabilities land in its own buffers."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        bs = []
+        for key, st_m, n, depth, cls in items:
+            self._mtp_key = key
+            bs.append(self._mtp_bufs(depth))
+        depth = items[0][3]
+        cuts = np.cumsum([it[2] for it in items])
+        last = torch.as_tensor(cuts - 1, dtype=torch.long, device=self.device)
+        self._multi = [(self._rows_buffers(n, ("mtp", key, 0, n)), st_m, n, cls) for key, st_m, n, _, cls in items]
+        try:
+            x, h = self.mtp_rows(None, None, torch.cat([b["stack"][:it[2]] for b, it in zip(bs, items)]))
+        finally:
+            self._multi = None
+        if c.has_indexer:                     # the blocks each feed completed, into its MTP pool
+            ip = self.pre(MTP) + "self_attn.indexer."
+            for (_, st_m, _, _, _), b in zip(items, bs):
+                own = SK.qsa_pool(st_m.ik[MTP], b["d32"][:SK.OWN * 4].view(SK.OWN, 4), b["d32"][SK.OWN * 4:],
+                                  self.W[ip + "k_layernorm.weight"], self.rope_cos, self.rope_sin, c.rms_norm_eps)
+                st_m.pool[MTP].index_copy_(0, b["dpi"], own)
+        x, h = x.index_select(0, last), h.index_select(0, last)
+        for j in range(depth):
+            if self.draft_head is not None:
+                lg = K.gemv(x, self.draft_head)
+            else:
+                lg = K.dense(x, self.W["lm_head.weight"]).float()
+            vals, ids = torch.topk(lg, 2, dim=-1)
+            z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
+            prob = torch.exp(vals - vals[:, :1]) / z
+            tok = self.draft_ids.index_select(0, ids.view(-1)).view(ids.shape) if self.draft_head is not None else ids
+            for i, b in enumerate(bs):
+                b["prob"][j].copy_(prob[i])
+                b["tok"][j].copy_(tok[i])
+            if j + 1 == depth:
+                break
+            self._multi = []
+            for i, (key, st_m, _, _, cls) in enumerate(items):
+                rb = self._rows_buffers(1, ("mtp", key, j + 1, 1))
+                rb["d"]["tok"].copy_(tok[i, :1])
+                self._multi.append((rb, st_m, 1, cls))
+            try:
+                x, h = self.mtp_rows(None, None, h)
+            finally:
+                self._multi = None
+        for b in bs:
+            b["tok_h"].copy_(b["tok"], non_blocking=True)
+            b["prob_h"].copy_(b["prob"], non_blocking=True)
 
     def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int) -> int:
         """Host work of a greedy chain draft at st_m.length: the feed of n = len(nexts) committed rows
