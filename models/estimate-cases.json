@@ -230,7 +230,7 @@
   "parallelism": {
    "slots": {
     "min": 1,
-    "max": 4,
+    "max": 8,
     "default": 8,
     "engine_max": 64,
     "engine_max_reason": null
@@ -504,7 +504,7 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 3,
+     "max": 8,
      "default": 8,
      "engine_max": 64,
      "engine_max_reason": null
@@ -688,8 +688,8 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 1,
-     "default": 1,
+     "max": 8,
+     "default": 8,
      "engine_max": 64,
      "engine_max_reason": null
     },
@@ -855,10 +855,10 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 1,
-     "default": 1,
-     "engine_max": 1,
-     "engine_max_reason": "Ornith-1.5-122B serves one chat at a time for now: its engine has no side slots yet."
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
+     "engine_max_reason": null
     },
     "window": {
      "min": 8192,
@@ -7187,7 +7187,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 45.0,
+    "total_gb": 94.0,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7224,6 +7224,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -7246,22 +7252,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 7.0,
+      "gb": 56.0,
       "kind": "kv",
-      "worst_gb": 7.0
+      "worst_gb": 56.0
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "context_tokens_fit": 2097152,
     "kv_bytes_per_token": 28672,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.0,
+    "kv_worst_gb": 56.0,
     "room_gb": 68.63,
     "lane_full_gb": 7.0,
-    "lanes_full": 1,
+    "lanes_full": 8,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
+     "All 8 lanes can hold the full 262,144-token window at once (7.00 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -7275,7 +7282,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 41.61,
+    "total_gb": 66.88,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7312,6 +7319,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -7334,22 +7347,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 3.61,
+      "gb": 28.88,
       "kind": "kv",
-      "worst_gb": 3.61
+      "worst_gb": 28.88
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "context_tokens_fit": 2097152,
     "kv_bytes_per_token": 14784,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.61,
+    "kv_worst_gb": 28.88,
     "room_gb": 68.63,
     "lane_full_gb": 3.61,
-    "lanes_full": 1,
+    "lanes_full": 8,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
+     "All 8 lanes can hold the full 262,144-token window at once (3.61 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -7360,7 +7374,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 85.65,
+    "total_gb": 127.65,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7397,6 +7411,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -7426,22 +7446,25 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 6.0,
+      "gb": 48.0,
       "kind": "kv",
-      "worst_gb": 6.0
+      "worst_gb": 48.0
      }
     ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 1178774,
     "kv_bytes_per_token": 24576,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 6.0,
+    "kv_worst_gb": 48.0,
     "room_gb": 26.98,
     "lane_full_gb": 6.0,
-    "lanes_full": 1,
+    "lanes_full": 4,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
+     "Over the budget by 21.02 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 1,178,774 tokens of conversation fit in all, 147,346 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -7451,9 +7474,98 @@
     "model": "ornith-1.5-122b",
     "slots": 2
    },
-   "error": {
-    "status": 422,
-    "code": "out_of_range"
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 91.65,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 12.0,
+      "kind": "kv",
+      "worst_gb": 12.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 524288,
+    "kv_bytes_per_token": 24576,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 12.0,
+    "room_gb": 26.98,
+    "lane_full_gb": 6.0,
+    "lanes_full": 2,
+    "notes": [
+     "All 2 lanes can hold the full 262,144-token window at once (6.00 GiB each).",
+     "About 524,288 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
+    ]
    }
   }
  ]

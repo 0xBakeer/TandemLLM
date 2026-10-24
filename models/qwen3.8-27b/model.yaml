@@ -653,7 +653,7 @@ components:
 # holds in the estimate's "typical" case; with the KV pool on, pages are committed only as a
 # conversation writes them.
 parallelism:
-  slots: {min: 1, max: 4, default: 8}
+  slots: {min: 1, max: 8, default: 8}
   window: {min: 8192, max: 262144, default: 262144, step: 8192}
   kv_pool: {default: true}
   floor_gb: {min: 10, max: 40, default: 15}

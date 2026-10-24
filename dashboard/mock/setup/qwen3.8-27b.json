@@ -1756,7 +1756,7 @@
  "parallelism": {
   "slots": {
    "min": 1,
-   "max": 4,
+   "max": 8,
    "default": 8,
    "engine_max": 64,
    "engine_max_reason": null
