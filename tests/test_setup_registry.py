@@ -509,15 +509,18 @@ def test_slots_follow_the_engine_family():
         assert s["engine_max"] == (registry.ENGINE_MAX_SLOTS if side else 1), (mid, s)
         assert (s["engine_max_reason"] is None) == side, (mid, s)
         assert registry.step_field(m, "parallelism", "slots")["max"] == s["engine_max"], mid
+    # SPD-217: Ornith's engine has side slots now (`Qwen35MoeEngine.verify_multi`)
     orn = models["ornith-1.5-122b"]
-    assert "one chat at a time" in orn["parallelism"]["slots"]["engine_max_reason"]
-    assert estimate.check(orn, {"model": orn["id"], "slots": 1})["slots"] == 1
-    try:
-        estimate.check(orn, {"model": orn["id"], "slots": 2})
-    except estimate.SelectionError as exc:
-        assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
-    else:
-        raise AssertionError("two chats on a model whose engine has no side slots")
+    assert orn["parallelism"]["slots"]["engine_max_reason"] is None
+    assert estimate.check(orn, {"model": orn["id"], "slots": 2})["slots"] == 2
+    one = [m for m in models.values() if not REGISTRY[m["engine"]].spec.side_slots]
+    for m in one:
+        try:
+            estimate.check(m, {"model": m["id"], "slots": 2})
+        except estimate.SelectionError as exc:
+            assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
+        else:
+            raise AssertionError(f"two chats on {m['id']}, whose engine has no side slots")
     fl = models["flint"]
     assert estimate.check(fl, {"model": fl["id"], "slots": 4})["slots"] == 4
     # a file that names no family is refused by name, not read as the 27B's

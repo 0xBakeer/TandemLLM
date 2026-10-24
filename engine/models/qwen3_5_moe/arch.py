@@ -13,8 +13,8 @@ ARCH = register(Arch(
     serve="engine.models.qwen3_5_moe.serving:serve",
     manifest="engine.models.qwen3_5_moe.serving:manifest",
     rank=4,
-    # #104: no side slots yet (ENG-241): one chat at a time
-    spec=ServeSpec(side_slots=False),
+    # SPD-217: side slots, their blocks in one joint verify pass (`Qwen35MoeEngine.verify_multi`)
+    spec=ServeSpec(side_slots=True),
     uses=("engine/models/flashnext/engine.py", "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py",
           "engine/models/flashnext/vision.py", "engine/models/flashnext/config.py", "engine/models/flashnext/pack.py",
           "engine/models/flashnext/ple.py", "engine/models/flashnext/serving.py",

@@ -51,12 +51,13 @@ GOLDEN_V2 = ("78caf289adafa1d34c0341b813e284086977b5b6a5ff64a2055bdd76ea83833e",
              "febbbe9bac10b8726fc91b32e6e11d5cb1cb1c7d0e6638e4ce7489772da1fdb0")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
-    # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again)
+    # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
+    # SPD-217: Ornith's joint verify pass (qwen3_5_moe once more)
     "qwen3_5": "52027eef3708c238172a5e5bee21ecd4120022314011d2357f04e9d0b5836da6",
     "qwen4_exp": "139d8178e8b38a4cb5eeade8c268c6a5fd07c3c2df0f5d84c5effe42202ca827",
     "nemotron_h": "63429f6dba04677b9e7d2f3660976674f43ed8cf0d7daf666eb39af033b434f5",
     "lfm2_moe": "699a67aff522396da3148d96c35cfe255a932b71aadb26744af087427f649f72",
-    "qwen3_5_moe": "b53e4b31edd066b62975129a7e13613615a01734625f1848e119360d94205ba9",
+    "qwen3_5_moe": "20e090e44de52e3c9b4fc59a676d6852ed0c03d199615c93371b43f8e859cd65",
     "flint": "7c5c278ad4a8ba2075c50f14b12a21d2db29aba347bd78ca9617a9985178b73b",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

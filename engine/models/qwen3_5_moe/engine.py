@@ -104,7 +104,9 @@ class Qwen35MoeEngine(FlashNextEngine):
         super().commit_dev(st, key)
         if self.taps and st.ring is not None:
             d = self._commit_bufs(key)["d"]
-            src = self._rb[key[0]]["taps"].index_select(0, d["idx"])
+            # a joint pass's block keeps its taps in its own rows (`verify_multi`: rec["taps"])
+            jt = self.rec.get("taps") if isinstance(getattr(self, "rec", None), dict) else None
+            src = (jt if jt is not None else self._rb[key[0]]["taps"]).index_select(0, d["idx"])
             st.ring.index_copy_(0, d["dst"] % self.ring_rows, src)
 
     # the reference's pieces this family uses (FlashNextEngine's base is Flash-Next's reference)
@@ -206,7 +208,85 @@ class Qwen35MoeEngine(FlashNextEngine):
         return rb["logits"]
 
     def verify_multi(self, items: list) -> list:
-        raise NotImplementedError("joint verify passes are not built for the Qwen3.5 MoE trunk yet")
+        """SPD-217: the verify blocks of several states over these weights in one pass: [(tokens, parents,
+        st)] -> per state (logits [M, vocab] fp32, its greedy tokens on the device, its post-norm rows). The
+        row-wise parts (the norms, the projections, the experts, the injects, the head) run once over every
+        state's rows; the GDN recurrence and the attention per state on its own rows and caches, as its
+        lone verify (`rows_step`) runs them. A state's taps go with its rows (`rec["taps"]`, read by its
+        commit). The projections and experts give a row its lone bits up to the self-check's widths, so
+        the caller keeps a pass at or under MOE_ROWS rows (the experts' row-wise path)."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        H, eps = c.hidden_size, c.rms_norm_eps
+        self.flush()
+        cx = []
+        for j, (tokens, parents, st) in enumerate(items):
+            M = len(tokens)
+            depth = [0] * M
+            for i, p in enumerate(parents):
+                depth[i] = 0 if p < 0 else depth[p] + 1
+            self.stage_rows(tokens, parents, st, key=("joint", j, M))
+            cx.append({"st": st, "M": M, "cls": self.qsa_class(st.length + max(depth)), "block": self._block,
+                       "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}})
+        cuts = [0]
+        for x in cx:
+            cuts.append(cuts[-1] + x["M"])
+        rows = [slice(cuts[j], cuts[j + 1]) for j in range(len(cx))]
+        total = cuts[-1]
+
+        def use(x):
+            self._cur, self._write, self._cls, self.rec = x["rb"], False, x["cls"], x["rec"]
+        zd = self._zero(total)
+        h = torch.cat([self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]) for x in cx])
+        n = K.hc_norm(h, self._site_norm(0), H, eps)
+        for li in range(c.num_hidden_layers):
+            p = self.pre(li)
+            k = self._tapcol.get(li)
+            if k is not None:
+                for j, x in enumerate(cx):
+                    x["rb"]["taps"][:, k].copy_(h[rows[j]])
+            if c.is_linear(li):
+                a = p + "linear_attn."
+                qkvz, ab = self.lin(n, self.W[a + "qkvz"]), K.gemv_bf16(n, self.W[a + "ab"])
+                parts = []
+                for j, x in enumerate(cx):
+                    use(x)
+                    parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                out = self.lin(torch.cat(parts), self.W[a + "out_proj.weight"])
+            else:
+                a = p + "self_attn."
+                qkv = self.lin(n, self.W[a + "qkv"])
+                parts = []
+                for j, x in enumerate(cx):
+                    use(x)
+                    parts.append(self._attn1_core(qkv[rows[j]], None, li, x["st"]))
+                out = self.lin(torch.cat(parts), self.W[a + "o_proj.weight"])
+            h, n = K.inject_norm(h, out, zd, 0, self.W[p + "post_attention_layernorm.weight"], 1, eps)
+            nxt = self._site_norm(li + 1)
+            if total <= self.MOE_ROWS:
+                yd, ids, wts = self.moe_parts(n, li)
+                for j, x in enumerate(cx):
+                    x["rec"][("ids", li)] = ids[rows[j]]
+                h, n = K.combine_inject_norm(h, yd, ids, wts, zd, 0, nxt, 1, eps)
+            else:
+                h, n = K.inject_norm(h, self.moe(n, li), zd, 0, nxt, 1, eps)
+        if DENSE_MAX:
+            logits = K.dense(n, self.W["lm_head.weight"])
+        else:
+            from tools.exl3_linear import exl3_matmul
+            logits = exl3_matmul(n, self.W["lm_head.weight"])
+        out = []
+        for j, x in enumerate(cx):
+            rb = x["rb"]
+            rb["logits"][:x["M"]].copy_(logits[rows[j]])
+            torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
+            x["rec"]["stack"] = n[rows[j]]
+            if self.taps:
+                x["rec"]["taps"] = rb["taps"]
+            self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
+            out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], n[rows[j]]))
+        self._pend_owner = None
+        return out
 
     # ------------------------------------------------------------------------- attention
     def _attn1_core(self, qkv, iqk, li, st):

@@ -45,10 +45,11 @@ def manifest() -> Manifest:
 
 
 class Qwen35MoeServing(FlashNextServing):
-    """`Qwen35MoeEngine` with one state and its graphs, in the server's engine interface. One sequence
-    slot for now: the joint verify of several slots is Flash-Next's mixer-shaped pass (not built here)."""
+    """`Qwen35MoeEngine` with one state and its graphs, in the server's engine interface. SPD-217: side
+    slots over the same weights (Flash-Next's `side_slot`, this class) whose blocks verify in one pass
+    (`Qwen35MoeEngine.verify_multi`)."""
 
-    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096, shadow=False, side_lane=False)
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False)
 
     def __init__(self, fn, max_len: int):
         super().__init__(fn, max_len)

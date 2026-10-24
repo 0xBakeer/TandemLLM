@@ -280,9 +280,9 @@ class FlashNextServing:
         a call on one state applies another's parked GDN rows first (`FlashNextEngine.settle`), each
         MTP head drafts into its own buffers, and decoding slots verify their blocks in one pass
         (`forward_tree_multi`)."""
-        e2 = FlashNextServing(self.fn, max_len)
+        e2 = type(self)(self.fn, max_len)      # SPD-217: a subclass's slot is its own class (Ornith's)
         d2 = None
-        if drafter0 is not None:
+        if drafter0 is not None and hasattr(drafter0, "cut"):
             ng = None
             if drafter0.ngram is not None:
                 from engine.drafters.ngram import NgramDrafter

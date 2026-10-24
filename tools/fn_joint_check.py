@@ -29,7 +29,6 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.methods import walk  # noqa: E402
-from engine.models.flashnext.serving import FlashNextServing, build  # noqa: E402
 from engine.tree import DraftTree  # noqa: E402
 from tools.fn_generate import class_prompt  # noqa: E402
 
@@ -54,8 +53,16 @@ def main() -> None:
     ap.add_argument("--block", type=int, default=5)
     ap.add_argument("--timing", type=int, default=0)
     ap.add_argument("--moe-group", action="store_true", help="the grouped expert kernels (tools/fn_kernels.py MOE_GROUP)")
+    ap.add_argument("--arch", default="flashnext", choices=("flashnext", "qwen3_5_moe"),
+                    help="the family whose joint pass is checked (qwen3_5_moe: Ornith)")
     ap.add_argument("--json")
     a = ap.parse_args()
+    global FlashNextServing, build
+    if a.arch == "qwen3_5_moe":
+        # SPD-217: Ornith's trunk (Qwen3.5 MoE), the same checks over `Qwen35MoeEngine.verify_multi`
+        from engine.models.qwen3_5_moe.serving import Qwen35MoeServing as FlashNextServing, build
+    else:
+        from engine.models.flashnext.serving import FlashNextServing, build
     if a.moe_group:
         from tools import fn_kernels
         fn_kernels.MOE_GROUP = True
