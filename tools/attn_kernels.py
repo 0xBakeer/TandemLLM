@@ -126,7 +126,7 @@ if HAVE_TRITON:
 
     @triton.jit
     def _attn_inv(Q, K, V, ANC, s_anc, PM, PL, PACC, T, R, NKV, START, CHUNK,
-                  s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, LENP,
+                  s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, LENP, SPLIT_AT,
                   SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
                   TP: tl.constexpr, DEVLEN: tl.constexpr):
         """SPD-201 (ATTN_INV): one token's query heads (BM rows, REP real) over the columns of its own positions
@@ -150,6 +150,8 @@ if HAVE_TRITON:
         arow = tl.load(ANC + t * s_anc + jj, mask=jm, other=0) != 0       # the token's ancestors
         dt = tl.sum(arow.to(tl.int32), axis=0) - 1
         lcv = START + dt + 1                                              # the columns the token sees
+        if lcv - 1 >= SPLIT_AT:
+            return                                                        # `_attn_inv2`'s token
         # the chunk of the token's own length class (512 to 32,768 columns, then a 64th of the class), not of
         # the launch's: the same token is cut at the same columns whatever the block around it
         cls = 1024
@@ -187,6 +189,107 @@ if HAVE_TRITON:
         tl.store(PACC + base[:, None] * D + od[None, :], acc, mask=gmask[:, None])
 
     @triton.jit
+    def _attn_inv2(Q, K, V, ANC, s_anc, PM, PL, PACC, T, R, NKV, START,
+                   s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, LENP, SPLIT_AT,
+                   SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, BN: tl.constexpr,
+                   TP: tl.constexpr, NT: tl.constexpr, DEVLEN: tl.constexpr):
+        """`_attn_inv` with NT tokens a program (8 rows each, REP real): a block wholly below START is the cache's
+        rows for every token, one K/V load and one product for all; a block at or past START gathers each token's
+        own columns (the cache below START, its ancestor at depth d at START + d), one product a token, each row
+        keeping its own token's. A row's statements are the same either way: the product of its query with the
+        block's keys, the same online softmax, and its values accumulated into the MMA accumulator (another
+        token's rows add exact zeros). So a token's bits depend on its positions alone, not on the block
+        around it, the commit point, or which tokens share its program."""
+        if DEVLEN:
+            START = tl.load(LENP)
+        BM: tl.constexpr = NT * 8
+        pg = tl.program_id(0)
+        kvh = tl.program_id(1)
+        sp = tl.program_id(2)
+        rr = tl.arange(0, BM)
+        lt = rr // 8
+        g = rr % 8
+        t = pg * NT + lt
+        rvalid = (g < REP) & (t < T)
+        qh = kvh * REP + g
+        od = tl.arange(0, D)
+        jj = tl.arange(0, TP)
+        jm = jj < T
+        anc = tl.load(ANC + jj[:, None] * s_anc + jj[None, :], mask=jm[:, None] & jm[None, :], other=0) != 0
+        dep = tl.sum(anc.to(tl.int32), axis=1) - 1                       # [TP]
+        # each row's token's depth: its ancestor count less one
+        arows = tl.load(ANC + t[:, None] * s_anc + jj[None, :], mask=(t < T)[:, None] & jm[None, :], other=0) != 0
+        dt = tl.sum(arows.to(tl.int32), axis=1) - 1                       # [BM]
+        lcv = START + dt + 1
+        rvalid = rvalid & (lcv - 1 >= SPLIT_AT)                          # `_attn_inv`'s tokens are its own
+        cls = tl.full([BM], 1024, dtype=tl.int32)
+        for _ in range(17):
+            cls = tl.where(cls < lcv, cls * 2, cls)
+        chunk = tl.maximum(512, cls // 64)
+        c0 = sp * chunk
+        c1 = tl.minimum(c0 + chunk, lcv)
+        lo = tl.min(tl.where(rvalid, c0, 2147483647), axis=0)
+        hi = tl.max(tl.where(rvalid, c1, 0), axis=0)
+        lo = lo // BN * BN
+        q = tl.load(Q + qh[:, None] * s_qh + t[:, None] * s_qt + od[None, :], mask=rvalid[:, None], other=0.0)
+        m_i = tl.full([BM], -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros([BM], dtype=tl.float32)
+        acc = tl.zeros([BM, D], dtype=tl.float32)
+        # the blocks wholly below START (the cache's rows for every token), then the rest (each token's own
+        # columns): two loops without a branch, so the loads of each are pipelined
+        mid = tl.maximum(lo, tl.minimum(hi, START // BN * BN))
+        for n0 in range(lo, mid, BN):
+            cols = n0 + tl.arange(0, BN)
+            vis = rvalid[:, None] & (cols[None, :] >= c0[:, None]) & (cols[None, :] < c1[:, None])
+            k = tl.load(K + kvh * s_kh + cols[:, None] * s_kn + od[None, :])
+            sc = tl.dot(q, tl.trans(k.to(tl.bfloat16))) * SCALE
+            sc = tl.where(vis, sc, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(sc, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            pr = tl.exp(sc - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(pr, 1)
+            v = tl.load(V + kvh * s_vh + cols[:, None] * s_vn + od[None, :])
+            acc = tl.dot(pr.to(tl.bfloat16), v.to(tl.bfloat16), acc * alpha[:, None])
+            m_i = m_new
+        for n0 in range(mid, hi, BN):
+            cols = n0 + tl.arange(0, BN)
+            vis = rvalid[:, None] & (cols[None, :] >= c0[:, None]) & (cols[None, :] < c1[:, None])
+            dcol = cols - START
+            sc = tl.full([BM, BN], -float("inf"), dtype=tl.float32)
+            for j in tl.static_range(NT):
+                tj = pg * NT + j
+                aj = tl.load(ANC + tj * s_anc + jj, mask=jm & (tj < T), other=0) != 0
+                hit = aj[None, :] & (dep[None, :] == dcol[:, None])
+                node = tl.sum(tl.where(hit, jj[None, :], 0), axis=1)
+                phys = tl.where(cols < START, cols, START + node)
+                kj = tl.load(K + kvh * s_kh + phys[:, None] * s_kn + od[None, :])
+                scj = tl.dot(q, tl.trans(kj.to(tl.bfloat16))) * SCALE
+                sc = tl.where((lt == j)[:, None], scj, sc)
+            sc = tl.where(vis, sc, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(sc, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            pr = tl.exp(sc - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(pr, 1)
+            acc = acc * alpha[:, None]
+            for j in tl.static_range(NT):
+                tj = pg * NT + j
+                aj = tl.load(ANC + tj * s_anc + jj, mask=jm & (tj < T), other=0) != 0
+                hit = aj[None, :] & (dep[None, :] == dcol[:, None])
+                node = tl.sum(tl.where(hit, jj[None, :], 0), axis=1)
+                phys = tl.where(cols < START, cols, START + node)
+                vj = tl.load(V + kvh * s_vh + phys[:, None] * s_vn + od[None, :])
+                prj = tl.where((lt == j)[:, None], pr, 0.0)
+                acc = tl.dot(prj.to(tl.bfloat16), vj.to(tl.bfloat16), acc)
+            m_i = m_new
+        r = g * T + t
+        base = sp * (NKV * R) + kvh * R + r
+        tl.store(PM + base, m_i, mask=rvalid)
+        tl.store(PL + base, l_i, mask=rvalid)
+        tl.store(PACC + base[:, None] * D + od[None, :], acc, mask=rvalid[:, None])
+
+    @triton.jit
     def _attn_combine(PM, PL, PACC, OUT, T, R, NKV, NS, s_oh, s_ot,
                       REP: tl.constexpr, D: tl.constexpr, NSP: tl.constexpr):
         kvh = tl.program_id(0)
@@ -214,6 +317,13 @@ if HAVE_TRITON:
 #: SPD-201: a verify's attention row by row over its own positions (`_attn_inv`): a token's bits do not depend
 #: on the tree around it or on where the last commit fell
 INV = _S.get("ATTN_INV") == "1"
+INV_BM = 16
+#: tokens a program of `_attn_inv2`, one K/V read of the cache blocks for all of them (0: `_attn_inv`, a program a
+#: token). 4 at 4 warps measured best on this board: a layer at 16,000 columns and 16 rows 993 -> 464 us (the shared
+#: kernel 365), at 4,000 and 8 rows 125 -> 56 (56)
+INV_NT = int(os.environ.get("QWEN38_ATTN_INV_NT", "4"))
+#: the position from which a token takes `_attn_inv2` (below: `_attn_inv`)
+INV_SPLIT = int(os.environ.get("QWEN38_ATTN_INV_SPLIT", "1024"))
 
 
 def attention_inv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start, block_mask: torch.Tensor,
@@ -236,12 +346,23 @@ def attention_inv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start, bloc
     pm = torch.empty(ns * R * hkv, dtype=torch.float32, device=q.device)
     pl = torch.empty_like(pm)
     pacc = torch.empty(ns * R * hkv, D, dtype=torch.float32, device=q.device)
-    _attn_inv[(T, hkv, ns)](q0, k0, v0, anc, anc.stride(0), pm, pl, pacc, T, R, hkv,
-                            0 if lenp is not None else int(start), chunk,
+    # a token below INV_SPLIT columns through `_attn_inv` (a program a token: the most programs where the context
+    # is short), one at or past it through `_attn_inv2` (the cache blocks read once for INV_NT tokens): the
+    # choice is the token's own position, so it is the same whatever the traffic
+    st = 0 if lenp is not None else int(start)
+    lp = lenp if lenp is not None else q0
+    tp = max(16, triton.next_power_of_2(T))
+    split = INV_SPLIT if INV_NT > 0 else 1 << 30
+    _attn_inv[(T, hkv, ns)](q0, k0, v0, anc, anc.stride(0), pm, pl, pacc, T, R, hkv, st, chunk,
                             q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
-                            lenp if lenp is not None else q0,
-                            SCALE=scale, REP=rep, D=D, BM=16, BN=bn, TP=max(16, triton.next_power_of_2(T)),
+                            lp, split, SCALE=scale, REP=rep, D=D, BM=INV_BM, BN=bn, TP=tp,
                             DEVLEN=lenp is not None, num_warps=num_warps, num_stages=num_stages)
+    if INV_NT > 0 and (lenp is not None or int(start) + T > INV_SPLIT):
+        _attn_inv2[(-(-T // INV_NT), hkv, ns)](
+            q0, k0, v0, anc, anc.stride(0), pm, pl, pacc, T, R, hkv, st,
+            q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
+            lp, split, SCALE=scale, REP=rep, D=D, BN=bn, TP=tp, NT=INV_NT,
+            DEVLEN=lenp is not None, num_warps=num_warps, num_stages=num_stages)
     _attn_combine[(hkv, R)](pm, pl, pacc, out, T, R, hkv, ns, out.stride(1), out.stride(0),
                             REP=rep, D=D, NSP=triton.next_power_of_2(ns), num_warps=4)
     return out.unsqueeze(0).transpose(1, 2)
@@ -572,7 +693,7 @@ def check_inv(seed: int = 0) -> list[str]:
     keep = INV
     INV = True
     try:
-        for S in (37, 500, 511, 1200, 3000, 32765, 40000):
+        for S in (37, 500, 511, 1020, 1200, 3000, 32765, 40000):
             L = S + 16 + 64
             kc = (torch.randn(1, hkv, L, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
             vc = (torch.randn(1, hkv, L, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
