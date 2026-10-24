@@ -17,8 +17,7 @@ and the joint pass with its commits; and the joint pass's GPU time by part (`Fla
 joint_timing`: staging, PLE/norms/mixers, projections, GDN recurrence, attention, experts, head).
 `--kernels N`: then one more joint pass with its commits under torch.profiler: the wall time, the GPU's
 kernel time (busy) and the top N kernels by summed time. `--lone-kernels N`: the same for the first
-state's lone verify and commit (its graphs, as a slot alone runs them), at every block width up to
-`--block`.
+state's lone verify and commit (its graphs, as a slot alone runs them), at every block width 2..`--block`.
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.pack)
     lens = [int(x) for x in a.tokens.split(",")]
-    L = max(lens) + (a.rounds + a.timing) * (a.block + 1) + 1024
+    L = max(lens) + (a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0)) * (a.block + 1) + 1024
     eng, _, _ = build(a.pack, L, tok, spec=False, log=lambda s: print(s, flush=True))
     fn = eng.fn
     # one state a length: the kinds in turn (prose, code, chat, prose, ...), so 8 lengths are 8 states
@@ -94,7 +93,7 @@ def main() -> None:
         tmp = FlashNextServing(fn, L)
         x = tmp.forward(ids, 0)
         cont = [int(x.view(-1).argmax())]
-        for i in range((a.rounds + a.timing) * (a.block + 1)):
+        for i in range((a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0)) * (a.block + 1)):
             x = tmp.forward(torch.tensor([cont[-1]], device="cuda"), ids.numel() + i)
             cont.append(int(x.view(-1).argmax()))
         del tmp
@@ -189,10 +188,15 @@ def main() -> None:
         from torch.profiler import ProfilerActivity, profile
         lone_k = {}
         s = lone[0]
-        for w in range(1, a.block + 1):
-            for rep_ in range(3):                               # the first warms (a capture), the last is kept
+        for w in range(2, a.block + 1):
+            for rep_ in range(3):                               # two warm (the graphs' captures), the third is profiled
                 blk = block_of(conts[0], at[0], w, False)
                 torch.cuda.synchronize()
+                if rep_ < 2:
+                    s.forward_tree(torch.tensor(blk[0], device="cuda"), blk[1], s.st.length)
+                    s.commit_tree(list(range(len(blk[0]))))
+                    at[0] += len(blk[0])
+                    continue
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
                     t0 = time.perf_counter()
                     s.forward_tree(torch.tensor(blk[0], device="cuda"), blk[1], s.st.length)

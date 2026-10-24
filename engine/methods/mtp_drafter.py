@@ -126,7 +126,9 @@ class MTPTreeDrafter:
         c = self.cut
         V, delta = c.prices.learned(c.kind, self.cls)
         q = self.req
-        return (f"mtp request: turn={q['turn']} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
+        ti = q.get("turn_in") or {}
+        ti = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ti.items()}
+        return (f"mtp request: turn={q['turn']} turn_in={ti} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
                 f"draft_ms={q['draft_ms']:.0f} verify_ms={q['verify_ms']:.0f} ({q['verify_rows']} rows) "
                 f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows, {q['primes']} calls) commit_ms={q['commit_ms']:.0f} "
                 f"spans={ {k: [n, round(ms), t] for k, (n, ms, t) in q['spans'].items()} } "
@@ -141,7 +143,7 @@ class MTPTreeDrafter:
     @staticmethod
     def _req() -> dict:
         return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
-                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None,
+                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None, "turn_in": None,
                 "spans": {"block": [0, 0.0, 0], "anchor": [0, 0.0, 0], "plain": [0, 0.0, 0],
                           "unpriced": [0, 0.0, 0]}}
 
@@ -362,6 +364,10 @@ class MTPTreeDrafter:
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
         # no draft head: no backlog to read into it, and each round's match decides (above)
+        # the decision's inputs, for the request's line (a plain turn whose reason is not seen cannot be argued)
+        c = self.cut
+        self.req["turn_in"] = {"plain_ms": c.plain_ms(self.cls), "spec_ms": c.spec_ms(self.cls), "backlog": unfed,
+                               "answer": self.answer, "extra_ms": round(float(extra), 1)}
         self._turn = self.req["turn"] = (not self.head.depth
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
