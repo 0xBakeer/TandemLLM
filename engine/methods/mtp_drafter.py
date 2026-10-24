@@ -225,6 +225,9 @@ class MTPTreeDrafter:
             self._obs = None
         self._plain, self.round, self.verify_ms = None, None, None
 
+    #: SPD-215: a joint round (server/round_runner.py) prices this drafter's round by its share of the pass
+    joint_priced = True
+
     def on_verify(self, rows: int, ms: float) -> None:
         self.verify_ms = ms
         self.req["verify_ms"] += ms

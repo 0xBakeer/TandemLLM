@@ -50,6 +50,8 @@ ROWCOPY = os.environ.get("QSE_RUNNER_ROWCOPY", "1") == "1"
 PIPE = os.environ.get("QSE_RUNNER_PIPE", "1") == "1"
 #: SRV-709 (a test knob): the pool refuses a lane once after it wrote this many tokens (0: never), so a test
 #: can watch a lane give way and go on; QSE_KV_TEST_REFUSE_SLOTS limits it to these slots (comma list)
+#: SPD-215: a joint pass hands each drafter that asks (`joint_priced`) its share of the pass by rows
+JOINT_PRICE = os.environ.get("QSE_RUNNER_JOINT_PRICE", "0") == "1"
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -402,6 +404,15 @@ class Runner:
             multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
             outs = multi([(t.eng, b, x.parents, t.pos) for t, b, x in zip(group, blocks, trees)])
             self.stats["joint"] += 1
+            if JOINT_PRICE:
+                # a drafter that prices its rounds by its verify (the MTP tree drafter's StairCut) gets its
+                # share of the joint pass by rows; without it the joint rounds go unpriced
+                ms = (time.perf_counter() - t0) * 1e3
+                total = sum(len(x.tokens) for x in trees) or 1
+                for t, x in zip(group, trees):
+                    ov = getattr(t.drafter, "on_verify", None)
+                    if ov is not None and getattr(t.drafter, "joint_priced", False):
+                        ov(len(x.tokens), ms * len(x.tokens) / total)
         t0 = self._t("verify", t0)
         # 3. the walks in one batch, each slot's penalties first
         specs = []
