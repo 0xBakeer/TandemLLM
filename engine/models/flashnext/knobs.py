@@ -6,4 +6,7 @@ KNOBS: dict[str, tuple] = {
     'FN_JOINT_ROWWISE': ('1', 'engine/models/flashnext/engine.py'),
     # SPD-215: the joint pass's experts through the grouped kernels (tools/fn_kernels.py MOE_GROUP); 0: a CTA a pair
     'FN_JOINT_MOE_GROUP': ('1', 'engine/models/flashnext/engine.py'),
+    # SPD-231: M > 1 rows of the mixers' GEMV (gemv_split) and mix_up on the register-blocked kernels (several
+    # weight rows a CTA, each row's bits the one-row kernels'); 0: the one-row-a-CTA kernels for every M
+    'FN_GEMV_NB': ('0', 'tools/fn_kernels.py'),
 }

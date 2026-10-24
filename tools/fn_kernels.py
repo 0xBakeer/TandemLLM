@@ -164,6 +164,60 @@ __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bf
         for (int o = LPR / 2; o > 0; o >>= 1) acc[m] += __shfl_xor_sync(0xffffffffu, acc[m], o);
 }
 
+// SPD-231: `row_dot` for NB weight rows at once (rows wr + nb ldw, nb < nlive): each activation chunk is
+// loaded once for the NB rows. Every (row, activation row) sum is `row_dot`'s own: the lane's chunks in K
+// order, a chunk's products in element order (summed on their own, then times the group's scale, with
+// GS), the same xor tree -- U changes nothing of that, and here a pass is one chunk.
+template <typename TW, int LPR, int MC, int NB>
+__device__ __forceinline__ void row_dot_nb(const TW* __restrict__ wr, size_t ldw, int nlive,
+                                           const __nv_bfloat16* __restrict__ X, int ldx, int m0, int mc, int K,
+                                           int sl, float (&acc)[NB][MC], const float* __restrict__ GS = nullptr,
+                                           size_t ldg = 0, int G = 0) {
+    constexpr int VEC = WVec<TW>::VEC;
+    constexpr int STEP = LPR * VEC;
+#pragma unroll
+    for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+        for (int m = 0; m < MC; ++m) acc[nb][m] = 0.f;
+    for (int k0 = sl * VEC; k0 < K; k0 += STEP) {
+        float w[NB][VEC], gs[NB];
+#pragma unroll
+        for (int nb = 0; nb < NB; ++nb)
+            if (nb < nlive) {
+                WVec<TW>::load(wr + nb * ldw + k0, w[nb]);
+                gs[nb] = GS ? GS[nb * ldg + k0 / G] : 1.0f;
+            }
+#pragma unroll
+        for (int m = 0; m < MC; ++m) {
+            if (m < mc) {
+                float x[VEC];
+                load_x8(X + (size_t)(m0 + m) * ldx + k0, x);
+                if (VEC == 16) load_x8(X + (size_t)(m0 + m) * ldx + k0 + 8, x + 8);
+#pragma unroll
+                for (int nb = 0; nb < NB; ++nb) {
+                    if (nb < nlive) {
+                        if (GS) {
+                            float t = 0.f;
+#pragma unroll
+                            for (int e = 0; e < VEC; ++e) t = fmaf(x[e], w[nb][e], t);
+                            acc[nb][m] = fmaf(gs[nb], t, acc[nb][m]);
+                        } else {
+#pragma unroll
+                            for (int e = 0; e < VEC; ++e) acc[nb][m] = fmaf(x[e], w[nb][e], acc[nb][m]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+        for (int m = 0; m < MC; ++m)
+#pragma unroll
+            for (int o = LPR / 2; o > 0; o >>= 1) acc[nb][m] += __shfl_xor_sync(0xffffffffu, acc[nb][m], o);
+}
+
 __device__ __forceinline__ void store_out(float* y, float v) { *y = v; }
 __device__ __forceinline__ void store_out(__nv_bfloat16* y, float v) { *y = __float2bfloat16_rn(v); }
 
@@ -225,6 +279,44 @@ __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __
     }
 }
 
+// SPD-231: `gemv_split_kernel` for M > 1 with NB weight rows a CTA: the same KS warps, slices, lanes and
+// warp-order slice sums for every row (its bits), each activation chunk loaded once for the NB rows (the
+// one-row-a-CTA kernel read all of x again for each of N rows: 212 MB of L2 a call at 32 rows).
+template <typename TW, int MC, int NB, typename TY>
+__global__ void __launch_bounds__(256) gemv_split_nb_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K, int G) {
+    __shared__ float red[8][NB][MC];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
+    const int n0 = blockIdx.x * NB, nlive = min(NB, N - n0), kc = K / ks, k0 = warp * kc;
+    const TW* wr = W + (size_t)n0 * K + k0;
+    for (int nb = 0; nb < nlive; ++nb)
+        for (int off = lane * 128; off < kc * (int)sizeof(TW); off += 32 * 128)
+            prefetch_l2(reinterpret_cast<const char*>(wr + (size_t)nb * K) + off);
+    pdl_wait();
+    pdl_trigger();
+    const float* gs = G ? S + (size_t)n0 * (K / G) + k0 / G : nullptr;
+    for (int m0 = 0; m0 < M; m0 += MC) {
+        const int mc = min(MC, M - m0);
+        float acc[NB][MC];
+        row_dot_nb<TW, 32, MC, NB>(wr, (size_t)K, nlive, X + k0, ldx, m0, mc, kc, lane, acc, gs, (size_t)(G ? K / G : 0), G);
+        if (lane == 0)
+#pragma unroll
+            for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+                for (int m = 0; m < MC; ++m) red[warp][nb][m] = acc[nb][m];
+        __syncthreads();
+        if (threadIdx.x < NB * MC) {
+            const int nb = threadIdx.x / MC, m = threadIdx.x % MC;
+            if (nb < nlive && m < mc) {
+                float t = red[0][nb][m];
+                for (int w = 1; w < ks; ++w) t += red[w][nb][m];
+                store_out(Y + (size_t)(m0 + m) * ldy + n0 + nb, t * (S && !G ? S[n0 + nb] : 1.0f));
+            }
+        }
+        __syncthreads();
+    }
+}
+
 // ----------------------------------------------------------------------------------- mix_up
 // A[M, R] = bf16(silu(bf16(D) / HC)) staged in shared memory (bf16), then per column j (one warp,
 // four groups of 8 lanes = the four streams): u_s = bf16(up row (s H + j) . a), x = mean of
@@ -270,6 +362,63 @@ __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D
                         p3 = __shfl_sync(0xffffffffu, p, 24);
             if (lane == 0 && m < mc)
                 Xo[(size_t)(m0 + m) * ldxo + j] = __float2bfloat16_rn((((p + p1) + p2) + p3) * inv_hc);
+        }
+    }
+}
+
+// SPD-231: mix_up for M > 1. A = bf16(silu(bf16(D) / HC)) [M, R] written once (`mix_a_kernel`, mix_up_kernel's
+// staging arithmetic), then a group of 8 lanes owns one column j and its 4 stream rows s H + j in-lane:
+// each A chunk is loaded once for the 4 rows. Per (row, stream) the sums are mix_up_kernel's (the same 8
+// lanes, chunks and xor tree), the products bf16(bf16(sigmoid(bf16(u))) n) likewise, and their sum
+// (((p0 + p1) + p2) + p3) / HC in mix_up_kernel's order. 4 columns a warp, 16 a CTA of 4 warps.
+__global__ void __launch_bounds__(256) mix_a_kernel(const float* __restrict__ D, int ldd, __nv_bfloat16* __restrict__ A,
+                                                    int M, int R, float inv_hc) {
+    pdl_wait();
+    pdl_trigger();
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < M * R) {
+        const int m = e / R, r = e % R;
+        A[e] = __float2bfloat16_rn(silu(bfr(bfr(D[(size_t)m * ldd + r]) * inv_hc)));
+    }
+}
+
+template <typename TW, int MC>
+__global__ void __launch_bounds__(128) mix_up_nb_kernel(const __nv_bfloat16* __restrict__ A,
+        const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc, int G) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int sl = lane & 7, grp = lane >> 3;
+    const int j = (blockIdx.x * 4 + warp) * 4 + grp;
+    const bool live = j < H;
+    const int jj = live ? j : 0;
+    if (live)
+        for (int s = 0; s < 4; ++s)
+            for (int off = sl * 128; off < R * (int)sizeof(TW); off += 8 * 128)
+                prefetch_l2(reinterpret_cast<const char*>(W + (size_t)(s * H + jj) * R) + off);
+    pdl_wait();
+    pdl_trigger();
+    const TW* wr = W + (size_t)jj * R;                    // stream s's row: wr + s H R
+    const float* gs = G ? S + (size_t)jj * (R / G) : nullptr;
+    for (int m0 = 0; m0 < M; m0 += MC) {
+        const int mc = min(MC, M - m0);
+        float acc[4][MC];
+        row_dot_nb<TW, 8, MC, 4>(wr, (size_t)H * R, live ? 4 : 0, A, R, m0, mc, R, sl, acc, gs,
+                                 (size_t)H * (G ? R / G : 0), G);
+        if (live && sl == 0) {
+#pragma unroll
+            for (int m = 0; m < MC; ++m) {
+                if (m < mc) {
+                    float p[4];
+#pragma unroll
+                    for (int s = 0; s < 4; ++s) {
+                        const int n = s * H + j;
+                        const float sc = S && !G ? S[n] : 1.0f;
+                        const float u = bfr(sigm(bfr(acc[s][m] * sc)));
+                        p[s] = bfr(u * __bfloat162float(Nn[(size_t)(m0 + m) * ldn + n]));
+                    }
+                    Xo[(size_t)(m0 + m) * ldxo + j] = __float2bfloat16_rn((((p[0] + p[1]) + p[2]) + p[3]) * inv_hc);
+                }
+            }
         }
     }
 }
@@ -1282,6 +1431,7 @@ __global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __re
 // --------------------------------------------------------------------------------- host side
 static int g_pdl = 1;      // fn_set_pdl: launch with programmatic stream serialization (QWEN38_FN_PDL)
 static int g_gemv_split = 1;   // fn_set_gemv_split: few-row weights on gemv_split_kernel (QWEN38_FN_GEMV_SPLIT)
+static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_nb / mix_up_nb (QWEN38_FN_GEMV_NB)
 
 template <typename... KArgs, typename... Args>
 static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
@@ -1297,6 +1447,7 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
 
 void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
+void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -1484,6 +1635,13 @@ static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const 
                           torch::Tensor& y, int M, int N, int K, cudaStream_t st, int G = 0) {
     int ks = g_gemv_split ? gemv_split_ks(N, K, WVec<TW>::VEC) : 1;
     while (G && ks > 1 && (K / ks) % G) ks /= 2;           // a slice holds whole scale groups
+    // SPD-231: int8 weights of at least 256 rows (fp16 ones and narrow ones were slower on the board)
+    if (ks > 1 && g_gemv_nb && M > 1 && N >= 256 && std::is_same<TW, int8_t>::value) {
+        launch(gemv_split_nb_kernel<TW, 8, 4, TY>, dim3((N + 3) / 4), dim3(32 * ks), 0, st,
+               (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(), s_ptr,
+               (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G);
+        return;
+    }
     if (ks > 1) {
         auto kern = M == 1 ? gemv_split_kernel<TW, 1, TY> : gemv_split_kernel<TW, 8, TY>;
         launch(kern, dim3(N), dim3(32 * ks), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
@@ -1610,6 +1768,26 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
     const size_t smem = (size_t)M * R * 2;
     dim3 grid((H + 7) / 8);
     const float inv = 1.0f / (float)hc;
+    if (g_gemv_nb && M > 1 && w.dtype() == torch::kInt8) {
+        // SPD-231: A once, then 16 columns a CTA with the streams in-lane (int8 weights; fp16 ones were slower)
+        auto a = torch::empty({M, R}, n.options());
+        launch(mix_a_kernel, dim3((M * R + 255) / 256), dim3(256), 0, st, (const float*)d.data_ptr(), (int)d.stride(0),
+               (__nv_bfloat16*)a.data_ptr(), M, R, inv);
+        if (w.dtype() == torch::kInt8) {
+            TORCH_CHECK(s.has_value() && s->is_contiguous() && s->numel() % (4 * H) == 0 && R % 16 == 0, "int8 scales, R % 16");
+            const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
+            TORCH_CHECK(!G || (R % ng == 0 && G % 16 == 0), "scale groups: R / groups a multiple of 16");
+            launch(mix_up_nb_kernel<int8_t, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
+                (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
+                (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
+        } else {
+            TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
+            launch(mix_up_nb_kernel<__half, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
+                (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const __half*)w.data_ptr(), (const float*)nullptr,
+                (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, 0);
+        }
+        return;
+    }
     if (w.dtype() == torch::kInt8) {
         TORCH_CHECK(s.has_value() && s->is_contiguous() && s->numel() % (4 * H) == 0 && R % 16 == 0, "int8 scales, R % 16");
         const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
@@ -1787,6 +1965,7 @@ _CPP = (
     "void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);\n"
     "void fn_set_pdl(int64_t on);\n"
     "void fn_set_gemv_split(int64_t on);\n"
+    "void fn_set_gemv_nb(int64_t on);\n"
     "void fn_set_moe_st(int64_t st);\n"
     "void fn_set_moe_warps(int64_t w);\n"
     "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
@@ -1817,12 +1996,13 @@ def _module():
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                       "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                       "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                       "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
+        _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
     return _MOD

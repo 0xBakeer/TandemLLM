@@ -56,12 +56,13 @@ GOLDEN_FP4 = {
     # SPD-217: Ornith's joint verify pass (qwen3_5_moe once more)
     # SPD-229: each state parks its own GDN rows; Ornith's joint pass on the grouped experts (Flash-Next and Ornith)
     # SPD-227: the prefill's int8 mixer GEMM on the tensor cores as an option (Flash-Next's kernels)
+    # SPD-231: the register-blocked mixer kernels behind QWEN38_FN_GEMV_NB (off)
     "qwen3_5": "52027eef3708c238172a5e5bee21ecd4120022314011d2357f04e9d0b5836da6",
-    "qwen4_exp": "65264c75fbb47bea3f599fb80a776446ed5d87f65a215ad76e31bb046f721b9b",
-    "nemotron_h": "63429f6dba04677b9e7d2f3660976674f43ed8cf0d7daf666eb39af033b434f5",
-    "lfm2_moe": "7b3383acb667cc72ca8f79ad054716a2c6af71d4a40b505cec3885cc4f73d811",
-    "qwen3_5_moe": "7c1f67d684cf311656be4250c3da43dcd7c958501a7c31746db73eaae20683e5",
-    "flint": "0c8c459b95d02079330a4071af1286e4c1eae17c6756f6679c01086035fe6245",
+    "qwen4_exp": "1dc9fb57002f6776dd025bb8c4b8ae2b183fda273876f2c6de98d8d90e384007",
+    "nemotron_h": "ff64549b0eaa08f21c056c827008bd5448af63ec07bdfc75dcd072be8833d3af",
+    "lfm2_moe": "938db1db71c524463d4fcc3270fbfe92621d1c5213d3366794303b0e7cfec089",
+    "qwen3_5_moe": "da8279b7525988b863f45a318ec71fa55bac83ebb69e53518e60e948fb996e89",
+    "flint": "4ec8a605919b52a7c7bacd1f4f5e47e377a66a5718d8373780627f89f09f5e45",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
