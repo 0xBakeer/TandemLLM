@@ -708,7 +708,7 @@ def test_a_nemotron_pack():
         assert e["QSE_ASSETS"] == "~/models/nemotron-3.5-super-vl-lilicorr/model.safetensors", e
         assert e["VISION"] == "off" and e["QSE_PAGE_CACHE_DROP"] == d and e["QWEN38_EXL3"] == "<unset>", e
         assert e["QSE_DISK_CACHE"] == f"~/.qwen38-spark-engine/cache/disk-community-{NH_SLUG}", e
-        assert (e["QSE_MEM_NEED_GIB"], e["MAX_LEN"], e["QSE_PARALLEL"]) == ("92", "262144", "3"), e
+        assert (e["QSE_MEM_NEED_GIB"], e["MAX_LEN"], e["QSE_PARALLEL"]) == ("92", "262144", "8"), e     # SRV-707: _nemotron.env runs 8 lanes
         assert e["QWEN38_SUFFIX_STORE"] == "~/.qwen38-spark-engine/suffix-nemotron", e
         # the served card is Super VL's, named after the pack, vision off
         card = model_card.find(NH_PID)
