@@ -9617,8 +9617,12 @@ class Handler(BaseHTTPRequestHandler):
             # the shadow's in-turn reading after it (narrator.Share)
             share = narrator_mod.Share(float((ui_doc.get("live") or {}).get(
                 "share", voice_mod.DEFAULTS["share"]))) if use_voice else None
+            # SR1's in-turn reading runs between two of the turn's own rounds on its thread; with side slots
+            # the round runner drives the GPU from its thread, and a lane's slices ran beside every lane's
+            # rounds (2026-10-25, 27B at 8 lanes: C1 35.1 / C8 124 with the shadow, 38.8 / 139 without).
+            # There it reads in the idle window only (`shadow_once`)
             sh_inline = (shadow_svc.inline(shadow_key, budget=share)
-                         if shadow_key is not None else None)
+                         if shadow_key is not None and par is None else None)
             voice = (narr.for_voice(ui, lang=ui.voice, opened=bool(in_think),
                                     close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
                                     decode=lambda xs: tok.decode(xs, skip_special_tokens=True),
