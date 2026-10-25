@@ -179,7 +179,7 @@ def module():
         venv_bin = os.path.dirname(sys.executable)
         if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        src = f"#define EXL3_ST {X.STAGES}\n" + _source()
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_PDL {int(X.PDL)}\n" + _source()    # SPD-245
         cpp = X._CPP + _CPP_ADD
         tag = hashlib.sha1((cpp + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"qwen35_exl3_frag_{tag}", cpp_sources=[cpp], cuda_sources=[src],
