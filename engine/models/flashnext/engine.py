@@ -50,6 +50,8 @@ ROWWISE = _S.get("FN_JOINT_ROWWISE") == "1"
 #: SPD-215: the joint pass's experts through the grouped kernels (a block's pairs of one expert share a CTA;
 #: tools/fn_kernels.py MOE_GROUP); a lone verify keeps its kernels
 JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
+#: SPD-239: every N joint passes their GPU ms by part in the log (`_timed`); 0: off
+JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -80,7 +82,7 @@ class FlashNextEngine(FlashNextRef):
         self._joint: dict = {}          # id(state) -> (block, rec, class) of its block in the last joint pass
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
         self._multi = None              # SPD-235: [(rows buffers, MTP state, rows, class)] of a packed MTP step
-        self.joint_timing = None        # a dict: `verify_multi` adds each part's GPU ms (a measurement)
+        self.joint_timing = {} if JOINT_TIMING else None  # a dict: `verify_multi` adds each part's GPU ms (a measurement)
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
         self._wc: dict = {}
@@ -975,11 +977,25 @@ class FlashNextEngine(FlashNextRef):
         self._applied([x["st"] for x in cx])
         if jt is not None:
             mark("end")
-            torch.cuda.synchronize()
-            for (name, a), (_, b) in zip(marks, marks[1:]):
-                jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
-            jt["passes"] = jt.get("passes", 0) + 1
+            self._timed(jt, marks, cx)
         return out
+
+    def _timed(self, jt: dict, marks: list, cx: list) -> None:
+        """A timed joint pass's parts into `jt` (GPU ms summed, its passes counted); with QWEN38_FN_JOINT_TIMING
+        (SPD-239) every N passes the averages a pass (with its states and rows) are logged and `jt` starts again."""
+        torch.cuda.synchronize()
+        for (name, a), (_, b) in zip(marks, marks[1:]):
+            jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
+        jt["passes"] = jt.get("passes", 0) + 1
+        if JOINT_TIMING:
+            jt["states"] = jt.get("states", 0) + len(cx)
+            jt["rows"] = jt.get("rows", 0) + sum(x["M"] for x in cx)
+            n = jt["passes"]
+            if n >= JOINT_TIMING:
+                parts = {k: round(v / n, 2) for k, v in jt.items() if k != "passes"}
+                print(f"[fn-joint] {n} passes, a pass: {parts}, ms {round(sum(v for k, v in parts.items() if k not in ('states', 'rows')), 2)}",
+                      flush=True)
+                jt.clear()
 
     def _verify_multi_rowwise(self, cx, rows, use, mark, marks, jt, K, H, hc, eps, S):
         """SPD-215: `verify_multi`'s layers with the row-wise parts (the mixers' norms, down/up mixes, the
@@ -1064,10 +1080,7 @@ class FlashNextEngine(FlashNextRef):
         self._applied([x["st"] for x in cx])
         if jt is not None:
             mark("end")
-            torch.cuda.synchronize()
-            for (name, a), (_, b) in zip(marks, marks[1:]):
-                jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
-            jt["passes"] = jt.get("passes", 0) + 1
+            self._timed(jt, marks, cx)
         return out
 
     @torch.no_grad()

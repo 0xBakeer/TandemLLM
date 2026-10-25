@@ -8,4 +8,7 @@ KNOBS: dict[str, tuple] = {
     'FN_JOINT_MOE_GROUP': ('1', 'engine/models/flashnext/engine.py'),
     # SPD-233: the rows an 8-lane joint pass keeps (24: the best of 8/16/24/32 at C8); 0: the cap, 32
     'FN_JOINT_ROWS8': ('24', 'engine/models/flashnext/serving.py'),
+    # SPD-239: every N joint passes, log their GPU ms by part (`verify_multi`'s marks; a measurement: each
+    # pass then syncs at its end); 0: off
+    'FN_JOINT_TIMING': ('0', 'engine/models/flashnext/engine.py'),
 }

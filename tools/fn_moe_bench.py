@@ -5,7 +5,7 @@ allocated; one CUDA graph runs the MoE of every bank in turn (random top-10 ids 
 each call reads weights the previous call did not touch. Bytes are the distinct experts' trellis,
 suh and svh a call reads (the shared expert counted once). Prints one JSON line per M.
 
-    python tools/fn_moe_bench.py --k 3 --rows 1 4 16 32
+    python tools/fn_moe_bench.py --k 3 --rows 1 4 16 32 [--group]
 """
 
 from __future__ import annotations
@@ -73,7 +73,9 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--st", type=int, nargs="+", default=[2, 3, 4], help="MoE cp.async stages to compare")
     ap.add_argument("--warps", type=int, nargs="+", default=[8], help="MoE warps a CTA to compare")
+    ap.add_argument("--group", action="store_true", help="the grouped expert kernels (fn_kernels.MOE_GROUP)")
     a = ap.parse_args()
+    K.MOE_GROUP = a.group
     banks = [bank(a.experts, a.k, a.shared_k, s) for s in range(a.banks)]
     g = torch.Generator().manual_seed(0)
     for w in a.warps:
@@ -115,7 +117,7 @@ def run(a, banks, g, st, warps) -> None:
         ms = ev[0].elapsed_time(ev[1]) / a.reps / len(banks)
         gbs = byts / len(banks) / (ms / 1e3) / 1e9
         parts = parts_ms(banks, xs, idss, wss, orders, bufs, outs, a.reps)
-        print(json.dumps({"warps": warps, "st": st, "M": M, "k": a.k, "shared_k": a.shared_k, "experts": a.experts, "banks": a.banks,
+        print(json.dumps({"group": a.group, "warps": warps, "st": st, "M": M, "k": a.k, "shared_k": a.shared_k, "experts": a.experts, "banks": a.banks,
                           "ms_per_call": round(ms, 4), "mb_per_call": round(byts / len(banks) / 1e6, 2),
                           "gb_s": round(gbs, 1), "parts_ms": parts}), flush=True)
 
