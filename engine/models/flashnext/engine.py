@@ -52,6 +52,8 @@ ROWWISE = _S.get("FN_JOINT_ROWWISE") == "1"
 JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 #: SPD-239: every N joint passes their GPU ms by part in the log (`_timed`); 0: off
 JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
+#: SPD-239: a joint pass reads every state's PLE rows in one batch a layer (`_ple_batch`); 0: a block at a time
+PLE_BATCH = _S.get("FN_PLE_BATCH") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -739,16 +741,45 @@ class FlashNextEngine(FlashNextRef):
         ctx = st.ple_ctx.get(li)
         return [self.cfg.eos_token_id] * self.hash[li].context_len if ctx is None else ctx.view(-1).tolist()
 
-    def _ple_fill(self, h: dict, row: int, li: int, ids: list[int]) -> None:
+    def _ple_fill(self, h: dict, row: int, li: int, ids, rows: np.ndarray | None = None) -> None:
+        """The PLE rows of consecutive block rows from `row` on: `ids` their n-gram ids (a row's heads, then the
+        next row's), `rows` their packed rows when read already (`_ple_batch`), else read here in one batch."""
         tab = self.tables[li]
         nh = self.cfg.ngram_heads
-        h["packed"].numpy()[row * nh:(row + 1) * nh] = tab.rows_of(np.asarray(ids, dtype=np.int64))
-        h["heads"].numpy()[row * nh:(row + 1) * nh] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
+        ids = np.asarray(ids, dtype=np.int64).reshape(-1)
+        h["packed"].numpy()[row * nh:row * nh + ids.size] = tab.rows_of(ids) if rows is None else rows
+        h["heads"].numpy()[row * nh:row * nh + ids.size] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
 
-    def stage_rows(self, tokens: list[int], parents: list[int], st: FNState, key=None) -> None:
+    @staticmethod
+    def _tree_paths(parents: list[int]) -> tuple[list[int], list[list[int]]]:
+        """Each row's depth and its root-to-row path (DFS pre-order, `parents`)."""
+        depth, paths = [], []
+        for i, p in enumerate(parents):
+            depth.append(0 if p < 0 else depth[p] + 1)
+            paths.append([i] if p < 0 else paths[p] + [i])
+        return depth, paths
+
+    def _ple_batch(self, items: list) -> list:
+        """SPD-239: the PLE rows of several blocks [(tokens, parents, st)] read in one batch a PLE layer: per block
+        {layer: (ids, packed rows)} for `stage_rows`. A cold table reads its misses from disk; one batch for every
+        state's rows is one round of reads instead of one a block row (8 states x 3 rows: 29-31 ms -> one)."""
+        out: list = [{} for _ in items]
+        for li in self.cfg.ple_layers:
+            hsh = self.hash[li]
+            ids = [np.asarray(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens, self._tree_paths(parents)[1]),
+                              dtype=np.int64).reshape(-1) for tokens, parents, st in items]
+            rows = self.tables[li].rows_of(np.concatenate(ids)) if ids else None
+            k = 0
+            for j, x in enumerate(ids):
+                out[j][li] = (x, rows[k:k + x.size])
+                k += x.size
+        return out
+
+    def stage_rows(self, tokens: list[int], parents: list[int], st: FNState, key=None, ple: dict | None = None) -> None:
         """Host work of a verify block: `tokens` in DFS pre-order with `parents` (-1 for the first
         row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path. `key`:
-        the rows buffers' own key (a joint pass stages each state's block in its own, `verify_multi`)."""
+        the rows buffers' own key (a joint pass stages each state's block in its own, `verify_multi`).
+        `ple`: the block's PLE ids and rows read already ({layer: (ids, rows)}, `_ple_batch`)."""
         from tools import fn_seq_kernels as SK
         M = len(tokens)
         hm, t0 = self.host_ms, time.perf_counter()
@@ -757,10 +788,7 @@ class FlashNextEngine(FlashNextRef):
         t1 = time.perf_counter()
         hm["stage_wait"] = hm.get("stage_wait", 0.0) + 1e3 * (t1 - t0)
         h, L = rb["h"], st.length
-        depth, paths = [], []
-        for i, p in enumerate(parents):
-            depth.append(0 if p < 0 else depth[p] + 1)
-            paths.append([i] if p < 0 else paths[p] + [i])
+        depth, paths = self._tree_paths(parents)
         d = np.asarray(depth, dtype=np.int64)
         h["tok"].numpy()[:] = tokens
         h["pos"].numpy()[:] = L + d + st.delta
@@ -778,9 +806,10 @@ class FlashNextEngine(FlashNextRef):
         h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
         t4 = time.perf_counter()
         for li in self.cfg.ple_layers:
-            hsh = self.hash[li]
-            for i, ids in enumerate(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens, paths)):
-                self._ple_fill(h, i, li, ids)
+            if ple is not None:
+                self._ple_fill(h, 0, li, *ple[li])
+            else:
+                self._ple_fill(h, 0, li, self.path_ple_ids(self.hash[li], self._ple_ctx(st, li), tokens, paths))
         t5 = time.perf_counter()
         # SPD-239: the staging's host ms by part (the copy buffer's wait, the rows, the attention control,
         # the tree control, the PLE rows)
@@ -891,12 +920,13 @@ class FlashNextEngine(FlashNextRef):
                 marks.append((name, ev))
         mark("stage")
         cx = []
+        ples = self._ple_batch(items) if PLE_BATCH else [None] * len(items)
         for j, (tokens, parents, st) in enumerate(items):
             M = len(tokens)
             depth = [0] * M
             for i, p in enumerate(parents):
                 depth[i] = 0 if p < 0 else depth[p] + 1
-            self.stage_rows(tokens, parents, st, key=("joint", j, M))
+            self.stage_rows(tokens, parents, st, key=("joint", j, M), ple=ples[j])
             cx.append({"st": st, "M": M, "cls": self.qsa_class(st.length + max(depth)), "block": self._block,
                        "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}})
         if jt is not None:
