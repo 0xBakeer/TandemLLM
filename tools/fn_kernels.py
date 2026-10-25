@@ -480,6 +480,7 @@ __device__ __forceinline__ void mma_tile(const uint4* WV, const __nv_bfloat16* X
 
 #define MIX_KSLICE 512
 #define MIX_LDS (MIX_KSLICE + 8)
+#define MIX_SLICES 24          // the most K slices a tensor-core GEMV adds (K <= 12,288)
 // down|inject GEMV: X bf16 [M, K] (M <= 64), W int8 [N, K], S fp32 [N, K / G] (G a multiple of 64 dividing the
 // slice) -> P fp32 [K / MIX_KSLICE][M][N] partial sums; the last of a column's slice CTAs to finish (CNT, a
 // ticket a column, back to 0 after) adds the column's partials in slice order into Y fp32 [M, ldy]. grid (ceil(N / 32), K / MIX_KSLICE), 128 threads: warp w the 8 rows from
@@ -538,8 +539,12 @@ __global__ void __launch_bounds__(128) mixer_mma_gemv_kernel(const __nv_bfloat16
     for (int e = threadIdx.x; e < M * nc; e += blockDim.x) {
         const int m = e / nc, nn = c0 + e % nc;
         const size_t o = (size_t)m * N + nn;
-        float v = __ldcg(P + o);
-        for (int sl = 1; sl < KS; ++sl) v += __ldcg(P + (size_t)sl * M * N + o);
+        float a[MIX_SLICES];                            // every slice's partial in flight, then added in order
+#pragma unroll
+        for (int sl = 0; sl < MIX_SLICES; ++sl) a[sl] = sl < KS ? __ldcg(P + (size_t)sl * M * N + o) : 0.f;
+        float v = a[0];
+#pragma unroll
+        for (int sl = 1; sl < MIX_SLICES; ++sl) if (sl < KS) v += a[sl];
         Y[(size_t)m * ldy + nn] = v;
     }
     if (threadIdx.x == 0) CNT[blockIdx.x] = 0;
@@ -1835,7 +1840,7 @@ template <typename TW, typename TY>
 static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const float* s_ptr,
                           torch::Tensor& y, int M, int N, int K, cudaStream_t st, int G = 0) {
     if (g_mixer_mma && std::is_same<TW, int8_t>::value && std::is_same<TY, float>::value && (G == 64 || G == 128)
-        && K % MIX_KSLICE == 0 && x.stride(0) % 8 == 0) {
+        && K % MIX_KSLICE == 0 && K / MIX_KSLICE <= MIX_SLICES && x.stride(0) % 8 == 0) {
         // SPD-241: the tensor-core GEMV at every M (64 rows a launch: a row's sums never depend on the call)
         const int KS = K / MIX_KSLICE, NB = (N + 31) / 32;
         auto P = torch::empty({KS, std::min(M, 64), N}, x.options().dtype(torch::kFloat));

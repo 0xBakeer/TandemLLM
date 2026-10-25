@@ -1150,9 +1150,7 @@ class FlashNextEngine(FlashNextRef):
                 x["rec"][("ids", li)] = ids[rows[j]]
             Hs, Ns = K.combine_inject_norm(Hs, yd, ids, wts, DI2, R, nxt, hc, eps)
         mark("head")
-        if GDN_MULTI and getattr(self, "_gent", None) is not None:
-            self._gent["copied"].record()
-            self._gent["k"] = len(c.linear_layers)
+        self._gdn_multi_end()
         if Ns is None:
             Ns = K.hc_norm(Hs, self._site_norm(c.num_hidden_layers), H, eps)
         dd = K.gemv(Ns, self.W["hyper_connection_mixer.down_inject"])
@@ -1589,6 +1587,13 @@ class FlashNextEngine(FlashNextRef):
         hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), qkvz[:, c.conv_dim:].reshape(-1, c.linear_value_head_dim),
                           self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
         return hh.view(R, -1)
+
+    def _gdn_multi_end(self) -> None:
+        """After a joint pass's last GDN layer: its entry tables' copies are recorded, the next pass starts over."""
+        ent = getattr(self, "_gent", None)
+        if ent is not None:
+            ent["copied"].record()
+            ent["k"] = len(self.cfg.linear_layers)
 
     def _gdn_entries(self, n: int) -> dict:
         """`_gdn_multi`'s entry tables: a pinned host row and its device copy for every GDN layer of a pass (`k`

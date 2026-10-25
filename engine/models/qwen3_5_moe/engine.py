@@ -29,8 +29,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from engine.models.flashnext.engine import (CAPTURE_ROWS, DENSE_MAX, JOINT_MOE_GROUP, CommitGraph,  # noqa: F401
-                                            DecodeGraph, FlashNextEngine, MTPChainGraph, VerifyGraph)
+from engine.models.flashnext.engine import (CAPTURE_ROWS, DENSE_MAX, GDN_MULTI, JOINT_MOE_GROUP,  # noqa: F401
+                                            CommitGraph, DecodeGraph, FlashNextEngine, MTPChainGraph, VerifyGraph)
 from engine.models.flashnext.ref import MTP
 from engine.models.qwen3_5_moe import kernels as AK
 from engine.models.qwen3_5_moe.ref import Qwen35MoeRef
@@ -232,7 +232,7 @@ class Qwen35MoeEngine(FlashNextEngine):
                 depth[i] = 0 if p < 0 else depth[p] + 1
             self.stage_rows(tokens, parents, st, key=("joint", j, M))
             cx.append({"st": st, "M": M, "cls": self.qsa_class(st.length + max(depth)), "block": self._block,
-                       "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}})
+                       "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}, "slots": self._ctl_slots})
         cuts = [0]
         for x in cx:
             cuts.append(cuts[-1] + x["M"])
@@ -253,11 +253,15 @@ class Qwen35MoeEngine(FlashNextEngine):
             if c.is_linear(li):
                 a = p + "linear_attn."
                 qkvz, ab = self.lin(n, self.W[a + "qkvz"]), K.gemv_bf16(n, self.W[a + "ab"])
-                parts = []
-                for j, x in enumerate(cx):
-                    use(x)
-                    parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
-                out = self.lin(torch.cat(parts), self.W[a + "out_proj.weight"])
+                # SPD-239: every state's delta rule of the layer in one launch (Flash-Next's `_gdn_multi`)
+                g = self._gdn_multi(cx, rows, qkvz, ab, li, use) if GDN_MULTI else None
+                if g is None:
+                    parts = []
+                    for j, x in enumerate(cx):
+                        use(x)
+                        parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                    g = torch.cat(parts)
+                out = self.lin(g, self.W[a + "out_proj.weight"])
             else:
                 a = p + "self_attn."
                 qkv = self.lin(n, self.W[a + "qkv"])
@@ -281,6 +285,7 @@ class Qwen35MoeEngine(FlashNextEngine):
                 h, n = K.combine_inject_norm(h, yd, ids, wts, zd, 0, nxt, 1, eps)
             else:
                 h, n = K.inject_norm(h, self.moe(n, li), zd, 0, nxt, 1, eps)
+        self._gdn_multi_end()
         if DENSE_MAX:
             logits = K.dense(n, self.W["lm_head.weight"])
         else:

@@ -282,6 +282,31 @@ def test_a_round_other_lanes_shared_teaches_no_price():
     return "a round of 4 lanes: no drafted price learned; a lone round: learned"
 
 
+def test_a_shared_round_drafts_where_a_lone_one_would_skip():
+    """SPD-239: a class whose lone prices make it skip (drafted above plain) and whose turn would go plain still
+    drafts when its last round had other lanes (`lanes` > 1): in a joint pass a plain lane gives one token a round
+    (C4 2026-10-25: a side slot priced at 30 ms a token skipped 222 of 225 rounds, C4 82.7 -> 70.0)."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    prompt = list(range(50))
+    d.reset()
+    d.sync(prompt, _rows(0, 50), 0)
+    assert d.propose_tree(prompt, 8).n_draft > 0
+    for _ in range(40):
+        d.cut.observe_plain(20.0, 0)
+        d.cut.observe_spec(30.0, 0, 1)
+    d.observe([100])
+    d.sync([100], _rows(50, 1), 50)
+    d.lanes = 4
+    assert d.propose_tree(prompt + [100], 8) is not None and d.stats["skipped"] == 0
+    d.observe([101])
+    d.sync([101], _rows(51, 1), 51)
+    d.lanes = 1
+    assert d.propose_tree(prompt + [100, 101], 8) is None and d.stats["skipped"] == 1
+    return "lanes 4: drafts where lanes 1 skips"
+
+
 def test_a_turns_backlog_prime_is_not_its_first_rounds_price():
     """P0 (2026-10-12): the first drafted round of a turn at 140k read the turn's backlog into the head
     (772 rows, 200 ms) and was priced at 93 ms; the turn weighs the prime (`StairCut.turn`), the round's

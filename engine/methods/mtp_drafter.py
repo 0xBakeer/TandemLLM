@@ -290,7 +290,9 @@ class MTPTreeDrafter:
         if self._backoff_left > 0:
             self._backoff_left -= 1
             backoff = True
-        if self.head.depth and (backoff or self.cut.skip(self.cls)):
+        # SPD-239: the class's skip (its drafted rounds priced above its plain step) weighs lone prices: a round
+        # other lanes share keeps drafting
+        if self.head.depth and (backoff or (self.lanes <= 1 and self.cut.skip(self.cls))):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -372,7 +374,9 @@ class MTPTreeDrafter:
         c = self.cut
         self.req["turn_in"] = {"plain_ms": c.plain_ms(self.cls), "spec_ms": c.spec_ms(self.cls), "backlog": unfed,
                                "answer": self.answer, "extra_ms": round(float(extra), 1)}
-        self._turn = self.req["turn"] = (not self.head.depth
+        # SPD-239: a lane whose last round other lanes shared drafts its turn: in a joint pass its rows cost a share
+        # of the pass, so the lone prices the turn weighs do not apply (a plain turn there gives 1 token a round)
+        self._turn = self.req["turn"] = (not self.head.depth or self.lanes > 1
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None

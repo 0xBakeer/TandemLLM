@@ -71,12 +71,13 @@ GOLDEN_FP4 = {
     # SPD-239: FN_GDN_MULTI
     # SPD-239: FN_GDN_MULTI default
     # SPD-241: mixer MMA kernels
+    # SPD-239: Ornith grouped GDN, lane-aware skip
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "dffc11ef290688bbf38979bd94dbdca73896f64ada83975a7be463f1c2245bd9",
-    "nemotron_h": "b8793a2fb048e62ca87bd7e09120902600319829766fdbe4e58a7132543d4df0",
-    "lfm2_moe": "d770cbc2082ee8c69506533fdbec55feb82c5566d50df2ec7d754572e5eef609",
-    "qwen3_5_moe": "aee7cbbab1030c1cf65332eecb39ba5fc759c288f15dff5c63c0bff467d6ff0c",
-    "flint": "96f343a9e4973e9f90a5ea98e7a4f92ab6309246ec91abbfd655606eae1b7e2e",
+    "qwen4_exp": "b72bb6cf802e53424b5b9acebb1279dcb144e04d76da9872193848f0cab94477",
+    "nemotron_h": "7767429b2c672d3fdac187083fdc0baaa7e8492848d626f19e08f03ab3ad9400",
+    "lfm2_moe": "e15933721d5ac74fb54ff7149000da25b86c5b3ec3a2e1579859eac2ec2ac3d4",
+    "qwen3_5_moe": "3fffdfb7f189e2edfb2b703103eeec2de6b4851ec49d8be94d22ff6b4de66d69",
+    "flint": "c294954ec0d3385fe996aed9cb699934c56bdfe719c591d74a79cb137baf1a8e",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
