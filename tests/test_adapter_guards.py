@@ -48,8 +48,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("dde907aee90e2a821d6ac07e986359953ec573b2a82559d882ba698d4451868c",
-             "6d47498645a183a6551a0ba2f205c37721169c9a57cce54388c0e155c0132295")
+GOLDEN_V2 = ("be384a47e8757cb0f089614f79c0fc5d2ed4d714e9615287da69d2f6cba76c28",
+             "168019336bdf6b752b05a351082be03e788eb52c8204bf8ceb064f67b7372436")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -76,7 +76,8 @@ GOLDEN_FP4 = {
     # SPD-239: FN_POOL_MULTI
     # SPD-245: QWEN38_EXL3_PDL (off): the skinny GEMM's launch under programmatic serialization, no arithmetic moved
     # SPD-245: GDN_PREP scan 16 / 4 by default (the 27B's prefill)
-    "qwen3_5": "d30d940be13e6e3b98609c71fadc67ff0db236f5bd4d11a250f74f679d175043",
+    # SPD-245: the GDN gate read in place (gate2d, gate_rows) and no normed-row store before the slab MLP
+    "qwen3_5": "2bc767eff443e72fd5d4777be8fca574bd66b28a0af2b1aa2693a70d36599a0e",
     "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",

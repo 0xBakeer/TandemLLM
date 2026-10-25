@@ -96,9 +96,11 @@ if HAVE_TRITON:
 
     @triton.jit
     def _add_norm_rot(R, X, W, H, Y, SUH, XH, M, N, EPS: tl.constexpr, BLOCK: tl.constexpr,
-                      G: tl.constexpr):
+                      G: tl.constexpr, STORE_Y: tl.constexpr):
         """`_add_rms_norm` (tools/norm_kernels.py) and then `rot_in_kernel` of its bf16 output for each
-        of the G members' sign vectors: the same operations in the same order, one launch."""
+        of the G members' sign vectors: the same operations in the same order, one launch. STORE_Y:
+        the norm's output written too (SPD-245: a caller whose next GEMM reads the rotated rows alone
+        skips the store; the rows' bits do not depend on it)."""
         row = tl.program_id(0)
         cols = tl.arange(0, BLOCK)
         m = cols < N
@@ -110,7 +112,8 @@ if HAVE_TRITON:
         rstd = tl.rsqrt(tl.sum(x * x) / N + EPS)
         w = tl.load(W + cols, mask=m, other=0.0).to(tl.float32)
         y = (x * rstd * (1.0 + w)).to(Y.dtype.element_ty)
-        tl.store(Y + row * N + cols, y, mask=m)
+        if STORE_Y:
+            tl.store(Y + row * N + cols, y, mask=m)
         yf = y.to(tl.float32)
         for g in tl.static_range(G):
             su = tl.load(SUH + g * N + cols, mask=m, other=0.0).to(tl.float32)
@@ -124,11 +127,13 @@ def add_norm_rot(res: torch.Tensor, x: torch.Tensor, weight: torch.Tensor, eps: 
                  out: tuple) -> torch.Tensor:
     """`tools.norm_kernels.add_rms_norm(res, x, weight, eps, out=out)` and the rotated input of a
     projection whose input signs are suh [G, N] (`tools.exl3_linear.rotate_in` of the norm's output):
-    returns xh [G, M, N] fp16."""
+    returns xh [G, M, N] fp16. `out` is (h, y); y None skips the norm output's store (SPD-245: the
+    MLP slab reads xh alone, so the 84 MB a layer at 8,192 rows need not be written)."""
     n = x.shape[-1]
     r = res.reshape(-1, n)
     a = x.reshape(-1, n).contiguous()
-    h, y = (t.view(-1, n) for t in out)
+    h = out[0].view(-1, n)
+    y = h if out[1] is None else out[1].view(-1, n)
     M = r.shape[0]
     G = suh.shape[0]
     xh = torch.empty(G, M, n, dtype=torch.float16, device=x.device)
@@ -136,8 +141,17 @@ def add_norm_rot(res: torch.Tensor, x: torch.Tensor, weight: torch.Tensor, eps: 
     while blk < n:
         blk *= 2
     _add_norm_rot[(M,)](r, a, weight, h, y, suh, xh, M, n, EPS=eps, BLOCK=blk, G=G,
-                        num_warps=8 if n >= 4096 else 4)
+                        STORE_Y=out[1] is not None, num_warps=8 if n >= 4096 else 4)
     return xh
+
+
+def mlp_slab_pairs(rows: int, gu, wd) -> bool:
+    """Whether `mlp_slab` takes these weights at this many rows (its own check, for a caller that
+    decides before the norm whether the normed rows are read at all)."""
+    from tools import exl3_linear as X
+    F = wd.K
+    return bool(gu.sizes and len(gu.sizes) == 2 and gu.sizes[0] == gu.sizes[1] == F
+                and wd.suh.shape[0] == 1 and rows > X.CHUNK_UNTIL and X._mm_out_fp32() is not False)
 
 
 #: (BM, BN, BK, warps, stages). The tiling never changes a row's bits (every tiling gives the library
@@ -199,10 +213,7 @@ def mlp_slab(x: torch.Tensor, gu, wd, *, xh: torch.Tensor | None = None,
     down projection through `slab_matmul`. None when the shapes do not pair (the caller's usual path)."""
     from tools import exl3_linear as X
     F = wd.K
-    if not (gu.sizes and len(gu.sizes) == 2 and gu.sizes[0] == gu.sizes[1] == F
-            and wd.suh.shape[0] == 1 and x.shape[0] > X.CHUNK_UNTIL):
-        return None
-    if X._mm_out_fp32() is False:
+    if not mlp_slab_pairs(x.shape[0], gu, wd):
         return None
     mod = X._module()
     M = x.shape[0]
@@ -251,8 +262,8 @@ def rms_norm_gated_out(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor
     from tools import norm_kernels as N
     n = x.shape[-1]
     flat = x.reshape(-1, n).contiguous()
-    g = gate.reshape(-1, n).contiguous()
+    g, s_zt, zh = N.gate_rows(gate, n, flat.shape[0])
     y = out.view(-1, n)
-    N._rms_norm_gated[(flat.shape[0],)](flat, g, weight, y, n, EPS=eps, BLOCK=N._block(n), PDL=N._pdl(),
-                                        num_warps=8 if n >= 4096 else 4)
+    N._rms_norm_gated[(flat.shape[0],)](flat, g, weight, y, n, s_zt, zh, EPS=eps, BLOCK=N._block(n),
+                                        PDL=N._pdl(), num_warps=8 if n >= 4096 else 4)
     return out

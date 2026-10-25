@@ -58,6 +58,28 @@ def test_mlp_bits():
         assert ref is not None and torch.equal(got, ref) and torch.equal(got2, ref), M
         assert torch.equal(got_lib, ref), M
         assert torch.equal(S.slab_matmul(x, g), X.exl3_matmul(x, g)), M
+        assert S.mlp_slab_pairs(M, gu, wd) and not S.mlp_slab_pairs(8, gu, wd)
+
+
+def test_add_norm_rot_store_y():
+    """SPD-245: the rotated rows and the residual are the same bits whether or not the normed rows are
+    stored; with y None nothing else is written."""
+    g = X.random_block(17408, 5120, 4, seed=11)
+    u = X.random_block(17408, 5120, 4, seed=21)
+    gu = X.EXL3Block.group([g, u], ["gate", "up"])
+    gen = torch.Generator(device="cpu").manual_seed(5)
+    M = 1024
+    res = (torch.randn(1, M, 5120, generator=gen)).to(torch.bfloat16).cuda()
+    x = (torch.randn(1, M, 5120, generator=gen) * 0.3).to(torch.bfloat16).cuda()
+    w = (torch.randn(5120, generator=gen) * 0.1).to(torch.bfloat16).cuda()
+    h1, y1 = res.clone(), torch.empty_like(res)
+    xh1 = S.add_norm_rot(h1, x, w, 1e-6, gu.suh, out=(h1, y1))
+    h2 = res.clone()
+    y2 = torch.full_like(res, 7.0)
+    xh2 = S.add_norm_rot(h2, x, w, 1e-6, gu.suh, out=(h2, None))
+    assert torch.equal(xh1, xh2) and torch.equal(h1, h2)
+    assert bool((y2 == 7.0).all()), "y None: nothing else written"
+    assert not torch.equal(y1, h1)
 
 
 def test_norm_rot_bits():
@@ -82,4 +104,5 @@ if __name__ == "__main__":
     test_slab_rot_bits()
     test_mlp_bits()
     test_norm_rot_bits()
+    test_add_norm_rot_store_y()
     print("ok")

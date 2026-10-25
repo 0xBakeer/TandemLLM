@@ -320,8 +320,21 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return (out * (1.0 + weight.float())).type_as(x)
 
 
+def gate2d(z: torch.Tensor) -> torch.Tensor:
+    """A GDN gate `z` ([.., T, H, dv] or [.., T, H * dv]) as its [tokens, H * dv] rows: a view wherever
+    its layout allows (a column slice of the fused qkvz output is one), which the fused gated norm reads
+    in place (tools/norm_kernels.py `gate_rows`, SPD-245); the same values either way."""
+    if z.dim() >= 3 and z.stride(-2) == z.shape[-1] * z.stride(-1):
+        z = z.flatten(-2) if z.dim() == 4 else z
+    return z.reshape(-1, z.shape[-1])
+
+
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
                    eps: float, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`weight * normalise(x) * silu(gate)` over x's [rows, n]; the gate as x's rows, or as the
+    [tokens, heads * n] rows of `gate2d`."""
+    if gate.shape[-1] != x.shape[-1] and not (FUSED["norm"] and x.is_cuda):
+        gate = gate.reshape(x.shape)
     if FUSED["norm"]:
         from tools.norm_kernels import rms_norm_gated as fused
         if out is not None:
@@ -1035,12 +1048,12 @@ class Qwen38Engine:
             self.state.S[i].copy_(S)
         if out is not None:
             rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps,
                            out=out)
             return None
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         o = o.view(B, T, -1)
         return linear(o, self.w.proj(f"{p}.linear_attn.out_proj"))
@@ -1068,11 +1081,11 @@ class Qwen38Engine:
         z = z_pre.reshape(B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
         if out is not None:
             rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps, out=out)
             return None
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
@@ -1137,7 +1150,7 @@ class Qwen38Engine:
         # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
@@ -1201,7 +1214,7 @@ class Qwen38Engine:
                                          cfg.linear_value_head_dim)
         o = fused_decode_step(q, k, v, g, beta, self.state.S[i], rep=cfg.num_v_per_k)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(1, 1, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
@@ -1476,11 +1489,15 @@ class Qwen38Engine:
                     del YJ, OJ
                     mj = None
                     if WINDOW_NORM_ROT and _x3.MLP_BRIDGE:
-                        from tools.exl3_slab_gemm import add_norm_rot, mlp_slab
+                        from tools.exl3_slab_gemm import add_norm_rot, mlp_slab, mlp_slab_pairs
                         gu = self.w.group(f"{p}.mlp.gate_up")
-                        xg = add_norm_rot(HJ, aj, wpost, cfg.rms_norm_eps, gu.suh, out=(HJ, XJ))
-                        mj = mlp_slab(XJ.view(RJ, -1), gu, self.w.proj(f"{p}.mlp.down_proj"), xh=xg,
-                                      triton_path=SLAB_TRITON)
+                        wd = self.w.proj(f"{p}.mlp.down_proj")
+                        # SPD-245: the slab MLP reads the rotated rows alone, so the normed rows are
+                        # not stored for it (`self.mlp` below, the other path, reads them)
+                        slab = mlp_slab_pairs(RJ, gu, wd)
+                        xg = add_norm_rot(HJ, aj, wpost, cfg.rms_norm_eps, gu.suh,
+                                          out=(HJ, None if slab else XJ))
+                        mj = mlp_slab(XJ.view(RJ, -1), gu, wd, xh=xg, triton_path=SLAB_TRITON) if slab else None
                         del xg
                     else:
                         add_rms_norm_out(HJ, aj, wpost, cfg.rms_norm_eps, (HJ, XJ))
@@ -1898,10 +1915,10 @@ class Qwen38Engine:
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
         if JOINT_ROWWISE:
             out = yield "gated", p, (o.reshape(-1, cfg.linear_value_head_dim),
-                                     z.reshape(-1, cfg.linear_value_head_dim))
+                                     gate2d(z))
             return out.view(B, T, -1)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         out = yield "lin", f"{p}.linear_attn.out_proj", o.view(B * T, -1)
         return out.view(B, T, -1)
