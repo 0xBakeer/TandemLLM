@@ -59,12 +59,13 @@ GOLDEN_FP4 = {
     # SPD-231: the register-blocked mixer kernels behind QWEN38_FN_GEMV_NB (off)
     # SPD-227: mm_i8_tc compiles once a weight shape
     # SPD-233/235: Flash-Next's 8-lane row count; the packed MTP draft (Flash-Next, Ornith)
+    # SPD-231: QWEN38_FN_GEMV_NB in the shared table beside FN_GEMV_SPLIT
     "qwen3_5": "52027eef3708c238172a5e5bee21ecd4120022314011d2357f04e9d0b5836da6",
-    "qwen4_exp": "364a413ee531e6a7161b8df89ed1df96e2c8f5cc8e5ff161dbd5251912142bc8",
-    "nemotron_h": "ff64549b0eaa08f21c056c827008bd5448af63ec07bdfc75dcd072be8833d3af",
-    "lfm2_moe": "642d19318dc18007455a3faefd5317742fbbd7fa41a5a24c9955336649aed013",
-    "qwen3_5_moe": "f052a480ad2085cf520b06e25a384ba345d28244cbe8b6d06d161c11779c276c",
-    "flint": "ccc10ec78a502dfa917b9c7aa490d4c3bf283a6e73399a9fed2b7e22163c0838",
+    "qwen4_exp": "8988406bd803430af65c58b23cd7bc5230b74249fa5ff5107e2befb9c6c0d0f7",
+    "nemotron_h": "514cc7997ca2d75bba50fe6cfdfe205fc0218b78d88d1c239028702427a8a8e5",
+    "lfm2_moe": "c3388ce6acb643b9ac4b3a011e059110895a36cd8bc023f41ad2d7d469f16f38",
+    "qwen3_5_moe": "7f39d63567c08fba983b3be970f201957ffabe520444993661d7643a9da69981",
+    "flint": "3e2402c446ca0c285945afa8fd2339e7fb1f3cb83d1375588872680193eae1e7",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
