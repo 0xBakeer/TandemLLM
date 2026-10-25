@@ -54,7 +54,8 @@ JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
 #: SPD-239: a joint pass reads every state's PLE rows in one batch a layer (`_ple_batch`); 0: a block at a time
 PLE_BATCH = _S.get("FN_PLE_BATCH") == "1"
-#: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`); 0: a state at a time
+#: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`; 8 lanes: 17.4 -> 13.5 ms
+#: a pass); 0: a state at a time
 GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length

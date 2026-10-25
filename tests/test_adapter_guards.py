@@ -69,11 +69,12 @@ GOLDEN_FP4 = {
     # SPD-239: FN_PLE_THREADS
     # SPD-239: commit_multi
     # SPD-239: FN_GDN_MULTI
+    # SPD-239: FN_GDN_MULTI default
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "46b9fda563c966e4d55b1183be789b95ecd0df17c57b7056f2089b9d37fdb22e",
+    "qwen4_exp": "c2ac475377f2d7cfdd607f983db82358b4c5bb04568563526ba45bd692c66992",
     "nemotron_h": "6717e5b2ed4c1b59c6f2d89da853735ea0651061b747dd58e10e8cd98006c7c1",
     "lfm2_moe": "5643f5fd98539a360c0f598cdb2e7901a47fc601908e4a9bf132c30124d99e43",
-    "qwen3_5_moe": "b1bed3a7bf56fd8439cb48a219f2a75257d64355bd48f7faf620fd008b381781",
+    "qwen3_5_moe": "f847bf263fc85df962dcb797ec003c28b285498d7fb735faffa05a99c57f1207",
     "flint": "acce99114ef0c64e9ce16efb504db4faef5e33360c7e77ffb1fd0722a00b2f97",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
