@@ -133,6 +133,10 @@ class Runner:
         # steady state by the slots in a round's verify (SPD-201): each round's GPU period (one round end to the
         # next) and tokens, the last 512 a slot count; `report` gives the medians and their tokens a second
         self._steady: dict = {}
+        # SPD-239: the same phases by the slots in a round's verify ({slots: {phase: ms summed}}, "n" the rounds),
+        # host and GPU, so a round of 8 lanes is read apart from the mix
+        self._ms_e: dict = {}
+        self._gpu_e: dict = {}
         self._round_e = 0
         self._round_tok = 0
         self._round_rows = 0                # the rows of the round's joint pass (0: none, or more than one)
@@ -226,7 +230,14 @@ class Runner:
         return dict(self.stats, skips=dict(SKIPS),
                     ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
                     gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n,
-                    steady=steady, prices=self.prices.report() if PRICED_CUT else None)
+                    steady=steady, prices=self.prices.report() if PRICED_CUT else None,
+                    ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e))
+
+    @staticmethod
+    def _by_e(d: dict) -> dict:
+        """SPD-239: {slots: {phase: ms a round}} for slot counts with 8 rounds or more."""
+        return {e: {k: (v if k == "n" else round(v / v_n, 2)) for k, v in sorted(ph.items())}
+                for e, ph in sorted(d.items()) if (v_n := ph["n"]) >= 8}
 
     def _t(self, key, t0):
         t1 = time.perf_counter()
@@ -258,12 +269,16 @@ class Runner:
                     seg = [a.elapsed_time(b) for (_, a), (lab, b) in zip(rnd, rnd[1:]) if lab == "verify"]
                     if len(seg) == 1:
                         self.prices.note(e, rows, seg[0], per)
+            ge = self._gpu_e.setdefault(e, {"n": 0})
+            ge["n"] += 1
             for (_, a), (lab, b) in zip(rnd, rnd[1:]):
                 if lab in self.gpu:
                     self.gpu[lab] += a.elapsed_time(b)
+                    ge[lab] = ge.get(lab, 0.0) + a.elapsed_time(b)
             if prev is not None and prev.query():
                 self.gpu["between"] += prev.elapsed_time(rnd[0][1])
                 self.gpu["period"] += prev.elapsed_time(rnd[0][1]) + rnd[0][1].elapsed_time(rnd[-1][1])
+                ge["between"] = ge.get("between", 0.0) + prev.elapsed_time(rnd[0][1])
             self.gpu_n += 1
         self._ev_done = keep[-8:]
 
@@ -278,6 +293,7 @@ class Runner:
         self._round_e, self._round_tok = 0, 0
         self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
         self._mark("start")
+        ms0 = dict(self.ms)
         t_r = t0 = time.perf_counter()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
         for t in tasks:
@@ -336,6 +352,10 @@ class Runner:
             self.prices.note_accept(self._round_acc, self._round_exp)
         self._bind_none()
         self._t("round", t_r)
+        me = self._ms_e.setdefault(self._round_e, {"n": 0})
+        me["n"] += 1
+        for k, v in self.ms.items():
+            me[k] = me.get(k, 0.0) + v - ms0[k]
         if self._ev:
             self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok, self._round_rows))
             self._ev_last = self._ev[-1][1]

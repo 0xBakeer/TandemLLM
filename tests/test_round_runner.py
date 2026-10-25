@@ -245,6 +245,12 @@ def test_the_familys_rows_at_a_lane_count_bound_the_joint_cut():
     return f"{out}; {len(seen)} cuts at 2 lanes to 4 rows"
 
 
+def test_the_report_gives_each_phase_by_the_slots_in_the_round():
+    # SPD-239: slot counts with fewer than 8 rounds are left out; the rest are ms a round
+    d = {8: {"n": 10, "verify": 1180.0, "tails": 52.0}, 2: {"n": 3, "verify": 90.0}}
+    assert R.Runner._by_e(d) == {8: {"n": 10, "tails": 5.2, "verify": 118.0}}
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
