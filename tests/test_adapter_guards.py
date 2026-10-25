@@ -63,11 +63,12 @@ GOLDEN_FP4 = {
     # SRV-717: the allocator snapshot reused 5 s
     # SPD-223: draft graphs check their window pages and every pointer they bake
     # SPD-239: FN_JOINT_TIMING knob, the joint pass's part timing in _timed
+    # SPD-239: the joint timing's host parts
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "6302d7590e931f0acc7edba511869fe5a40e8321197607abda222c0d32f307e0",
+    "qwen4_exp": "4abdc7fa451e3c7e8b3ba24cca7f73e7c739d93093b7ad4c095fbc4c5cbfbdf1",
     "nemotron_h": "514cc7997ca2d75bba50fe6cfdfe205fc0218b78d88d1c239028702427a8a8e5",
     "lfm2_moe": "c3388ce6acb643b9ac4b3a011e059110895a36cd8bc023f41ad2d7d469f16f38",
-    "qwen3_5_moe": "378ec34684e39238c3dd010428196850eab2126803d36be1d6ff6d7bc17561ab",
+    "qwen3_5_moe": "e1563267728d6db478bffe309cd64ac418be9e0dbc2fe8b10675a6f142d2dc23",
     "flint": "3e2402c446ca0c285945afa8fd2339e7fb1f3cb83d1375588872680193eae1e7",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

@@ -580,11 +580,16 @@ class FlashNextServing:
         and streams as its `forward_tree` leaves them, and its block committed by its `commit_tree`."""
         fn = items[0][0].fn
         jobs = []
+        t0 = time.perf_counter()
         for s, block, parents, start in items:
             s._settle_chain()
             s._at(start)
             s._ensure(start + block.numel())
             jobs.append(([int(t) for t in block.view(-1).tolist()], [int(p) for p in parents], s.st))
+        jt = getattr(fn, "joint_timing", None)
+        if jt is not None:
+            # SPD-239: the host before the pass (a chain's commit, the window, the blocks to the host)
+            jt["host_pre"] = jt.get("host_pre", 0.0) + 1e3 * (time.perf_counter() - t0)
         outs = fn.verify_multi(jobs)
         torch.cuda.current_stream().synchronize()
         res = []

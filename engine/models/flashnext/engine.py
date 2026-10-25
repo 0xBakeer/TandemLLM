@@ -868,6 +868,7 @@ class FlashNextEngine(FlashNextRef):
         S = c.num_experts_per_tok + 1
         jt = self.joint_timing
         marks = []
+        t_h0 = time.perf_counter()
 
         def mark(name):
             # QWEN38 joint-pass timing (tools/fn_joint_check.py --timing): an event at each part's start
@@ -885,6 +886,9 @@ class FlashNextEngine(FlashNextRef):
             self.stage_rows(tokens, parents, st, key=("joint", j, M))
             cx.append({"st": st, "M": M, "cls": self.qsa_class(st.length + max(depth)), "block": self._block,
                        "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}})
+        if jt is not None:
+            jt["host_stage"] = jt.get("host_stage", 0.0) + 1e3 * (time.perf_counter() - t_h0)
+            self._t_h0 = t_h0
         cuts = [0]
         for x in cx:
             cuts.append(cuts[-1] + x["M"])
@@ -983,6 +987,7 @@ class FlashNextEngine(FlashNextRef):
     def _timed(self, jt: dict, marks: list, cx: list) -> None:
         """A timed joint pass's parts into `jt` (GPU ms summed, its passes counted); with QWEN38_FN_JOINT_TIMING
         (SPD-239) every N passes the averages a pass (with its states and rows) are logged and `jt` starts again."""
+        jt["host_issue"] = jt.get("host_issue", 0.0) + 1e3 * (time.perf_counter() - self._t_h0)
         torch.cuda.synchronize()
         for (name, a), (_, b) in zip(marks, marks[1:]):
             jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
@@ -993,7 +998,8 @@ class FlashNextEngine(FlashNextRef):
             n = jt["passes"]
             if n >= JOINT_TIMING:
                 parts = {k: round(v / n, 2) for k, v in jt.items() if k != "passes"}
-                print(f"[fn-joint] {n} passes, a pass: {parts}, ms {round(sum(v for k, v in parts.items() if k not in ('states', 'rows')), 2)}",
+                gpu = round(sum(v for k, v in parts.items() if not k.startswith("host_") and k not in ("states", "rows")), 2)
+                print(f"[fn-joint] {n} passes, a pass: {parts}, gpu ms {gpu}",
                       flush=True)
                 jt.clear()
 
