@@ -178,6 +178,24 @@ def test_a_trim_below_the_floor_keeps_the_set_count_honest():
     ps.trim(5000)
     assert w.floor == 0 and ps.rows == w.rows
 
+def test_cover_maps_the_pages_a_gather_reads_and_nothing_else():
+    """SPD-223: a draft graph's gather reads [pos0 - window + 1, + span). A floor lowered without its ensure (the
+    SPD-211 shape: pages uncovered stay unmapped until the next ensure) is mapped by `cover`, below the floor onto
+    the shared page, at or above it fresh; a second cover maps nothing, and rows already mapped cost nothing."""
+    pool = _pool()
+    w, _ = _pair(pool)
+    w.ensure(65536)
+    assert w.cover(65536 - 2048, 65536) == 0                    # the window behind the newest row: mapped
+    w.set_floor(16384)                                          # lowered: pages 16384..49151 unmapped
+    lo, hi = 20000, 20000 + 2048
+    miss = [q for q in w._pages_for(lo, hi) if q not in w.handles and q not in w.alias]
+    assert miss, "the lowered floor left the gathered rows unmapped"
+    assert w.cover(lo, hi) == len(miss)
+    assert all(q in w.handles or q in w.alias for q in w._pages_for(lo, hi))
+    assert w.cover(lo, hi) == 0
+    return f"{len(miss)} unmapped page(s) under a lowered floor mapped once, then nothing"
+
+
 def test_the_window_is_the_27bs_choice_and_off_for_any_other_build():
     import ast
     import inspect

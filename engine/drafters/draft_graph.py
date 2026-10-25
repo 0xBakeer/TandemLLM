@@ -37,6 +37,20 @@ from engine.settings import SETTINGS as _S
 
 
 
+def cover_window(d, pos0: int, span: int, win: int) -> int:
+    """SPD-223: the window rows a draft's gather reads ([pos0 - win + 1, + span)) mapped before it runs: a page
+    left unmapped by a floor move or a trim faulted a draft graph's replay (`WindowBuffer.cover` maps it and the
+    line says so). The pages it mapped; 0 without a window buffer or on the path that is right."""
+    if getattr(d, "_ckb", None) is None:
+        return 0
+    lo = max(0, int(pos0) - int(win) + 1)
+    fixed = sum(b.cover(lo, lo + int(span)) for b in (d._ckb, d._cvb) if b is not None and hasattr(b, "cover"))
+    if fixed:
+        print(f"[dflash2] draft window: {fixed} unmapped page(s) of rows {lo}..{lo + int(span)} mapped before the "
+              f"draft (floor {d._ckb.floor}, rows {d._ckb.rows})", flush=True)
+    return fixed
+
+
 def dflash2_head(eng):
     """The head the draft reads: the target's, or QWEN38_DRAFT_HEAD_EXL3's (engine/drafters/dflash2.py)."""
     from engine.drafters import dflash2
@@ -58,9 +72,21 @@ class DraftGraph:
         self.graphs: dict = {}                                        # class -> (graph, out)
         # the cache the graph gathers from; a drafter that reallocates it gets a new graph
         self.ck_ptr = drafter._ck.data_ptr()
+        self.ptrs = DraftGraph.pointers(drafter)            # SPD-223: every tensor the body bakes
         self.stream = torch.cuda.Stream()
         self.out = None
         self.stats = {"captured": 0, "replayed": 0}
+
+    @staticmethod
+    def pointers(drafter) -> tuple:
+        """What a captured body points at: the window K/V, the row flags, the embedding, the head, the length
+        (graph_run recaptures when any of them moved)."""
+        def ptr(t):
+            return t.data_ptr() if isinstance(t, torch.Tensor) else id(t)
+        eng = drafter.eng
+        cs = getattr(drafter, "_cs", None)
+        return (ptr(drafter._ck), ptr(drafter._cv), ptr(cs) if cs is not None else 0,
+                ptr(eng.w.norm("embed_tokens.weight")), ptr(dflash2_head(eng)), int(drafter.max_len))
 
     @staticmethod
     def eligible(drafter) -> bool:  # noqa: D401
@@ -119,6 +145,8 @@ class DraftGraph:
         self.host[0], self.host[1], self.host[2] = anchor, pos0, self.d.ctx_len
         self.scal.copy_(self.host, non_blocking=True)
         span = self.span(pos0)
+        if cover_window(self.d, pos0, span, self.win):
+            self.stats["covered"] = self.stats.get("covered", 0) + 1
         temp = float(self.d.tree_temp) if M.HOST_ASYNC else None
         # the kernel flags too, as the verify graphs key on them (an in-process A/B flips
         # them; a served process never does, so this is one key a span)
@@ -276,7 +304,7 @@ class PackedDraftGraph:
         dev = ds[0].eng.device
         self.scal = [torch.zeros(3, dtype=torch.long, device=dev) for _ in ds]
         self.host = torch.zeros(len(ds), 3, dtype=torch.long).pin_memory()
-        self.ptrs = tuple(d._ck.data_ptr() for d in ds)
+        self.ptrs = tuple(DraftGraph.pointers(d) for d in ds)          # SPD-223: every tensor each body bakes
         self.graphs: dict = {}
         self.stream = torch.cuda.Stream()
         # one memory pool for this set's graphs (one per span combination): they never run at once,
@@ -406,11 +434,15 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     if any(d.module.w is not ds[0].module.w for d in ds):
         raise ValueError("a packed draft runs one drafter checkpoint")
     temp = float(ds[0].tree_temp) if M.HOST_ASYNC else None
+    win = int(ds[0].cfg.sliding_window)
+    span = max(_span(p, win) for _, _, p in reqs)
+    for d, _, p in reqs:
+        cover_window(d, p, span, win)                       # SPD-223
     graph = PACKED_GRAPH if graph is None else graph
     if graph and torch.cuda.is_available():
         key = tuple(id(d) for d in ds)
         pg = _PACKED.pop(key, None)
-        if pg is None or pg.ptrs != tuple(d._ck.data_ptr() for d in ds):
+        if pg is None or pg.ptrs != tuple(DraftGraph.pointers(d) for d in ds):
             pg = PackedDraftGraph(tuple(ds))
         _PACKED[key] = pg                          # most recently used last
         while len(_PACKED) > _PACKED_MAX:

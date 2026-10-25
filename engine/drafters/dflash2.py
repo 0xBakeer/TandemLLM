@@ -1223,6 +1223,33 @@ def _window_buffer(kvp):
                     self.pool.stats["pages_mapped"] += len(new)
                 return nbytes
 
+        def cover(self, lo: int, hi: int) -> int:
+            """SPD-223: every page of rows [lo, hi) mapped before a draft graph gathers them: below the floor
+            onto the shared page, at or above it fresh and zeroed (as `ensure` maps them); the pages it had to
+            map (0 on the path that is right). A gather of an unmapped page is an illegal memory access."""
+            lo, hi = max(0, int(lo)), min(int(hi), self.max_rows)
+            if hi <= lo:
+                return 0
+            with self.lock:
+                miss = [p for p in self._pages_for(lo, hi) if p not in self.handles and p not in self.alias]
+                if not miss:
+                    return 0
+                fp = self.floor // self.page_rows if self.page_rows else 0
+                below, above = [p for p in miss if p < fp], [p for p in miss if p >= fp]
+                self._alias_map(below)
+                if above:
+                    nbytes = len(above) * self.page
+                    if self.pool is not None:
+                        self.pool.gate(self.owner, nbytes)
+                    self._map_pages(above)
+                    if self.drv is not None:
+                        P = self.page
+                        for a, b in kvp._runs(above):
+                            self._flat[a * P:min(self.nbytes, b * P)].zero_()
+                    if self.pool is not None:
+                        self.pool._add(self.owner, nbytes)
+                return len(miss)
+
         def trim(self, rows: int = 0) -> int:
             if int(rows) < self.floor:
                 self.set_floor(self._floor_for(rows))
@@ -1900,7 +1927,11 @@ class DFlash2Drafter(Drafter):
         from engine.drafters.draft_graph import DraftGraph
         self._flush_sync()
         g = getattr(self, "_graph", None)
-        if g is None or g.ck_ptr != self._ck.data_ptr():
+        if g is None or g.ptrs != DraftGraph.pointers(self):
+            # SPD-223: every tensor the graph baked (the window, the row flags, embeddings, head, max_len)
+            if g is not None:
+                print(f"[dflash2] draft graph rebuilt: its tensors moved ({g.ptrs} -> {DraftGraph.pointers(self)})",
+                      flush=True)
             g = self._graph = DraftGraph(self)
         return g.run(anchor, pos0)
 

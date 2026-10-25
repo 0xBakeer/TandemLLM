@@ -48,8 +48,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("c3e9f9b11d98f8d7573171435c29ff17306074655584a6782851e3388050e2b5",
-             "0e168dbd3fc855a0002d075a978aea3fe797e3fa4195b7abd243f32b26a226b7")
+GOLDEN_V2 = ("7d203baa967c777aa591be7b4e00f920d31d3ee8c70246d8b187fc6f26bd6cf4",
+             "cb63de9719e55827c4c2906f173c3fdeeb90524734b2b44086f81d8cd7c0c22c")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -61,7 +61,8 @@ GOLDEN_FP4 = {
     # SPD-233/235: Flash-Next's 8-lane row count; the packed MTP draft (Flash-Next, Ornith)
     # SPD-231: QWEN38_FN_GEMV_NB in the shared table beside FN_GEMV_SPLIT
     # SRV-717: the allocator snapshot reused 5 s
-    "qwen3_5": "52027eef3708c238172a5e5bee21ecd4120022314011d2357f04e9d0b5836da6",
+    # SPD-223: draft graphs check their window pages and every pointer they bake
+    "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
     "qwen4_exp": "8988406bd803430af65c58b23cd7bc5230b74249fa5ff5107e2befb9c6c0d0f7",
     "nemotron_h": "514cc7997ca2d75bba50fe6cfdfe205fc0218b78d88d1c239028702427a8a8e5",
     "lfm2_moe": "c3388ce6acb643b9ac4b3a011e059110895a36cd8bc023f41ad2d7d469f16f38",
