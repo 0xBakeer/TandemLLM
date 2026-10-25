@@ -64,12 +64,13 @@ GOLDEN_FP4 = {
     # SPD-223: draft graphs check their window pages and every pointer they bake
     # SPD-239: FN_JOINT_TIMING knob, the joint pass's part timing in _timed
     # SPD-239: the joint timing's host parts
+    # SPD-239: staging parts, FN_GEMV_MC
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "4abdc7fa451e3c7e8b3ba24cca7f73e7c739d93093b7ad4c095fbc4c5cbfbdf1",
-    "nemotron_h": "514cc7997ca2d75bba50fe6cfdfe205fc0218b78d88d1c239028702427a8a8e5",
-    "lfm2_moe": "c3388ce6acb643b9ac4b3a011e059110895a36cd8bc023f41ad2d7d469f16f38",
-    "qwen3_5_moe": "e1563267728d6db478bffe309cd64ac418be9e0dbc2fe8b10675a6f142d2dc23",
-    "flint": "3e2402c446ca0c285945afa8fd2339e7fb1f3cb83d1375588872680193eae1e7",
+    "qwen4_exp": "5f90a142fb05ac64c7598cd0330012f4733ec0128c38764f72d61590bcfc7775",
+    "nemotron_h": "6717e5b2ed4c1b59c6f2d89da853735ea0651061b747dd58e10e8cd98006c7c1",
+    "lfm2_moe": "5643f5fd98539a360c0f598cdb2e7901a47fc601908e4a9bf132c30124d99e43",
+    "qwen3_5_moe": "b75a81b348bf9283163554b7eb3b806355a521abe947c3cc0b4c6e475d194021",
+    "flint": "acce99114ef0c64e9ce16efb504db4faef5e33360c7e77ffb1fd0722a00b2f97",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

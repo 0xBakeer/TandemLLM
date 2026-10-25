@@ -751,8 +751,11 @@ class FlashNextEngine(FlashNextRef):
         the rows buffers' own key (a joint pass stages each state's block in its own, `verify_multi`)."""
         from tools import fn_seq_kernels as SK
         M = len(tokens)
+        hm, t0 = self.host_ms, time.perf_counter()
         rb = self._rows_buffers(M, key)
         rb["copied"].synchronize()
+        t1 = time.perf_counter()
+        hm["stage_wait"] = hm.get("stage_wait", 0.0) + 1e3 * (t1 - t0)
         h, L = rb["h"], st.length
         depth, paths = [], []
         for i, p in enumerate(parents):
@@ -765,16 +768,26 @@ class FlashNextEngine(FlashNextRef):
         anc = h["anc"].numpy()
         for i, pa in enumerate(paths):
             anc[i, :len(pa)] = L + np.asarray(pa)
+        t2 = time.perf_counter()
         self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M,
                         st.delta)
+        t3 = time.perf_counter()
         ctl, _ = SK.tree_ctl(parents)
         h["gctl"].numpy()[:] = ctl
         h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
         h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
+        t4 = time.perf_counter()
         for li in self.cfg.ple_layers:
             hsh = self.hash[li]
             for i, ids in enumerate(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens, paths)):
                 self._ple_fill(h, i, li, ids)
+        t5 = time.perf_counter()
+        # SPD-239: the staging's host ms by part (the copy buffer's wait, the rows, the attention control,
+        # the tree control, the PLE rows)
+        hm["stage_rows_ctl"] = hm.get("stage_rows_ctl", 0.0) + 1e3 * (t2 - t1)
+        hm["stage_qsa"] = hm.get("stage_qsa", 0.0) + 1e3 * (t3 - t2)
+        hm["stage_tree"] = hm.get("stage_tree", 0.0) + 1e3 * (t4 - t3)
+        hm["stage_ple"] = hm.get("stage_ple", 0.0) + 1e3 * (t5 - t4)
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
         self._block = (list(tokens), list(parents), paths)
@@ -999,7 +1012,10 @@ class FlashNextEngine(FlashNextRef):
             if n >= JOINT_TIMING:
                 parts = {k: round(v / n, 2) for k, v in jt.items() if k != "passes"}
                 gpu = round(sum(v for k, v in parts.items() if not k.startswith("host_") and k not in ("states", "rows")), 2)
-                print(f"[fn-joint] {n} passes, a pass: {parts}, gpu ms {gpu}",
+                hm, prev = self.host_ms, getattr(self, "_hm_prev", {})
+                stg = {k: round((v - prev.get(k, 0.0)) / n, 2) for k, v in hm.items() if k.startswith("stage_")}
+                self._hm_prev = dict(hm)
+                print(f"[fn-joint] {n} passes, a pass: {parts}, gpu ms {gpu}, staging host ms {stg}",
                       flush=True)
                 jt.clear()
 

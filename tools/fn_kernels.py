@@ -251,8 +251,8 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
 // The same dot products for a weight of few rows (`gemv_split`): one CTA a row, its K split into KS
 // contiguous slices, warp w the slice w with gemv_kernel's lane-strided sums, the slices added in warp
 // order; KS is a function of the weight's shape, so a row's bits do not depend on M.
-template <typename TW, int MC, typename TY>
-__global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+template <typename TW, int MC, typename TY, int MINB = 1>
+__global__ void __launch_bounds__(256, MINB) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K, int G) {
     __shared__ float red[8][MC];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
@@ -321,8 +321,8 @@ __global__ void __launch_bounds__(256) gemv_split_nb_kernel(const __nv_bfloat16*
 // A[M, R] = bf16(silu(bf16(D) / HC)) staged in shared memory (bf16), then per column j (one warp,
 // four groups of 8 lanes = the four streams): u_s = bf16(up row (s H + j) . a), x = mean of
 // bf16(bf16(sigmoid(u_s)) * n_s).
-template <typename TW, int MC>
-__global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D, int ldd,
+template <typename TW, int MC, int MINB = 1>
+__global__ void __launch_bounds__(256, MINB) mix_up_kernel(const float* __restrict__ D, int ldd,
         const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
         __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc, int G) {
     extern __shared__ __nv_bfloat16 a_s[];                 // [M, R]
@@ -1432,6 +1432,10 @@ __global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __re
 static int g_pdl = 1;      // fn_set_pdl: launch with programmatic stream serialization (QWEN38_FN_PDL)
 static int g_gemv_split = 1;   // fn_set_gemv_split: few-row weights on gemv_split_kernel (QWEN38_FN_GEMV_SPLIT)
 static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_nb / mix_up_nb (QWEN38_FN_GEMV_NB)
+// fn_set_gemv_mc: SPD-239, the rows a pass and the CTAs an SM of gemv_split / mix_up for M > 1 (QWEN38_FN_GEMV_MC):
+// 0 = 8 rows, no bound; 1 = 4 rows, 2 CTAs; 2 = 4 rows, 3 CTAs; 3 = 2 rows, 4 CTAs; 4 = 8 rows, 2 CTAs; 5 = 2 rows,
+// 3 CTAs. A row's sums are the same chunks in the same order whatever the rows a pass (its bits)
+static int g_gemv_mc = 0;
 
 template <typename... KArgs, typename... Args>
 static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
@@ -1448,6 +1452,7 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
 void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
 void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
+void fn_set_gemv_mc(int64_t v) { g_gemv_mc = (int)v; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -1644,6 +1649,11 @@ static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const 
     }
     if (ks > 1) {
         auto kern = M == 1 ? gemv_split_kernel<TW, 1, TY> : gemv_split_kernel<TW, 8, TY>;
+        if (M > 1 && g_gemv_mc == 1) kern = gemv_split_kernel<TW, 4, TY, 2>;
+        if (M > 1 && g_gemv_mc == 2) kern = gemv_split_kernel<TW, 4, TY, 3>;
+        if (M > 1 && g_gemv_mc == 3) kern = gemv_split_kernel<TW, 2, TY, 4>;
+        if (M > 1 && g_gemv_mc == 4) kern = gemv_split_kernel<TW, 8, TY, 2>;
+        if (M > 1 && g_gemv_mc == 5) kern = gemv_split_kernel<TW, 2, TY, 3>;
         launch(kern, dim3(N), dim3(32 * ks), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
                (const TW*)w.data_ptr(), s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G);
         return;
@@ -1793,6 +1803,11 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
         const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
         TORCH_CHECK(!G || (R % ng == 0 && G % 16 == 0), "scale groups: R / groups a multiple of 16");
         auto k = M == 1 ? mix_up_kernel<int8_t, 1> : mix_up_kernel<int8_t, 8>;
+        if (M > 1 && g_gemv_mc == 1) k = mix_up_kernel<int8_t, 4, 2>;
+        if (M > 1 && g_gemv_mc == 2) k = mix_up_kernel<int8_t, 4, 3>;
+        if (M > 1 && g_gemv_mc == 3) k = mix_up_kernel<int8_t, 2, 4>;
+        if (M > 1 && g_gemv_mc == 4) k = mix_up_kernel<int8_t, 8, 2>;
+        if (M > 1 && g_gemv_mc == 5) k = mix_up_kernel<int8_t, 2, 3>;
         launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
             (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
@@ -1966,6 +1981,7 @@ _CPP = (
     "void fn_set_pdl(int64_t on);\n"
     "void fn_set_gemv_split(int64_t on);\n"
     "void fn_set_gemv_nb(int64_t on);\n"
+    "void fn_set_gemv_mc(int64_t v);\n"
     "void fn_set_moe_st(int64_t st);\n"
     "void fn_set_moe_warps(int64_t w);\n"
     "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
@@ -1996,13 +2012,14 @@ def _module():
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                       "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                       "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                       "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
+        _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
     return _MOD

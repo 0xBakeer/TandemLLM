@@ -381,6 +381,9 @@ KNOBS: dict[str, tuple] = {
     # SPD-231: M > 1 rows of the mixers' GEMV (gemv_split) and mix_up on the register-blocked kernels (several
     # weight rows a CTA, each row's bits the one-row kernels'); 0: the one-row-a-CTA kernels for every M
     'FN_GEMV_NB': ('0', 'tools/fn_kernels.py'),
+    # SPD-239: the mixer kernels' rows a pass and CTAs an SM for M > 1 (gemv_split / mix_up; 0: 8 rows, no
+    # bound; 1-5: tools/fn_kernels.py g_gemv_mc); the bits are the same at every setting
+    'FN_GEMV_MC': ('0', 'tools/fn_kernels.py'),
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
     'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),

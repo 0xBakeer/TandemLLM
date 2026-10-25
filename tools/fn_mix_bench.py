@@ -54,6 +54,7 @@ def main() -> None:
     ap.add_argument("--rows", type=int, nargs="+", default=[1, 2, 3, 4, 5, 8, 16, 24, 32])
     ap.add_argument("--layers", type=int, default=96)
     ap.add_argument("--reps", type=int, default=20)
+    ap.add_argument("--mc", type=int, nargs="+", default=[0], help="QWEN38_FN_GEMV_MC settings to compare (SPD-239)")
     a = ap.parse_args()
     dev = "cuda"
     g = torch.Generator(device=dev).manual_seed(5)
@@ -61,15 +62,24 @@ def main() -> None:
              for _ in range(a.layers)]
     ups = [Int8Rows.of((torch.randn(HC * H, R, generator=g, device=dev) * 0.05).half(), 64) for _ in range(a.layers)]
     nb_d, nb_u = downs[0].nbytes, ups[0].nbytes
-    for M in a.rows:
+    for mc, M in [(mc, M) for mc in a.mc for M in a.rows]:
+        K._module().fn_set_gemv_mc(mc)
         n = (torch.randn(M, HC * H, generator=g, device=dev)).to(torch.bfloat16)
         d = torch.empty(M, R + HC, dtype=torch.float32, device=dev)
         x = torch.empty(M, H, dtype=torch.bfloat16, device=dev)
+        # the outputs at this setting against the 8-row pass's, bit for bit (the first weights)
+        same = []
+        for v in (0, mc):
+            K._module().fn_set_gemv_mc(v)
+            dd = K.gemv(n, downs[0])
+            same.append((dd, K.mix_up(dd, n, ups[0], HC)))
+        K._module().fn_set_gemv_mc(mc)
+        equal = all(torch.equal(p, q) for p, q in zip(same[0], same[1]))
         dms = ring_ms([lambda w=w: K.gemv(n, w, out=d) for w in downs], a.reps)
         ums = ring_ms([lambda w=w: K.mix_up(d, n, w, HC, out=x) for w in ups], a.reps)
-        print(json.dumps({"M": M, "gemv_us": round(dms * 1e3, 1), "gemv_gbs": round(nb_d / dms / 1e6, 1),
+        print(json.dumps({"mc": mc, "M": M, "gemv_us": round(dms * 1e3, 1), "gemv_gbs": round(nb_d / dms / 1e6, 1),
                           "mix_up_us": round(ums * 1e3, 1), "mix_up_gbs": round(nb_u / ums / 1e6, 1),
-                          "pass_ms_96": round(96 * (dms + ums), 2)}), flush=True)
+                          "pass_ms_96": round(96 * (dms + ums), 2), "equal_to_mc0": equal}), flush=True)
 
 
 if __name__ == "__main__":
