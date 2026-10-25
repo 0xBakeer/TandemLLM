@@ -384,9 +384,11 @@ KNOBS: dict[str, tuple] = {
     # SPD-239: the mixer kernels' rows a pass and CTAs an SM for M > 1 (gemv_split / mix_up; 0: 8 rows, no
     # bound; 1-5: tools/fn_kernels.py g_gemv_mc); the bits are the same at every setting
     'FN_GEMV_MC': ('0', 'tools/fn_kernels.py'),
-    # SPD-241: the mixers' int8 group-scaled GEMV and mix_up on tensor cores at every row count (a one-time
-    # summation-order change, checked by a KL/top-1 run before it is a default); 0: the CUDA-core kernels
-    'FN_MIXER_MMA': ('0', 'tools/fn_kernels.py'),
+    # SPD-241: the mixers' int8 group-scaled GEMV and mix_up on tensor cores at every row count, a one-time
+    # summation-order change (tools/fn_mma_agree.py: top-1 99.6 / 99.6 / 98.8 %, KL 5e-4..1.7e-3, the class of the
+    # GEMV_SPLIT order change); served Flash-Next C1-C8 43.3 / 56.9 / 83.2 / 107.8 (CUDA cores 41.6 / 55.4 / 75.5 / 95.0);
+    # 0: the CUDA-core kernels
+    'FN_MIXER_MMA': ('1', 'tools/fn_kernels.py'),
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
     'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),
