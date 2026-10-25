@@ -47,10 +47,11 @@ def test_no_join_without_exl3_or_during_a_verify():
 
 
 def test_knobs_default_on():
-    # SPD-169/189/193 are bit-identical; SPD-191's prep kernel ships after the fp64 gate (2026-10-23)
+    # SPD-169/189/193 are bit-identical; SPD-191's prep kernel ships after the fp64 gate (2026-10-23), its scan
+    # at 16 / 4 after the KL gate against 32 / 8 (SPD-245, tools/gdn_tile_gate.py)
     for k in ("WINDOW_ROWWISE", "GDN_PREP", "SLAB_TRITON", "WINDOW_NORM_ROT"):
         assert KNOBS[k][0] == "1", k
-    assert (KNOBS["GDN_PREP_BV"][0], KNOBS["GDN_PREP_WARPS"][0]) == ("32", "8")
+    assert (KNOBS["GDN_PREP_BV"][0], KNOBS["GDN_PREP_WARPS"][0]) == ("16", "4")
 
 
 if __name__ == "__main__":
