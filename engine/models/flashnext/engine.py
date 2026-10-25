@@ -54,6 +54,8 @@ JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
 #: SPD-239: a joint pass reads every state's PLE rows in one batch a layer (`_ple_batch`); 0: a block at a time
 PLE_BATCH = _S.get("FN_PLE_BATCH") == "1"
+#: SPD-239: a joint round's commits pool every lane's indexer blocks of every layer in one launch; 0: a launch each
+POOL_MULTI = _S.get("FN_POOL_MULTI") == "1"
 #: SPD-239: a joint pass reads its PLE rows on a thread while the layers before the first PLE layer run; 0: before the pass
 PLE_LATE = _S.get("FN_PLE_LATE") == "1"
 #: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`; 8 lanes: 17.4 -> 13.5 ms
@@ -1252,6 +1254,7 @@ class FlashNextEngine(FlashNextRef):
             ent["d"][:len(rows)].copy_(ent["h"][:len(rows)], non_blocking=True)
             SK.commit_multi(ent["d"][:len(rows)])
             ent["copied"].record()
+        pools = []
         for j, st, path, cb, moved, tokens, rec in done:
             d, n = cb["d"], len(path)
             if moved:
@@ -1264,8 +1267,11 @@ class FlashNextEngine(FlashNextRef):
             if c.has_indexer:
                 slots, posb = cb["d32"][:SK.OWN * 4].view(SK.OWN, 4), cb["d32"][SK.OWN * 4:]
                 for li in c.attention_layers:
-                    own = SK.qsa_pool(st.ik[li], slots, posb, self.W[self.pre(li) + "self_attn.indexer.k_layernorm.weight"],
-                                      self.rope_cos, self.rope_sin, c.rms_norm_eps)
+                    kln = self.W[self.pre(li) + "self_attn.indexer.k_layernorm.weight"]
+                    if POOL_MULTI:
+                        pools.append(SK.qsa_pool_entry(st.ik[li], slots, posb, kln, st.pool[li], cb["dpi"]))
+                        continue
+                    own = SK.qsa_pool(st.ik[li], slots, posb, kln, self.rope_cos, self.rope_sin, c.rms_norm_eps)
                     st.pool[li].index_copy_(0, cb["dpi"], own)
             self._pend_of(st)[1].fill_(n)
             self._commit_lane(st, rec, d, n)
@@ -1276,6 +1282,13 @@ class FlashNextEngine(FlashNextRef):
             st.length += len(path)
             self._pending[id(st)] = st
             out[j] = cb["stack"][:n]
+        if pools:
+            # SPD-239: every lane's pooled indexer blocks of every attention layer in one launch (after its KV moves)
+            ent = self._commit_entries(len(pools), "_pent")
+            ent["h"].numpy()[:len(pools)] = np.asarray(pools, dtype=np.int64)
+            ent["d"][:len(pools)].copy_(ent["h"][:len(pools)], non_blocking=True)
+            SK.qsa_pool_multi(ent["d"][:len(pools)], SK.OWN, self.rope_cos, self.rope_sin, c.rms_norm_eps)
+            ent["copied"].record()
         for j, (st, path) in enumerate(items):
             if out[j] is None:
                 out[j] = self.commit(st, path)
@@ -1329,16 +1342,17 @@ class FlashNextEngine(FlashNextRef):
         cb["copied"].record()
         return cb, any(path[k] != k for k in range(n))
 
-    def _commit_entries(self, n: int) -> dict:
-        """`commit_multi`'s entry table: pinned host rows and their device copy, grown to fit; the host rows are
-        rewritten only after the last copy from them is done."""
+    def _commit_entries(self, n: int, name: str = "_cent") -> dict:
+        """`commit_multi`'s entry tables (`name`: the copies', the pools'): pinned host rows and their device copy,
+        grown to fit; the host rows are rewritten only after the last copy from them is done."""
         from tools import fn_seq_kernels as SK
-        ent = getattr(self, "_cent", None)
+        ent = getattr(self, name, None)
         if ent is None or ent["h"].shape[0] < n:
             m = max(n, 1024)
-            ent = self._cent = {"h": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
-                                "d": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
-                                "copied": torch.cuda.Event()}
+            ent = {"h": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
+                   "d": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
+                   "copied": torch.cuda.Event()}
+            setattr(self, name, ent)
             ent["copied"].record()
         ent["copied"].synchronize()
         return ent

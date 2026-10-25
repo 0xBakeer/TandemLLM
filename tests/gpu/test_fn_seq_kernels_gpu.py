@@ -309,6 +309,34 @@ def _rope_tables(n, rot=64):
     return torch.cat([ang.cos(), ang.cos()], -1).to(torch.bfloat16), torch.cat([ang.sin(), ang.sin()], -1).to(torch.bfloat16)
 
 
+def test_qsa_pool_multi_equals_pool_then_index_copy():
+    """SPD-239: `qsa_pool_multi` over 6 (state, layer) pairs leaves every pool as `pool.index_copy_(0, rows,
+    qsa_pool(...))` leaves it, bit for bit."""
+    g = _g(23)
+    cap, eps = 2048, 1e-6
+    cos, sin = _rope_tables(cap)
+    ents, cases = [], []
+    for k in range(6):
+        ikc = torch.randn(cap, 128, generator=g, device=DEV).to(torch.bfloat16)
+        kln = (torch.randn(128, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+        b0 = 40 + 37 * k
+        b = b0 + torch.arange(SK.OWN, dtype=torch.int32, device=DEV)
+        slots = (b[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=DEV)).contiguous()
+        posb = (b * 4).contiguous()
+        rows = b.long().contiguous()
+        pool0 = torch.randn(cap // 4, 128, generator=g, device=DEV).to(torch.bfloat16)
+        want = pool0.clone()
+        want.index_copy_(0, rows, SK.qsa_pool(ikc, slots, posb, kln, cos, sin, eps))
+        got = pool0.clone()
+        ents.append(SK.qsa_pool_entry(ikc, slots, posb, kln, got, rows))
+        cases.append((want, got, ikc, slots, posb, kln, rows))
+    SK.qsa_pool_multi(torch.tensor(ents, dtype=torch.int64, device=DEV), SK.OWN, cos, sin, eps)
+    torch.cuda.synchronize()
+    for k, (want, got, *_) in enumerate(cases):
+        assert torch.equal(want, got), k
+    return f"{len(cases)} pairs x {SK.OWN} blocks in one launch = pool then index_copy"
+
+
 def test_qsa_pool_scores_and_selection():
     """Pooled keys within a bf16 step of the reference's arithmetic; scores rows = one-row calls and
     the own blocks equal the shared pool's for the same keys; the selection over 3,000 random keys
@@ -444,7 +472,8 @@ def test_commit_multi_equals_the_commits_gathers():
 TESTS = [test_tree_helpers, test_commit_multi_equals_the_commits_gathers, test_gdn_rows_multi_equals_each_states_call,
          test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
-         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows, test_qsa_pool_scores_and_selection,
+         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows,
+         test_qsa_pool_multi_equals_pool_then_index_copy, test_qsa_pool_scores_and_selection,
          test_attn_prep_indexer_query, test_qsa_topk_kernel_equals_torch]
 
 

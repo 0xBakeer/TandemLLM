@@ -361,15 +361,12 @@ __global__ void __launch_bounds__(256) ple_conv_kernel(const __nv_bfloat16* __re
 // keys (fp32, in key order, / 4, rounded to bf16), the RMS norm (1 + w), the rope at the block's first
 // position (bf16(bf16(n c) + bf16(rot(n) s)) over the first ROT dims). SLOTS[b][0..3]: the cache slots
 // of the block's keys; POSB[b]: its first position.
-__global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __restrict__ IKC,
+__device__ __forceinline__ float qsa_pool_body(const __nv_bfloat16* __restrict__ IKC,
         const int* __restrict__ SLOTS, const int* __restrict__ POSB, const __nv_bfloat16* __restrict__ KLN,
-        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, __nv_bfloat16* __restrict__ OUT,
-        int ROT, float eps) {
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, int b, int ROT, float eps) {
     __shared__ float sh[4];
     __shared__ float nv[128];
-    pdl_wait();
-    pdl_trigger();
-    const int b = blockIdx.x, t = threadIdx.x;
+    const int t = threadIdx.x;
     float acc = 0.f;
 #pragma unroll
     for (int i = 0; i < 4; ++i) acc += b2f(IKC[(size_t)SLOTS[b * 4 + i] * 128 + t]);
@@ -385,7 +382,34 @@ __global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __re
         const float rh = t < ROT / 2 ? -nv[t + ROT / 2] : nv[t - ROT / 2];
         o = bfr(bfr(n * c) + bfr(rh * sn));
     }
-    OUT[(size_t)b * 128 + t] = __float2bfloat16_rn(o);
+    return o;
+}
+
+__global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __restrict__ IKC,
+        const int* __restrict__ SLOTS, const int* __restrict__ POSB, const __nv_bfloat16* __restrict__ KLN,
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, __nv_bfloat16* __restrict__ OUT,
+        int ROT, float eps) {
+    pdl_wait();
+    pdl_trigger();
+    const int b = blockIdx.x;
+    const float o = qsa_pool_body(IKC, SLOTS, POSB, KLN, COS, SIN, b, ROT, eps);
+    OUT[(size_t)b * 128 + threadIdx.x] = __float2bfloat16_rn(o);
+}
+
+// SPD-239: `qsa_pool` of many (state, layer) pairs into their pools in one launch, grid (NB, pairs): pair z's
+// entry E[z] = [ikc, slots, posb, kln, pool, rows (int64 [NB], the pool row of each block)]; a CTA computes
+// qsa_pool_kernel's block and writes it at its pool row (what `pool.index_copy_(0, rows, qsa_pool(...))` writes)
+__global__ void __launch_bounds__(128) qsa_pool_multi_kernel(const long long* __restrict__ E,
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, int ROT, float eps) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.y * 16;
+    const int b = blockIdx.x;
+    const float o = qsa_pool_body(reinterpret_cast<const __nv_bfloat16*>(e[0]), reinterpret_cast<const int*>(e[1]),
+                                  reinterpret_cast<const int*>(e[2]), reinterpret_cast<const __nv_bfloat16*>(e[3]),
+                                  COS, SIN, b, ROT, eps);
+    const long long row = reinterpret_cast<const long long*>(e[5])[b];
+    reinterpret_cast<__nv_bfloat16*>(e[4])[row * 128 + threadIdx.x] = __float2bfloat16_rn(o);
 }
 
 // The indexer's score of block b for row t: sum over the NH query heads in order of
@@ -592,6 +616,16 @@ void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, to
         (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)cos.size(1), (float)eps);
 }
 
+void seq_qsa_pool_multi(torch::Tensor E, int64_t NB, torch::Tensor cos, torch::Tensor sin, double eps) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    TORCH_CHECK(cos.dtype() == torch::kBFloat16 && cos.size(1) <= 128, "cos/sin bf16 [L, ROT]");
+    if (E.size(0) == 0 || NB == 0) return;
+    launch(qsa_pool_multi_kernel, dim3((unsigned)NB, (unsigned)E.size(0)), dim3(128), st, (const long long*)E.data_ptr(),
+        (const __nv_bfloat16*)cos.data_ptr(), (const __nv_bfloat16*)sin.data_ptr(), (int)cos.size(1), (float)eps);
+}
+
 void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk) {
     const at::cuda::OptionalCUDAGuard guard(sc.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -643,6 +677,7 @@ _CPP = (
     "void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos, "
     "torch::Tensor sin, torch::Tensor out, double eps);\n"
     "void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc);\n"
+    "void seq_qsa_pool_multi(torch::Tensor E, int64_t NB, torch::Tensor cos, torch::Tensor sin, double eps);\n"
     "void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk);\n")
 
 _MOD = None
@@ -658,7 +693,7 @@ def _module():
         tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
                            functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
-                                      "seq_qsa_pool", "seq_qsa_scores", "seq_qsa_topk"],
+                                      "seq_qsa_pool", "seq_qsa_pool_multi", "seq_qsa_scores", "seq_qsa_topk"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1"))
@@ -846,6 +881,18 @@ def qsa_pool(ikc, slots, posb, kln, cos, sin, eps: float, out=None):
         out = torch.empty(NB, 128, dtype=torch.bfloat16, device=ikc.device)
     _module().seq_qsa_pool(ikc, slots, posb, kln, cos, sin, out, eps)
     return out
+
+
+def qsa_pool_entry(ikc, slots, posb, kln, pool, rows) -> list:
+    """SPD-239: one (state, layer)'s `qsa_pool` + `pool.index_copy_(0, rows, ...)` as a `qsa_pool_multi` entry."""
+    assert ikc.is_contiguous() and pool.is_contiguous() and slots.is_contiguous() and posb.is_contiguous()
+    assert pool.shape[-1] == 128 and rows.dtype == torch.int64 and rows.is_contiguous()
+    return [ikc.data_ptr(), slots.data_ptr(), posb.data_ptr(), kln.data_ptr(), pool.data_ptr(), rows.data_ptr()] + [0] * 10
+
+
+def qsa_pool_multi(entries: torch.Tensor, NB: int, cos, sin, eps: float) -> None:
+    """SPD-239: `qsa_pool` of many (state, layer) pairs, each block written at its pool row, in one launch."""
+    _module().seq_qsa_pool_multi(entries, NB, cos, sin, eps)
 
 
 def qsa_scores(iq, pool, own, qctl, NB: int, out=None):

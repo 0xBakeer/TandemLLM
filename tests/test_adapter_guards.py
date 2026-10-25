@@ -73,11 +73,12 @@ GOLDEN_FP4 = {
     # SPD-241: mixer MMA kernels
     # SPD-239: Ornith grouped GDN, lane-aware skip
     # SPD-241: FN_MIXER_MMA default
+    # SPD-239: FN_POOL_MULTI
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "c9bb1654faf87594055cd7a37d132e2b023ce2e1923fef90be51608e865ebb5a",
+    "qwen4_exp": "fed9080be4a130d029c0ee6e1dff9b0328c6e6cf9dee12d982d565584c70ce6f",
     "nemotron_h": "a092fa02b9c66ab8f46d7a0e9dc59c63e14965254d122a1adbf971260880bd13",
     "lfm2_moe": "1bddceaa08ab9fe5078627984e427c922998902a2fe921c434296c8d7aab282b",
-    "qwen3_5_moe": "f5896b5f4d6115c3793cb3284479b5ea8a8445539e12a203e5b8ca5a6feed9de",
+    "qwen3_5_moe": "22874f59721dc32017f8ec4c627dc60a2f5e4860a5bf6b29a4f9ab46e47c5ea1",
     "flint": "78c14dd5ca023dc5ed4684723b0454ba1abf923fd796d62d6d9b7ae862e28b87",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
