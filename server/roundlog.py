@@ -15,7 +15,7 @@ round, after the slots' walks have synced). Lines:
                                  its parent on the path: it was reached)
   {"k": "draft", "t", "E", "slots", "ms"}   one packed draft pass
 
-A slot line also carries, for the drafter studies (~/Projects/spd-e5/fable-teach-drafter-1023.md):
+A slot line also carries, for the drafter studies:
 `top_ids` / `top_lp` per verified node the target's top-64 ids and log-probabilities (the verify's row
 after penalties, temperature 1; copied behind the walk's own synchronize, `topk_async`), `drawn` the
 tokens the walk emitted (the target's draw at each path node), `cand` / `lat_lp` the proposing DFlash2

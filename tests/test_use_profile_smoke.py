@@ -1,7 +1,7 @@
 """SPD-167: ops/use-profile.sh's smoke turn retries once and logs the whole answer before a rollback.
 
-The comparison's first activation of the ThinkingCap community profile rolled itself back after one
-empty smoke answer, cause not found. A first activation warms its caches and graphs; one empty turn
+A first activation of the ThinkingCap community profile rolled itself back after one empty
+smoke answer, cause not found. A first activation warms its caches and graphs; one empty turn
 is no reason to roll back. The function is taken from the script as written and run against a fake
 server that answers empty first and then "ready"."""
 

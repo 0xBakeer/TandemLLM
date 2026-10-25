@@ -180,7 +180,7 @@ After the merge into 0.4.0 (2026-10-06), one check per shape (single runs, `--pa
 
 ## SPD-E5 (2026-10-23)
 
-On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side graphs off), suffix store off, temperature 1.0, prose prompt, 512 tokens a request, one round a level, N decoding at once proven from `/health` at 5 Hz (`~/spd-e5/raw/par-Y*.json` on the reference box):
+On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side graphs off), suffix store off, temperature 1.0, prose prompt, 512 tokens a request, one round a level, N decoding at once proven from `/health` at 5 Hz:
 
 | rules | C1 | C2 | C4 | C8 (total tok/s) | 8-slot round |
 |-|-:|-:|-:|-:|-:|
