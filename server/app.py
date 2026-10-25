@@ -11818,6 +11818,10 @@ def _serve(a, led) -> None:
         raise SystemExit(f"[shadow] {exc}")
     if STATE.get("shadow") is not None:
         threading.Thread(target=_shadow_loop, name="shadow-reader", daemon=True).start()
+    if os.environ.get("QSE_STACK_SAMPLE"):
+        # SRV-717: every thread's busy stacks, sampled (server/stack_sampler.py), a measurement only
+        from server import stack_sampler
+        stack_sampler.start(os.environ["QSE_STACK_SAMPLE"])
     # the small models under memory pressure (server/rolemem.py): unloaded before a conversation
     # is parked or a request waits, loaded again once memory has stayed back
     _roles_start(a)
