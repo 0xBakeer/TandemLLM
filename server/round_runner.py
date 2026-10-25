@@ -137,6 +137,7 @@ class Runner:
         # host and GPU, so a round of 8 lanes is read apart from the mix
         self._ms_e: dict = {}
         self._gpu_e: dict = {}
+        self._tails_e: dict = {}
         self._round_e = 0
         self._round_tok = 0
         self._round_rows = 0                # the rows of the round's joint pass (0: none, or more than one)
@@ -231,7 +232,8 @@ class Runner:
                     ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
                     gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n,
                     steady=steady, prices=self.prices.report() if PRICED_CUT else None,
-                    ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e))
+                    ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e),
+                    tails_by_slots=self._by_e(self._tails_e))
 
     @staticmethod
     def _by_e(d: dict) -> dict:
@@ -525,14 +527,24 @@ class Runner:
 
     def _tails(self, group, trees, outs, walked) -> None:
         if PIPE:
+            t0 = time.perf_counter()
             halves = [self._tail_a(t, x, path, new) for t, x, path, new in self._paths(group, trees, outs, walked)]
             go = [t for t, h in zip(group, halves) if h[2] is None]
-            self._propose(go, time.perf_counter(), deadline=False)
+            t1 = time.perf_counter()
+            self._propose(go, t1, deadline=False)
             for t in go:
                 t.pre = True
+            t2 = time.perf_counter()
             for t, h in zip(group, halves):
                 self._bind(t)
                 self._tail_b(t, *h)
+            # SPD-239: the tails' host ms by half (the walks' paths and drafter syncs, the next draft's issue, the
+            # commits), summed by the slots in the round (`report`'s tails_by_slots)
+            ta = self._tails_e.setdefault(len(group), {"n": 0, "a": 0.0, "draft": 0.0, "b": 0.0})
+            ta["n"] += 1
+            ta["a"] += 1e3 * (t1 - t0)
+            ta["draft"] += 1e3 * (t2 - t1)
+            ta["b"] += 1e3 * (time.perf_counter() - t2)
             return
         for t, x, path, new in self._paths(group, trees, outs, walked):
             self._tail(t, x, path, new)
