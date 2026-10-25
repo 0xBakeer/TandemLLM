@@ -6,9 +6,12 @@ KNOBS: dict[str, tuple] = {
     # of its own, its chain kernel, while the other slots wait)
     'JOINT_CHAINS': ('1', 'engine/models/qwen3_5/adapter.py'),
     # SPD-163: the joint verify pass from CUDA graphs (engine/models/qwen3_5/joint_graphs.py); 0: eager.
-    # SPD-223: off by default: with the suffix store on, 8 lanes met an illegal memory access in round 3 of
-    # C8 in every run with the graphs (8 of 8) and in none without (2 of 2); the cause is open
-    'JOINT_GRAPHS': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-223: off from 80b324f6 (the suffix store on, 8 lanes: an illegal memory access in a DFlash2 draft graph's
+    # replay, CUDA_LAUNCH_BLOCKING=1, 2026-10-25). On again since the draft graphs map the window pages they gather
+    # and are rebuilt when a tensor they baked moved (cfe48a3e): 6 of 6 fresh servers of C8 x3 with the store on
+    # ran clean (before: 2 of 3 faulted), C8 139-162 tok/s against ~137 without the graphs. Neither guard has
+    # logged firing yet, so the exact cause is not proven; their lines say when one acts
+    'JOINT_GRAPHS': ('1', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: joint graphs kept, the least recently replayed dropped first
     'JOINT_GRAPHS_MAX': ('24', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
