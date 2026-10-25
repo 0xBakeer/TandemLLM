@@ -1,7 +1,7 @@
-"""SRV-717: a sampler of every thread's stack for a box without ptrace (QSE_STACK_SAMPLE=<path>[,<ms>]).
+"""SRV-717: a sampler of every thread's stack for a box without ptrace (QSE_STACK_SAMPLE=<path>[,<ms>[,<depth>]]).
 
 Every `ms` milliseconds (10 by default) a daemon thread reads `sys._current_frames()` and counts, per thread
-name, the innermost frames (file:line function, three deep) of each thread that is not waiting (its innermost
+name, the innermost frames (file:line function, `depth` deep, 3 by default) of each thread that is not waiting (its innermost
 function is not a wait, a sleep, a socket or a select). Every 20 s and at exit it writes the counts as JSON to
 `path`: the busiest stacks per thread first. It only reads frames; a sample costs a few tens of microseconds
 under the GIL, so it is a measurement tool, off unless named."""
@@ -22,10 +22,12 @@ IDLE = {"wait", "sleep", "select", "poll", "accept", "recv", "recv_into", "readi
 
 
 def start(spec: str) -> threading.Thread | None:
-    path, _, ms = spec.partition(",")
+    path, _, rest = spec.partition(",")
+    ms, _, depth = rest.partition(",")
     if not path:
         return None
     every = max(1.0, float(ms or 10)) / 1e3
+    deep = max(1, int(depth or 3))
     counts: dict = collections.defaultdict(collections.Counter)
     busy: collections.Counter = collections.Counter()
     seen: collections.Counter = collections.Counter()
@@ -57,7 +59,7 @@ def start(spec: str) -> threading.Thread | None:
                     continue
                 busy[tid] += 1
                 key, f, n = [], fr, 0
-                while f is not None and n < 3:
+                while f is not None and n < deep:
                     key.append(f"{os.path.basename(f.f_code.co_filename)}:{f.f_lineno} {f.f_code.co_name}")
                     f, n = f.f_back, n + 1
                 counts[tid][" < ".join(key)] += 1
