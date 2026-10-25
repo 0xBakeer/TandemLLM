@@ -66,11 +66,12 @@ GOLDEN_FP4 = {
     # SPD-239: the joint timing's host parts
     # SPD-239: staging parts, FN_GEMV_MC
     # SPD-239: PLE rows in one batch
+    # SPD-239: FN_PLE_THREADS
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "3d0b91bd4c70d997ce8210c54325f48b965b4bf5db0cfe10e2023b39fec6d3de",
+    "qwen4_exp": "dec952af2bea4f3a42dde4823398a9f574c06fd20944f8fbe4a2c8602fa21af3",
     "nemotron_h": "6717e5b2ed4c1b59c6f2d89da853735ea0651061b747dd58e10e8cd98006c7c1",
     "lfm2_moe": "5643f5fd98539a360c0f598cdb2e7901a47fc601908e4a9bf132c30124d99e43",
-    "qwen3_5_moe": "1bc8c81c7067296d61bd20ba4152c9a7633f9ed6303b992450b785b5002d8076",
+    "qwen3_5_moe": "fe2dea3df08200a43834a50fe8e97823568781136b648effcd851e66aa030e11",
     "flint": "acce99114ef0c64e9ce16efb504db4faef5e33360c7e77ffb1fd0722a00b2f97",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

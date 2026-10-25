@@ -14,4 +14,6 @@ KNOBS: dict[str, tuple] = {
     # SPD-239: a joint pass reads every state's PLE rows in one batch a layer (a cold table: one round of disk
     # reads, not one a block row); 0: each block's own (a block's rows are always one batch)
     'FN_PLE_BATCH': ('1', 'engine/models/flashnext/engine.py'),
+    # SPD-239: the cold n-gram table's reads in flight a miss batch (its thread pool)
+    'FN_PLE_THREADS': ('16', 'engine/models/flashnext/ple.py'),
 }

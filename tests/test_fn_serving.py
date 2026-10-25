@@ -255,6 +255,33 @@ def test_a_draft_cut_to_the_anchor_is_a_drafted_round():
     return "a draft cut to the anchor: a drafted round of one token, not a plain step; wants_graphs"
 
 
+def test_a_round_other_lanes_shared_teaches_no_price():
+    """SPD-239: the drafter prices a round by the wall time to its next proposal; a round the round runner ran with
+    other lanes (`lanes` > 1) spans every lane's work (C2 2026-10-25: a request priced drafting at 30.6 ms a token
+    against plain 25.1 and took 221 plain steps), so it is not learned; a lone round is, as before."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    prompt = list(range(50))
+    d.reset()
+    d.sync(prompt, _rows(0, 50), 0)
+    for lanes, learned in ((4, False), (1, True)):
+        d.cut.spec.clear(), d.cut.rounds.clear(), d.cut.plain.clear()
+        d.lanes = lanes
+        blk = d.propose_tree(prompt, 8)
+        assert blk is not None and blk.n_draft > 0
+        d.on_verify(len(blk.tokens), 5.0)
+        d.observe([100])
+        d.sync([100], _rows(len(prompt), 1), len(prompt))
+        prompt = prompt + [100]
+        d.propose_tree(prompt, 8)
+        assert (0 in d.cut.spec) is learned and (0 in d.cut.rounds) is learned, (lanes, d.cut.spec)
+        d.observe([101])
+        d.sync([101], _rows(len(prompt), 1), len(prompt))
+        prompt = prompt + [101]
+    return "a round of 4 lanes: no drafted price learned; a lone round: learned"
+
+
 def test_a_turns_backlog_prime_is_not_its_first_rounds_price():
     """P0 (2026-10-12): the first drafted round of a turn at 140k read the turn's backlog into the head
     (772 rows, 200 ms) and was priced at 93 ms; the turn weighs the prime (`StairCut.turn`), the round's

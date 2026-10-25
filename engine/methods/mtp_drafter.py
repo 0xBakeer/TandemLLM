@@ -99,6 +99,10 @@ class MTPTreeDrafter:
         self.req = self._req()              # this request's own counts (the verbose report)
         self.cls = 0                        # the context class of the last round
         self._t_prev = None                 # the last round's start (perf_counter)
+        # SPD-239: the lanes that decoded in this drafter's last round (the round runner sets it): a round other
+        # lanes shared is priced by every lane's work, so only a round of one lane teaches the plain and drafted
+        # prices the turn and the skip weigh
+        self.lanes = 1
         self._cls_prev = 0
         self._obs = None                    # what the last round was, to price at the next start
         self._plain = None                  # a plain step was taken: None, or whether it captured
@@ -257,7 +261,7 @@ class MTPTreeDrafter:
             span[0] += 1
             span[1] += ms
             span[2] += self._obs[3] if self._obs is not None and self._obs[0] != "plain" else 0
-        if self._obs is not None and self._t_prev is not None:
+        if self._obs is not None and self._t_prev is not None and self.lanes <= 1:
             if self._obs[0] == "plain":
                 self.cut.observe_plain(ms, self._cls_prev)
             else:

@@ -327,6 +327,11 @@ class Runner:
         # 2. the joint verify pass (a task without a draft takes its plain step alone)
         t0 = self._t("rest", t0)
         live = [t for t in tasks if not t.done]
+        for t in live:
+            if hasattr(t.drafter, "lanes"):
+                # SPD-239: the drafter prices this round by its wall time at its next proposal; a shared one
+                # is not a lone round's price
+                t.drafter.lanes = len(live)
         if len(live) > 1:
             from engine.tree import DraftTree
             for t in live:
