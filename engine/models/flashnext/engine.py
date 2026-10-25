@@ -54,6 +54,8 @@ JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
 #: SPD-239: a joint pass reads every state's PLE rows in one batch a layer (`_ple_batch`); 0: a block at a time
 PLE_BATCH = _S.get("FN_PLE_BATCH") == "1"
+#: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`); 0: a state at a time
+GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -800,7 +802,7 @@ class FlashNextEngine(FlashNextRef):
         self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M,
                         st.delta)
         t3 = time.perf_counter()
-        ctl, _ = SK.tree_ctl(parents)
+        ctl, self._ctl_slots = SK.tree_ctl(parents)
         h["gctl"].numpy()[:] = ctl
         h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
         h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
@@ -928,7 +930,7 @@ class FlashNextEngine(FlashNextRef):
                 depth[i] = 0 if p < 0 else depth[p] + 1
             self.stage_rows(tokens, parents, st, key=("joint", j, M), ple=ples[j])
             cx.append({"st": st, "M": M, "cls": self.qsa_class(st.length + max(depth)), "block": self._block,
-                       "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}})
+                       "rb": self._rows_buffers(M, ("joint", j, M)), "rec": {}, "slots": self._ctl_slots})
         if jt is not None:
             jt["host_stage"] = jt.get("host_stage", 0.0) + 1e3 * (time.perf_counter() - t_h0)
             self._t_h0 = t_h0
@@ -1076,12 +1078,15 @@ class FlashNextEngine(FlashNextRef):
                 a = p + "linear_attn."
                 qkvz, ab = self.lin(X, self.W[a + "qkvz"]), K.gemv_bf16(X, self.W[a + "ab"])
                 mark("gdn")
-                parts = []
-                for j, x in enumerate(cx):
-                    use(x)
-                    parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                g = self._gdn_multi(cx, rows, qkvz, ab, li, use) if GDN_MULTI else None
+                if g is None:
+                    parts = []
+                    for j, x in enumerate(cx):
+                        use(x)
+                        parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                    g = torch.cat(parts)
                 mark("proj")
-                out = self.lin(torch.cat(parts), self.W[a + "out_proj.weight"])
+                out = self.lin(g, self.W[a + "out_proj.weight"])
             else:
                 a = p + "self_attn."
                 qkv = self.lin(X, self.W[a + "qkv"])
@@ -1111,6 +1116,9 @@ class FlashNextEngine(FlashNextRef):
                 x["rec"][("ids", li)] = ids[rows[j]]
             Hs, Ns = K.combine_inject_norm(Hs, yd, ids, wts, DI2, R, nxt, hc, eps)
         mark("head")
+        if GDN_MULTI and getattr(self, "_gent", None) is not None:
+            self._gent["copied"].record()
+            self._gent["k"] = len(c.linear_layers)
         if Ns is None:
             Ns = K.hc_norm(Hs, self._site_norm(c.num_hidden_layers), H, eps)
         dd = K.gemv(Ns, self.W["hyper_connection_mixer.down_inject"])
@@ -1512,6 +1520,58 @@ class FlashNextEngine(FlashNextRef):
         else:
             self.rec[("ple", li)] = gvn
         return out
+
+    def _gdn_multi(self, cx, rows, qkvz, ab, li, use):
+        """SPD-239: a joint pass's GDN layer li past its projections for every state: each state's conv and gates
+        (`gdn_pre`, its rows recorded for its commit as `_gdn1_core` records them), the delta rule of every state in
+        one launch (`fn_seq_kernels.gdn_rows_multi`: each state's own call, its tree's scratch slots its own), the
+        gated norm once over every row (row-wise). None (the state-at-a-time path) when the trees' slots exceed
+        the scratch."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        stk = self._scratch()
+        if sum(x["slots"] for x in cx) > stk.shape[0]:
+            return None
+        R, H = qkvz.shape[0], c.linear_num_value_heads
+        o = torch.empty(R, H, c.linear_value_head_dim, dtype=torch.bfloat16, device=self.device)
+        ent = self._gdn_entries(len(cx))
+        hrow, slot = ent["h"].numpy()[ent["k"]], 0
+        for j, x in enumerate(cx):
+            use(x)
+            st, d = x["st"], self._cur["d"]
+            q = qkvz[rows[j]]
+            y, gg, beta = SK.gdn_pre(q, st.conv[li], self._wc[li], d["csrc"], ab[rows[j]], self._wc[("alog", li)],
+                                     self._wc[("dtb", li)], shift=self._write)
+            self.rec[li] = (q, y, gg, beta)
+            hrow[j] = SK.gdn_rows_entry(y, gg, beta, st.S[li], stk[slot:slot + max(x["slots"], 1)], d["gctl"],
+                                        o[rows[j]], self._write, pre=self._parked(li, st))
+            slot += x["slots"]
+        dev = ent["d"][ent["k"], :len(cx)]
+        dev.copy_(ent["h"][ent["k"], :len(cx)], non_blocking=True)
+        ent["k"] += 1
+        SK.gdn_rows_multi(dev, c.key_dim, H, c.num_v_per_k)
+        p = self.pre(li) + "linear_attn."
+        hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), qkvz[:, c.conv_dim:].reshape(-1, c.linear_value_head_dim),
+                          self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        return hh.view(R, -1)
+
+    def _gdn_entries(self, n: int) -> dict:
+        """`_gdn_multi`'s entry tables: a pinned host row and its device copy for every GDN layer of a pass (`k`
+        the next), the host rows rewritten only after the last pass's copies are done."""
+        from tools import fn_seq_kernels as SK
+        ent = getattr(self, "_gent", None)
+        L = len(self.cfg.linear_layers)
+        if ent is None or ent["h"].shape[1] < n:
+            m = max(n, 8)
+            ent = self._gent = {"h": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
+                                "d": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
+                                "copied": torch.cuda.Event(), "k": L}
+            ent["copied"].record()
+        if ent["k"] >= L:                   # a new pass: its first layer
+            ent["copied"].synchronize()
+            ent["k"] = 0
+        return ent
 
     def _gdn1(self, x, li, st):
         """The GDN layer of the rows: qkv|z and a|b, the conv over each row's window and the gates

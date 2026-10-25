@@ -245,14 +245,12 @@ __device__ __forceinline__ void tile_store(const float (&s)[4][4], float* __rest
 // (load, save): load -1 continue from the previous row's tile, -2 the entry state S, >= 0 scratch
 // slot; save >= 0 leaves the tile in that slot after the row. WRITE: the last row's tile goes back
 // to S (a decode step).
-__global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
+__device__ __forceinline__ void gdn_rows_body(const __nv_bfloat16* __restrict__ QKV, int ldq,
         int koff, int voff, const float* __restrict__ G, const float* __restrict__ BETA,
         float* __restrict__ S, float* __restrict__ STK, const int* __restrict__ CTL, int M,
         __nv_bfloat16* __restrict__ OUT, int H, int REP, int write,
         const __nv_bfloat16* __restrict__ PRE, int ldp, const float* __restrict__ PG, const float* __restrict__ PB,
         const int* __restrict__ PN) {
-    pdl_wait();
-    pdl_trigger();
     const int h = blockIdx.x, vb = blockIdx.y;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int c0 = vb * 16 + warp * 4;
@@ -275,6 +273,33 @@ __global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __re
         if (sv >= 0) tile_store(s, STK + (size_t)sv * H * 128 * 128 + hs, lane, c0);
     }
     if (write && M > 0) tile_store(s, S + hs, lane, c0);
+}
+
+__global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
+        int koff, int voff, const float* __restrict__ G, const float* __restrict__ BETA,
+        float* __restrict__ S, float* __restrict__ STK, const int* __restrict__ CTL, int M,
+        __nv_bfloat16* __restrict__ OUT, int H, int REP, int write,
+        const __nv_bfloat16* __restrict__ PRE, int ldp, const float* __restrict__ PG, const float* __restrict__ PB,
+        const int* __restrict__ PN) {
+    pdl_wait();
+    pdl_trigger();
+    gdn_rows_body(QKV, ldq, koff, voff, G, BETA, S, STK, CTL, M, OUT, H, REP, write, PRE, ldp, PG, PB, PN);
+}
+
+// SPD-239: `gdn_rows_kernel` for several states in one launch, grid (H, 8, states): state z's call from its
+// entry E[z] = [qkv, ldq, g, beta, S, scratch (its own slots), ctl, M, out, pre, ldp, pg, pb, pn, write, 0]
+// (pre / pg / pb / pn 0: no parked rows), each CTA the one-state kernel's own arithmetic
+__global__ void __launch_bounds__(128) gdn_rows_multi_kernel(const long long* __restrict__ E, int koff, int voff,
+                                                             int H, int REP) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.z * 16;
+    gdn_rows_body(reinterpret_cast<const __nv_bfloat16*>(e[0]), (int)e[1], koff, voff,
+                  reinterpret_cast<const float*>(e[2]), reinterpret_cast<const float*>(e[3]),
+                  reinterpret_cast<float*>(e[4]), reinterpret_cast<float*>(e[5]), reinterpret_cast<const int*>(e[6]),
+                  (int)e[7], reinterpret_cast<__nv_bfloat16*>(e[8]), H, REP, (int)e[14],
+                  reinterpret_cast<const __nv_bfloat16*>(e[9]), (int)e[10], reinterpret_cast<const float*>(e[11]),
+                  reinterpret_cast<const float*>(e[12]), reinterpret_cast<const int*>(e[13]));
 }
 
 // --------------------------------------------------------------------------------------- PLE
@@ -465,6 +490,15 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, cudaStream_t st, 
 
 void seq_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 
+void seq_gdn_rows_multi(torch::Tensor E, int64_t koff, int64_t voff, int64_t H, int64_t rep) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0) return;
+    launch(gdn_rows_multi_kernel, dim3((unsigned)H, 8, (unsigned)E.size(0)), dim3(128), st, (const long long*)E.data_ptr(),
+           (int)koff, (int)voff, (int)H, (int)rep);
+}
+
 void seq_commit_multi(torch::Tensor E) {
     const at::cuda::OptionalCUDAGuard guard(E.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -596,6 +630,7 @@ void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, tor
 _CPP = (
     "void seq_set_pdl(int64_t on);\n"
     "void seq_commit_multi(torch::Tensor E);\n"
+    "void seq_gdn_rows_multi(torch::Tensor E, int64_t koff, int64_t voff, int64_t H, int64_t rep);\n"
     "void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y, "
     "torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift);\n"
     "void seq_gdn_rows(torch::Tensor qkv, int64_t koff, int64_t voff, torch::Tensor g, torch::Tensor beta, "
@@ -622,7 +657,7 @@ def _module():
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
         tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                           functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
+                           functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
                                       "seq_qsa_pool", "seq_qsa_scores", "seq_qsa_topk"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
@@ -687,6 +722,26 @@ def gdn_rows(qkv, key_dim: int, g, beta, S, scratch, ctl, rep: int, write: bool,
     pr, pg, pb, pn = pre if pre is not None else (None, None, None, None)
     _module().seq_gdn_rows(qkv, key_dim, 2 * key_dim, g, beta, S, scratch, ctl, out, rep, write, pr, pg, pb, pn)
     return out
+
+
+def gdn_rows_entry(qkv, g, beta, S, scratch, ctl, out, write: bool, pre=None) -> list:
+    """SPD-239: one state's `gdn_rows` call as a `gdn_rows_multi` entry (the same tensors and checks' shapes; the
+    scratch is this state's own slots)."""
+    M = qkv.shape[0]
+    assert qkv.dtype == torch.bfloat16 and qkv.stride(1) == 1 and S.is_contiguous() and scratch.is_contiguous()
+    assert ctl.dtype == torch.int32 and ctl.is_contiguous() and ctl.numel() == 2 * M and out.is_contiguous()
+    assert g.is_contiguous() and beta.is_contiguous() and g.dtype == beta.dtype == torch.float32
+    pr, pg, pb, pn = pre if pre is not None else (None, None, None, None)
+    return [qkv.data_ptr(), qkv.stride(0), g.data_ptr(), beta.data_ptr(), S.data_ptr(), scratch.data_ptr(),
+            ctl.data_ptr(), M, out.data_ptr(), pr.data_ptr() if pr is not None else 0,
+            pr.stride(0) if pr is not None else 0, pg.data_ptr() if pg is not None else 0,
+            pb.data_ptr() if pb is not None else 0, pn.data_ptr() if pn is not None else 0, int(write), 0]
+
+
+def gdn_rows_multi(entries: torch.Tensor, key_dim: int, H: int, rep: int) -> None:
+    """SPD-239: `gdn_rows` of several states in one launch (`entries` int64 [states, 16] on the device, one
+    `gdn_rows_entry` a state): every CTA computes what the state's own call computes."""
+    _module().seq_gdn_rows_multi(entries, key_dim, 2 * key_dim, H, rep)
 
 
 def gdn_rows_reference(qkv, key_dim: int, g, beta, S, parents: list[int], rep: int):

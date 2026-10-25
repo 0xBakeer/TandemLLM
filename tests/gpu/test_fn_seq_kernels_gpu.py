@@ -111,6 +111,37 @@ def test_gdn_rows_parked_commit_folded():
     return "5 parked rows folded into a 12-row tree call = commit walk then the call, bit for bit"
 
 
+def test_gdn_rows_multi_equals_each_states_call():
+    """SPD-239: `gdn_rows_multi` over three states in one launch (a tree with scratch slots, a chain, a tree after
+    5 parked rows; each state's slots its own part of one scratch) leaves each state's out and written state of its
+    own `gdn_rows` call, bit for bit."""
+    trees = (TREE, [-1, 0, 1, 2], [-1, 0, 0, 2, 2])
+    cases, ents, slot = [], [], 0
+    stk = torch.zeros(31, H, D, D, device=DEV)
+    stk1 = torch.zeros(31, H, D, D, device=DEV)
+    for k, tr in enumerate(trees):
+        M = len(tr)
+        qkv, gg, beta, S = _gdn_inputs(M + 5, 10 + k)
+        ctl_l, ns = SK.tree_ctl(tr)
+        ctl = torch.tensor(ctl_l, dtype=torch.int32, device=DEV)
+        pre = None
+        if k == 2:
+            pre = (qkv[M:].contiguous(), gg[M:].contiguous(), beta[M:].contiguous(),
+                   torch.tensor([5], dtype=torch.int32, device=DEV))
+        q, g_, b_ = qkv[:M].contiguous(), gg[:M].contiguous(), beta[:M].contiguous()
+        want_s = S.clone()
+        want_o = SK.gdn_rows(q, KD, g_, b_, want_s, stk1, ctl, 3, k == 1, pre=pre)
+        got_s, got_o = S.clone(), torch.empty(M, H, D, dtype=torch.bfloat16, device=DEV)
+        ents.append(SK.gdn_rows_entry(q, g_, b_, got_s, stk[slot:slot + max(ns, 1)], ctl, got_o, k == 1, pre=pre))
+        slot += ns
+        cases.append((want_s, want_o, got_s, got_o, q, g_, b_, ctl, pre))
+    SK.gdn_rows_multi(torch.tensor(ents, dtype=torch.int64, device=DEV), KD, H, 3)
+    torch.cuda.synchronize()
+    for k, (ws, wo, gs, go, *_) in enumerate(cases):
+        assert torch.equal(wo, go) and torch.equal(ws, gs), k
+    return f"{len(trees)} states ({slot} scratch slots, parked rows, a written state) in one launch = each state's call"
+
+
 def test_gdn_pre_windows_equal_decode_shift():
     M = len(TREE)
     g = _g(2)
@@ -410,7 +441,7 @@ def test_commit_multi_equals_the_commits_gathers():
     return f"{len(keep)} states, {len(ents)} entries in one launch: rows, streams and windows as the commit's gathers"
 
 
-TESTS = [test_tree_helpers, test_commit_multi_equals_the_commits_gathers,
+TESTS = [test_tree_helpers, test_commit_multi_equals_the_commits_gathers, test_gdn_rows_multi_equals_each_states_call,
          test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
          test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows, test_qsa_pool_scores_and_selection,
