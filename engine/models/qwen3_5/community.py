@@ -64,7 +64,8 @@ def _parallel(m: dict) -> list[str]:
         slots = min(slots, int(cap))
     out = [f"# SPD-165: parallel requests at the base's Setup Guide defaults (models/{m['id']}/model.yaml)",
            f"{k['slots']}={slots}",
-           f"{k['side_window']}={int(p['side_window']['default'])}",
+           # SRV-707: one window for every lane (the card's `window`; it has no side window of its own)
+           f"{k['side_window']}={int(p['window']['default'])}",
            f"{k['kv_pool']}={'on' if p.get('kv_pool', {}).get('default') else 'off'}",
            f"{k['floor_gb']}={p['floor_gb']['default']:g}"]
     out += [f"{key}={val}" for key, val in (p.get("fixed") or {}).items()]

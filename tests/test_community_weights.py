@@ -930,8 +930,8 @@ def test_spd165_a_27b_pack_serves_its_bases_parallel_defaults():
         keys = ("QSE_PARALLEL", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL", "QSE_PARALLEL_FLOOR_GB", "QSE_SIDE_GRAPHS",
                 "QSE_SIDE_SLOT_CONST_GB", "QSE_KV_HARD_FLOOR_GB", "QSE_BARRIER_IDLE_OWNER")
         e = _resolve(community.env(m, c), keys)
-        assert e["QSE_PARALLEL"] == str(min(p["slots"]["default"], p["slots"]["engine_max"])) == "4", e
-        assert e["QSE_SIDE_MAX_LEN"] == str(p["side_window"]["default"]) and e["QSE_KV_POOL"] == "on", e
+        assert e["QSE_PARALLEL"] == str(min(p["slots"]["default"], p["slots"]["engine_max"])) == "8", e   # SRV-707: 8 lanes
+        assert e["QSE_SIDE_MAX_LEN"] == str(p["window"]["default"]) and e["QSE_KV_POOL"] == "on", e   # SRV-707
         assert e["QSE_PARALLEL_FLOOR_GB"] == f"{p['floor_gb']['default']:g}", e
         assert all(e[k] == v for k, v in p["fixed"].items()), e
         o = _resolve(community.env(m, c), keys, setup_env="QSE_PARALLEL='1'\n")
