@@ -260,6 +260,7 @@ KNOBS: dict[str, tuple] = {
     'EXL3_SILU_FUSED': ('1', 'tools/exl3_linear.py'),
     'EXL3_MLP_BRIDGE': ('1', 'tools/exl3_linear.py'),
     'EXL3_STAGES': ('3', 'tools/exl3_linear.py'),
+    'EXL3_PDL': ('0', 'tools/exl3_linear.py'),
     'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),
     'SAMPLE_BATCH': ('1', 'engine/sample.py'),
     'SAMPLE_NUCLEUS': ('1', 'engine/sample.py'),
