@@ -161,7 +161,8 @@ def main() -> None:
             for j in range(len(prompts)):
                 at[j] += len(blocks[j][0])
         n = max(1, a.timing - 1)
-        jt = {k: round(v / fn.joint_timing["passes"], 2) for k, v in fn.joint_timing.items() if k != "passes"}
+        npass = fn.joint_timing.get("passes")         # a family whose joint pass marks no parts: none
+        jt = {k: round(v / npass, 2) for k, v in fn.joint_timing.items() if k != "passes"} if npass else {}
         timing = {"states": len(prompts), "rows": len(prompts) * a.block, "lone_graphs_ms": round(tl / n * 1e3, 2),
                   "lone_eager_ms": round(te / n * 1e3, 2), "joint_ms": round(tj / n * 1e3, 2), "joint_parts_ms": jt}
         fn.joint_timing = None
