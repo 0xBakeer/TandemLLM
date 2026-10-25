@@ -17,8 +17,8 @@ KNOBS: dict[str, tuple] = {
     # SPD-239: the cold n-gram table's reads in flight a miss batch (its thread pool)
     'FN_PLE_THREADS': ('16', 'engine/models/flashnext/ple.py'),
     # SPD-239: a joint pass reads its PLE rows on a thread while the layers before the first PLE layer run (the
-    # same rows); 0: before the pass
-    'FN_PLE_LATE': ('0', 'engine/models/flashnext/engine.py'),
+    # same rows; served steady rounds 78.4 -> 77.5 ms at 4 lanes, 114.2 -> 112.4 ms at 8); 0: before the pass
+    'FN_PLE_LATE': ('1', 'engine/models/flashnext/engine.py'),
     # SPD-239: the joint pass's GDN delta rule of a layer for every state in one launch (each state's own
     # arithmetic, its tree's scratch slots its own; served C8 93.2 -> 94.2, GDN 17.4 -> 13.5 ms a pass); 0: a launch a state
     'FN_GDN_MULTI': ('1', 'engine/models/flashnext/engine.py'),
