@@ -58,8 +58,8 @@ JOINT_PRICE = os.environ.get("QSE_RUNNER_JOINT_PRICE", "0") == "1"
 PRICED_CUT = os.environ.get("QSE_RUNNER_PRICED_CUT", "0") == "1"
 PRICED_EXPLORE = int(os.environ.get("QSE_RUNNER_PRICED_EXPLORE", "8") or 8)
 #: SPD-235: a round's MTP drafts in one packed pass (engine/methods/draft_meet.py): the lanes' heads stage their
-#: drafts and the runner runs them together after the proposals (heads with `run_packed`: Flash-Next's MTP head,
-#: Ornith's); 0: each head its own graph. Served 2026-10-25, C8: Flash-Next 74.8 -> 83.6, Ornith 72.8 -> 79.7
+#: drafts and the runner runs them together after the proposals (heads with `run_packed`, the MoE families' MTP
+#: heads); 0: each head its own graph. Served 2026-10-25, C8 of the two MoE families: 74.8 -> 83.6, 72.8 -> 79.7
 MTP_PACK = os.environ.get("QSE_RUNNER_MTP_PACK", "1") == "1"
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}

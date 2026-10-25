@@ -112,8 +112,16 @@ def test_every_reader_flushes_first_and_reset_drops():
             elif reader == "resume":
                 D.DFlash2Drafter.state_resume(d, 3)
             else:
-                d._graph = types.SimpleNamespace(ck_ptr=d._ck.data_ptr(), run=lambda a, p: "ran")
-                assert D.DFlash2Drafter.graph_run(d, 1, 3) == "ran"
+                # SPD-223: a graph is reused while every tensor it baked is in place (`DraftGraph.pointers`;
+                # this fake drafter has no engine, so its pointers are pinned)
+                from engine.drafters import draft_graph as G
+                keep_ptrs = G.DraftGraph.pointers
+                G.DraftGraph.pointers = staticmethod(lambda _d: ("fixed",))
+                try:
+                    d._graph = types.SimpleNamespace(ptrs=("fixed",), run=lambda a, p: "ran")
+                    assert D.DFlash2Drafter.graph_run(d, 1, 3) == "ran"
+                finally:
+                    G.DraftGraph.pointers = keep_ptrs
             assert torch.equal(d._ck, ref._ck), reader
         d = drafter(w)
         sync(d, 3, 0, 7)
