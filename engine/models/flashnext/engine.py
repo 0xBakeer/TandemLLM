@@ -54,6 +54,8 @@ JOINT_MOE_GROUP = _S.get("FN_JOINT_MOE_GROUP") == "1"
 JOINT_TIMING = int(_S.get("FN_JOINT_TIMING") or 0)
 #: SPD-239: a joint pass reads every state's PLE rows in one batch a layer (`_ple_batch`); 0: a block at a time
 PLE_BATCH = _S.get("FN_PLE_BATCH") == "1"
+#: SPD-239: a joint pass reads its PLE rows on a thread while the layers before the first PLE layer run; 0: before the pass
+PLE_LATE = _S.get("FN_PLE_LATE") == "1"
 #: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`; 8 lanes: 17.4 -> 13.5 ms
 #: a pass); 0: a state at a time
 GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
@@ -778,6 +780,26 @@ class FlashNextEngine(FlashNextRef):
                 k += x.size
         return out
 
+    def _ple_reader(self):
+        """The one thread a joint pass reads its PLE rows on (`verify_multi` with QWEN38_FN_PLE_LATE)."""
+        ex = getattr(self, "_plex", None)
+        if ex is None:
+            from concurrent.futures import ThreadPoolExecutor
+            ex = self._plex = ThreadPoolExecutor(1, thread_name_prefix="fn-ple")
+        return ex
+
+    def _ple_late(self, cx: list, ples: list) -> None:
+        """SPD-239: the joint pass's PLE rows, read meanwhile (`_ple_batch`), into each state's rows buffer and to the
+        device in stream order before the PLE layer's kernels."""
+        for x, ple in zip(cx, ples):
+            rb = x["rb"]
+            h, d = rb["h"], rb["d"]
+            for li in self.cfg.ple_layers:
+                self._ple_fill(h, 0, li, *ple[li])
+            d["packed"].copy_(h["packed"], non_blocking=True)
+            d["heads"].copy_(h["heads"], non_blocking=True)
+            rb["copied"].record()
+
     def stage_rows(self, tokens: list[int], parents: list[int], st: FNState, key=None, ple: dict | None = None) -> None:
         """Host work of a verify block: `tokens` in DFS pre-order with `parents` (-1 for the first
         row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path. `key`:
@@ -809,6 +831,8 @@ class FlashNextEngine(FlashNextRef):
         h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
         t4 = time.perf_counter()
         for li in self.cfg.ple_layers:
+            if ple == "late":
+                break                               # filled by `_ple_late` before the first PLE layer runs
             if ple is not None:
                 self._ple_fill(h, 0, li, *ple[li])
             else:
@@ -923,7 +947,13 @@ class FlashNextEngine(FlashNextRef):
                 marks.append((name, ev))
         mark("stage")
         cx = []
-        ples = self._ple_batch(items) if PLE_BATCH else [None] * len(items)
+        late = None
+        if PLE_BATCH and PLE_LATE and ROWWISE and c.ple_layers and min(c.ple_layers) > 0:
+            # SPD-239: the PLE rows read while the layers before the first PLE layer run (`_ple_late`)
+            late = self._ple_reader().submit(self._ple_batch, items)
+            ples = ["late"] * len(items)
+        else:
+            ples = self._ple_batch(items) if PLE_BATCH else [None] * len(items)
         for j, (tokens, parents, st) in enumerate(items):
             M = len(tokens)
             depth = [0] * M
@@ -943,7 +973,7 @@ class FlashNextEngine(FlashNextRef):
         def use(x):
             self._cur, self._write, self._cls, self.rec = x["rb"], False, x["cls"], x["rec"]
         if ROWWISE:
-            return self._verify_multi_rowwise(cx, rows, use, mark, marks, jt, K, H, hc, eps, S)
+            return self._verify_multi_rowwise(cx, rows, use, mark, marks, jt, K, H, hc, eps, S, late)
         mark("mix")
         hs = [self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc) for x in cx]
         ns = [None] * len(cx)
@@ -1052,7 +1082,7 @@ class FlashNextEngine(FlashNextRef):
                       flush=True)
                 jt.clear()
 
-    def _verify_multi_rowwise(self, cx, rows, use, mark, marks, jt, K, H, hc, eps, S):
+    def _verify_multi_rowwise(self, cx, rows, use, mark, marks, jt, K, H, hc, eps, S, late=None):
         """SPD-215: `verify_multi`'s layers with the row-wise parts (the mixers' norms, down/up mixes, the
         injects, the MoE combine, the head's mixer) run once over every state's rows instead of a state at
         a time; the PLE, the GDN recurrence and the attention still run per state on its own rows and
@@ -1066,6 +1096,9 @@ class FlashNextEngine(FlashNextRef):
             p = self.pre(li)
             mark("mix")
             if li in c.ple_layers:
+                if late is not None:
+                    self._ple_late(cx, late.result())
+                    late = None
                 parts = []
                 for j, x in enumerate(cx):
                     use(x)

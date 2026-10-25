@@ -70,12 +70,13 @@ GOLDEN_FP4 = {
     # SPD-239: commit_multi
     # SPD-239: FN_GDN_MULTI
     # SPD-239: FN_GDN_MULTI default
+    # SPD-241: mixer MMA kernels
     "qwen3_5": "d418a406555f3d5900e5ed9f9430b95669a029154a843d798bc67b90aa264155",
-    "qwen4_exp": "c2ac475377f2d7cfdd607f983db82358b4c5bb04568563526ba45bd692c66992",
-    "nemotron_h": "6717e5b2ed4c1b59c6f2d89da853735ea0651061b747dd58e10e8cd98006c7c1",
-    "lfm2_moe": "5643f5fd98539a360c0f598cdb2e7901a47fc601908e4a9bf132c30124d99e43",
-    "qwen3_5_moe": "f847bf263fc85df962dcb797ec003c28b285498d7fb735faffa05a99c57f1207",
-    "flint": "acce99114ef0c64e9ce16efb504db4faef5e33360c7e77ffb1fd0722a00b2f97",
+    "qwen4_exp": "dffc11ef290688bbf38979bd94dbdca73896f64ada83975a7be463f1c2245bd9",
+    "nemotron_h": "b8793a2fb048e62ca87bd7e09120902600319829766fdbe4e58a7132543d4df0",
+    "lfm2_moe": "d770cbc2082ee8c69506533fdbec55feb82c5566d50df2ec7d754572e5eef609",
+    "qwen3_5_moe": "aee7cbbab1030c1cf65332eecb39ba5fc759c288f15dff5c63c0bff467d6ff0c",
+    "flint": "96f343a9e4973e9f90a5ea98e7a4f92ab6309246ec91abbfd655606eae1b7e2e",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

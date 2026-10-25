@@ -6,7 +6,7 @@ graph runs the down|inject GEMV of every weight in turn, another the mix_up of e
 reads weights the previous one did not touch (the kernels' own launch chaining kept). Bytes are a
 weight's int8 rows and scales. Prints one JSON line per M.
 
-    python tools/fn_mix_bench.py --rows 1 2 3 4 5 8 16 24 32
+    python tools/fn_mix_bench.py --rows 1 2 3 4 5 8 16 24 32 [--mma]
 """
 
 from __future__ import annotations
@@ -55,7 +55,9 @@ def main() -> None:
     ap.add_argument("--layers", type=int, default=96)
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--mc", type=int, nargs="+", default=[0], help="QWEN38_FN_GEMV_MC settings to compare (SPD-239)")
+    ap.add_argument("--mma", action="store_true", help="SPD-241: the tensor-core mixer kernels (QWEN38_FN_MIXER_MMA)")
     a = ap.parse_args()
+    K._module().fn_set_mixer_mma(int(a.mma))
     dev = "cuda"
     g = torch.Generator(device=dev).manual_seed(5)
     downs = [Int8Rows.of((torch.randn(R + HC, HC * H, generator=g, device=dev) * 0.02).half(), 128)
@@ -77,7 +79,7 @@ def main() -> None:
         equal = all(torch.equal(p, q) for p, q in zip(same[0], same[1]))
         dms = ring_ms([lambda w=w: K.gemv(n, w, out=d) for w in downs], a.reps)
         ums = ring_ms([lambda w=w: K.mix_up(d, n, w, HC, out=x) for w in ups], a.reps)
-        print(json.dumps({"mc": mc, "M": M, "gemv_us": round(dms * 1e3, 1), "gemv_gbs": round(nb_d / dms / 1e6, 1),
+        print(json.dumps({"mma": a.mma, "mc": mc, "M": M, "gemv_us": round(dms * 1e3, 1), "gemv_gbs": round(nb_d / dms / 1e6, 1),
                           "mix_up_us": round(ums * 1e3, 1), "mix_up_gbs": round(nb_u / ums / 1e6, 1),
                           "pass_ms_96": round(96 * (dms + ums), 2), "equal_to_mc0": equal}), flush=True)
 
