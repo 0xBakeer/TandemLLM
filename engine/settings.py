@@ -242,6 +242,8 @@ KNOBS: dict[str, tuple] = {
     'END_ALIGN_REASONING': ('on', 'server/endalign.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
+    # SRV-717: how long a snapshot of the allocator's segments is reused by the decision models' pool reads (s)
+    'POOL_SNAPSHOT_TTL_S': ('5.0', 'engine/decision/device.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),
     'SHADOW_GB': ('4', 'server/conductor/shadow.py'),
     'SHADOW_GRID': ('512', 'server/conductor/shadow.py'),
