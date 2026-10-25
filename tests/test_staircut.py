@@ -395,7 +395,8 @@ def test_one_slow_request_does_not_keep_a_class_plain():
             assert n < 400
         return n
     back = plain_turns_to_return()
-    assert 2 <= back <= 8 and sc.plain_turns[0] == 0, back
+    # SPD-237: a measured drafted price weighs TURN_MARGIN less, so the return comes after 1..8 plain turns
+    assert 1 <= back <= 8 and sc.plain_turns[0] == 0, back
     # the return loses again (its rounds cost 30 ms a token): the next return takes about twice as long
     for _ in range(40):
         sc.observe_spec(30.0, 0)

@@ -177,6 +177,12 @@ class StairCut:
     OUTLIER = 4.0         # a plain step or draft this many times its price is not learned
     AGE = 0.2             # a plain turn moves what a class learned of its drafted rounds this far to the prior
     FORGET = 8            # plain turns after which a class with no `spec` prior forgets its drafted rounds
+    #: SPD-237: a turn takes the plain step only when a drafted round's MEASURED price a token (not the price
+    #: file's prior) is this much above the plain step's. The two are measured as wall time between proposals, which under the round runner's
+    #: pipelined rounds overstates a drafted round: served 2026-10-25, Flash-Next 3.05 at C1, priced drafted
+    #: 29.9 ms a token against plain 26.1 while the drafted request ran at 24.4 ms a token and the plain turns
+    #: that followed at 27.2 (41.0 vs 36.7 tok/s): the class flipped to plain turns on a measurement artefact
+    TURN_MARGIN = 0.2
 
     def __init__(self, prices: PriceModel, calibrator: ProbDeciles | None = None, siblings: bool = True,
                  max_rows: int = 32, kind: str = "chain"):
@@ -284,6 +290,8 @@ class StairCut:
         if plain is None or spec is None or prime is None:
             return True
         n = self.plain_turns.get(ctx_class, 0)
+        if ctx_class in self.rounds:
+            spec = spec / (1.0 + self.TURN_MARGIN)       # SPD-237: a measured drafted price, not a prior's
         if (plain - spec) * answer > backlog * prime + extra_ms:
             if n == 0:
                 self.age[ctx_class] = self.AGE              # drafted on from a drafting turn: the full rate
