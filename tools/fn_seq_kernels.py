@@ -93,6 +93,52 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
+// ------------------------------------------------------------------------------ commits (SPD-239)
+// The copies of many states' commits in one launch: E [ne][16] int64, one entry a CTA column (grid (ne, 8)).
+// kind 0, rows: dst row i (i < n) = src row idx[i], `words` 4-byte words a row (strides in words):
+//   [0, src, src_stride, dst, dst_stride, words, idx (int64 [n] on the device), n]
+// kind 1, a bf16 window [C, w] (w <= 9) in place from its own columns and a block's rows: column j becomes
+//   cols[j] < w ? the window's column cols[j] : row cols[j] - w of src (a row's C channels at src + row * stride);
+//   a thread owns a channel, so every read of the channel is before its writes:
+//   [1, window, src, src_stride (elements), C, w, 0, cols[0..w-1]]
+__global__ void __launch_bounds__(256) commit_multi_kernel(const long long* __restrict__ E) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.x * 16;
+    const int step = gridDim.y * blockDim.x, first = blockIdx.y * blockDim.x + threadIdx.x;
+    if (e[0] == 0) {
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(e[1]);
+        uint32_t* dst = reinterpret_cast<uint32_t*>(e[3]);
+        const long long ss = e[2], ds = e[4];
+        const int words = (int)e[5], n = (int)e[7];
+        const long long* idx = reinterpret_cast<const long long*>(e[6]);
+        for (int i = 0; i < n; ++i) {
+            const uint32_t* s = src + idx[i] * ss;
+            uint32_t* d = dst + (long long)i * ds;
+            for (int w = first; w < words; w += step) d[w] = s[w];
+        }
+        return;
+    }
+    __nv_bfloat16* win = reinterpret_cast<__nv_bfloat16*>(e[1]);
+    const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(e[2]);
+    const long long ss = e[3];
+    const int C = (int)e[4], w = (int)e[5];
+    for (int c = first; c < C; c += step) {
+        __nv_bfloat16 old[9], nv[9];
+#pragma unroll
+        for (int j = 0; j < 9; ++j) if (j < w) old[j] = win[(size_t)c * w + j];
+#pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            if (j < w) {
+                const int col = (int)e[7 + j];
+                nv[j] = col < w ? old[col] : src[(size_t)(col - w) * ss + c];
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < 9; ++j) if (j < w) win[(size_t)c * w + j] = nv[j];
+    }
+}
+
 // ------------------------------------------------------------------------------ GDN conv + gates
 // grid (nC + 1, M), 256 threads. CTA x < nC: 256 channels of row m. The window of row m is
 // [tap3, tap2, tap1, x_m]; SRC[m][j] (j = 0, 1, 2 for distance 3, 2, 1) is a row of the block
@@ -419,6 +465,14 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, cudaStream_t st, 
 
 void seq_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 
+void seq_commit_multi(torch::Tensor E) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0) return;
+    launch(commit_multi_kernel, dim3((unsigned)E.size(0), 8), dim3(256), st, (const long long*)E.data_ptr());
+}
+
 void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y,
                  torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
@@ -541,6 +595,7 @@ void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, tor
 
 _CPP = (
     "void seq_set_pdl(int64_t on);\n"
+    "void seq_commit_multi(torch::Tensor E);\n"
     "void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y, "
     "torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift);\n"
     "void seq_gdn_rows(torch::Tensor qkv, int64_t koff, int64_t voff, torch::Tensor g, torch::Tensor beta, "
@@ -567,12 +622,40 @@ def _module():
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
         tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                           functions=["seq_set_pdl", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
+                           functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
                                       "seq_qsa_pool", "seq_qsa_scores", "seq_qsa_topk"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1"))
     return _MOD
+
+
+# ------------------------------------------------------------------------------------- commits
+#: the int64 fields of a `commit_multi` entry
+COMMIT_FIELDS = 16
+
+
+def commit_multi(entries: torch.Tensor) -> None:
+    """SPD-239: the copies of many commits in one launch, `entries` int64 [n, COMMIT_FIELDS] on the device: a row
+    gather (kind 0) or a bf16 window shifted in place from a block's rows (kind 1); the layouts at the kernel."""
+    _module().seq_commit_multi(entries)
+
+
+def rows_entry(src: torch.Tensor, dst: torch.Tensor, idx: torch.Tensor, n: int) -> list:
+    """A kind 0 entry: dst rows 0..n-1 = src rows idx (rows of 4-byte words, unit stride within a row)."""
+    eb = src.element_size()
+    words = src.shape[1] * eb // 4
+    assert src.stride(1) == 1 and dst.stride(1) == 1 and (src.shape[1] * eb) % 4 == 0 and src.dtype == dst.dtype
+    return [0, src.data_ptr(), src.stride(0) * eb // 4, dst.data_ptr(), dst.stride(0) * eb // 4, words,
+            idx.data_ptr(), n] + [0] * (COMMIT_FIELDS - 8)
+
+
+def window_entry(win: torch.Tensor, src: torch.Tensor, cols: list[int]) -> list:
+    """A kind 1 entry: the bf16 window [1, C, w] gets cols (`_tail_cols`) of [its columns | src's rows]."""
+    C, w = win.shape[-2], win.shape[-1]
+    assert win.is_contiguous() and win.dtype == src.dtype == torch.bfloat16 and src.stride(1) == 1 and w <= 9
+    assert len(cols) == w and src.shape[1] >= C
+    return [1, win.data_ptr(), src.data_ptr(), src.stride(0), C, w, 0] + list(cols) + [0] * (COMMIT_FIELDS - 7 - w)
 
 
 # ------------------------------------------------------------------------------------- GDN

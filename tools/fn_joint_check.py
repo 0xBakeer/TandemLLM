@@ -18,6 +18,8 @@ joint_timing`: staging, PLE/norms/mixers, projections, GDN recurrence, attention
 `--kernels N`: then one more joint pass with its commits under torch.profiler: the wall time, the GPU's
 kernel time (busy) and the top N kernels by summed time. `--lone-kernels N`: the same for the first
 state's lone verify and commit (its graphs, as a slot alone runs them), at every block width 2..`--block`.
+`--commit-multi` (SPD-239): the joint states commit in one call (`FlashNextServing.commit_tree_multi`, every
+lane's copies in one launch); their next rounds and end states are then held to the lone twins' own commits.
 """
 
 from __future__ import annotations
@@ -60,6 +62,8 @@ def main() -> None:
                     help="the family whose joint pass is checked (qwen3_5_moe: Ornith)")
     ap.add_argument("--kernels", type=int, default=0, help="one more joint pass under torch.profiler: top N kernels")
     ap.add_argument("--lone-kernels", type=int, default=0, help="the first state's lone verify + commit by width: top N")
+    ap.add_argument("--commit-multi", action="store_true",
+                    help="SPD-239: the joint states commit in one call (FlashNextServing.commit_tree_multi)")
     ap.add_argument("--json")
     a = ap.parse_args()
     global FlashNextServing, build
@@ -100,6 +104,14 @@ def main() -> None:
         conts.append(cont)
         at.append(0)
         assert int(lg.view(-1).argmax()) == cont[0]
+    def commit_joint(states, paths_):
+        # the joint pass's states keep their paths: each its own commit_tree, or all in one call
+        if a.commit_multi:
+            FlashNextServing.commit_tree_multi(list(zip(states, paths_)))
+        else:
+            for s_, p_ in zip(states, paths_):
+                s_.commit_tree(p_)
+
     rounds = []
     for r in range(a.rounds):
         blocks = [block_of(conts[j], at[j], a.block, r % 2 == 1) for j in range(len(prompts))]
@@ -115,8 +127,8 @@ def main() -> None:
             [(s, torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], s.st.length) for j, s in enumerate(joint)])
         same = [bool(torch.equal(lone_out[j], outs[j])) for j in range(len(joint))]
         diff = [float((lone_out[j] - outs[j]).abs().max()) for j in range(len(joint))]
-        for j, s in enumerate(joint):
-            s.commit_tree(paths[j])
+        commit_joint(joint, paths)
+        for j in range(len(joint)):
             at[j] += len(paths[j])
         rows = sum(len(b[0]) for b in blocks)
         rounds.append({"round": r, "rows": rows, "tree": r % 2 == 1, "equal": same, "max_diff": diff})
@@ -141,8 +153,7 @@ def main() -> None:
             t2 = time.perf_counter()
             FlashNextServing.forward_tree_multi(
                 [(s, torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], s.st.length) for j, s in enumerate(joint)])
-            for j, s in enumerate(joint):
-                s.commit_tree(list(range(len(blocks[j][0]))))
+            commit_joint(joint, [list(range(len(blocks[j][0]))) for j in range(len(joint))])
             torch.cuda.synchronize()
             t3 = time.perf_counter()
             if r:                                               # the first round warms

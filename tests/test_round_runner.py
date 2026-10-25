@@ -251,6 +251,25 @@ def test_the_report_gives_each_phase_by_the_slots_in_the_round():
     assert R.Runner._by_e(d) == {8: {"n": 10, "tails": 5.2, "verify": 118.0}}
 
 
+
+def test_a_family_that_commits_a_round_at_once_gets_one_call():
+    # SPD-239: an engine with `commit_tree_multi` gets each joint round's paths in one call (here the engine's
+    # own commit_tree a slot at a time inside it), and no tail commits again: each request writes its alone text
+    from engine.model import Qwen38Engine
+    calls = []
+
+    def multi(items):
+        calls.append(len(items))
+        for eng, path in items:
+            eng.commit_tree(path)
+    Qwen38Engine.commit_tree_multi = staticmethod(multi)
+    try:
+        out = _check(3)
+    finally:
+        del Qwen38Engine.commit_tree_multi
+    assert calls and all(n > 1 for n in calls), calls
+    return f"{out}; {len(calls)} rounds committed in one call each"
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

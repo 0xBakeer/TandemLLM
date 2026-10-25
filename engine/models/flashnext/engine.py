@@ -1172,6 +1172,137 @@ class FlashNextEngine(FlashNextRef):
             self._pending[id(st)] = st
         return self._commit_bufs(key)["stack"]
 
+    @torch.no_grad()
+    def commit_multi(self, items: list) -> list:
+        """SPD-239: `commit` for the states of one joint pass, [(st, path)] -> each path's streams. Each state's
+        copies -- its GDN rows parked a layer, its conv windows, its PLE window, its streams -- go in one launch for
+        all of them (`fn_seq_kernels.commit_multi`: the same gathers as `commit_dev`, so the same bits); the KV
+        moves of a branch, the indexer's pooled blocks and the host's context follow a state at a time. A state
+        not of a joint pass, or the commit without the fold, takes `commit`."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        out: list = [None] * len(items)
+        rows, done = [], []
+        for j, (st, path) in enumerate(items):
+            joint = self._joint.get(id(st))
+            if joint is None or not self.fold:
+                continue
+            self._joint.pop(id(st))
+            self._block, self.rec, self._vcls = joint
+            self.settle(st)
+            t0 = time.perf_counter()
+            cb, moved = self._stage_lane(j, st, path)
+            self.host_ms["stage_commit"] = self.host_ms.get("stage_commit", 0.0) + 1e3 * (time.perf_counter() - t0)
+            rec, n = self.rec, len(path)
+            idx = cb["d"]["idx"]
+            c3, c9 = self._tail_cols(path, c.linear_conv_kernel_dim - 1), None
+            for li in c.linear_layers:
+                qkvz, y, gg, beta = rec[li]
+                py, pg, pb = self._pend_bufs(li, st)
+                rows += [SK.rows_entry(y, py, idx, n), SK.rows_entry(gg, pg, idx, n), SK.rows_entry(beta, pb, idx, n),
+                         SK.window_entry(st.conv[li], qkvz, c3)]
+            for li in c.ple_layers:
+                c9 = c9 or self._tail_cols(path, st.ple_conv[li].shape[-1])
+                rows.append(SK.window_entry(st.ple_conv[li], rec[("ple", li)], c9))
+            rows.append(SK.rows_entry(rec["stack"], cb["stack"], idx, n))
+            done.append((j, st, path, cb, moved, self._block[0], rec))
+        if rows:
+            ent = self._commit_entries(len(rows))
+            ent["h"].numpy()[:len(rows)] = np.asarray(rows, dtype=np.int64)
+            ent["d"][:len(rows)].copy_(ent["h"][:len(rows)], non_blocking=True)
+            SK.commit_multi(ent["d"][:len(rows)])
+            ent["copied"].record()
+        for j, st, path, cb, moved, tokens, rec in done:
+            d, n = cb["d"], len(path)
+            if moved:
+                for li in c.attention_layers:
+                    src, dst = d["src"][:n], d["dst"][:n]
+                    st.k[li].index_copy_(1, dst, st.k[li].index_select(1, src))
+                    st.v[li].index_copy_(1, dst, st.v[li].index_select(1, src))
+                    if li in st.ik:
+                        st.ik[li].index_copy_(0, dst, st.ik[li].index_select(0, src))
+            if c.has_indexer:
+                slots, posb = cb["d32"][:SK.OWN * 4].view(SK.OWN, 4), cb["d32"][SK.OWN * 4:]
+                for li in c.attention_layers:
+                    own = SK.qsa_pool(st.ik[li], slots, posb, self.W[self.pre(li) + "self_attn.indexer.k_layernorm.weight"],
+                                      self.rope_cos, self.rope_sin, c.rms_norm_eps)
+                    st.pool[li].index_copy_(0, cb["dpi"], own)
+            self._pend_of(st)[1].fill_(n)
+            self._commit_lane(st, rec, d, n)
+            for li in c.ple_layers:
+                hsh = self.hash[li]
+                st.ple_ctx[li] = torch.tensor([(self._ple_ctx(st, li) + [tokens[i] for i in path])[-hsh.context_len:]],
+                                              dtype=torch.long)
+            st.length += len(path)
+            self._pending[id(st)] = st
+            out[j] = cb["stack"][:n]
+        for j, (st, path) in enumerate(items):
+            if out[j] is None:
+                out[j] = self.commit(st, path)
+        return out
+
+    def _commit_lane(self, st: FNState, rec: dict, d: dict, n: int) -> None:
+        """A family's own part of a lane's commit in `commit_multi` (`commit_dev`'s past the shared copies): `rec`
+        the lane's joint intermediates, `d` its device path rows / KV slots (the first n). Flash-Next: none."""
+        return
+
+    #: the most rows a joint pass's path keeps (a block's rows; `commit_multi`'s lane buffers)
+    LANE_ROWS = 33
+
+    def _stage_lane(self, j: int, st: FNState, path: list[int]) -> tuple:
+        """`stage_commit` into lane j's own buffers (`commit_multi`: every lane's copies run in one launch after
+        all are staged, so two lanes of one shape may not share a buffer): the path's rows, its KV source and
+        destination slots and the indexer's pooled blocks, copied to the device; returns (buffers, moved)."""
+        from tools import fn_seq_kernels as SK
+        c, dev, R = self.cfg, self.device, self.LANE_ROWS
+        lanes = self.__dict__.setdefault("_lane_bufs", {})
+        cb = lanes.get(j)
+        if cb is None:
+            hbuf = torch.zeros(3 * R, dtype=torch.int64, pin_memory=True)
+            dbuf = torch.zeros(3 * R, dtype=torch.int64, device=dev)
+            cb = lanes[j] = {"hbuf": hbuf, "dbuf": dbuf, "copied": torch.cuda.Event(),
+                             "h": {"idx": hbuf[:R], "src": hbuf[R:2 * R], "dst": hbuf[2 * R:]},
+                             "d": {"idx": dbuf[:R], "src": dbuf[R:2 * R], "dst": dbuf[2 * R:]},
+                             "h32": torch.zeros(SK.OWN * 5, dtype=torch.int32, pin_memory=True),
+                             "d32": torch.zeros(SK.OWN * 5, dtype=torch.int32, device=dev),
+                             "hpi": torch.zeros(SK.OWN, dtype=torch.int64, pin_memory=True),
+                             "dpi": torch.zeros(SK.OWN, dtype=torch.int64, device=dev),
+                             "stack": torch.zeros(R, c.hc_count * c.hidden_size, dtype=self.dtype, device=dev)}
+            cb["copied"].record()
+        n = len(path)
+        assert n <= R, f"a joint path of {n} rows"
+        cb["copied"].synchronize()
+        h, L = cb["h"], st.length
+        h["idx"].numpy()[:n] = path
+        h["src"].numpy()[:n] = [L + r for r in path]
+        h["dst"].numpy()[:n] = L + np.arange(n)
+        if c.has_indexer:
+            r = c.indexer_compress_ratio
+            b = L // r + np.arange(SK.OWN)
+            h32 = cb["h32"].numpy()
+            h32[:SK.OWN * 4] = np.clip((r * b)[:, None] + np.arange(r)[None, :], 0, st.cap - 1).reshape(-1)
+            h32[SK.OWN * 4:] = r * b + st.delta
+            cb["hpi"].numpy()[:] = np.clip(b, 0, next(iter(st.pool.values())).shape[0] - 1)
+            cb["d32"].copy_(cb["h32"], non_blocking=True)
+            cb["dpi"].copy_(cb["hpi"], non_blocking=True)
+        cb["dbuf"].copy_(cb["hbuf"], non_blocking=True)
+        cb["copied"].record()
+        return cb, any(path[k] != k for k in range(n))
+
+    def _commit_entries(self, n: int) -> dict:
+        """`commit_multi`'s entry table: pinned host rows and their device copy, grown to fit; the host rows are
+        rewritten only after the last copy from them is done."""
+        from tools import fn_seq_kernels as SK
+        ent = getattr(self, "_cent", None)
+        if ent is None or ent["h"].shape[0] < n:
+            m = max(n, 1024)
+            ent = self._cent = {"h": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
+                                "d": torch.zeros(m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
+                                "copied": torch.cuda.Event()}
+            ent["copied"].record()
+        ent["copied"].synchronize()
+        return ent
+
     def _commit_bufs(self, key) -> dict:
         """A commit's device inputs (path rows, KV source and destination slots, the conv tails) and
         its pinned host image; the path's streams as the output."""

@@ -61,6 +61,9 @@ PRICED_EXPLORE = int(os.environ.get("QSE_RUNNER_PRICED_EXPLORE", "8") or 8)
 #: drafts and the runner runs them together after the proposals (heads with `run_packed`, the MoE families' MTP
 #: heads); 0: each head its own graph. Served 2026-10-25, C8 of the two MoE families: 74.8 -> 83.6, 72.8 -> 79.7
 MTP_PACK = os.environ.get("QSE_RUNNER_MTP_PACK", "1") == "1"
+#: SPD-239: a joint round's commits at once where the family commits several slots in one call (its
+#: `commit_tree_multi`: every lane's copies in one launch); 0: each tail commits its own
+COMMIT_MULTI = os.environ.get("QSE_RUNNER_COMMIT_MULTI", "1") == "1"
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -540,9 +543,12 @@ class Runner:
             for t in go:
                 t.pre = True
             t2 = time.perf_counter()
+            multi = getattr(group[0].eng, "commit_tree_multi", None) if COMMIT_MULTI and len(group) > 1 else None
+            if multi is not None:
+                multi([(t.eng, h[0]) for t, h in zip(group, halves)])
             for t, h in zip(group, halves):
                 self._bind(t)
-                self._tail_b(t, *h)
+                self._tail_b(t, *h, committed=multi is not None)
             # SPD-239: the tails' host ms by half (the walks' paths and drafter syncs, the next draft's issue, the
             # commits), summed by the slots in the round (`report`'s tails_by_slots)
             ta = self._tails_e.setdefault(len(group), {"n": 0, "a": 0.0, "draft": 0.0, "b": 0.0})
@@ -649,10 +655,11 @@ class Runner:
             t.think.observe(new)
         return path, new, end
 
-    def _tail_b(self, t: Task, path, new, end) -> None:
-        """PIPE: the rest of `_tail` while the GPU drafts: the target's commit, the penalties, the stop patterns,
-        the stream, the end."""
-        t.eng.commit_tree(path)
+    def _tail_b(self, t: Task, path, new, end, committed: bool = False) -> None:
+        """PIPE: the rest of `_tail` while the GPU drafts: the target's commit (unless the round committed every
+        slot at once), the penalties, the stop patterns, the stream, the end."""
+        if not committed:
+            t.eng.commit_tree(path)
         if t.pen is not None:
             t.pen.commit(new)
         stop_now = t.pstop is not None and t.pstop.observe(new)

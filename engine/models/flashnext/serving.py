@@ -620,6 +620,32 @@ class FlashNextServing:
         if path:
             self._h_last.copy_(stack[len(path) - 1:len(path)])
 
+    @staticmethod
+    @torch.no_grad()
+    def commit_tree_multi(items: list) -> None:
+        """SPD-239: [(serving, path)] of one joint pass's slots committed at once (`FlashNextEngine.commit_multi`:
+        every lane's copies in one launch), each slot left as its `commit_tree` leaves it; a slot whose block was
+        not in the joint pass takes its own `commit_tree`."""
+        fn = items[0][0].fn
+        mine = [(s, path) for s, path in items if id(s.st) in fn._joint]
+        for s, path in items:
+            if id(s.st) not in fn._joint:
+                s.commit_tree(path)
+        if not mine:
+            return
+        t0 = time.perf_counter()
+        stacks = fn.commit_multi([(s.st, [int(p) for p in path]) for s, path in mine])
+        ms = (time.perf_counter() - t0) * 1e3 / len(mine)
+        for (s, path), stack in zip(mine, stacks):
+            s.commit_ms = ms
+            k = (s._width, len(path), any(int(p) != j for j, p in enumerate(path)))
+            s.uses[k] = s.uses.get(k, 0) + 1
+            if k + (getattr(fn, "_vcls", 0),) in s._fresh:
+                s._fresh.discard(k + (getattr(fn, "_vcls", 0),))
+                s.captured = True
+            if path:
+                s._h_last.copy_(stack[len(path) - 1:len(path)])
+
     @torch.no_grad()
     def forward_block(self, block: torch.Tensor, start: int) -> torch.Tensor:
         """A chain block: its rows' logits; the rows are kept by `rollback_to(keep)`, or all of them

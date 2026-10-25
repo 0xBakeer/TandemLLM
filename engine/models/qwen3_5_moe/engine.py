@@ -109,6 +109,12 @@ class Qwen35MoeEngine(FlashNextEngine):
             src = (jt if jt is not None else self._rb[key[0]]["taps"]).index_select(0, d["idx"])
             st.ring.index_copy_(0, d["dst"] % self.ring_rows, src)
 
+    def _commit_lane(self, st, rec, d, n) -> None:
+        # SPD-239: `commit_dev`'s taps for a lane of `commit_multi` (its joint rows' taps into the ring)
+        if self.taps and st.ring is not None:
+            src = rec["taps"].index_select(0, d["idx"][:n])
+            st.ring.index_copy_(0, d["dst"][:n] % self.ring_rows, src)
+
     # the reference's pieces this family uses (FlashNextEngine's base is Flash-Next's reference)
     norm = Qwen35MoeRef.norm
     layer = Qwen35MoeRef.layer
