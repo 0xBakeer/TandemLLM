@@ -48,8 +48,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("1bed471aade2b92d8a59b89ebdc48033138a488a3060f1f1cd19d00828d2e0c1",
-             "1a32da2181a8e1a53e4886a04aaed8f25d32bf1c9f6ad9bae44168436fa29b58")
+GOLDEN_V2 = ("202863f8caa30eaded721bb3c7281d37a4e638cf6264e60b02da5d42eb456898",
+             "44d52d84b4ad2104790f55cf1acc7edeb38f46394517617f447f7ae9a94890b2")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -81,7 +81,8 @@ GOLDEN_FP4 = {
     # SPD-245: one attention table a launch, kept by the capturing graph
     # SPD-223: a capture stream for each graph owner
     # SPD-223: a new pool after a joint flush
-    "qwen3_5": "4ff946d6e2fe71b8689d13645519fa5f9ef8f094a3ef1ba1bfe286a0c8892129",
+    # SPD-245: GDN_CHUNKED knob (off), the gate tool's --flag
+    "qwen3_5": "cfa1c9d052b8cc34ae163c8939f67e27763b4da4b97634b2df50738474dc8c38",
     "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",

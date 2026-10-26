@@ -206,6 +206,9 @@ SLAB_TRITON = _S.get("SLAB_TRITON") == "1"
 #: and repeated text at 2K / 8K / 32K); prefill -6 % at 2K, -7 % at 8K and 32K
 GDN_PREP_BV = int(_S.get("GDN_PREP_BV"))
 GDN_PREP_WARPS = int(_S.get("GDN_PREP_WARPS"))
+#: SPD-245: the GDN_PREP path's recurrence at a 32-row chunk (tools/gdn_chunked_kernels.py): the UT transform
+#: and the walk without register spills, the walk's programs value-block fastest; an order move (0: 64 rows)
+GDN_CHUNKED = _S.get("GDN_CHUNKED") == "1"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
@@ -1075,8 +1078,12 @@ class Qwen38Engine:
         A_log = self.w.norm(f"{p}.linear_attn.A_log")
         dt_bias = self.w.norm(f"{p}.linear_attn.dt_bias")
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias.float())
-        o, S = chunk_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None,
-                                    chunk_size=GDN_PREFILL_CHUNK, bv=GDN_PREP_BV, warps=GDN_PREP_WARPS)
+        if GDN_CHUNKED:
+            from tools.gdn_chunked_kernels import chunked_prefill_normed
+            o, S = chunked_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None)
+        else:
+            o, S = chunk_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None,
+                                        chunk_size=GDN_PREFILL_CHUNK, bv=GDN_PREP_BV, warps=GDN_PREP_WARPS)
         self.state.S[i].copy_(S)
         z = z_pre.reshape(B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
         if out is not None:
