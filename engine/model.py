@@ -1965,13 +1965,10 @@ class Qwen38Engine:
             q, k = self.apply_rope(q, k, cos, sin)
         if self._jg is not None:
             # SPD-163, a joint graph: `attention`'s graph-safe statements (the scatter at the static
-            # slots, the whole cache, the start and the length from the device)
-            from tools.attn_kernels import decode_attention_dev
-            jg = self._jg
-            i = self.kv.slot[layer]
-            self.kv.k[i].index_copy_(2, jg.slots, k.to(self.kv.k.dtype))
-            self.kv.v[i].index_copy_(2, jg.slots, v.to(self.kv.v.dtype))
-            o = decode_attention_dev(q, self.kv.k[i], self.kv.v[i], jg.lenp, self.tree.anc_incl, jg.max_lc)
+            # slots, the whole cache, the start and the length from the device); SPD-245: handed out as
+            # an `attn` request, so the lanes' blocks run in one launch a layer where the family groups
+            # them (engine/models/qwen3_5/attn_group.py), else here one lane at a time
+            o = yield "attn", str(layer), (self, q, k, v)
         else:
             kk, vv = self.kv.append(layer, k, v, start)
             from tools.attn_kernels import decode_attention
@@ -2403,6 +2400,25 @@ def _join(xs: list, dim: int) -> torch.Tensor:
     return torch.cat(xs, dim=dim)
 
 
+def joint_attn_lone(name: str, payloads: list) -> list:
+    """The `"attn"` requests of a joint pass one lane at a time: the scatter at the lane's static slots, the
+    whole cache, the start and the length from the device (`_attention_steps`). A family's adapter may
+    install a grouped launch as `joint_attn` (SPD-245); this is the shared default."""
+    from tools.attn_kernels import decode_attention_dev
+    layer = int(name)
+    out = []
+    for eng, q, k, v in payloads:
+        jg = eng._jg
+        i = eng.kv.slot[layer]
+        eng.kv.k[i].index_copy_(2, jg.slots, k.to(eng.kv.k.dtype))
+        eng.kv.v[i].index_copy_(2, jg.slots, v.to(eng.kv.v.dtype))
+        out.append(decode_attention_dev(q, eng.kv.k[i], eng.kv.v[i], jg.lenp, eng.tree.anc_incl, jg.max_lc))
+    return out
+
+
+Qwen38Engine.joint_attn = staticmethod(joint_attn_lone)
+
+
 def joint_steps(eng0, gens: list) -> list:
     """`forward_tree_multi`'s loop: run the engines' step generators, each request for the same weight as
     one call over every engine's rows; returns each generator's value (its logits). The joint graphs
@@ -2422,6 +2438,12 @@ def joint_steps(eng0, gens: list) -> list:
             if kind == "gdn":
                 # SPD-163: per-engine payloads, not rows to join (`_run_gdn`), one table a pass
                 for j, r in zip(js, _run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
+                    answers[j] = r
+                continue
+            if kind == "attn":
+                # SPD-245: the graphed lanes' attention of a layer, one launch for every lane where the
+                # family installs `joint_attn` (its adapter), else each lane's own launch
+                for j, r in zip(js, eng0.joint_attn(name, xs)):
                     answers[j] = r
                 continue
             if len(xs) == 1:

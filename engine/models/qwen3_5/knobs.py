@@ -14,8 +14,13 @@ KNOBS: dict[str, tuple] = {
     'JOINT_GRAPHS': ('1', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-163: joint graphs kept, the least recently replayed dropped first
     'JOINT_GRAPHS_MAX': ('24', 'engine/models/qwen3_5/joint_graphs.py'),
-    # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager)
-    'JOINT_GRAPHS_AFTER': ('16', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-245: a graphed joint pass runs every lane's attention of a layer in one scatter, one split and one
+    # combine launch (engine/models/qwen3_5/attn_group.py; every row the lone launch's bits); 0: a lane at a time
+    'JOINT_ATTN_GROUP': ('1', 'engine/models/qwen3_5/attn_group.py'),
+    # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager).
+    # SPD-245: 4 (was 16): an 8-lane round at 16 ran a third of its passes eager while shapes warmed; C4 99-101
+    # vs 96, C8 152 vs 150 tok/s served
+    'JOINT_GRAPHS_AFTER': ('4', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-199: the joint pass's row cap, at most the proven one (64 on EXL3, 32 else); empty: the proven one.
     # The EXL3 4-bit projections cost ~1.6x more from 33 rows on (tools/exl3_tall.py), so 32 is the other arm
     'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),

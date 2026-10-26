@@ -10,6 +10,7 @@ from __future__ import annotations
 from engine.methods.manifest import Manifest
 from engine.model import VERIFY_ROWS, Qwen38Engine
 from engine.models.adapter import Capabilities, CostModel
+from engine.models.qwen3_5 import attn_group
 from engine.models.state import Qwen38State
 from engine.settings import SETTINGS as _S
 
@@ -20,7 +21,8 @@ from engine.settings import SETTINGS as _S
 MODULES = ("engine/config.py", "engine/drafters/__init__.py", "engine/drafters/dflash2.py",
            "engine/drafters/draft_graph.py", "engine/drafters/dspark.py", "engine/drafters/mtp.py",
            "engine/gdn.py", "engine/kvpool.py", "engine/linear.py", "engine/loader.py", "engine/model.py",
-           "engine/settings.py", "engine/tree.py", "engine/verify_graph.py", "engine/vision.py")
+           "engine/models/qwen3_5/attn_group.py", "engine/settings.py", "engine/tree.py",
+           "engine/verify_graph.py", "engine/vision.py")
 
 
 def cost(eng) -> CostModel:
@@ -172,6 +174,7 @@ Qwen38Engine.joint_graphs_report = joint_graphs_report
 Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
 Qwen38Engine.tree_batchable = tree_batchable
 Qwen38Engine.joint_policy = joint_policy
+Qwen38Engine.joint_attn = staticmethod(attn_group.run_attn)      # SPD-245
 Qwen38Engine.cost = cost
 Qwen38Engine.discard_pending = discard_pending
 Qwen38Engine.cache_state = cache_state

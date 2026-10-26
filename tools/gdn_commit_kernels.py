@@ -85,7 +85,13 @@ def _rows_tensor(rows: list[int], device) -> torch.Tensor:
     if t is None:
         if len(_ROWS) > 4096:
             _ROWS.clear()
-        t = _ROWS[key] = torch.tensor(rows, dtype=torch.int32, device=device)
+        if str(device).startswith("cuda"):
+            # SPD-245: from pinned memory, without a synchronisation: a tree's path misses this cache
+            # most rounds, and the pageable copy drained the stream before the round's tails
+            from engine.model import h2d
+            t = _ROWS[key] = h2d(list(rows), torch.int32, device)
+        else:
+            t = _ROWS[key] = torch.tensor(rows, dtype=torch.int32, device=device)
     return t
 
 
