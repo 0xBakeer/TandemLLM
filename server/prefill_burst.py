@@ -18,6 +18,14 @@ turn back; the last one runs `run(jobs)` (engine/model.py `prefill_joint`: every
 its own forward's, the weights read once a layer for all of them) and hands each member its result.
 A member whose prompt the joint forward cannot take joins with no job and prefills alone.
 
+Requests on their way to a slot (`received` at the handler's start, `settle` once bound or queued):
+eight requests sent at once reach their slots one by one, and the first one bound on an idle engine
+used to reach its prefill before the second was bound, find itself the burst's only member and prefill
+alone (live 2026-10-26: one of the eight in both C8 rounds of a pair, its first token at 0.6 s, the
+other seven at 4 s). A member that would run the joint forward alone while another request is still on
+its way waits for it (the turn given back), up to `wait_s`; with none on the way it starts at once, so
+a lone request never waits.
+
 Plain Python and CPU-testable (tests/test_prefill_burst.py); server/app.py builds one when
 `QSE_PREFILL_BURST` is wait or joint and the server runs parallel slots.
 """
@@ -39,8 +47,25 @@ class Burst:
         self.size = 0                      # members of the open burst
         self.jobs: dict = {}               # join: member -> its job, until the last one takes them
         self.results: dict = {}            # join: member -> (ok, result or exception)
+        self.incoming = 0                  # requests received and not yet bound to a slot (or queued)
         self.stats = {"bursts": 0, "members": 0, "max_members": 0, "timeouts": 0, "wait_ms": 0.0,
-                      "joint": 0, "joint_rows": 0}
+                      "joint": 0, "joint_rows": 0, "held": 0}
+
+    def received(self) -> list:
+        """A request on its way to a slot; `settle` the token once it is bound (after `arrive`) or
+        queued, and at its end whatever happened (idempotent)."""
+        with self.cv:
+            self.incoming += 1
+            return [False]
+
+    def settle(self, tok) -> None:
+        if not tok:
+            return
+        with self.cv:
+            if not tok[0]:
+                tok[0] = True
+                self.incoming -= 1
+                self.cv.notify_all()
 
     def is_open(self) -> bool:
         return bool(self.pending or self.done or self.jobs)
@@ -55,6 +80,7 @@ class Burst:
                 self.size = 0
             self.pending.add(who)
             self.size += 1
+            self.cv.notify_all()
             return True
 
     def member(self, who) -> bool:
@@ -87,67 +113,84 @@ class Burst:
         """Member `who` at its prefill, holding the GPU turn. `job`: what `run(jobs)` takes for it (a list
         of jobs in arrival order -> their results), or None (it prefills alone). The last member to come
         runs the jobs, holding the turn; the others give the turn back (`release`) and take it again
-        (`acquire`) once their result is in. Returns (True, result) for a job the joint forward ran,
-        (False, None) when the member prefills alone (no job, a burst of one, or `wait_s` passed before
-        the last member came)."""
+        (`acquire`) once their result is in. A member that would be the last while a request is still on
+        its way to a slot (`received`) waits like the others, and runs the jobs itself if that request
+        joins nothing (bound elsewhere, queued, gone). Returns (True, result) for a job the joint forward
+        ran, (False, None) when the member prefills alone (no job, a burst of one, or `wait_s` passed
+        before the last member came)."""
         with self.cv:
             if who not in self.pending:
                 return False, None
             self.pending.discard(who)
+            self.cv.notify_all()
             if job is not None:
                 self.jobs[who] = job
                 self.stats["joint_rows"] += int(rows)
-            if self.pending:
+            if self.pending or (self.incoming > 0 and (job is not None or self.jobs)):
                 if job is None:
-                    return False, None
+                    return False, None             # alone; the waiting members stay for the others
                 lead = False
+                if not self.pending:
+                    self.stats["held"] += 1        # one more is on its way: wait for it
             else:
                 lead, batch = True, self.jobs
                 self.jobs = {}
         if lead:
-            if len(batch) <= 1:
-                with self.cv:
-                    for m in batch:
-                        if m != who:
-                            self.results[m] = (False, None)
-                    self._close()
-                return False, None
-            try:
-                out = run(list(batch.values()))
-            except BaseException as e:             # every member hears of it, the leader raises
-                with self.cv:
-                    for m in batch:
-                        if m != who:
-                            self.results[m] = (None, e)
-                    self._close()
-                raise
-            with self.cv:
-                for m, r in zip(batch, out):
-                    if m != who:
-                        self.results[m] = (True, r)
-                self.stats["joint"] += 1
-                self._close()
-            return (True, out[list(batch).index(who)]) if who in batch else (False, None)
+            return self._lead(who, batch, run)
         if release is not None:
             release()
         t0 = self.clock()
+        batch = None
         try:
             with self.cv:
                 while who not in self.results:
+                    if who in self.jobs and not self.pending and self.incoming == 0:
+                        batch = self.jobs              # nobody else is coming: this member runs them
+                        self.jobs = {}
+                        break
                     if who in self.jobs and self.clock() - t0 >= self.wait_s:
                         del self.jobs[who]             # not taken yet: it prefills alone
                         self.stats["timeouts"] += 1
                         self.results[who] = (False, None)
                         break
-                    self.cv.wait(0.5)
-                ok, r = self.results.pop(who)
+                    self.cv.wait(0.05 if who in self.jobs else 0.5)
+                if batch is None:
+                    ok, r = self.results.pop(who)
                 self.stats["wait_ms"] += (self.clock() - t0) * 1e3
         finally:
             if acquire is not None:
                 acquire()
+        if batch is not None:
+            return self._lead(who, batch, run)
         if ok is None:
             raise r
         return (True, r) if ok else (False, None)
+
+    def _lead(self, who, batch: dict, run):
+        """The last member: the joint forward over `batch` (member -> job), holding the turn."""
+        if len(batch) <= 1:
+            with self.cv:
+                for m in batch:
+                    if m != who:
+                        self.results[m] = (False, None)
+                self._close()
+            return False, None
+        try:
+            out = run(list(batch.values()))
+        except BaseException as e:                 # every member hears of it, the leader raises
+            with self.cv:
+                for m in batch:
+                    if m != who:
+                        self.results[m] = (None, e)
+                self._close()
+            raise
+        with self.cv:
+            for m, r in zip(batch, out):
+                if m != who:
+                    self.results[m] = (True, r)
+            self.stats["joint"] += 1
+            self._close()
+        return (True, out[list(batch).index(who)]) if who in batch else (False, None)
 
     def prefilled(self, who, release=None, acquire=None) -> bool:
         """Member `who` has prefilled. The last one closes the burst and goes on; the others call
@@ -190,6 +233,6 @@ class Burst:
 
     def report(self) -> dict:
         with self.cv:
-            return {"open": self.is_open(), "pending": sorted(map(str, self.pending)),
+            return {"open": self.is_open(), "pending": sorted(map(str, self.pending)), "incoming": self.incoming,
                     "waiting": sorted(map(str, self.done)), "wait_s": self.wait_s,
                     **{k: (round(v, 1) if isinstance(v, float) else v) for k, v in self.stats.items()}}

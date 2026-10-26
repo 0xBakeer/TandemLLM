@@ -7642,8 +7642,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_bytes(503, json.dumps({"error": {
                 "message": gpu_health.words(), "type": "engine_failed", "code": 503}}).encode(),
                 extra_headers=(("Retry-After", str(gpu_health.RETRY_AFTER_S)),))
-        with logbuf.serving(body):
-            return self._complete_logged(body, path)
+        # SPD-245: on its way to a slot, for the prefill burst (server/prefill_burst.py `received`)
+        pool = dict.get(STATE, "pool")
+        burst = pool.burst if pool is not None else None
+        self._burst_tok = burst.received() if burst is not None else None
+        try:
+            with logbuf.serving(body):
+                return self._complete_logged(body, path)
+        finally:
+            if burst is not None:
+                burst.settle(self._burst_tok)
+            self._burst_tok = None
 
     def _loop_escape(self, body: dict, plan, rec, sampler, cid: str):
         """SRV-475: this request's sampling under the profile's `sampling` section. While the
@@ -8477,6 +8486,8 @@ class Handler(BaseHTTPRequestHandler):
                 if got:
                     side.no_carry = bool(me["own"]) or lane_kind is not None
             micro = not got and lane_kind is not None
+            if not got and par is not None and par.burst is not None:
+                par.burst.settle(getattr(self, "_burst_tok", None))   # SPD-245: queued, not on its way
             while not got and not micro:
                 # 0.8.2: the Lanes view's queued line says why (server/parallel.py)
                 rec.queue_why = _queue_why(par, par_why, side_need, time.monotonic() - t_wait, me)
@@ -8635,6 +8646,8 @@ class Handler(BaseHTTPRequestHandler):
             # SPD-245: a member of the prefill burst when none of the slots decodes (or one is open)
             par.burst.arrive(side.index if side is not None else 0,
                              idle=not any(s.phase in ("decode", "runner") for s in par.slots))
+        if par is not None and par.burst is not None:
+            par.burst.settle(getattr(self, "_burst_tok", None))       # SPD-245: bound (or a micro lane)
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns

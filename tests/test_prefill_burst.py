@@ -192,6 +192,106 @@ def test_leave_frees_waiting_joiners():
     assert got[0] == (False, None) and not b.is_open()
 
 
+# --- requests on their way to a slot (`received` / `settle`) ------------------------------------------------
+
+def test_eight_arrivals_within_ms_the_first_does_not_start_alone():
+    """The race of 2026-10-26: eight requests received at once, the first bound and at its prefill before
+    the others are bound (their way to a slot is slower). It must wait for them: one joint forward of 8."""
+    b = Burst(wait_s=5)
+    toks = [b.received() for _ in range(8)]
+    runs, got, lock = [], {}, threading.Lock()
+
+    def run(jobs):
+        runs.append(list(jobs))
+        return [j * 10 for j in jobs]
+
+    def request(i, delay):
+        time.sleep(delay)
+        assert b.arrive(i, idle=True)
+        b.settle(toks[i])
+        r = b.join(i, i + 1, run, release=lambda: None, acquire=lambda: None, rows=512)
+        with lock:
+            got[i] = r
+
+    th = [threading.Thread(target=request, args=(i, 0.0 if i == 0 else 0.03 + 0.002 * i)) for i in range(8)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(3)
+    assert len(runs) == 1 and sorted(runs[0]) == list(range(1, 9)), runs
+    assert got == {i: (True, (i + 1) * 10) for i in range(8)}
+    assert b.stats["held"] >= 1 and b.stats["max_members"] == 8 and b.stats["timeouts"] == 0
+    assert not b.is_open() and b.incoming == 0
+
+
+def test_a_lone_request_starts_at_once():
+    b = Burst(wait_s=5)
+    tok = b.received()
+    assert b.arrive(0, idle=True)
+    b.settle(tok)
+    t0 = time.monotonic()
+    called = []
+    assert b.join(0, "x", lambda js: called.append(js)) == (False, None) and not called
+    assert time.monotonic() - t0 < 0.05 and b.stats["held"] == 0 and not b.is_open()
+
+
+def test_a_held_member_goes_alone_once_the_other_queues():
+    """The one on its way finds no slot (it queues, `settle` without `arrive`): the held member runs at
+    once then, not after wait_s."""
+    b = Burst(wait_s=5)
+    t0, t1 = b.received(), b.received()
+    b.arrive(0, idle=True)
+    b.settle(t0)
+    threading.Timer(0.1, lambda: b.settle(t1)).start()
+    called, start = [], time.monotonic()
+    assert b.join(0, "x", lambda js: called.append(js), release=lambda: None, acquire=lambda: None) == (False, None)
+    took = time.monotonic() - start
+    assert 0.08 < took < 1.0 and not called and b.stats["held"] == 1 and b.stats["timeouts"] == 0
+    assert not b.is_open()
+
+
+def test_a_held_member_waits_at_most_wait_s():
+    b = Burst(wait_s=0.2)
+    tok = b.received()
+    b.received()                                   # never settles
+    b.arrive(0, idle=True)
+    b.settle(tok)
+    start = time.monotonic()
+    assert b.join(0, "x", None, release=lambda: None, acquire=lambda: None) == (False, None)
+    assert 0.15 < time.monotonic() - start < 2 and b.stats["timeouts"] == 1
+
+
+def test_a_jobless_member_goes_alone_while_a_held_one_keeps_waiting():
+    b = Burst(wait_s=5)
+    ta, tb, tc = b.received(), b.received(), b.received()
+    b.arrive(0, idle=True)
+    b.settle(ta)
+    got = {}
+    t = threading.Thread(target=lambda: got.update({0: b.join(0, "a", lambda js: [j.upper() for j in js],
+                                                            release=lambda: None, acquire=lambda: None)}))
+    t.start()
+    time.sleep(0.05)
+    b.arrive(1, idle=True)
+    b.settle(tb)
+    assert b.join(1, None, None) == (False, None)  # a long prompt: alone, no wait
+    time.sleep(0.05)
+    assert 0 not in got                            # 0 still waits for the third
+    b.arrive(2, idle=True)
+    b.settle(tc)
+    assert b.join(2, "c", lambda js: [j.upper() for j in js]) == (True, "C")
+    t.join(2)
+    assert got[0] == (True, "A") and not b.is_open()
+
+
+def test_settle_is_idempotent():
+    b = Burst()
+    tok = b.received()
+    b.settle(tok)
+    b.settle(tok)
+    b.settle(None)
+    assert b.incoming == 0
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())
