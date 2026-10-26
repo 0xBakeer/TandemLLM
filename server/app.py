@@ -1909,6 +1909,12 @@ def _cold_release() -> None:
         res.owner = None
 
 
+def _sampled_q_free() -> bool:
+    """SPD-245: the sampled verify carries no q: `--sampled-tree det` with a tree, where the drafter
+    gets no sampler (`_generate_stream`) and every walk draws the target's token at each node."""
+    return bool(STATE.get("sampled_tree") == "det" and STATE.get("tree"))
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -7336,6 +7342,10 @@ class Handler(BaseHTTPRequestHandler):
                              # SPD-245: what a sampled request that names no filter runs with
                              "unnamed_filters": sampling_defaults.resolve(
                                  None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
+                             # SPD-245: whether an unseeded sampled request draws its own seed
+                             "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
+                                          "keyed": sampling_defaults.keys_unseeded(
+                                              _S.get("FRESH_SEED"), _sampled_q_free())},
                              # SRV-241: what a regenerate samples with, and how many there were
                              "regenerate": (STATE["regenerate"].report()
                                             if STATE.get("regenerate") is not None
@@ -8134,6 +8144,12 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()             # a bug here serves the request as sent
         if rec.sampling is None and sampler.on:
             rec.sampling = "client"
+        # SPD-245: an unseeded sampled request draws its own seed here and takes the keyed walk a
+        # seeded one takes (server/sampling_defaults.py); recorded in the decision row like a
+        # regenerate's seed. The response is as for a client's seed (no seed field).
+        drawn = sampling_defaults.admit_seed(sampler, _S.get("FRESH_SEED"), _sampled_q_free())
+        if drawn is not None and plan is not None and plan.row is not None:
+            plan.row["extra"]["seed_drawn"] = drawn
         # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
         # under a conductor plan; its reasoning ends with the template's blank lines as content,
         # so each round's block is timed. SRV-617: on the raw path too for a plain API caller

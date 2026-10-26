@@ -330,6 +330,9 @@ KNOBS: dict[str, tuple] = {
     'WY_PREC': ('ieee', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS': ('4', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS_PREP': ('4', 'tools/gdn_wy_kernels.py'),
+    # SPD-245: an unseeded sampled request draws its own seed and takes the keyed walk (server/sampling_defaults.py
+    # `admit_seed`): auto = where the sampled verify carries no q (--sampled-tree det), on, off
+    'FRESH_SEED': ('auto', 'server/app.py'),
     # SRV-241 (0.4.4-test): the regenerate rule (server/regenerate.py): `sample` = a regenerate of
     # an answered conversation under a TandemLLM plan samples with a fresh seed, `off` = no
     # detection; the defaults of --regenerate and its sampling flags (docs/server.md, Regenerate)

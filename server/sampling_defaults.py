@@ -13,9 +13,21 @@ top_p (Qwen3.8-27B and its fine-tunes: top_k 20, top_p 0.95). The order, first o
 
 Only the filters move; the temperature is the request's or the server's as before, a greedy
 request is untouched, and the logits are not touched at all.
+
+SPD-245, the seed: a sampled request that names no seed draws its own at admission (`admit_seed`, 63
+bits of OS entropy, as a regenerate's) and then takes the walk a seeded request takes: the token at
+position t is argmax(z / T + G_t) over `engine/sample.py` `_filter`'s kept set, G_t Gumbel noise keyed
+by (seed, t), the Gumbel-max form of a draw from the same filtered distribution the multinomial draws
+from. Two requests get two seeds, so two answers to one prompt differ as before; a client that sends
+the recorded seed gets the answer again. QWEN38_FRESH_SEED: `auto` (the default) where the sampled
+verify carries no q (`--sampled-tree det` with a tree: the drafter's tree is the greedy one and the walk
+draws the target's token at each node, which is all the keyed walk does too), `on` everywhere (also
+where a sampling drafter's q-aware `min(1, p/q)` accept would otherwise apply), `off` never.
 """
 
 from __future__ import annotations
+
+import secrets
 
 FIELDS = ("top_p", "top_k", "min_p")
 PLAIN = {"top_p": 1.0, "top_k": 0, "min_p": 0.0}
@@ -46,3 +58,36 @@ def resolve(body: dict | None, server: dict | None = None, card: dict | None = N
         return {"top_p": float(card.get("top_p", 1.0)), "top_k": int(card.get("top_k", 0) or 0),
                 "min_p": 0.0, "source": "card"}
     return dict(PLAIN, source="none")
+
+
+FRESH_MODES = ("auto", "on", "off")
+
+
+def fresh_seed() -> int:
+    """A request's own seed: 63 bits of OS entropy (a non-negative int64, as a regenerate's)."""
+    return secrets.randbits(63)
+
+
+def seed_mode(mode: str | None) -> str:
+    m = (mode or "auto").strip().lower()
+    if m not in FRESH_MODES:
+        raise ValueError(f"QWEN38_FRESH_SEED must be one of {FRESH_MODES}, got {mode!r}")
+    return m
+
+
+def keys_unseeded(mode: str | None, q_free: bool) -> bool:
+    """Whether an unseeded sampled request draws its own seed under `mode`."""
+    m = seed_mode(mode)
+    return m == "on" or (m == "auto" and q_free)
+
+
+def admit_seed(sampler, mode: str | None, q_free: bool) -> int | None:
+    """Give an unseeded sampled request its own seed (see the module docstring); returns the seed
+    drawn, or None when the request keeps its sampler as it is (greedy, a seed of its own, the mode
+    off, or `auto` where the verify carries a q). `q_free`: the server's sampled verify takes no q."""
+    if sampler is None or not sampler.on or sampler.seed is not None:
+        return None
+    if not keys_unseeded(mode, q_free):
+        return None
+    sampler.seed = fresh_seed()
+    return sampler.seed

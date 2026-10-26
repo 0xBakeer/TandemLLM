@@ -43,6 +43,8 @@ All sampling filters (`temperature`, `top_p`, `top_k`, `min_p`) run after the pe
 
 A request with a `seed` draws with noise keyed by its position in the sequence: the token at index t is the argmax of `log p_t + G_t`, where `G_t` is Gumbel noise from a generator seeded by `(seed, t)`. That is an exact sample from `p_t`, and it does not depend on how many draws the drafters made before. The same seed therefore gives the same text whatever the drafters proposed.
 
+A sampled request without a `seed` draws its own at admission (SPD-245, 63 bits of OS entropy) and takes the same keyed walk. The distribution is the same: Gumbel-max over `_filter`'s kept set is a draw from the filtered `p_t`, the draw the unseeded multinomial took. Only the noise differs, and two requests get two seeds, so a regenerate of the same prompt still differs. Under an active plan the seed is in the decision row (`extra.seed_drawn`). The response has no seed field, as for a client's seed. `QWEN38_FRESH_SEED`: `auto` (default) draws where the sampled verify carries no q (`--sampled-tree det`), `on` draws everywhere (the q-aware `min(1, p/q)` accept of a sampling drafter gives way to the keyed walk), `off` never draws. `/health` `sampling.unseeded` says which applies.
+
 `tests/test_sample.py` checks the samplers statistically on the CPU, and `tools/sampled_dist.py` checks the served engine's sampled answers against the target sampled alone.
 
 ## Caches
