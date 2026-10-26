@@ -98,6 +98,10 @@ def test_the_row_is_the_raw_file():
     assert back == row, (back, row)
     assert not validate(row, registry._PAR_ROW), validate(row, registry._PAR_ROW)
     assert registry._parallel_errors(_model([back]), _root([raw])) == []
+    # a workload without a decode window (one event) is left out of the row
+    raw2 = _raw(decode={"median": {"code": None, "prose": 126.29}})
+    assert pc.build_row(raw2)["decode"] == {"prose": 126.3}
+    assert not validate(pc.build_row(raw2), registry._PAR_ROW)
 
 
 def test_a_level_without_proof_is_refused():

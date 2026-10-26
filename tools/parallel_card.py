@@ -18,6 +18,8 @@ own for every request):
 
   decode   the code and the prose workload alone, `--decode-runs` each after `--warmups` warm-ups;
            decode tok/s = (completion tokens - 1) / (last token - first token); median per workload.
+           A workload whose text arrives in one event has no decode window, and the row leaves it out
+           (LFM2.5's code answer, 2026-10-26: one stream event a run, one run ending as tool_calls).
   prefill  prompts of 2,048, 8,192 and 32,768 tokens (counted with the server's /v1/tokenize and
            checked against the request's prompt_tokens), `--prefill-runs` each, 1 token out;
            TTFT = send to first token; prefill tok/s = prompt tokens / TTFT; medians.
@@ -379,7 +381,9 @@ def build_row(raw: dict) -> dict:
                                  "prompt_tokens": s["prompts"]["prompt_tokens"]}},
            "rounds": raw["args"]["rounds"]}
     if raw.get("decode"):
-        row["decode"] = {w: _r(raw["decode"]["median"][w], 1) for w in ("code", "prose")}
+        # a workload whose stream gave no decode window (its text arrived in one event) is left out
+        row["decode"] = {w: _r(raw["decode"]["median"][w], 1) for w in ("code", "prose")
+                         if raw["decode"]["median"].get(w) is not None}
     if raw.get("prefill"):
         row["prefill"] = {d: {"ttft_s": _r(v["ttft_s"], 2), "tok_s": _r(v["tok_s"], 0),
                               "prompt_tokens": int(v["prompt_tokens"]) if v["prompt_tokens"] else None}
