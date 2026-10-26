@@ -188,6 +188,8 @@ class FlashNextServing:
         # each for chains of 2-6 rows (a class's idle captures need shapes before the first rounds)
         self.uses: dict = dict(PRIOR_USES)
         self._fresh: set = set()            # graphs captured while idle and not replayed yet
+        self._owed: dict = {}               # class -> a length a turn found it at without its graphs
+        self.last_owed = None               # the last `capture_cost`'s class and missing graphs (the turn's line)
         self.capture_ms = None              # one verify or commit graph's capture, ms (EMA 0.2)
         self._width = 0                     # the last verify block's rows (its commit's key)
         self.picks = None
@@ -279,7 +281,7 @@ class FlashNextServing:
         if drafter is None:
             return None
         self.kv.length = 0
-        steps = self.idle_captures()
+        steps = self.idle_captures(ahead=False)       # the classes ahead are the idle windows' (SRV-713)
         return sum(1 for _ in steps) if steps is not None else 0
 
     def draft_heads(self) -> dict:
@@ -460,20 +462,85 @@ class FlashNextServing:
     def capture_cost(self, n: int) -> float:
         """What a drafted turn at context length `n` would spend capturing the graphs its class lacks,
         ms: the first drafted request in each class paid 3.4-5.1 s of captures (P0, 2026-10-12)
-        until the idle captures below took them (`StairCut.turn` weighs it with the backlog)."""
-        miss = self._missing(self.fn.qsa_class(n))
+        until the idle captures below took them (`StairCut.turn` weighs it with the backlog). A class
+        that lacks graphs here is owed them: the next idle window captures it whatever length the state
+        is left at (a conductor box leaves it at a side question's)."""
+        cls = self.fn.qsa_class(n)
+        miss = self._missing(cls)
+        if miss:
+            self._owed.setdefault(cls, int(n))
+        # what the turn's line names: the class and its missing verify, commit and draft graphs
+        self.last_owed = f"{cls}:" + "".join(f"{k}{sum(1 for m in miss if m[0] == k)}" for k in "vcm")
         return len(miss) * (self.capture_ms if self.capture_ms is not None else CAPTURE_MS)
 
-    def idle_captures(self):
+    def _next_class_len(self, n: int) -> int | None:
+        """The shortest context past `n` in another class (`qsa_class` grows with the length), or None
+        when no context under `max_len` is."""
+        q, cls, top = self.fn.qsa_class, self.fn.qsa_class(n), int(self.max_len) - 1
+        lo, hi = int(n), max(int(n) + 1, 1)
+        while hi < top and q(hi) == cls:
+            lo, hi = hi, min(top, hi * 2)
+        if hi <= lo or q(hi) == cls:
+            return None
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            lo, hi = (mid, hi) if q(mid) == cls else (lo, mid)
+        return hi
+
+    #: SRV-713: the span past the state's length whose classes an idle window captures ahead: a request
+    #: through the conductor starts 4.1-4.8k tokens long (its plan's prompt, 2026-10-26), two classes past an
+    #: empty state's (1,024 from 2,051 tokens, 2,048 from 4,096)
+    AHEAD_TOKENS = 6144
+
+    def _capture_lengths(self, ahead: bool) -> list:
+        """The lengths whose classes the idle captures serve, in order: the state's own; with `ahead`,
+        those turns found without graphs (`capture_cost`), then the next class past the state's length
+        (the one a conversation grows into) and every further one that starts within `AHEAD_TOKENS` of
+        it. SRV-713: every request through the conductor starts in the 2,048 class (its plan's prompt
+        is 4.1-4.8k tokens), the warm-up captures class 0 only and the class of a short state's length
+        is class 0, so each such turn took the plain step: 39.5 tok/s on code against 81.4 raw."""
+        n = int(self.st.length)
+        out = [n]
+        if ahead:
+            out += sorted(self._owed.values())
+            x, first = self._next_class_len(n), True
+            while x is not None and (first or x <= n + self.AHEAD_TOKENS):
+                out.append(x)
+                x, first = self._next_class_len(x), False
+        return out
+
+    def idle_captures(self, ahead: bool = True, wants=None):
         """The graphs the class of the state's length lacks, one capture a step (a generator: the
         server stops between two when a request waits), or None when it lacks none. An empty state
         (a side slot after its warm-up) captures class 0's: its first drafted turn would pay them, so
         it would never draft (2026-10-12: 3 requests at once, the side slots drafted nothing). Every
         capture leaves the state as it was: a verify writes only rows past the length, a commit's and the
-        MTP chain's warm-ups are undone (engine.py)."""
-        cls = self.fn.qsa_class(self.st.length)
-        miss = self._missing(cls)
-        return self._capture_steps(cls, miss) if miss else None
+        MTP chain's warm-ups are undone (engine.py).
+
+        With `ahead`, then the classes of `_capture_lengths` past the state's own, each where `wants(n)`
+        (the drafter's `wants_graphs`) says drafting can pay. A class's graphs fit any length: the rows'
+        positions, the visible keys and the dense flag of each row are the replay's inputs. A capture's
+        rows read no position the state has not committed: a dense row (a short state's) reads up to
+        its own, a sparse one only complete blocks (the scores past them are -inf)."""
+        todo, seen = [], set()
+        for i, n in enumerate(self._capture_lengths(ahead)):
+            cls = self.fn.qsa_class(n)
+            if cls in seen:
+                continue
+            seen.add(cls)
+            if i and wants is not None and not wants(n):
+                continue
+            miss = self._missing(cls)
+            if miss:
+                todo.append((cls, miss))
+            else:
+                self._owed.pop(cls, None)
+        return self._capture_classes(todo) if todo else None
+
+    def _capture_classes(self, todo: list):
+        for cls, miss in todo:
+            yield from self._capture_steps(cls, miss)
+            self._owed.pop(cls, None)
 
     @torch.no_grad()
     def _capture_steps(self, cls: int, miss: list):
