@@ -165,7 +165,7 @@ class JointGraphs:
     def __init__(self):
         self.lru = GraphLRU(CAP)
         self.pool = torch.cuda.graph_pool_handle()
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
         self.bufs: dict = {}
         self.bad: set = set()                # keys whose capture was refused: eager from then on
         self.seen: dict = {}                 # passes of a shape not captured yet
@@ -244,6 +244,10 @@ class JointGraphs:
             n_seen = self.seen[key] = self.seen.get(key, 0) + 1
             if n_seen < AFTER:
                 return self._no("warming")
+            if len(self.lru) >= self.lru.cap:
+                # SPD-223: every graph here shares one capture stream, whose cuBLAS workspace a reset drops: one
+                # graph evicted would leave the others bound to a freed workspace, so the set goes at once
+                self._flush()
             if len(self.seen) > 4096:
                 self.seen.clear()
             # captured before `_fold_begin` hands this round's pending commit to the device, so a refusal
@@ -400,6 +404,17 @@ class JointGraphs:
         cap.hidden_post = [eng.hidden_post_norm for eng in engs]
         self.stats["captured"] += 1
         return cap
+
+    def _flush(self) -> None:
+        """Every kept graph reset at once (counted as evicted), before the next capture warms the stream again."""
+        for c in self.lru.items.values():
+            if getattr(c, "graph", None) is not None:
+                c.graph.reset()
+                c.graph = None
+        self.lru.evicted += len(self.lru.items)
+        self.lru.items.clear()
+        self.lru.nbytes.clear()
+        self.stats["flushed"] = self.stats.get("flushed", 0) + 1
 
     def report(self) -> dict:
         return dict(self.lru.report(), **{k: v for k, v in self.stats.items()})

@@ -108,7 +108,7 @@ class VerifyGraphs:
         self.eng = eng
         dev = eng.device
         self.pool = torch.cuda.graph_pool_handle()
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
         self.graphs: dict = {}
         self.tokens = {}                          # T -> static token buffer
         self.pos = {}                             # T -> static rotary positions

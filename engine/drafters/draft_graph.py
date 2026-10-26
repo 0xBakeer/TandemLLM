@@ -73,9 +73,14 @@ class DraftGraph:
         # the cache the graph gathers from; a drafter that reallocates it gets a new graph
         self.ck_ptr = drafter._ck.data_ptr()
         self.ptrs = DraftGraph.pointers(drafter)            # SPD-223: every tensor the body bakes
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
+        self._leased = True
         self.out = None
         self.stats = {"captured": 0, "replayed": 0}
+
+    def __del__(self):
+        if getattr(self, "_leased", False):
+            _release(self.graphs, self.stream)
 
     @staticmethod
     def pointers(drafter) -> tuple:
@@ -306,11 +311,16 @@ class PackedDraftGraph:
         self.host = torch.zeros(len(ds), 3, dtype=torch.long).pin_memory()
         self.ptrs = tuple(DraftGraph.pointers(d) for d in ds)          # SPD-223: every tensor each body bakes
         self.graphs: dict = {}
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
+        self._leased = True
         # one memory pool for this set's graphs (one per span combination): they never run at once,
         # and each replay's outputs are read before the set's next packed call
         self.pool = torch.cuda.graph_pool_handle()
         self.stats = {"captured": 0, "replayed": 0}
+
+    def __del__(self):
+        if getattr(self, "_leased", False):
+            _release(self.graphs, self.stream)
 
     def run(self, reqs: list, temp):
         from engine.verify_graph import VerifyGraphs
@@ -366,6 +376,18 @@ class PackedDraftGraph:
             return got[1]
         hb.fetch()
         return [r + ((hb, e),) for e, r in enumerate(got[1])]
+
+
+def _release(graphs: dict, stream) -> None:
+    """A graph owner going away: its graphs reset (torch drops its stream's cuBLAS workspace with them), then
+    its capture stream back to the lease (engine/capture_lock.py, SPD-223)."""
+    try:
+        for got in graphs.values():
+            got[0].reset()
+        graphs.clear()
+        capture_lock.give_back(stream)
+    except Exception:                                                # noqa: BLE001
+        pass
 
 
 class _HostBlobs:

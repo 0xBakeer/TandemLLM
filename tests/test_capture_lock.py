@@ -146,6 +146,30 @@ def test_the_drafters_capture_runs_with_the_lock_held():
     assert not capture_lock.LOCK._is_owned()
 
 
+def test_a_capture_stream_has_one_owner_at_a_time():
+    """SPD-223: torch drops a capture stream's cuBLAS workspace when any graph captured on it is reset, so two
+    graph owners must never hold one stream (a shared pooled stream left a kept draft graph bound to a freed
+    workspace). The lease hands a stream to one owner until it is given back, then hands it on."""
+    made = []
+    saved = capture_lock._new_stream, list(capture_lock._FREE), dict(capture_lock.LEASES)
+    capture_lock._new_stream = lambda: made.append(object()) or made[-1]
+    capture_lock._FREE.clear()
+    try:
+        a, b, c = capture_lock.lease_stream(), capture_lock.lease_stream(), capture_lock.lease_stream()
+        assert len({id(a), id(b), id(c)}) == 3 and len(made) == 3
+        capture_lock.give_back(b)
+        d = capture_lock.lease_stream()
+        assert d is b and len(made) == 3, "a given-back stream serves the next owner"
+        e = capture_lock.lease_stream()
+        assert e not in (a, c, d) and len(made) == 4
+        capture_lock.give_back(None)
+    finally:
+        capture_lock._new_stream = saved[0]
+        capture_lock._FREE[:] = saved[1]
+        capture_lock.LEASES.clear()
+        capture_lock.LEASES.update(saved[2])
+
+
 # ------------------------------------------------------------------ 2. the writer waits
 
 def test_the_writer_copies_nothing_while_a_capture_holds_the_lock():

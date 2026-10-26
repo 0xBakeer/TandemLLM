@@ -48,8 +48,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("f58864a23629d307112db205fa4b55a0457a1cd93da73ebaf8e5b74eb02936a2",
-             "d34d388a04a6434e238df0c90e2f049237a6fe2568f3600227bd4c3526a85d57")
+GOLDEN_V2 = ("6e3f2878fc2baa4705981976997175633c52e005ea5821b6186942f5428813d4",
+             "3d92ff17855911079cc5f3e1b5e6b02ada96a0ef4ebc67a9272579c7e20fe82d")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -79,7 +79,8 @@ GOLDEN_FP4 = {
     # SPD-245: the GDN gate read in place (gate2d, gate_rows) and no normed-row store before the slab MLP
     # SPD-245: lane-grouped joint attention, the commit's path rows pinned
     # SPD-245: one attention table a launch, kept by the capturing graph
-    "qwen3_5": "320c3308cfa688d5f846d828813215da902496760cc33f0823e120f26ae61d78",
+    # SPD-223: a capture stream for each graph owner
+    "qwen3_5": "e159bd85953df5702d4d8d9e7c2be0f0a24d140bcb58cbbcc7b25e0fabd1eb13",
     "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",
