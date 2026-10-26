@@ -58,6 +58,9 @@ _PAR_COLS = [1, 3, 10, 12, 13, 14]
 #: SPD-199: rows a block keeps in a joint pass at any E (0: the share of the row cap, `max_rows // E`); the
 #: joint cut's tree cap and the graphs' padding both follow it
 ROWS_A_SLOT = int(_S.get("JOINT_ROWS_A_SLOT") or 0)
+#: SPD-245: rows a block keeps at exactly E lanes ({E: rows}, QWEN38_JOINT_ROWS_AT_LANES "lanes:rows" pairs)
+ROWS_AT_LANES = {int(e): int(r) for e, r in (p.split(":") for p in
+                                             (_S.get("JOINT_ROWS_AT_LANES") or "").split(",") if p.strip())}
 
 
 def t_pad(E: int, max_rows: int) -> int:
@@ -65,6 +68,8 @@ def t_pad(E: int, max_rows: int) -> int:
     t = min(MAX_T, max_rows // max(1, E))
     if ROWS_A_SLOT:
         t = min(t, ROWS_A_SLOT)
+    if E in ROWS_AT_LANES:
+        t = min(t, ROWS_AT_LANES[E])
     return max(2, t)
 
 

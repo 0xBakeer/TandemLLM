@@ -99,8 +99,10 @@ def test_spd163_the_joint_cut_keeps_each_tree_within_a_cap():
             assert 0 in k and all(t.parents[i] in k for i in k if i)
         assert slots.joint_cut(trees, 64) == slots.joint_cut(trees, 64, None)
     from engine.models.qwen3_5 import joint_graphs as JG
-    assert [JG.t_pad(e, 64) for e in (2, 3, 4, 5, 8)] == [16, 16, 16, 12, 8]
-    assert JG.t_pad(8, 32) == 4
+    # SPD-245: 4 lanes keep 8 rows a block (QWEN38_JOINT_ROWS_AT_LANES 4:8)
+    assert JG.ROWS_AT_LANES == {4: 8}
+    assert [JG.t_pad(e, 64) for e in (2, 3, 4, 5, 8)] == [16, 16, 8, 12, 8]
+    assert JG.t_pad(8, 32) == 4 and JG.t_pad(4, 32) == 8
 
 
 if __name__ == "__main__":

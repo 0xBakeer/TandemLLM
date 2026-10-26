@@ -26,6 +26,11 @@ KNOBS: dict[str, tuple] = {
     'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),
     # SPD-199: rows a block keeps in a joint pass whatever E (0: max_rows // E); 8 -> 32 rows at 4 slots, 64 at 8
     'JOINT_ROWS_A_SLOT': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-245: rows a block keeps at exactly this many lanes, "lanes:rows" pairs (empty: none). 4:8: a 4-lane
+    # pass of 4 x 8 rows (the 32-row byte-bound GEMM) instead of 4 x 16: round 106 -> 91 ms for one token less,
+    # C4 steady 112 -> 117 (t1) and 124 -> 131 (t0) tok/s, served x3 on two servers each; 8 rows at 2 lanes
+    # lose 3-4 % and 4 or 6 rows at 8 lanes lose up to 7 %, so no other lane count is in the table
+    'JOINT_ROWS_AT_LANES': ('4:8', 'engine/models/qwen3_5/joint_graphs.py'),
     # SPD-199: the 27B's EXL3 projections at 33+ rows through the decode-once tile: '' off, '64' or '128' rows
     'EXL3_TALL': ('', 'engine/models/qwen3_5/tall.py'),
     # SPD-201: the 27B's EXL3 projections at 33..64 rows read fragment-major activations (the same bits)
