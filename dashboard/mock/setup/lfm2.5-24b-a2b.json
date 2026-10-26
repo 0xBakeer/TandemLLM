@@ -540,9 +540,9 @@
    {
     "profile": "lfm25-exl3-4.0",
     "build": "0.14.2",
-    "commit": "6d691a11",
+    "commit": "05fce721",
     "date": "2026-10-26",
-    "raw": "models/lfm2.5-24b-a2b/measurements/parallel-2026-10-26-lfm25-exl3-4.0.json",
+    "raw": "models/lfm2.5-24b-a2b/measurements/parallel-2026-10-26-lfm25-exl3-4.0-srv723.json",
     "setup": {
      "env": "v3-lfm-4.0",
      "lanes": 8,
@@ -562,63 +562,63 @@
       "set": "card-v1",
       "sha256": "eb44b3d5e32e2b9c",
       "prompt_tokens": {
-       "code": 241,
-       "prose": 184
+       "code": 240,
+       "prose": 181
       }
      }
     },
     "rounds": 3,
     "decode": {
-     "prose": 126.3
+     "code": 130.8,
+     "prose": 129.9
     },
     "prefill": {
      "2048": {
-      "ttft_s": 0.36,
-      "tok_s": 5693.0,
-      "prompt_tokens": 2052
+      "ttft_s": 0.37,
+      "tok_s": 5600.0,
+      "prompt_tokens": 2055
      },
      "8192": {
-      "ttft_s": 1.38,
-      "tok_s": 5958.0,
-      "prompt_tokens": 8198
+      "ttft_s": 1.41,
+      "tok_s": 5798.0,
+      "prompt_tokens": 8200
      },
      "32768": {
-      "ttft_s": 5.64,
-      "tok_s": 5814.0,
-      "prompt_tokens": 32778
+      "ttft_s": 5.67,
+      "tok_s": 5782.0,
+      "prompt_tokens": 32775
      }
     },
     "levels": {
      "1": {
-      "wall_tok_s": 122.5,
-      "decode_tok_s": 126.0,
-      "ttft_s": 0.13,
+      "wall_tok_s": 122.8,
+      "decode_tok_s": 125.9,
+      "ttft_s": 0.11,
       "at_once": 1,
       "rounds": 3
      },
      "2": {
-      "wall_tok_s": 163.1,
-      "decode_tok_s": 168.8,
-      "ttft_s": 0.24,
+      "wall_tok_s": 164.8,
+      "decode_tok_s": 171.1,
+      "ttft_s": 0.22,
       "at_once": 2,
       "rounds": 3
      },
      "4": {
-      "wall_tok_s": 202.6,
-      "decode_tok_s": 212.1,
-      "ttft_s": 0.49,
+      "wall_tok_s": 202.7,
+      "decode_tok_s": 212.2,
+      "ttft_s": 0.48,
       "at_once": 4,
       "rounds": 3
      },
      "8": {
-      "wall_tok_s": 233.2,
-      "decode_tok_s": 246.2,
-      "ttft_s": 0.97,
+      "wall_tok_s": 238.6,
+      "decode_tok_s": 252.3,
+      "ttft_s": 0.98,
       "at_once": 8,
       "rounds": 3
      }
-    },
-    "note": "Window 131,072 tokens a lane, the largest this card fits on the Spark. The code workload's answer arrived in one stream event a run (one run ended as tool_calls), so decode names prose alone."
+    }
    }
   ]
  },
