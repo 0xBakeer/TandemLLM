@@ -49,6 +49,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.drafters.dflash2 import _Conv, _apply_rope, _lin, _rms, _rope_tables
+from engine.methods import draft_meet
 
 #: the files of a LiLiCorr checkpoint directory
 FILES = ("config.json", "model.safetensors")
@@ -395,6 +396,162 @@ class LiLiCorrModel:
         start, pairs = self.lattice(ids, logp, rows, anchor_g, anchor_ok)
         return self.walk(ids, start, pairs)
 
+    # ---- several sequences at once (SPD-233) -----------------------------------------------------
+    def draft_multi(self, reqs: list) -> torch.Tensor:
+        """`draft` of B sequences in one pass, reqs [(anchor, pos0, ck, cv, ctx_ok, anchor_g, anchor_ok)]
+        as `draft` takes them: every projection, the head and the lattice's layers over all B blocks' rows
+        at once (the weights read once), the attention and the walk per sequence on its own rows, context
+        and mask. [B, slots, 4] (`walk` a sequence)."""
+        c = self.cfg
+        B, S = len(reqs), c.block_size - 1
+        h = self.block_multi(reqs)
+        rows = h.view(B, c.block_size, -1)[:, 1:]                                      # [B, S, H]
+        ids, logp = self.candidates(self.head(rows.reshape(B * S, -1)))
+        ids, logp = ids.view(B, S, -1), logp.view(B, S, -1)
+        start, pairs = self.lattice_multi(ids, logp, rows, torch.stack([r[5] for r in reqs]),
+                                          torch.stack([r[6].reshape(()) for r in reqs]))
+        return self.walk_multi(ids, start, pairs)
+
+    def block_multi(self, reqs: list) -> torch.Tensor:
+        """`block` of B sequences: their rows stacked [B * block, H] (a sequence's rows adjacent, the
+        convolutions' taps stopping at each block's first row), the final normed rows."""
+        c, W = self.cfg, self.W
+        B, blk, eps, dev = len(reqs), c.block_size, c.rms_norm_eps, self.device
+        ids = torch.full((B, blk), c.mask_token_id, dtype=torch.long, device=dev)
+        ids[:, 0] = torch.cat([r[0].view(1) for r in reqs])
+        h = self.embed.index_select(0, ids.view(-1))
+        rb = torch.arange(blk, device=dev)
+        row = rb.repeat(B)
+        pos = torch.stack([r[1].reshape(()) for r in reqs]).view(B, 1) + rb
+        cos, sin = _rope_tables(pos.view(-1), c.head_dim, c.rope_theta, h.dtype)
+        ones = torch.ones(blk, blk, dtype=torch.bool, device=dev)
+        masks = torch.stack([torch.zeros(blk, r[4].shape[1] + blk, dtype=torch.float32, device=dev).masked_fill_(
+            ~torch.cat([r[4], ones], 1), float("-inf")) for r in reqs])                  # [B, blk, C + blk]
+        for i in range(c.num_hidden_layers):
+            h = h + self._attention_multi(i, h, row, cos, sin, [r[2][i] for r in reqs], [r[3][i] for r in reqs],
+                                          masks)
+            h = h + self._mlp_part(i, h, row)
+        return _rms(h, W["norm.weight"], eps)
+
+    def _attention_multi(self, i, h, row, cos, sin, cks, cvs, masks) -> torch.Tensor:
+        """`_attention_part` over B blocks' rows: the projections and the convolution on all rows, each
+        block's attention over its own context and its own rows."""
+        c, W, p = self.cfg, self.W, f"layers.{i}.self_attn"
+        T, D, eps = h.shape[0], c.head_dim, c.rms_norm_eps
+        B = len(cks)
+        blk = T // B
+        conv = self.convs[i][0] if self.convs[i] is not None else None
+        x = _rms(h, W[f"layers.{i}.input_layernorm.weight"], eps)
+        out_coef = None
+        if conv is not None:
+            x, out_coef = conv.prepare(x, row)
+        q = _lin(x, W[f"{p}.q_proj.weight"]).view(T, c.num_attention_heads, D)
+        k = _lin(x, W[f"{p}.k_proj.weight"]).view(T, c.num_key_value_heads, D)
+        v = _lin(x, W[f"{p}.v_proj.weight"]).view(T, c.num_key_value_heads, D)
+        q = _apply_rope(_rms(q, W[f"{p}.q_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]   # [nh, T, D]
+        k = _apply_rope(_rms(k, W[f"{p}.k_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]   # [kv, T, D]
+        vt = v.transpose(0, 1)
+        keys = torch.stack([torch.cat([cks[b], k[:, b * blk:(b + 1) * blk]], 1) for b in range(B)])
+        vals = torch.stack([torch.cat([cvs[b], vt[:, b * blk:(b + 1) * blk]], 1) for b in range(B)])
+        qb = q.view(q.shape[0], B, blk, D).transpose(0, 1)                                   # [B, nh, blk, D]
+        o = self._attend_multi(qb, keys, vals, masks, self.sink[i])
+        o = _lin(o, W[f"{p}.o_proj.weight"])
+        return o if conv is None else conv.finish(o, out_coef, row)
+
+    @staticmethod
+    def _attend_multi(q, keys, vals, masks, sink) -> torch.Tensor:
+        """`_attend` of B blocks: q [B, heads, blk, D] over keys / vals [B, kv heads, K, D] with masks
+        [B, blk, K]. -> [B * blk, heads * D]."""
+        B, nh, blk, D = q.shape
+        G, K = keys.shape[1], keys.shape[2]
+        per = nh // G
+        logits = torch.einsum("bgqtd,bgkd->bgqtk", q.float().reshape(B, G, per, blk, D), keys.float()) / math.sqrt(D)
+        logits = logits.reshape(B, nh, blk, K) + masks[:, None]
+        if sink is not None:
+            logits = torch.cat([logits, sink.view(1, nh, 1, 1).expand(B, nh, blk, 1)], -1)
+        w = torch.softmax(logits, -1)[..., :K]
+        o = torch.einsum("bgqtk,bgkd->bgqtd", w.reshape(B, G, per, blk, K), vals.float())
+        return o.reshape(B, nh, blk, D).transpose(1, 2).reshape(B * blk, nh * D).to(q.dtype)
+
+    def lattice_multi(self, ids, logp, pass_hidden, anchor_g, anchor_ok) -> tuple[torch.Tensor, torch.Tensor]:
+        """`lattice` of B sequences: ids / logp [B, slots, k], pass_hidden [B, slots, H], anchor_g [B, H],
+        anchor_ok [B] -> (start [B, k], pairs [B, slots - 1, k, k])."""
+        c, W = self.cfg, self.W
+        B, S, k = ids.shape
+        dt = W["lilicorr.slot_embedding"].dtype
+        tok = self.embed.index_select(0, ids.reshape(-1)).to(dt)
+        x = _linb(tok, W, "lilicorr.token_proj") if c.lc_hidden != c.hidden_size else tok
+        x = x.view(B, S, k, c.lc_hidden) + _linb(pass_hidden.to(dt), W, "lilicorr.pass_hidden_proj").unsqueeze(2)
+        lp = logp.float()
+        feats = torch.stack([lp, lp.exp(), lp - lp.max(-1, keepdim=True).values,
+                             self.rank_frac.expand_as(lp), self.is_top1.expand_as(lp)], -1).to(dt)
+        feats = F.layer_norm(feats, (5,), W["lilicorr.feature_norm.weight"], W["lilicorr.feature_norm.bias"])
+        x = x + _linb(F.silu(_linb(feats, W, "lilicorr.feature_mlp.up_proj")), W, "lilicorr.feature_mlp.down_proj")
+        x = x + W["lilicorr.slot_embedding"][0, 0, :S] + W["lilicorr.rank_embedding"][0, 0]
+        a = _linb(anchor_g.view(B, 1, -1).to(dt), W, "lilicorr.context_proj")
+        a = a * anchor_ok.view(B, 1, 1).to(a.dtype)
+        x = self._encode_multi(x.reshape(B, S * k, c.lc_hidden)).view(B, S, k, c.lc_hidden)
+        return self._scores_multi(x, a)
+
+    def _encode_multi(self, x: torch.Tensor) -> torch.Tensor:
+        """`_encode` of B sequences' nodes x [B, n, Hc]."""
+        c, W = self.cfg, self.W
+        B, n = x.shape[0], x.shape[1]
+        eps, heads = c.rms_norm_eps, c.lc_heads
+        hd = c.lc_hidden // heads
+        bias = self.attn_bias[:, :n, :n]
+        for j in range(c.lc_layers):
+            p = f"lilicorr.layers.{j}"
+            y = _rms(x, W[f"{p}.attn_norm.weight"], eps)
+            qkv = F.linear(y, W[f"{p}.attn.in_proj_weight"], W[f"{p}.attn.in_proj_bias"])
+            q, kk, v = (t.reshape(B, n, heads, hd).transpose(1, 2) for t in qkv.chunk(3, -1))
+            o = F.scaled_dot_product_attention(q, kk, v, attn_mask=bias[None])
+            x = x + _linb(o.transpose(1, 2).reshape(B, n, c.lc_hidden), W, f"{p}.attn.out_proj")
+            y = F.silu(_linb(_rms(x, W[f"{p}.mlp_norm.weight"], eps), W, f"{p}.mlp.up_proj"))
+            x = x + _lin_wide(y, W[f"{p}.mlp.down_proj.weight"]) + W[f"{p}.mlp.down_proj.bias"]
+        return _rms(x, W["lilicorr.output_norm.weight"], eps)
+
+    def _scores_multi(self, x: torch.Tensor, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """`_scores` of B sequences: x [B, slots, k, Hc], a [B, 1, Hc]."""
+        c, W = self.cfg, self.W
+        B = x.shape[0]
+        a = _rms(a, W["lilicorr.anchor_norm.weight"], c.rms_norm_eps)
+        w_x, w_a, w_xa = self.factor_w
+        a4 = a.view(B, 1, 1, -1)
+        pre = F.linear(x, w_x, W["lilicorr.factor_input_proj.bias"]) + F.linear(a4, w_a) + F.linear(x * a4, w_xa)
+        factor = F.silu(pre)
+        outgoing = _unit(_linb(factor, W, "lilicorr.out_head"), c.vector_eps)
+        incoming = _unit(_linb(factor, W, "lilicorr.in_head"), c.vector_eps)
+        anchor_out = _unit(_linb(a, W, "lilicorr.anchor_out_head"), c.vector_eps)[:, 0]           # [B, D2]
+        start = (incoming[:, 0] @ anchor_out.unsqueeze(-1)).squeeze(-1).float() * c.logit_scale
+        pairs = torch.matmul(outgoing[:, :-1], incoming[:, 1:].transpose(-1, -2)).float() * c.logit_scale
+        return start, pairs
+
+    @staticmethod
+    def walk_multi(ids: torch.Tensor, start: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
+        """`walk` of B sequences: ids [B, slots, k], start [B, k], pairs [B, slots - 1, k, k] -> [B, slots, 4]."""
+        B = ids.shape[0]
+        ar = torch.arange(B, device=ids.device)
+        rows, pick = [start], start.argmax(-1)
+        for s in range(ids.shape[1] - 1):
+            nxt = pairs[:, s][ar, pick]
+            pick = nxt.argmax(-1)
+            rows.append(nxt)
+        prob = torch.softmax(torch.stack(rows, 1), -1)                                # [B, S, k]
+        two = torch.topk(prob, 2, -1)
+        tok = ids.gather(2, two.indices)
+        return torch.stack([tok[..., 0].float(), two.values[..., 0], tok[..., 1].float(), two.values[..., 1]], -1)
+
+
+#: SPD-233: a joint round's LiLiCorr drafts in one packed pass (the round runner's draft meeting,
+#: engine/methods/draft_meet.py): the lanes' context rows in one product, then one graph for the lanes' blocks,
+#: the head over all their rows, the lattices and the walks, so the drafter's weights are read once a round, not
+#: once a lane. Bolt EXL3 4.0, 8 lanes, 2026-10-26: the round's draft 80.9 -> 17.3 ms; served C8 T1 56.5 -> 75.5 /
+#: 74.7 tok/s. "off": each lane drafts from its own graph
+PACK = os.environ.get("QSE_NH_LILICORR_PACK", "on") != "off"
+#: packed graphs kept (one a set of lanes, the least recently replayed reset first)
+PACK_GRAPHS = int(os.environ.get("QSE_NH_LILICORR_PACK_GRAPHS", "12") or 12)
+
 
 class LiLiCorrHead:
     """LiLiCorr as a draft head of the shared tree drafter (`MTPTreeDrafter`): `depth` 7, the rows it
@@ -454,7 +611,16 @@ class LiLiCorrHead:
         context brought up to n - 1, the block, the lattice and the walk, left on the device for
         `read`."""
         self._n = len(nexts)
+        if PACK and draft_meet.MEET is not None and draft_meet.MEET(self):
+            # SPD-233: the round runner drafts this lane with the round's other lanes (`run_packed`), before the read
+            self._pend = (int(nexts[-1]), int(self.srv.kv.length))
+            return
         self._out = self.draft_at(int(nexts[-1]), int(self.srv.kv.length))
+
+    @property
+    def fn(self):
+        """The engine whose heads draft together (the round runner packs the heads of one engine)."""
+        return self.srv.fn
 
     def read(self) -> tuple[list, list]:
         self.st.length += self._n
@@ -465,6 +631,17 @@ class LiLiCorrHead:
     def draft_at(self, anchor: int, n: int) -> torch.Tensor:
         """[slots, 4] on the device (`LiLiCorrModel.walk`) for `anchor` at position n."""
         self.feed(n)
+        self._stage(anchor, n)
+        if self.graph is None:
+            return self._draft()
+        if self.graph is False:
+            self._capture()
+        self.graph.replay()
+        return self._gout
+
+    def _stage(self, anchor: int, n: int) -> None:
+        """The draft's staged input: the anchor, its position, the anchor row's slot, whether that row is
+        this sequence's, the context slots each block row sees."""
         tag = self.tag
         ok = (tag >= max(n - self.W + 1, 0)) & (tag < n)              # a slot this draft may read at all
         # row i (position n + i) sees a context key at p when n + i - p < window
@@ -481,29 +658,89 @@ class LiLiCorrHead:
         if self._copied is not None:
             self._copied.record()
         self.stats["drafts"] += 1
-        if self.graph is None:
-            return self._draft()
-        if self.graph is False:
-            self._capture()
-        self.graph.replay()
-        return self._out
+
+    def _req(self) -> tuple:
+        """The draft's inputs as `LiLiCorrModel.draft` takes them, from the staged buffers and the rings."""
+        d = self._d
+        return (d["i"][:1], d["i"][1], self.k, self.v, d["ok"], self.g.index_select(0, d["i"][2:])[0], d["f"][0])
 
     def _draft(self) -> torch.Tensor:
-        d = self._d
-        return self.m.draft(d["i"][:1], d["i"][1], self.k, self.v, d["ok"], self.g.index_select(0, d["i"][2:])[0],
-                            d["f"][0])
+        return self.m.draft(*self._req())
+
+    @staticmethod
+    @torch.no_grad()
+    def run_packed(heads: list) -> None:
+        """SPD-233: the staged drafts of these heads (one engine, one checkpoint) in one pass: their context
+        rows in one product (`feed_multi`), then one graph a set of heads (`_PackedGraph`); each head's
+        draft is left for its `read`."""
+        LiLiCorrHead.feed_multi(heads, [h._pend[1] for h in heads])
+        for h in heads:
+            h._stage(*h._pend)
+        m = heads[0].m
+        if not m.device.type == "cuda":
+            out = m.draft_multi([h._req() for h in heads])
+        else:
+            reg = m.__dict__.setdefault("_packed", {})
+            key = tuple(id(h) for h in heads)
+            g = reg.pop(key, None)
+            if g is None:
+                g = _PackedGraph(tuple(heads))
+                g.capture()
+                for h in heads:
+                    h.captures += 1             # this round's draft time is the capture's (the drafter skips it)
+            reg[key] = g
+            while len(reg) > PACK_GRAPHS:
+                reg.pop(next(iter(reg))).release()
+            g.graph.replay()
+            out = g.out
+        for b, h in enumerate(heads):
+            h._out = out[b]
+
+    @staticmethod
+    def feed_multi(heads: list, ns: list) -> None:
+        """`feed` of several heads over one checkpoint: every head's new context rows in one `context` call."""
+        jobs = []
+        for h, n in zip(heads, ns):
+            st = h.srv.st
+            if (id(st), st.tap_gen) != h.gen:
+                h.gen = (id(st), st.tap_gen)
+                h.tag.fill_(-1)
+                h.fed = 0
+            R = st.ring.shape[0]
+            a = max(h.fed, n - h.W + 1, st.tap_from, n - R, 0)
+            if a < n:
+                jobs.append((h, a, n, st.ring, R))
+            h.fed = max(h.fed, n)
+        if not jobs:
+            return
+        m = heads[0].m
+        dev = m.device
+        taps = torch.cat([ring.index_select(0, (torch.arange(a, n) % R).to(dev)) for _, a, n, ring, R in jobs])
+        g, k, v = m.context(taps, torch.cat([torch.arange(a, n) for _, a, n, _, _ in jobs]).to(dev))
+        o = 0
+        for h, a, n, _, _ in jobs:
+            pos = torch.arange(a, n)
+            slot = (pos % h.W).to(dev)
+            h.g.index_copy_(0, slot, g[o:o + n - a])
+            h.k.index_copy_(2, slot, k[:, :, o:o + n - a])
+            h.v.index_copy_(2, slot, v[:, :, o:o + n - a])
+            h.tag[pos % h.W] = pos
+            h.stats["context_rows"] += n - a
+            o += n - a
 
     def _capture(self) -> None:
         from engine import capture_lock
-        s = torch.cuda.Stream()
+        # SPD-223: a capture stream of the head's own: the draft's cuBLAS products bake that stream's workspace,
+        # which a reset of another owner's graph on a shared stream (a joint decode graph's eviction) would free
+        s = self._stream = getattr(self, "_stream", None) or capture_lock.lease_stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
                 self._draft()
         torch.cuda.current_stream().wait_stream(s)
         g = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(g):
-            self._out = self._draft()
+        with capture_lock.LOCK, torch.cuda.graph(g, stream=s):
+            self._gout = self._draft()
         torch.cuda.synchronize()
         self.graph = g
         self.captures += 1
@@ -530,6 +767,40 @@ class LiLiCorrHead:
             self.tag[pos % self.W] = pos
             self.stats["context_rows"] += n - a
         self.fed = max(self.fed, n)
+
+
+class _PackedGraph:
+    """SPD-233: `LiLiCorrModel.draft_multi` of one set of heads captured once, on a capture stream of its own
+    (engine/capture_lock.py, SPD-223); `out` [heads, slots, 4] after each replay."""
+
+    def __init__(self, heads: tuple):
+        from engine import capture_lock
+        self.heads = heads
+        self.stream = capture_lock.lease_stream()
+        self.graph = None
+        self.out = None
+
+    def capture(self) -> None:
+        from engine import capture_lock
+        m = self.heads[0].m
+        self.stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.stream):
+            for _ in range(2):
+                m.draft_multi([h._req() for h in self.heads])
+        torch.cuda.current_stream().wait_stream(self.stream)
+        g = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(g, stream=self.stream):
+            self.out = m.draft_multi([h._req() for h in self.heads])
+        torch.cuda.synchronize()
+        self.graph = g
+
+    def release(self) -> None:
+        """The graph reset (its pool and the stream's workspace go with it), then the stream back."""
+        from engine import capture_lock
+        if self.graph is not None:
+            self.graph.reset()
+            self.graph = None
+            capture_lock.give_back(self.stream)
 
 
 def build_head(srv, path: str, log=print) -> LiLiCorrHead:
