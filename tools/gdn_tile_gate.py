@@ -15,6 +15,9 @@ largest logit, and the free-running greedy agreement (tokens until the first spl
 run-to-run floor (it must be bit-equal).
 
     python tools/gdn_tile_gate.py --ref 32x8 --tile 16x4 --lens 2048,8192,32768 [--json out.json]
+
+`--flag NAME` gates an engine flag instead of a tiling: cand = ref's tile with `engine.model.NAME` on, ref and
+ref2 with it off (SPD-245: `--ref 16x4 --tile 16x4 --flag GDN_CHUNKED`).
 """
 
 from __future__ import annotations
@@ -48,9 +51,14 @@ def class_ids(tok, cls: str, n: int) -> list:
     return ids[:n]
 
 
+FLAG = None
+
+
 def arm(name: str, tile: tuple) -> None:
     M.GDN_PREP = name != "yard"
     M.GDN_PREP_BV, M.GDN_PREP_WARPS = tile
+    if FLAG:
+        setattr(M, FLAG, name == "cand")
 
 
 def run(eng, ids: torch.Tensor, greedy: int, forced: list | None = None) -> tuple:
@@ -89,7 +97,10 @@ def main() -> None:
     ap.add_argument("--classes", default="prose,code,repeat")
     ap.add_argument("--greedy", type=int, default=64)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--flag", default=None, help="an engine.model flag the candidate turns on")
     a = ap.parse_args()
+    global FLAG
+    FLAG = a.flag
     ref_tile = tuple(int(v) for v in a.ref.split("x"))
     tiles = {"ref": ref_tile, "cand": tuple(int(v) for v in a.tile.split("x")), "yard": ref_tile}
     lens = [int(v) for v in a.lens.split(",")]
@@ -98,7 +109,7 @@ def main() -> None:
     eng = M.Qwen38Engine(cfg, w, max_len=max(lens) + a.greedy + 64, device="cuda")
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(cfg.path)
-    res = {"ref": list(ref_tile), "cand": list(tiles["cand"]), "rows": {}}
+    res = {"ref": list(ref_tile), "cand": list(tiles["cand"]), "flag": a.flag, "rows": {}}
     k = 0
     for cls in a.classes.split(","):
         for T in lens:
