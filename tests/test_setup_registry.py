@@ -16,7 +16,8 @@ The test matrix:
      profiles, an unknown dependency, a cycle, a default whose dependency is off, a conflict on by
      default, YAML's on/off booleans as knob keys, an unknown asset, a docs file that is not there,
      a default out of range, a row of another build marked comparable, a non-comparable row without
-     its reason, a quality value without date, an unknown key   test_the_validator_rules
+     its reason, a quality value without date, an unknown key, a lanes default past the card's
+     measured max (SPD-245)                                  test_the_validator_rules
   6  a second folder lists with no code change; a broken file is reported while the others still
      list; a folder without model.yaml is skipped; a folder named after another id is refused
                                                             test_more_models
@@ -400,8 +401,11 @@ def test_the_validator_rules():
     x["profiles"][0]["made_by"]["repo"] = "not a repo"
     _refused(x, "made_by.repo")
     x = copy.deepcopy(d)
-    x["parallelism"]["slots"]["default"] = 65             # SRV-707: past the measured max is fine, not the engine's
+    x["parallelism"]["slots"]["default"] = 65             # SRV-707: never past the engine's lanes
     _refused(x, "$.parallelism.slots: the default is outside min..64")
+    x = copy.deepcopy(d)
+    x["parallelism"]["slots"]["max"] = 3                  # SPD-245: nor past the lanes the card measured
+    _refused(x, "$.parallelism.slots: the default 8 is past the max 3")
     x = copy.deepcopy(d)
     x["parallelism"]["fixed"]["QSE_X"] = "a b"
     _refused(x, "$.parallelism.fixed.QSE_X")

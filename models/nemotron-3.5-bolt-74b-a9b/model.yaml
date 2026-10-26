@@ -609,9 +609,11 @@ components:
   docs: docs/caches.md
   note: null
 parallelism:
+  # eight lanes measured (SPD-245, EXL3 4.0, 0.14.2, 2026-10-26): 1/2/4/8 at once 33.4 / 40.0 / 46.5 / 54.3 tok/s,
+  # N decoding at once in every round (`parallel`)
   slots:
     min: 1
-    max: 3
+    max: 8
     default: 8
   window:
     min: 8192

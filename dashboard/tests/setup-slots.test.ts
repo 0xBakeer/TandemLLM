@@ -26,7 +26,7 @@ describe('the engine limit', () => {
   });
   it('is the range, whatever the card measured; Wren\'s schema takes it too', () => {
     expect(slotsRange(VL)).toEqual({ min: 1, max: 64, measured: 3 });
-    expect(slotsRange(Q)).toEqual({ min: 1, max: 64, measured: 4 });
+    expect(slotsRange(Q)).toEqual({ min: 1, max: 64, measured: 8 });   // SRV-711: 8 lanes measured
     expect(deriveSteps(VL).find((s) => s.id === 'parallelism')!.fields[0]).toMatchObject({ field: 'slots', min: 1, max: 64 });
   });
 });
@@ -98,14 +98,15 @@ describe('fitMax and the verdict: memory decides', () => {
       }
     }
     expect(fitMax(VL, defaults(VL))).toBe(8);
-    expect(defaults(VL).slots).toBe(8);
+    expect(defaults(VL).slots).toBe(3);     // SPD-245: the default is the card's measured max
   });
   it('above the card\'s measured range: allowed, with the untested note', () => {
     const v = slotsVerdict(VL, { ...defaults(VL), slots: 5 });
     expect(v).toMatchObject({ n: 5, untested: true, over: false });
     expect(S.slotsUntested(3)).toBe('Measured up to 3 on this model. More is untested.');
     expect(slotsVerdict(VL, { ...defaults(VL), slots: 3 }).untested).toBe(false);
-    expect(slotsVerdict(VL, defaults(VL)).untested).toBe(true);    // 8 by default, measured up to 3
+    expect(slotsVerdict(VL, defaults(VL)).untested).toBe(false);   // 3 by default, the measured max (SPD-245)
+    expect(slotsVerdict(VL, { ...defaults(VL), slots: 8 }).untested).toBe(true);
   });
   it('a count that does not fit: over, by how much, and the most that fit; Next is held with that reason', () => {
     const sel = { ...defaults(Q), kv_pool: false, slots: 4 };
@@ -149,7 +150,7 @@ describe('the guarantee: how many chats can all hold the full window (SRV-707)',
     expect(off.kv_pool).toBe(false);
     const e = estimate(VL, off);
     expect(slotsVerdict(VL, off).full).toBe(e.lanes_full);
-    expect(e.lanes_full).toBe(8);
+    expect(e.lanes_full).toBe(3);          // its 3 lanes by default (SPD-245)
     expect(S.lanesFull(8, 8, 262_144, 2, false)).toBe('All 8 chats can be 262,144 tokens long at the same time (2.0 GiB each).');
   });
   it('with the pool on the 27B: fewer than the chats, and what happens past it', () => {

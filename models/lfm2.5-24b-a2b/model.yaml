@@ -511,10 +511,11 @@ components:
   note: null
 parallelism:
   # three sequence slots (SPD-107, measured on 4.0, 2026-10-14): 1, 2 and 3 requests at once decoded 139.9, 169.1
-  # and 177.8 tok/s in total, each text its request's alone
+  # and 177.8 tok/s in total, each text its request's alone; eight lanes of 131,072 tokens (SPD-245, 4.0, 0.14.2,
+  # 2026-10-26): 1/2/4/8 at once 122.5 / 163.1 / 202.6 / 233.2 tok/s, N decoding at once in every round (`parallel`)
   slots:
     min: 1
-    max: 3
+    max: 8
     default: 8
   window:
     min: 8192

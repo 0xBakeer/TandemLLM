@@ -528,11 +528,14 @@ def _cross(m: dict, root: str) -> list[str]:
         r = p[k]
         if not r["min"] <= r["default"] <= r["max"]:
             errs.append(f"$.parallelism.{k}: the default is outside min..max")
-    # SRV-707: the lanes' default may be past the card's measured max (8 lanes by default), never
-    # past what the engine family serves
+    # SRV-707: the lanes' default is never past what the engine family serves; SPD-245: nor past the
+    # card's max, how far the lanes were measured (a new box starts on a lane count a run proved)
     r, top = p["slots"], slots_limit(m)["engine_max"]
     if not r["min"] <= r["default"] <= top or r["max"] < r["min"]:
         errs.append(f"$.parallelism.slots: the default is outside min..{top} (the engine's lanes)")
+    elif r["default"] > r["max"]:
+        errs.append(f"$.parallelism.slots: the default {r['default']} is past the max {r['max']}, the lanes "
+                    f"this card measured")
     for k, v in (p.get("fixed") or {}).items():
         if not re.match(ENV_KEY, k) or not isinstance(v, str) or not re.fullmatch(SAFE_VALUE, v):
             errs.append(f"$.parallelism.fixed.{k}: a serve.env key and a plain string value")
