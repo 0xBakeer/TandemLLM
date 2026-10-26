@@ -63,6 +63,7 @@ from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noq
                              strip_blocks)
 from server import compat  # noqa: E402
 from server import sampling_defaults  # noqa: E402  (SPD-245 a request's filters when it names none)
+from server import prefill_burst  # noqa: E402  (SPD-245 the prefills of requests that arrive together)
 from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
 from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
 from server import thinking as thinking_mod  # noqa: E402
@@ -1299,6 +1300,8 @@ def _par_end(pool, side, cid) -> None:
     the turn and the side slot given back."""
     if pool.admission is not None:
         pool.admission.release(cid)
+    if pool.burst is not None:
+        pool.burst.leave(side.index if side is not None else 0)
     if side is None:
         pool.slots[0].phase = ""
         return
@@ -1314,6 +1317,19 @@ def _par_end(pool, side, cid) -> None:
 # ------------------------------------------------------------------ parallel requests
 # `--parallel N` (server/slots.py). Every helper below runs only when `STATE["pool"]` exists; a
 # server without side slots never calls one.
+def _burst_prefilled() -> None:
+    """SPD-245: a member of the prefill burst has prefilled: the GPU turn back, until every member has."""
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.burst is None:
+        return
+    i = _par_index()
+    if not pool.burst.member(i):
+        return
+    held = pool.turn is not None and pool.turn.held_by(i)
+    pool.burst.prefilled(i, release=(lambda: pool.turn.release(i)) if held else None,
+                         acquire=(lambda: pool.turn.acquire(i)) if held else None)
+
+
 def _par_index() -> int:
     """The slot the current thread's request runs on: a side slot's index, else 0."""
     s = slots_mod.current()
@@ -2021,6 +2037,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
+        _burst_prefilled()
         if where.get("why"):
             # SRV-546: a long re-read is never silent (positions only, never text)
             print(f"[cache] re-read {forwarded:,} of {len(ctx):,} tokens (resumed at {reused:,}, "
@@ -5263,6 +5280,11 @@ PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
 #: SRV-321: between two layers of a layer-major window the GPU turn is offered to a waiting slot,
 #: as between two chunks ("off" offers it after the window only, kept for the A/B)
 PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().lower() != "off"
+
+#: SPD-245: requests bound to slots while none decodes prefill as one burst before any of them decodes
+#: (server/prefill_burst.py); a member waits at most QSE_PREFILL_BURST_WAIT_S for the others. Off by default
+PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "off").strip().lower() == "on"
+PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
 
 
 def _par_window_yield() -> None:
@@ -8565,6 +8587,10 @@ class Handler(BaseHTTPRequestHandler):
             elif par_why.get("hop_from") is not None:
                 print(f"[parallel] {cid} slot 0, moved from slot {par_why['hop_from']} (busy "
                       f"{par_why.get('home_wait')} s): carried in or read again: {nums}", flush=True)
+        if par is not None and not micro and par.burst is not None:
+            # SPD-245: a member of the prefill burst when none of the slots decodes (or one is open)
+            par.burst.arrive(side.index if side is not None else 0,
+                             idle=not any(s.phase in ("decode", "runner") for s in par.slots))
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns
@@ -11616,6 +11642,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
+    if PREFILL_BURST:
+        pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
     slots[0].lock = LOCK
     if a.parallel_switch_ms > 0:
         # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms

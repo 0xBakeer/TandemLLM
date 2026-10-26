@@ -755,6 +755,7 @@ class Pool:
         self.meeting = meeting
         self.draft_meeting = draft_meeting
         self.admission = admission
+        self.burst = None                  # SPD-245: server/prefill_burst.py `Burst`, when on
         self._lk = threading.Lock()
         # `peak_running`: the most slots busy at once so far. /health showed it as `max_running`
         # until 0.8.2, where it read as a limit ("max_running 2" on three slots, 2026-10-13)
@@ -874,7 +875,8 @@ class Pool:
                 "meeting": self.meeting.report() if self.meeting is not None else None,
                 "draft_meeting": (self.draft_meeting.report() if self.draft_meeting is not None
                                   else None),
-                "admission": self.admission.report() if self.admission is not None else None}
+                "admission": self.admission.report() if self.admission is not None else None,
+                "prefill_burst": self.burst.report() if self.burst is not None else None}
 
 
 # ------------------------------------------------------------------ the barrier
