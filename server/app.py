@@ -5308,8 +5308,9 @@ PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().l
 #: SPD-245: requests bound to slots while none decodes prefill as one burst before any of them decodes
 #: (server/prefill_burst.py). "wait" (or "on"): each prefills alone, then waits for the others; "joint":
 #: their prompts in one forward (engine/model.py `prefill_joint`, each row its own forward's bits), a
-#: prompt it cannot take alone. A member waits at most QSE_PREFILL_BURST_WAIT_S for the others. Off by default
-PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "off").strip().lower()
+#: prompt it cannot take alone. A member waits at most QSE_PREFILL_BURST_WAIT_S for the others. "joint" by
+#: default: a burst forms only while no slot decodes, and each member's rows keep their own forward's bits.
+PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "joint").strip().lower()
 PREFILL_BURST = "wait" if PREFILL_BURST == "on" else PREFILL_BURST if PREFILL_BURST in ("wait", "joint") else None
 PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
 
