@@ -84,11 +84,13 @@ GOLDEN_FP4 = {
     # SPD-245: GDN_CHUNKED knob (off), the gate tool's --flag
     # SPD-245: GDN_CHUNKED on (the GDN prefill walk value-block fastest, the UT transform in fewer registers)
     # SPD-245: prefill_joint and the skinny-order slab product
+    # SRV-713: a Flash-Next MTP step leaves the verify block's records for its commit (engine/models/flashnext/engine.py,
+    # no row changes); Flash-Next and Ornith
     "qwen3_5": "be7b55433345d94de0f34eefd843e48363086f039cb09571ba97705fa25b3af8",
-    "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
+    "qwen4_exp": "b41ebca1bd94daf939f1a198b04145547e7c7753b641484a2dd2eb3771cdf3bb",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",
-    "qwen3_5_moe": "80305c014bfd3f35a2f31d8d8cd34cb17751ea752dad14580b2b8ceb1d507393",
+    "qwen3_5_moe": "c3db84a3452b9cbb57744c3bca4d659a23c17f622a3a9d4bbf030049a3d6a75f",
     "flint": "be812ac05a869010d6c5d82450b8eb440eb3a387195ebf1e880312c04a635a07",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
