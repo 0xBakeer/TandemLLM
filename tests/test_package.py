@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import shutil
 import stat
 import sys
@@ -101,6 +102,25 @@ def test_the_shipped_texts_in_an_installed_layout():
     assert packages.SHIPPED_ROOT == ROOT, "this checkout reads its own packages/"
     assert packages.Library()._dirs({"skill_dirs": ["{repo}/packages/skills"]}) == [
         os.path.join(ROOT, "packages", "skills")]
+
+
+def test_the_docker_context_carries_the_wheel():
+    """ops/Dockerfile.dash builds the wheel from only what its .dockerignore lets in: every package
+    pyproject declares must be COPYed into the build stage and not ignored (#87)."""
+    dock = os.path.join(ROOT, "ops", "Dockerfile.dash")
+    with open(dock) as f:
+        copies = [m.group(1).rstrip("/") for ln in f
+                  if (m := re.match(r"\s*COPY\s+(\S+)\s+\S+\s*$", ln))
+                  and not ln.lstrip().startswith("COPY --")]
+    with open(dock + ".dockerignore") as f:
+        allow = [ln.strip()[1:].rstrip("/") for ln in f if ln.strip().startswith("!")]
+    dirs = _toml()["tool"]["setuptools"].get("package-dir", {})
+    for pkg in _toml()["tool"]["setuptools"]["packages"]:
+        d = dirs.get(pkg, pkg.replace(".", "/"))
+        assert any(d == c or d.startswith(c + "/") for c in copies), \
+            f"{d} (package {pkg}) is not COPYed in ops/Dockerfile.dash"
+        assert any(d == a or d.startswith(a + "/") for a in allow), \
+            f"{d} (package {pkg}) is excluded by ops/Dockerfile.dash.dockerignore"
 
 
 def test_version_mapping():

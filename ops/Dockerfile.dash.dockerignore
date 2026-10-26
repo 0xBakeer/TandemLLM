@@ -1,5 +1,5 @@
-# the image needs pyproject.toml, VERSION, the license files, docs/proxy.md, proxy/, server/ and
-# dashboard/dist/ only
+# the image needs pyproject.toml, VERSION, the license files, docs/proxy.md, proxy/, server/,
+# chatd/ and packages/ (the wheel's declared packages) and dashboard/dist/ only
 *
 !pyproject.toml
 !VERSION
@@ -9,5 +9,7 @@
 !docs/proxy.md
 !proxy/
 !server/
+!chatd/
+!packages/
 !dashboard/dist/
 **/__pycache__
