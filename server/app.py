@@ -8240,15 +8240,19 @@ class Handler(BaseHTTPRequestHandler):
         n_choices = int(body.get("n") or 1)
         lp_top = compat.top_logprobs(body, chat)
         tool_mode = compat.tool_choice(body)[0] if chat else "none"
-        parse_calls = chat and tool_mode != "none"
+        offered = bool(body.get("tools"))
+        # SRV-723: an answer to a request that offered no tools is text on the raw path: never
+        # parsed, never held. LFM2.5's call opener is an ordinary token, and its code answer to the
+        # card prompt opened with it (`[write_file(file_path=..., content=...)]`): the stream rewriter
+        # held the whole answer and sent it at the end, and one that closed the block went out as a
+        # call with finish `tool_calls`. Under a conductor plan such a call is refused (SRV-247)
+        parse_calls = chat and tool_mode != "none" and (offered or (plan is not None and plan.active))
         tool_names = compat.tool_names(body) if parse_calls else []
         # SRV-247 (UX2, 2026-10-07): a call the model writes in an answer to a request that offered
         # no tools is read out of the text and dropped, never handed over: a curl client with
         # memory on received the model's own `tool` call (a GET on the memory search, with the
-        # session's share address) and finish `tool_calls`. Under a conductor plan only: the raw
-        # path is the release's, byte for byte
-        refuse_calls = bool(parse_calls and not body.get("tools") and plan is not None
-                            and plan.active)
+        # session's share address) and finish `tool_calls`. Under a conductor plan only
+        refuse_calls = bool(parse_calls and not offered and plan is not None and plan.active)
         max_calls = 1 if body.get("parallel_tool_calls") is False else None
         # a value the model writes as text goes back as the JSON type its schema asks for
         # (`"offset": 150`, not `"150"`) -- clients validate the arguments against the schema and

@@ -66,6 +66,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`
                   (SRV-425; the server reads it when `STATE["tool_format"]` is "pythonic", as the
                   LFM2.5 adapter sets it); FAKE_PYTHONIC_BAD the block's list never closes
+    FAKE_NATIVE_NOTOOLS  with or without `tools`: the answer opens with LFM2's Pythonic block, a
+                  `write_file` call with a long content, then a sentence (SRV-723)
     FAKE_ARGKEY     with `tools`: a sentence, then Flint's arg-key call to the first tool, a path and a
                   three-line content (`tool_format` "argkey", as the Flint adapter sets it);
                   FAKE_ARGKEY_BAD a block whose argument has no <arg_value>
@@ -298,6 +300,11 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     if tools and "FAKE_PYTHONIC" in user:
         inner = f"[{tools[0]}(city='Berlin', days=3" + ("" if "FAKE_PYTHONIC_BAD" in user else ")]")
         answer = "Let me look that up.<|tool_call_start|>" + inner + "<|tool_call_end|>"
+    if "FAKE_NATIVE_NOTOOLS" in user:
+        # SRV-723: the model's own call markup opening an answer to a request that offered no tools
+        # (LFM2.5's code answer to the card prompt), a sentence after the block
+        answer = ("<|tool_call_start|>[write_file(path='intervals.py', content='" + " ".join(words)
+                  + "')]<|tool_call_end|>\nBoth files are above.")
     if "FAKE_CALL_NOTOOLS" in user:
         # SRV-247: a call the request did not offer a tool for (the memory search as `tool`)
         answer = "Let me check my memory for that.\n\n" + _call("tool", user)

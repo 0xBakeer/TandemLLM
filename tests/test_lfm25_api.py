@@ -15,6 +15,10 @@ tests/test_toolcall_pythonic.py; this file is what a client holds.
                                                                         test_reasoning_and_answer_apart
   5  the Qwen path is unchanged: with no tool_format a Pythonic block is text
                                                                         test_without_the_format_the_block_is_text
+  6  SRV-723: a request that offers no tools gets its answer as text on the raw path: the model's own
+     call markup at the answer's start streams as content in many events, finish `stop`, no
+     tool_calls, streamed and not; the Qwen form too; with tools the same block is a call
+                                                                        test_no_tools_the_markup_is_text
 
 Run: python tests/test_lfm25_api.py
 """
@@ -41,18 +45,21 @@ OPEN, CLOSE = "<|tool_call_start|>", "<|tool_call_end|>"
 
 
 def ask(text: str, stream: bool, fmt: str = "reasoning_content", tool_format: str | None = "pythonic",
-        think: bool = True) -> dict:
-    """One chat request with tools on the fake engine: what the client holds."""
+        think: bool = True, tools: list | None = TOOLS) -> dict:
+    """One chat request (with tools unless `tools` is None) on the fake engine: what the client holds."""
     serve("raw")
     if tool_format:
         app.STATE["spec"] = ServeSpec(tool_format=tool_format)
     app.STATE["reasoning_format"] = fmt
     # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
-    body = {"messages": [{"role": "user", "content": text}], "stream": stream, "tools": TOOLS,
+    body = {"messages": [{"role": "user", "content": text}], "stream": stream,
             "max_tokens": 2000, "reasoning_format": fmt,
             "chat_template_kwargs": {"enable_thinking": think}}
+    if tools is not None:
+        body["tools"] = tools
     head, raw = Req(body).response()
-    out = {"content": "", "reasoning": "", "calls": {}, "finish": None, "raw": raw, "order": []}
+    out = {"content": "", "reasoning": "", "calls": {}, "finish": None, "raw": raw, "order": [],
+           "events": 0}
     if not stream:
         m = json.loads(raw)["choices"][0]
         out["content"] = m["message"].get("content") or ""
@@ -69,6 +76,8 @@ def ask(text: str, stream: bool, fmt: str = "reasoning_content", tool_format: st
             if d.get("content"):
                 out["content"] += d["content"]
                 out["order"].append("content")
+                out["events"] += 1
+                out.setdefault("first", d["content"])
             out["reasoning"] += d.get("reasoning_content") or ""
             for tc in d.get("tool_calls") or []:
                 c = out["calls"].setdefault(tc["index"], {"name": "", "args": ""})
@@ -135,6 +144,31 @@ def test_without_the_format_the_block_is_text():
         out = ask("what is the weather in Berlin FAKE_PYTHONIC", stream=stream, tool_format=None)
         assert out["calls"] == {} and out["finish"] == "stop", (stream, out["finish"], out["calls"])
         assert OPEN in out["content"]
+
+
+def test_no_tools_the_markup_is_text():
+    for stream in (False, True):
+        out = ask("write the two files FAKE_NATIVE_NOTOOLS", stream=stream, think=False, tools=None)
+        assert out["finish"] == "stop", (stream, out["finish"], out["raw"][-300:])
+        assert out["calls"] == {} and '"tool_calls"' not in out["raw"], (stream, out["raw"][-300:])
+        assert out["content"].startswith(f"{OPEN}[write_file(path='intervals.py', content='"), out["content"][:80]
+        assert out["content"].endswith(f"')]{CLOSE}\nBoth files are above."), out["content"][-80:]
+        if stream:
+            # streamed as it was written: the block's text over many events, not one at the end
+            assert out["events"] > 10, out["events"]
+            assert len(out["first"]) < len(OPEN) + 40, out["first"]
+    # the Qwen form: a call with no tools offered is text on the raw path as well
+    for stream in (False, True):
+        out = ask("What is my UX1 pet? FAKE_CALL_NOTOOLS", stream=stream, tool_format=None, think=False,
+                  tools=None)
+        assert out["finish"] == "stop" and out["calls"] == {}, (stream, out["finish"], out["calls"])
+        assert "<tool_call>" in out["content"], out["content"][:200]
+    # tools offered: the same block is a call, as before
+    for stream in (False, True):
+        out = ask("write the two files FAKE_NATIVE_NOTOOLS", stream=stream, think=False)
+        assert out["finish"] == "tool_calls", (stream, out["finish"], out["raw"][-300:])
+        assert [c["name"] for c in out["calls"].values()] == ["write_file"], out["calls"]
+        assert OPEN not in out["content"] and "write_file(" not in out["content"], out["content"]
 
 
 if __name__ == "__main__":
