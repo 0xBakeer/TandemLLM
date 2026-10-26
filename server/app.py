@@ -4418,7 +4418,9 @@ def graphs_once() -> str:
     commit and draft graphs of a class its rounds have not used yet), slot 0's and each side slot's,
     captured in the idle window one at a time under the engine lock (which holds the GPU turn as slot
     0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
-    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
+    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`). An engine also takes
+    the classes ahead of its state's length (`idle_captures(wants=...)`): a conductor-planned prompt
+    starts in a class the class of a short state never reached (SRV-713)."""
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
@@ -4442,8 +4444,9 @@ def graphs_once() -> str:
         return "busy"
     t0, n, why = time.perf_counter(), 0, "nothing"
     try:
-        for e, _ in engines:
-            steps = e.idle_captures()
+        for e, d in engines:
+            # SRV-713: and the classes ahead of the state's length where drafting can pay there
+            steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
             if steps is None:
                 continue
             why = "captured"

@@ -374,6 +374,8 @@ class MTPTreeDrafter:
         c = self.cut
         self.req["turn_in"] = {"plain_ms": c.plain_ms(self.cls), "spec_ms": c.spec_ms(self.cls), "backlog": unfed,
                                "answer": self.answer, "extra_ms": round(float(extra), 1)}
+        if getattr(self.s, "last_owed", None):
+            self.req["turn_in"]["owed"] = self.s.last_owed
         # SPD-239: a lane whose last round other lanes shared drafts its turn: in a joint pass its rows cost a share
         # of the pass, so the lone prices the turn weighs do not apply (a plain turn there gives 1 token a round)
         self._turn = self.req["turn"] = (not self.head.depth or self.lanes > 1

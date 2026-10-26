@@ -457,7 +457,7 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     assert not s.captured
     # after the server's warm-up: the state starts over and class 0's graphs are taken at once
     s.st.length = 500
-    s.idle_captures = lambda: iter([1, 2, 3]) if s.st.length == 0 else None
+    s.idle_captures = lambda ahead=True, wants=None: iter([1, 2, 3]) if s.st.length == 0 and not ahead else None
     assert s.precapture(None) is None and s.precapture(object()) == 3 and s.st.length == 0
     return ("8 graphs of the 1,024 class (2 widths, 4 commits, a moved one over a tree, 2 feeds); then nothing owed; "
             "a first replay unpriced; class 0 right after the warm-up")
@@ -671,6 +671,119 @@ def test_the_drafter_resumes_and_snapshots_its_head():
     d.state_resume(0)
     assert d.held is None and d.head.st.length == 0
     return "the head's views; a snapshot feeds the queue first; resume and restore set its length and the waiting row"
+
+
+def _qsa_class(n: int) -> int:
+    """Flash-Next's context classes (engine.py `qsa_class`: 4 keys a block, dense up to TOPK 512 blocks)."""
+    if (n + 1) // 4 <= 512:
+        return 0
+    nb = 1024
+    while nb * 4 < n + 1:
+        nb *= 2
+    return nb
+
+
+def _ahead_serving(max_len: int = 32_768):
+    """A Flash-Next serving after the warm-up: class 0's graphs taken, the graph classes stubbed."""
+    from engine.models.flashnext import serving as S
+    fn = _FN()
+    fn.qsa_class = _qsa_class
+    fn.stage_rows = lambda toks, parents, st: None
+    fn.stage_commit = lambda st, path: None
+    made = []
+
+    class VG:
+        def __init__(self, fn_, st, M, cls):
+            self.key = (M, cls)
+
+        def capture(self):
+            made.append(("v",) + self.key)
+
+        def replay(self):
+            pass
+
+    class CG:
+        def __init__(self, fn_, st, key):
+            self.key = key
+
+        def capture(self):
+            made.append(("c",) + self.key)
+
+    head = types.SimpleNamespace(depth=3, graphs={})
+    head.capture_class = lambda n, cls: (made.append(("m", n, cls)), head.graphs.__setitem__((n, cls), 1))
+    s = FlashNextServing(fn, max_len)
+    s.heads["mtp"] = head
+    s.captured, s.commit_ms = False, 0.0
+    return s, made, (S, VG, CG)
+
+
+def _drain(s, stubs, steps):
+    S, VG, CG = stubs
+    real, (S.VerifyGraph, S.CommitGraph) = (S.VerifyGraph, S.CommitGraph), (VG, CG)
+    sync, torch.cuda.synchronize = torch.cuda.synchronize, lambda: None
+    try:
+        return 0 if steps is None else sum(1 for _ in steps)
+    finally:
+        S.VerifyGraph, S.CommitGraph = real
+        torch.cuda.synchronize = sync
+
+
+def test_idle_captures_take_the_classes_ahead_and_the_owed_ones():
+    """SRV-713: after the warm-up (class 0 only, `precapture`) an idle window also captures the classes ahead
+    of the state's length (the next one, and each further one starting within `AHEAD_TOKENS`: from an empty
+    state 1,024 from 2,051 tokens and 2,048 from 4,096, where the conductor's prompts start) and every class
+    a turn found without graphs (`capture_cost`), whatever length the state was left at; none where `wants`
+    says drafting does not pay; the state's length unchanged."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0 and s.idle_captures(ahead=False) is None
+    nxt = [s._next_class_len(n) for n in (0, 2051, 4096, 30_000)]
+    assert nxt == [2051, 4096, 8192, None], nxt
+    assert s._capture_lengths(True) == [0, 2051, 4096], s._capture_lengths(True)
+    assert s.capture_cost(4784) > 0 and s.last_owed.startswith("2048:v")   # the conductor's prompt: owed
+    assert s.idle_captures(wants=lambda n: False) is None, s._capture_lengths(True)   # drafting does not pay
+    asked = []
+    n = _drain(s, stubs, s.idle_captures(wants=lambda n: asked.append(n) or True))
+    assert n > 0 and {m[-1] for m in made[-n:]} == {1024, 2048} and asked == [4784, 2051], (made[-n:], asked)
+    assert s.capture_cost(4784) == 0.0 and s.capture_cost(4129) == 0.0 and s._owed == {}, s._owed
+    assert s.last_owed == "2048:v0c0m0" and s.st.length == 0
+    # a side question leaves the state short; a turn at 9,000 tokens found class 4096 without graphs
+    s.st.length = 300
+    assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
+    n = _drain(s, stubs, s.idle_captures())
+    assert {m[-1] for m in made[-n:]} == {4096} and s.capture_cost(9000) == 0.0 and s.st.length == 300, made[-n:]
+    assert s.idle_captures() is None
+    # a state at 4,784 tokens: its own class has them, the next (4,096 from 8,192) is taken ahead
+    s.st.length = 4784
+    assert s._capture_lengths(True) == [4784, 8192] and s.idle_captures() is None     # 4096 captured above
+    return "classes 1,024 and 2,048 ahead of an empty state, 4,096 owed from a short one; none unwanted"
+
+
+def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
+    """SRV-713: every request through the conductor starts in Flash-Next's first sparse class (its plan's
+    prompt, 4,129-4,784 tokens on the 2026-10-26 card run). The warm-up captured class 0 only, so StairCut
+    weighed the class's 25 missing graphs (9.5 s) against a 256-token answer and the whole turn took the
+    plain step (1.0 a block, 39 tok/s on code; raw, short prompts, 69.6). After one idle window the same
+    turn drafts; the turn's prices are the run's (22.0 ms plain, 17.7 ms drafted a token)."""
+    s, made, stubs = _ahead_serving()
+    _drain(s, stubs, s.idle_captures(ahead=False))                    # the warm-up's class 0
+    s.capture_ms = 380.0                                              # a graph's capture on the box
+    pc = str(s.price_class(4784))
+    prices = PriceModel({pc: {"plain": {"1": 22.0}, "spec": {"1": 17.7}, "prime": {"1": 0.03}}})
+    prompt = list(range(4784))
+
+    def turn():
+        d = MTPTreeDrafter(s, _StubHead(), StairCut(prices, siblings=False))
+        d.reset()
+        d.sync(prompt, _rows(0, len(prompt)), 0)
+        tree = d.propose_tree(prompt, 8)
+        return d.req["turn"], d.req["turn_in"], tree
+
+    t, ti, tree = turn()
+    assert t is False and tree is None and ti["extra_ms"] > 5000, ti  # the bug: graphs owed, a plain turn
+    _drain(s, stubs, s.idle_captures())                               # one idle window (state at 0)
+    t, ti, tree = turn()
+    assert t is True and ti["extra_ms"] == 0.0 and tree is not None and tree.n_draft > 0, (t, ti, tree)
+    return "a 4,784-token turn: plain while class 2048 is owed, drafts after one idle window"
 
 
 if __name__ == "__main__":

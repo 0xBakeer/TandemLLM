@@ -24,7 +24,7 @@ class _Eng:
     def __init__(self, n):
         self.owed, self.kv, self.locked = n, type("KV", (), {"length": 32_000})(), []
 
-    def idle_captures(self):
+    def idle_captures(self, ahead=True, wants=None):
         if not self.owed:
             return None
         return self._steps()
