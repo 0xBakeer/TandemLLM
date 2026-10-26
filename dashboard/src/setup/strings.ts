@@ -131,6 +131,21 @@ export const S = {
   losslessTitle: (same: number, tie: number) => `${same} of ${same + tie} traces identical to the greedy decode, ${tie} differ only at a near tie`,
   sortBy: (col: string) => `Sort by ${col}`,
   chooseWeights: 'Choose the weights',
+  // SPD-245: the weight cards' speed rows
+  parallelTitle: 'Speed on this build',
+  parallelDecode: 'One request',
+  parallelPrefill: 'First token of a cold prompt',
+  parallelAtOnce: 'Requests at once, in total',
+  parallelFoot: 'Each row is one run on our DGX Spark: the medians of its rounds, every level with as many requests decoding at once as it names.',
+  parallelBuild: (build: string, commit: string, date: string) => `build ${build} (${commit}), ${date};`,
+  parallelSetup: (lanes: number, window: number, maxTokens: number, sampling: string, store: boolean, cache: boolean, rounds: number, prompts: string) =>
+    `${lanes} lanes of ${window.toLocaleString('en-US')} tokens, ${maxTokens} tokens a request, ${sampling}, thinking off, suffix store ${store ? 'on' : 'off'}, response cache ${cache ? 'on' : 'off'}, ${rounds} rounds a level, prompts ${prompts}.`,
+  parallelPrefillTitle: (tokens: number, tokS: number) => `${tokens.toLocaleString('en-US')} prompt tokens, ${tokS.toLocaleString('en-US')} tok/s`,
+  parallelLevelTitle: (n: number, decode: number | null, ttft: number | null) =>
+    `${n} at once: ${decode == null ? '–' : decode.toFixed(1)} tok/s over the decode window, first token after ${ttft == null ? '–' : ttft.toFixed(2)} s (median)`,
+  parallelCard: (one: number | null, n: number, top: number | null) =>
+    n === 1 ? `${one == null ? '–' : one.toFixed(1)} tok/s alone` : `${one == null ? '–' : one.toFixed(1)} alone, ${top == null ? '–' : top.toFixed(1)} with ${n} at once`,
+  weightsAtOnce: 'Parallel',
 
   // weights
   weightsKl: 'KL vs original',

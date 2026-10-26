@@ -3,7 +3,8 @@
     models/<id>/model.yaml           the tile, the weight profiles, the measured table, the tools that
                                      run beside the model, parallelism, methods, the device presets
     models/<id>/README.md            optional
-    models/<id>/measurements/*       optional raw data (the measured table's own files)
+    models/<id>/measurements/*       optional raw data (the measured table's own files, and the raw
+                                     file of every `parallel` row, tools/parallel_card.py)
     models/schema/model.schema.json  SCHEMA below as a JSON Schema file, for editors (`--schema`)
 
 `load_all()` reads every model.yaml with the safe loader, checks it against SCHEMA and the cross rules
@@ -14,7 +15,9 @@ model.yaml is skipped. The result is kept until a file's mtime moves.
 
 The cross rules: a schema version this code does not read is refused whole (a schema 2 must not be
 half-read); ids unique per list; exactly one recommended profile; every measured row, asset,
-dependency and default names something that exists; the tools that are on by default satisfy their
+dependency and default names something that exists; a `parallel` row (SPD-245) names a profile or a
+community pack of the model, once, every level decoded N requests at once in every round, and the row
+is its raw file's `row`; the tools that are on by default satisfy their
 own dependencies and conflicts, and no dependency goes round in a circle; a field's default and
 recommended value pass the field's own check; every `docs` link is a file in the repository. What the
 repository adds (tests/test_setup_registry.py): every serve.env key a model names is one the engine
@@ -149,6 +152,33 @@ _ROW = _obj({"profile": _ID, "build": _STR, "date": _STR, "comparable": {"type":
              "ttft_s": {"type": "object"},
              "lossless": {"type": ["object", "null"]}},
             required=("profile", "build", "date", "comparable", "cells", "ttft_s", "lossless"))
+# SPD-245: the card's speed row of a weight set on one build (tools/parallel_card.py): decode alone, the
+# prefill's first token at fixed prompt lengths, and N requests at once with the proof that N decoded
+# together. Every number is the raw file's (`raw`, models/<id>/measurements/), which holds the row too.
+_INT1 = {"type": "integer", "minimum": 1}
+PAR_LEVELS = ("1", "2", "4", "8")                  # requests at once
+PAR_PREFILL = ("2048", "8192", "32768")             # prompt tokens
+_PAR_SETUP = _obj({"env": _STR, "lanes": _INT1, "window": _INT1, "max_tokens": _INT1,
+                   "suffix_store": {"type": "boolean"}, "response_cache": {"type": "boolean"},
+                   "thinking": {"type": "boolean"},
+                   "sampling": _obj({"temperature": _NUM0, "top_k": {"type": "integer", "minimum": 0},
+                                     "top_p": _NUM0, "min_p": _NUM0, "seed": _STR}),
+                   "prompts": _obj({"set": _STR, "sha256": {"type": "string", "pattern": r"^[0-9a-f]{16}$"},
+                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())})})
+_PAR_LEVEL = _obj({"wall_tok_s": _NUM0, "decode_tok_s": {"type": ["number", "null"], "minimum": 0},
+                   "ttft_s": {"type": ["number", "null"], "minimum": 0},
+                   "at_once": {"type": "integer", "minimum": 0}, "rounds": _INT1})
+_PAR_PREFILL = _obj({"ttft_s": _NUM0, "tok_s": _NUM0, "prompt_tokens": _INT1})
+_PAR_ROW = _obj({"profile": {"type": "string", "pattern": r"^(community/)?[a-z0-9][a-z0-9._-]{0,79}$"},
+                 "build": _STR, "commit": {"type": "string", "pattern": r"^[0-9a-f]{7,40}$"},
+                 "date": {"type": "string", "pattern": r"^20[0-9]{2}-[01][0-9]-[0-3][0-9]$"},
+                 "raw": {"type": "string", "pattern": r"^models/[a-z0-9.-]+/measurements/[A-Za-z0-9._-]+\.json$"},
+                 "setup": _PAR_SETUP, "rounds": _INT1,
+                 "decode": _obj({"code": _NUM0, "prose": _NUM0}, required=()),
+                 "prefill": _obj({d: _PAR_PREFILL for d in PAR_PREFILL}, required=()),
+                 "levels": _obj({n: _PAR_LEVEL for n in PAR_LEVELS}, required=("1",)),
+                 "note": _NOTE},
+                required=("profile", "build", "commit", "date", "raw", "setup", "rounds", "levels"))
 _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "what": _STR,
                    "default": {"type": "boolean"}, "required": {"type": "boolean"},
                    "memory_gib": _NUM0, "memory_max_gib": {"type": ["number", "null"]},
@@ -200,6 +230,8 @@ SCHEMA = _obj({
     "profiles": {"type": "array", "items": _PROFILE},
     "measurements": _obj({"build": _STR, "date": _STR, "method": _STR, "source": _STR,
                           "rows": {"type": "array", "items": _ROW}}),
+    # SPD-245, optional: the speed rows of the weight cards (_PAR_ROW)
+    "parallel": _obj({"method": _STR, "rows": {"type": "array", "items": _PAR_ROW}}),
     "memory": _obj({"parts": {"type": "array",
                               "items": _obj({"id": _ID, "label": _STR, "gib": _NUM0,
                                              "kind": {"enum": ["fixed", "reserve"]},
@@ -457,6 +489,7 @@ def _cross(m: dict, root: str) -> list[str]:
             for task, c in cells.items():
                 if len(c) not in (5, 6):
                     errs.append(f"$.measurements.rows[{i}].cells.{mode}.{task}: 5 or 6 numbers")
+    errs += _parallel_errors(m, root)
     comps = {c["id"]: c for c in m["components"]}
     for i, c in enumerate(m["components"]):
         for d in c["depends_on"] + c["conflicts"]:
@@ -515,6 +548,45 @@ def _cross(m: dict, root: str) -> list[str]:
                     errs.append(f"$.{group}[{i}].{which}: {why}")
             if f.get("docs") and not _docs_ok(f["docs"], root):
                 errs.append(f"$.{group}[{i}].docs: no file {f['docs']!r} in the repository")
+    return errs
+
+
+def _parallel_errors(m: dict, root: str) -> list[str]:
+    """SPD-245: a speed row names a weight set of this model, proves every level, and is its raw file's."""
+    errs = []
+    profiles = {p["id"] for p in m["profiles"]}
+    seen = set()
+    for i, r in enumerate((m.get("parallel") or {}).get("rows") or []):
+        at = f"$.parallel.rows[{i}]"
+        pid = r["profile"]
+        if pid.startswith("community/"):
+            if not os.path.isfile(os.path.join(root, "models", m["id"], "community", pid[len("community/"):] + ".json")):
+                errs.append(f"{at}: no community pack {pid!r} of this model")
+        elif pid not in profiles:
+            errs.append(f"{at}: no profile {pid!r}")
+        if pid in seen:
+            errs.append(f"{at}: a second row for {pid!r} (one row a weight set: the card's current numbers)")
+        seen.add(pid)
+        for n, lv in r["levels"].items():
+            if lv["at_once"] != int(n):
+                errs.append(f"{at}.levels.{n}: refused: {lv['at_once']} decoded at once, not {n} (the requests "
+                            f"queued; the level is run again)")
+            if lv["rounds"] != r["rounds"]:
+                errs.append(f"{at}.levels.{n}: {lv['rounds']} valid rounds of {r['rounds']}")
+            if int(n) > r["setup"]["lanes"]:
+                errs.append(f"{at}.levels.{n}: more requests than the setup's {r['setup']['lanes']} lanes")
+        if not r["raw"].startswith(f"models/{m['id']}/measurements/"):
+            errs.append(f"{at}.raw: not under models/{m['id']}/measurements/")
+            continue
+        path = os.path.join(root, r["raw"])
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError) as exc:
+            errs.append(f"{at}.raw: no raw file {r['raw']!r} ({type(exc).__name__})")
+            continue
+        if raw.get("row") != r:
+            errs.append(f"{at}: not the raw file's row ({r['raw']}); write it from the file")
     return errs
 
 

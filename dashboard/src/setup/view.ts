@@ -31,6 +31,8 @@ import './install';
 import './installed';
 import { changeText } from './job-view';
 import './measure-table';
+import { cardLine } from './parallel-table';
+import './parallel-table';
 import './memory-bar';
 import './reset';
 import './signin';
@@ -751,6 +753,9 @@ export class QseSetup extends LightElement {
       <section class="panel ov-table" aria-label="Measured speed">
         <qse-measure-table .model=${m} .selected=${sel.profile}></qse-measure-table>
       </section>
+      ${m.parallel?.rows.length
+        ? html`<section class="panel ov-table" aria-label="Speed on this build"><qse-parallel-table .model=${m} .selected=${sel.profile}></qse-parallel-table></section>`
+        : nothing}
     </div>`;
   }
 
@@ -796,6 +801,7 @@ export class QseSetup extends LightElement {
               <span><span class="wcard-k">${S.weightsKl}</span> ${p.quality.kl_vs_bf16 != null ? p.quality.kl_vs_bf16.toFixed(4) : '–'}</span>
               <span><span class="wcard-k">${S.weightsMemory}</span> ${p.weights_gib.toFixed(1)} GiB</span>
               <span><span class="wcard-k">${S.weightsDisk}</span> ${here ? S.onDisk : S.toDownload(p.disk_gb)}</span>
+              ${cardLine(m, p.id) ? html`<span data-parallel-line><span class="wcard-k">${S.weightsAtOnce}</span> ${cardLine(m, p.id)}</span>` : nothing}
             </span>
             ${this.renderSource(p)}
             ${p.note ? html`<span class="wcard-note">${p.note}</span>` : nothing}
