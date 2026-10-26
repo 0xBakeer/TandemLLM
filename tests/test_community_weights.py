@@ -718,6 +718,22 @@ def test_a_nemotron_pack():
         assert card["model"] == NH and card["label"] == c["name"] and card["capabilities"]["vision"] is False, card
 
 
+def test_the_flashnext_verified_block_is_its_run():
+    """SRV-713: the 3.05 pack's verified block is its run's (one greedy request a kind, tools/q35m_ab.py,
+    through the conductor), after the idle captures took the conductor's prompt class ahead."""
+    with open(os.path.join(ROOT, "models", "qwen3.8-flash-next", "measurements",
+                           "verified-2026-10-26-turboderp-flashnext-3.05.json")) as fh:
+        run = json.load(fh)
+    with open(FN_ENTRY) as fh:
+        v = json.load(fh)["verified"]
+    kinds = ("prose", "code", "chat")
+    assert v["tok_s"] == {k: round(run["answers"][k]["tok_s"], 1) for k in kinds}, v
+    assert v["tokens_per_round"] == {k: run["answers"][k]["per_block"] for k in kinds}, v
+    assert (v["build"], v["device"], v["date"]) == (run["build"], run["device"], run["date"]) == \
+        ("0.14.2", "dgx-spark", "2026-10-26")
+    assert all(run["answers"][k]["per_block"] > 1.0 for k in kinds), run      # drafted, not plain turns
+    assert run["version"].endswith("+flashnext-3.05") and "through the conductor" in v["notes"]
+
 def test_the_nemotron_card_is_the_raw_data():
     with open(os.path.join(ROOT, "models", NH, "measurements", "0.12.1-summary.json")) as fh:
         meas = json.load(fh)
