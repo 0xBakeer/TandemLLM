@@ -64,6 +64,18 @@ MTP_PACK = os.environ.get("QSE_RUNNER_MTP_PACK", "1") == "1"
 #: SPD-239: a joint round's commits at once where the family commits several slots in one call (its
 #: `commit_tree_multi`: every lane's copies in one launch); 0: each tail commits its own
 COMMIT_MULTI = os.environ.get("QSE_RUNNER_COMMIT_MULTI", "1") == "1"
+#: SPD-233: at E lanes of families that join a plain step to the joint pass (`joint_plain`), the runner weighs its
+#: drafted rounds' tokens a GPU ms against its plain rounds' (one joint decode step, a token a lane) and takes the
+#: better: in plain mode every lane's drafter skips its draft. Each mode's rate is a running mean of the rounds
+#: that ran it (the period from one round's end to the next, as `steady`), every QSE_RUNNER_LANE_PROBE-th round at
+#: E runs the other mode, and a switch needs QSE_RUNNER_LANE_MARGIN over the current mode. Bolt EXL3 4.0, 8 lanes,
+#: T1 prose: a drafted round 114.6 ms for 11 tokens, the joint plain step 64.3 ms for 8 (in process); served C8
+#: 78.3 / 78.1 -> 90.5 / 90.1 tok/s. "auto" (the default): the families whose serving engine opts in (`lane_plain`
+#: True, measured), "1": every joint-plain family, "0": off
+LANE_MODE = os.environ.get("QSE_RUNNER_LANE_PLAIN", "auto")
+LANE_PLAIN = LANE_MODE != "0"
+LANE_PROBE = max(2, int(os.environ.get("QSE_RUNNER_LANE_PROBE", "16") or 16))
+LANE_MARGIN = float(os.environ.get("QSE_RUNNER_LANE_MARGIN", "0.03") or 0.03)
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -146,6 +158,8 @@ class Runner:
         self._round_rows = 0                # the rows of the round's joint pass (0: none, or more than one)
         self._round_exp = 0.0               # the kept drafts' expected tokens (scores), for the calibration
         self._round_acc = 0                 # the drafts the walks accepted
+        self._round_plain = False           # SPD-233: every block of the round's pass was its anchor alone
+        self._lane: dict = {}               # SPD-233: by lanes, the drafted and plain rounds' rates (`_lane_plain`)
         from server import slots as slots_mod
         self.prices = slots_mod.RowPrices()
         import random
@@ -235,6 +249,8 @@ class Runner:
                     ms_a_round={k: round(v / n, 2) for k, v in self.ms.items()},
                     gpu_ms_a_round={k: round(v / g, 2) for k, v in self.gpu.items()}, gpu_rounds=self.gpu_n,
                     steady=steady, prices=self.prices.report() if PRICED_CUT else None,
+                    lane_plain=({e: {k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
+                                 for e, st in sorted(self._lane.items())} if LANE_PLAIN else None),
                     ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e),
                     tails_by_slots=self._by_e(self._tails_e))
 
@@ -259,12 +275,14 @@ class Runner:
     def _gpu_read(self) -> None:
         """The finished rounds' GPU segments into `gpu` (a round whose last event is not done waits)."""
         keep = []
-        for rnd, prev, e, tok, rows in self._ev_done:
+        for rnd, prev, e, tok, rows, plain in self._ev_done:
             if not rnd[-1][1].query():
-                keep.append((rnd, prev, e, tok, rows))
+                keep.append((rnd, prev, e, tok, rows, plain))
                 continue
             if prev is not None and prev.query() and e:
                 per = prev.elapsed_time(rnd[-1][1])
+                if LANE_PLAIN and e > 1 and per > 0:
+                    self._lane_note(e, plain, tok / per)
                 st = self._steady.setdefault(e, [])
                 st.append((per, tok))
                 if len(st) > 512:
@@ -297,6 +315,7 @@ class Runner:
         self._ev = []
         self._round_e, self._round_tok = 0, 0
         self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
+        self._round_plain = False
         self._mark("start")
         ms0 = dict(self.ms)
         t_r = t0 = time.perf_counter()
@@ -367,7 +386,8 @@ class Runner:
         for k, v in self.ms.items():
             me[k] = me.get(k, 0.0) + v - ms0[k]
         if self._ev:
-            self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok, self._round_rows))
+            self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok, self._round_rows,
+                                  self._round_plain))
             self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
             print(f"[runner] {self.report()}", flush=True)
@@ -380,9 +400,12 @@ class Runner:
         self._collect = []
         if MTP_PACK and sum(1 for t in tasks if not t.done) > 1:
             self._mtp_collect = []
+        skip = self._lane_plain() if LANE_PLAIN else False
         for t in tasks:
             if t.done:
                 continue
+            if LANE_PLAIN and hasattr(t.drafter, "lane_skip"):
+                t.drafter.lane_skip = skip
             self._bind(t)
             if deadline and t.deadline is not None and t.deadline.expired():
                 t.end("deadline")
@@ -402,6 +425,35 @@ class Runner:
         if calls:
             self._packed(calls)
         return self._t("packed", t0)
+
+    def _lane_plain(self) -> bool:
+        """SPD-233: whether the next round's lanes take the plain step (no drafts): at E live lanes, all of them of
+        families that join a plain step to the joint pass, the mode whose rounds made more tokens a GPU ms; the
+        drafted rate is learned first, then the plain rate, and every LANE_PROBE-th round at E runs the other mode."""
+        live = [t for t in self.tasks if not t.done]
+        e = len(live)
+        if e < 2 or not all(getattr(t.eng.caps, "joint_plain", False) and hasattr(t.drafter, "lane_skip")
+                            and (LANE_MODE == "1" or getattr(t.eng, "lane_plain", False)) for t in live):
+            return False
+        st = self._lane.setdefault(e, {"drafted": None, "plain_rate": None, "nd": 0, "np": 0, "n": 0, "plain": False})
+        st["n"] += 1
+        if st["nd"] < 4:
+            return False
+        if st["np"] < 2:
+            return True
+        d, p = st["drafted"], st["plain_rate"]
+        if st["plain"] and d > p * (1 + LANE_MARGIN):
+            st["plain"] = False
+        elif not st["plain"] and p > d * (1 + LANE_MARGIN):
+            st["plain"] = True
+        return (not st["plain"]) if st["n"] % LANE_PROBE == 0 else st["plain"]
+
+    def _lane_note(self, e: int, plain: bool, rate: float) -> None:
+        """A finished round at e lanes: its tokens a GPU ms into its mode's running mean (a fifth of the new)."""
+        st = self._lane.setdefault(e, {"drafted": None, "plain_rate": None, "nd": 0, "np": 0, "n": 0, "plain": False})
+        k, n = ("plain_rate", "np") if plain else ("drafted", "nd")
+        st[k] = rate if st[k] is None else 0.8 * st[k] + 0.2 * rate
+        st[n] += 1
 
     def _bind_none(self):
         from server import slots as slots_mod
@@ -490,6 +542,7 @@ class Runner:
                     return
                 group, trees = [t for t, _ in kept], [x for _, x in kept]
         if len(group) > 1:
+            self._round_plain = all(len(x.tokens) == 1 for x in trees)
             self._round_rows = sum(len(x.tokens) for x in trees)
             self._round_exp += sum(sum(x.scores[1:]) for x in trees)
         t0 = time.perf_counter()

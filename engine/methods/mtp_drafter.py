@@ -103,6 +103,9 @@ class MTPTreeDrafter:
         # lanes shared is priced by every lane's work, so only a round of one lane teaches the plain and drafted
         # prices the turn and the skip weigh
         self.lanes = 1
+        # SPD-233: the round runner found the joint plain step makes more tokens a ms at this many lanes than the
+        # drafted rounds (server/round_runner.py `_lane_plain`): the round takes the plain step without a draft
+        self.lane_skip = False
         self._cls_prev = 0
         self._obs = None                    # what the last round was, to price at the next start
         self._plain = None                  # a plain step was taken: None, or whether it captured
@@ -292,7 +295,7 @@ class MTPTreeDrafter:
             backoff = True
         # SPD-239: the class's skip (its drafted rounds priced above its plain step) weighs lone prices: a round
         # other lanes share keeps drafting
-        if self.head.depth and (backoff or (self.lanes <= 1 and self.cut.skip(self.cls))):
+        if self.head.depth and (backoff or self.lane_skip or (self.lanes <= 1 and self.cut.skip(self.cls))):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -307,6 +310,10 @@ class MTPTreeDrafter:
         if self.head.depth == 0:
             # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
             # one, so the drafted rounds' price is learned from rounds that drafted
+            if self.lane_skip:
+                self.pending = None
+                self.stats["skipped"] += 1
+                return None
             if self._look_left > 0:
                 self._look_left -= 1
                 self.pending = None

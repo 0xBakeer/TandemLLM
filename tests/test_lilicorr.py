@@ -737,6 +737,12 @@ def test_serving_drafts_a_round_with_the_head_and_a_long_lookup():
     finally:
         del os.environ["QSE_NH_LOOKUP"]
     assert d3.ngram is None and srv.side_slot(256, d3)[1].ngram is None
+    # SPD-233: a round the runner gives to the joint plain step (`lane_skip`) drafts nothing
+    n0, d.lane_skip = d.stats["skipped"], True
+    try:
+        assert d.propose_tree(PROMPT.tolist() + [anchor], 16) is None and d.stats["skipped"] == n0 + 1
+    finally:
+        d.lane_skip = False
     return f"a round of {len(tree.tokens) - 1} drafted tokens; lookup min order {LOOK_MIN_ORDER_HEAD}"
 
 

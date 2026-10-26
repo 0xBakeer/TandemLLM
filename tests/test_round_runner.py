@@ -252,6 +252,47 @@ def test_the_report_gives_each_phase_by_the_slots_in_the_round():
 
 
 
+def test_lanes_take_the_mode_that_makes_more_tokens_a_ms():
+    """SPD-233, QSE_RUNNER_LANE_PLAIN: at E lanes of joint-plain families the runner learns the drafted rounds'
+    rate (4 rounds), then the plain rounds' (2), takes the better one with a probe of the other every
+    LANE_PROBE-th round, and goes back when the other mode's rate passes it; a lane of a family that cannot join
+    a plain step to the pass keeps drafting, and under "auto" so does a round with an engine that did not opt in."""
+    from types import SimpleNamespace as NS
+    saved = R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE
+    R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE = True, 8, "1"
+    try:
+        r = R.Runner.__new__(R.Runner)
+        r._lane = {}
+        joint = NS(joint_plain=True)
+        r.tasks = [NS(done=False, eng=NS(caps=joint), drafter=NS(lane_skip=False)) for _ in range(4)]
+        modes = []
+        for _ in range(40):
+            plain = r._lane_plain()
+            modes.append(plain)
+            r._lane_note(4, plain, 4 / 40.0 if plain else 6 / 80.0)      # plain 0.1 tokens a ms, drafted 0.075
+        assert modes[:4] == [False] * 4 and modes[4:6] == [True, True], modes
+        assert all(m == ((i + 1) % 8 != 0) for i, m in enumerate(modes[6:], 6)), modes
+        for _ in range(80):                                              # the drafts get better: 0.2 tokens a ms
+            plain = r._lane_plain()
+            modes.append(plain)
+            r._lane_note(4, plain, 4 / 40.0 if plain else 16 / 80.0)
+        tail = modes[-24:]
+        assert tail.count(False) > tail.count(True) and r._lane[4]["plain"] is False, (tail, r._lane)
+        r.tasks[1].eng = NS(caps=NS(joint_plain=False))
+        assert r._lane_plain() is False and 4 in r._lane and 3 not in r._lane
+        # "auto": only engines that opt in (`lane_plain`)
+        R.LANE_MODE = "auto"
+        r.tasks[1].eng = NS(caps=joint)
+        assert r._lane_plain() is False
+        for t in r.tasks:
+            t.eng.lane_plain = True
+        r._lane_plain()
+        assert r._lane[4]["n"] > 120
+    finally:
+        R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE = saved
+    return f"plain after {modes.index(True)} drafted rounds; back to drafting when the drafts made more"
+
+
 def test_a_family_that_commits_a_round_at_once_gets_one_call():
     # SPD-239: an engine with `commit_tree_multi` gets each joint round's paths in one call (here the engine's
     # own commit_tree a slot at a time inside it), and no tail commits again: each request writes its alone text

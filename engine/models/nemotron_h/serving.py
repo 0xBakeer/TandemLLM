@@ -369,6 +369,11 @@ class NemotronHServing:
     #: 78.1 tok/s against 75.5 / 74.7 at 32 (2026-10-27)
     JOINT_ROWS_AT = {8: int(os.environ.get("QSE_NH_JOINT_ROWS8", "16") or 0)}
 
+    #: SPD-233: the round runner may give a round of this many lanes to the joint plain step when its plain rounds
+    #: make more tokens a ms than its drafted ones (server/round_runner.py `_lane_plain`, QSE_RUNNER_LANE_PLAIN
+    #: auto). Bolt EXL3 4.0, 8 lanes, T1 prose, served C8: 78.3 / 78.1 -> 90.5 / 90.1 tok/s (2026-10-27)
+    lane_plain = True
+
     def joint_policy(self) -> dict:
         """The joint pass: 32 rows (the row kernels' range, `tree_batchable`) and, by lanes, the rows a pass
         keeps (`JOINT_ROWS_AT`)."""
