@@ -786,6 +786,68 @@ def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
     return "a 4,784-token turn: plain while class 2048 is owed, drafts after one idle window"
 
 
+def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records():
+    """SRV-713: the round runner issues the next draft before the commit (QSE_RUNNER_PIPE). In one round of a
+    class without graphs both were captured inline: the next draft's MTP chain graph (its warm-up and capture
+    run the MTP step, `_mtp_begin`), then the block's commit graph, which reads the verify's records
+    (`rec`). The MTP step emptied them and the commit's capture failed on the first layer: a raw 4,024-token
+    request on Flash-Next 3.05 ended in HTTP 500, KeyError: 0 in `commit_dev` (2026-10-26, 6d691a11)."""
+    import contextlib
+    from engine.models.flashnext import engine as E
+    eng = object.__new__(E.FlashNextEngine)
+    eng.cfg = types.SimpleNamespace(linear_layers=(0, 1), ple_layers={}, has_indexer=False)
+    eng._joint, eng._multi, eng._pending, eng.fold, eng.host_ms, eng.hash = {}, None, {}, False, {}, {}
+    eng._block = ([7, 8, 9], [-1, 0, 1])
+    eng.settle = lambda st: None
+    eng.stage_commit = lambda st, path: (3, len(path), False, 0)
+    eng._commit_bufs = lambda key: {"stack": torch.zeros(len(key), 3)}
+    eng._rows_buffers = lambda M, key: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
+    eng.stage_mtp = lambda st_m, nexts, depth: 0
+    eng.mtp_chain_dev = lambda st_m, n, depth, cls: eng._mtp_begin(n, ("mtp", "mtp", 0, n), cls)
+    read = []
+
+    def commit_dev(st, key):                    # what the real one reads first: each linear layer's record
+        read.extend(type(eng.rec[li]).__name__ for li in eng.cfg.linear_layers)
+    eng.commit_dev = commit_dev
+
+    class CG:                                   # the commit graph: its capture runs `commit_dev`
+        def __init__(self, eng_, st, key):
+            self.eng, self.st, self.key = eng_, st, key
+            self.graph = types.SimpleNamespace(replay=lambda: None)
+
+        def capture(self):
+            self.eng.commit_dev(self.st, self.key)
+
+    class _Graph:
+        def replay(self):
+            pass
+
+    stream = lambda: types.SimpleNamespace(wait_stream=lambda s: None)    # noqa: E731
+    cuda = {"Stream": stream, "stream": lambda s: contextlib.nullcontext(), "current_stream": stream, "CUDAGraph": _Graph,
+            "graph": lambda g: contextlib.nullcontext(), "synchronize": lambda: None}
+    real = {k: getattr(torch.cuda, k) for k in cuda}
+    real_cg = E.CommitGraph
+    st, st_m = FNState(cap=16), FNState(cap=16)
+    try:
+        for k, v in cuda.items():
+            setattr(torch.cuda, k, v)
+        E.CommitGraph = CG
+        # 1. the block's verify graph replays: the records are its intermediates
+        vg = object.__new__(E.VerifyGraph)
+        vg.eng, vg.graph = eng, _Graph()
+        vg.rec = {0: (1, 2, 3, 4), 1: (1, 2, 3, 4), "stack": torch.zeros(3, 3)}
+        vg.replay()
+        # 2. the next draft's MTP chain graph, captured inline (no graph for its feed at this class)
+        E.MTPChainGraph(eng, st_m, 2, 3, 1024).capture()
+        # 3. the block's commit graph, captured inline: it reads the verify's records
+        eng.commit(st, [0, 1], {})
+    finally:
+        for k, v in real.items():
+            setattr(torch.cuda, k, v)
+        E.CommitGraph = real_cg
+    assert read == ["tuple", "tuple"] and eng.rec is vg.rec and st.length == 2, (read, eng.rec)
+    return "verify replay, an inline MTP capture, an inline commit capture: the commit reads both layers' records"
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

@@ -1773,8 +1773,12 @@ class FlashNextEngine(FlashNextRef):
 
     def _mtp_begin(self, M: int, key, cls: int) -> torch.Tensor:
         """The rows' tokens for an MTP step: the staged buffers of `key` (the attention reads them), or under
-        a packed step (`_multi`, SPD-235) every lane's tokens in lane order."""
-        self._write, self.rec = False, {}
+        a packed step (`_multi`, SPD-235) every lane's tokens in lane order. The trunk's records (`rec`) are
+        left alone: they are the last verify block's until its commit, and the MTP layer writes none. The
+        round runner issues the next draft before the commit (QSE_RUNNER_PIPE), so an MTP graph captured
+        there (its warm-up runs this step) emptied them and the commit graph captured after it failed on
+        its first layer (SRV-713: a raw 4,024-token request, HTTP 500, KeyError: 0 in `commit_dev`)."""
+        self._write = False
         if self._multi is not None:
             return torch.cat([rb["d"]["tok"] for rb, _, _, _ in self._multi])
         rb = self._rows_buffers(M, key)
