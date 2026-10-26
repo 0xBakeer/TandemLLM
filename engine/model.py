@@ -206,8 +206,10 @@ SLAB_TRITON = _S.get("SLAB_TRITON") == "1"
 #: and repeated text at 2K / 8K / 32K); prefill -6 % at 2K, -7 % at 8K and 32K
 GDN_PREP_BV = int(_S.get("GDN_PREP_BV"))
 GDN_PREP_WARPS = int(_S.get("GDN_PREP_WARPS"))
-#: SPD-245: the GDN_PREP path's recurrence at a 32-row chunk (tools/gdn_chunked_kernels.py): the UT transform
-#: and the walk without register spills, the walk's programs value-block fastest; an order move (0: 64 rows)
+#: SPD-245: the GDN_PREP path's recurrence rescheduled (tools/gdn_chunked_kernels.py): the UT transform in fewer
+#: registers (same bits), the walk's programs value-block fastest (the state's bits kept, a few outputs one bf16
+#: ulp the other way: an order move, top-1 64-65/65 in tools/gdn_tile_gate.py); prefill 8K -0.3 s, 32K -1.3 s.
+#: 0: chunk_prefill_normed
 GDN_CHUNKED = _S.get("GDN_CHUNKED") == "1"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree

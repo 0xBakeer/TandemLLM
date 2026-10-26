@@ -55,10 +55,11 @@ def truth(q, k, v, gate, beta, S0):
 
 
 def test_close_to_the_shipped_path_and_the_fp64_reference():
-    for T, seed in ((1024, 0), (1000, 1), (96, 2)):
+    for (T, seed), c in [(ts, c) for ts in ((1024, 0), (1000, 1), (96, 2)) for c in (64, 32)]:
         args = inputs(T, seed)
+        kw = {"chunk_size": c} if c == 32 else {"chunk_size": 64, "warps": 4, "warps_intra": 8}
         with torch.no_grad():
-            o, S = chunked_prefill_normed(*args)
+            o, S = chunked_prefill_normed(*args, **kw)
             ro, rS = chunk_prefill_normed(*args, chunk_size=64, bv=16, warps=4)
             to, tS = truth(*args)
         scale = ro.float().abs().max().item()
@@ -87,6 +88,19 @@ def test_a_fresh_sequence_is_a_zero_state():
         o, S = chunked_prefill_normed(q, k, v, gate, beta, None)
         oz, Sz = chunked_prefill_normed(q, k, v, gate, beta, torch.zeros(1, H, D, D, device="cuda"))
     assert torch.equal(o, oz) and torch.equal(S, Sz)
+
+
+def test_the_64_row_ut_transform_keeps_the_shipped_bits():
+    """At the shipped chunk `_intra_c` (k read again, the substitution as a loop) is `_intra` bit for bit, so
+    the state keeps its bits and only the walk's output order moves."""
+    for T, seed in ((1024, 5), (1000, 6)):
+        args = inputs(T, seed)
+        with torch.no_grad():
+            o, S = chunked_prefill_normed(*args, chunk_size=64, warps=4, warps_intra=8)
+            os_, Ss = chunked_prefill_normed(*args, chunk_size=64, warps=4, intra="ship")
+            ro, rS = chunk_prefill_normed(*args, chunk_size=64, bv=16, warps=4)
+        assert torch.equal(o, os_) and torch.equal(S, Ss), T
+        assert torch.equal(S, rS), T
 
 
 if __name__ == "__main__":

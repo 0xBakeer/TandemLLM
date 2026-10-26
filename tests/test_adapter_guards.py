@@ -48,8 +48,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("202863f8caa30eaded721bb3c7281d37a4e638cf6264e60b02da5d42eb456898",
-             "44d52d84b4ad2104790f55cf1acc7edeb38f46394517617f447f7ae9a94890b2")
+GOLDEN_V2 = ("7de2132fcdc2a3de5280fdb70a1c363f836a696f732b7bdd850cc10a59a7c4dd",
+             "00f303e1fe675a702199003e290109bfa4008e6dca53c76d48eedfe0f2c3e46c")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -82,7 +82,8 @@ GOLDEN_FP4 = {
     # SPD-223: a capture stream for each graph owner
     # SPD-223: a new pool after a joint flush
     # SPD-245: GDN_CHUNKED knob (off), the gate tool's --flag
-    "qwen3_5": "cfa1c9d052b8cc34ae163c8939f67e27763b4da4b97634b2df50738474dc8c38",
+    # SPD-245: GDN_CHUNKED on (the GDN prefill walk value-block fastest, the UT transform in fewer registers)
+    "qwen3_5": "dab7d9faeceb3895d9f1c1553bdc73bbe1df0b4da440f86084180d70dfaa9151",
     "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",
