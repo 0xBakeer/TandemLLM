@@ -483,6 +483,8 @@ Each request leaves one log line with its token counts, its finish reason and it
 
 Every sampling field works on every path, speculative ones included, and a seeded request reproduces its text exactly ([exactness.md](exactness.md)). Penalties apply to every row before sampling. None is set in the served profile, and a client that sends one gets it, with one exception under the conductor.
 
+A sampled request that names no filter (`top_p`, `top_k`, `min_p`) runs with `--top-p` / `--top-k` when they were given at start, else with the model card's (SPD-245; Qwen3.8-27B: top_k 20, top_p 0.95), else over the whole vocabulary; `/health` `sampling.unnamed_filters` shows which. A sampled request without a `seed` draws one at admission and takes the keyed walk (`QWEN38_FRESH_SEED`, `auto`), the same distribution; `/health` `sampling.unseeded` says where it applies ([exactness.md](exactness.md#sampling)).
+
 Regenerate (0.4.4-test, SRV-241): under TandemLLM a regenerate samples, and every other request keeps the greedy default ([exactness.md](exactness.md#what-changes-output-on-purpose)). Open WebUI sends no flag. Its 0.11.4 source (`Chat.svelte`) shows the shapes:
 
 | client action | what the server receives | here |

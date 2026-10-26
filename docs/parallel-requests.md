@@ -31,7 +31,7 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 | `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
 | `--side-slot-const-gb` | 7.5, or 1.5 with side graphs off | a side slot's bytes beyond its window in the build's estimate (`QSE_SIDE_SLOT_CONST_GB`) |
 
-Measured up to 4 slots on the 27B and 3 on Flash-Next and LFM2.5; 8 by default is not measured on the GPU yet.
+8 lanes are measured on the 27B, Flash-Next, Ornith and Flint (SRV-711, 2026-10-24, 1/2/4/8 requests at once, total tok/s, 3-round medians, N decoding at once: the 27B ThinkingCap EXL3 4.0 38.3 / 67.6 / 100.1 / 154.5, Flash-Next 3.05 36.5 / 45.6 / 57.5 / 71.3, Ornith EXL3 4.0 37.7 / 47.0 / 58.4 / 69.8, Flint EXL3 4.0 111.7 / 154.9 / 193.3 / 232.3). Every weight card has a speed row with 1, 2, 4 and 8 requests at once on the current build ([measurement.md](measurement.md#the-weight-cards-speed-rows)); a card's lanes default is never above the lanes its row measured.
 
 The shipped `ops/serve.env` runs 8 lanes on the pool with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`, the values the Setup Guide writes for the 27B. Until SRV-707 it kept one sequence, and the box the older measurements come from ran two with a 65,536-token side window.
 
@@ -49,6 +49,41 @@ The guide counts how many lanes can all hold the full window at once, the guaran
 Admission reserves KV pages for the prompt and at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens` (0: all of it), so more lanes start than the worst case allows; a lane that writes past its reservation and finds the pool full gives way as above.
 
 A round with more than 16 decoding lanes verifies in more than one pass of 32 rows (2 rows a lane), so each lane gets less speculation; the guide says so above 16 and takes up to 64.
+
+## How a round runs
+
+One thread runs every decoding lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the lanes' proposals, one packed draft, one joint verify pass, the walks and the tails (commits, penalties, stop strings, the stream). `/health` `parallel.round_runner` has its host and GPU milliseconds by phase. A lane of a family without a draft head joins the pass with its plain step as a one-row block (ENG-241). The 27B's joint pass runs from CUDA graphs once a pass shape has come `QWEN38_JOINT_GRAPHS_AFTER` times; a graphed pass gives each lane's logits, state and KV bit for bit what the eager pass gives (`tools/joint_graph_check.py`).
+
+| knob | default | what it does |
+|-|-|-|
+| `QSE_ROUND_RUNNER` | 1 | one runner thread for every lane's round (0: each slot runs its own loop) |
+| `QSE_RUNNER_MTP_PACK` | 1 | the lanes' MTP drafts in one packed pass (Flash-Next, Ornith; SPD-235) |
+| `QSE_RUNNER_COMMIT_MULTI` | 1 | a joint round's commits in one call where the family has `commit_tree_multi` (SPD-239) |
+| `QWEN38_JOINT_GRAPHS` | 1 | the 27B's joint verify pass from CUDA graphs (0: eager) |
+| `QWEN38_JOINT_GRAPHS_MAX` | 24 | joint graphs kept; a full set is reset whole and captured again into a new pool |
+| `QWEN38_JOINT_GRAPHS_AFTER` | 4 | times a pass shape comes before it is captured (16 before SPD-245) |
+| `QWEN38_JOINT_ATTN_GROUP` | 1 | a graphed pass runs every lane's attention of a layer in one scatter, one split and one combine launch, every row the lone launch's bits (0: a lane at a time) |
+| `QWEN38_JOINT_ROWS_AT_LANES` | `4:8` | rows a block keeps at exactly that many lanes, `lanes:rows` pairs: 8 rows a lane at 4 lanes (32-row pass) instead of 16 |
+| `QSE_RUNNER_LANE_PLAIN` | `auto` | at each lane count, the drafted round or the joint plain step, whichever makes more tokens a GPU ms; `auto` for the families that opt in (NemotronH), `1` for every family that joins a plain step, `0` off |
+| `QSE_NH_LILICORR_PACK` | `on` | NemotronH: the lanes' LiLiCorr drafts in one packed pass |
+| `QSE_NH_JOINT_ROWS8` | 16 | NemotronH: rows of a joint pass at 8 lanes (0: the 32-row cap) |
+
+NemotronH reads its routed experts once for the union a pass's rows pick, so its joint pass costs more with every row than a dense model's; at 8 lanes it keeps 16 rows (SPD-233). Where drafts do not pay, the runner takes the joint plain step: it learns at each lane count the tokens a GPU ms of its drafted rounds and of its plain rounds, decided on live rounds only (a round that captures a graph enters no rate), takes the better with a 3 % margin (`QSE_RUNNER_LANE_MARGIN`) and runs the other mode every 16th round (`QSE_RUNNER_LANE_PROBE`); a workload whose drafts pay keeps drafting. `/health` `parallel.round_runner.lane_plain` has the rates. [nemotron-h.md](nemotron-h.md#how-the-engine-runs-it) has the family's numbers.
+
+Each graph owner captures on a stream of its own (SPD-223): `engine/capture_lock.py` `lease_stream` hands out a driver-created stream to one owner at a time (a lone draft graph, a packed draft set, the joint set, a slot's verify graphs) and takes it back only after the owner's graphs are reset. A graph's reset frees the cuBLAS workspace torch keeps for its capture stream, and every graph captured on that stream bakes the workspace into its GEMM nodes. With the streams of torch's shared pool, one owner's eviction freed the workspace of another owner's kept graph, and that graph's next replay wrote into freed memory: an illegal memory access at 4 and 8 greedy lanes. The same kernels are captured into the same pools, so every replay keeps its bits.
+
+## Prompts that arrive together (SPD-245)
+
+Requests bound to lanes while no lane decodes form a burst (`QSE_PREFILL_BURST`, `server/prefill_burst.py`). Every member prefills before any of them decodes, so the lanes decode in joint rounds of all of them from the first round on instead of beside the prefills still waiting. With `joint`, the default, the members' prompts run in one layer-major forward (`engine/model.py` `prefill_joint`): each EXL3 projection is one call over every member's rows on a slab decoded once a layer, the row-wise kernels run once over all rows, and the mixers run one sequence at a time on its own engine. Every row is bit for bit what its own prefill gives (`tests/gpu/test_prefill_joint_gpu.py`); 8 prompts of 512 tokens took 3.55 s in one forward against 4.43 s one after another, in process. The joint forward takes a prompt of up to `EXL3_CHUNK_UNTIL` rows (512 on the 27B's EXL3 profiles) on a plain text forward; a longer prompt, an image or another weight format joins the burst with no job and prefills alone.
+
+A member that would run the joint forward alone while another request is still on its way to a lane gives the turn back and waits for it, up to `QSE_PREFILL_BURST_WAIT_S`. A request with none on its way starts at once, so a lone request never waits. `/health` `parallel.prefill_burst` has the bursts, their members, the joint forwards and their rows, `incoming` and `held`.
+
+| knob | default | what it does |
+|-|-|-|
+| `QSE_PREFILL_BURST` | `joint` | `joint`: a burst's prompts in one forward; `wait` (or `on`): each prompt alone, the decodes after every member's prefill; `off`: no burst |
+| `QSE_PREFILL_BURST_WAIT_S` | 10 | how long a member waits for the others, then it goes on (counted as a timeout) |
+
+Only the order of the work moves, so a burst changes no token. It changes time to first token: a member's first token comes after every member's prefill.
 
 ## What a slot costs
 
@@ -194,6 +229,19 @@ On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side 
 | and a 64-row joint pass (SPD-159) | | 53.7, 53.5 | 69.0, 70.2 | 79.8, 79.2 | |
 
 Single runs; three repeats of the old rules spread 33.1 to 37.7 at C8, so a difference under about 10 % is noise. In an 8-slot round the joint verify pass is still about 210 ms against 77 ms for one block: the per-state parts (GDN, attention, norms, the gate inputs) run once per engine, eagerly, and the pass issues about 7,500 kernels (SPD-163).
+
+## SPD-245 (2026-10-26)
+
+The 27B ThinkingCap EXL3 4.0 pack on one DGX Spark: 8 lanes, every lane the 262,144-token window, KV pool on, side graphs off, suffix store off, `--sampled-tree det`, `X-Tandem: raw`. N requests of 512 prompt tokens each sent at once, 512 tokens each; temperature 0 (greedy) or temperature 1.0 alone (the card's top_k 20 and top_p 0.95 then apply, and an unseeded request draws its own seed). Wall is all completion tokens over the time from the first send to the last end; the decode window leaves out each request's first token and the time before the first one. Medians of the last two of three rounds, every round with N decoding at once and no fault. The greedy rows and C4 sampled ran on a3dc1e45, the other sampled rows on 345ab0fa (two rounds), the same day.
+
+| N at once | greedy, wall tok/s | sampled, wall tok/s | sampled, decode window |
+|-:|-:|-:|-:|
+| 1 | 42.5 | 36.5 | 38.1 |
+| 2 | 73.5 | 62.9 | 67.9 |
+| 4 | 108.9 | 99.2 | 105.7 |
+| 8 | 155.9 | 146.2 | 168.4 |
+
+One prompt alone, greedy, time to first token: 2,048 tokens 1.90 s, 8,192 tokens 6.76 s, 32,768 tokens 29.4 s. At 8,192 tokens, four arms in one session: the chunk-64 GDN prefill on and the joint burst on 6.76 s, the GDN prefill off 6.97 s, the burst off 6.72 s, both off 6.95 s; the burst does not change a lone prompt. A/Bs on the way, each in one session: `QWEN38_JOINT_GRAPHS_AFTER` 4 against 16 gave C4 99 to 101 against 96 tok/s; `QWEN38_JOINT_ROWS_AT_LANES` 4:8 took the 4-lane round from 106 to 91 ms for one token less a round (steady C4 112 to 117 sampled, 124 to 131 greedy, three rounds on two servers each). Before the SPD-223 stream lease every full bench order faulted in its second or third C8 greedy batch; after it, none did.
 
 ## The text
 
