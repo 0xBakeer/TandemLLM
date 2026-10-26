@@ -77,6 +77,10 @@ FORMULA = "fp4"
 #: replaced function's bit for bit on the CPU and the GPU (fp32, bf16, fp16; 1 to 4 taps; one and two blocks)
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
+#: 0.15.0 (SPD-201 to SPD-245): no entry across 0.15.0. The speed setup's knob defaults, the joint passes,
+#: the 27B's prefill orders and Flash-Next's tensor-core mixers moved every family's stored rows or their
+#: fingerprint, so no model adopts a file from before 0.15.0; the entries above only reach older trees
+#: (tests/test_fp_same_rows.py)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
              "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441",
              ("tools/exl3_linear.py", "a75b6a3f1fd36ff9ecafe79c09cb797106ce48f53edc73b10d4ef19a0fe3c40f"):

@@ -56,6 +56,14 @@ refusal message, and the 27B's DFlash2 grouped convolution written again with th
 
   * the 27B's v2 and v3 are 0.9.x's with the entries; every model adopts what main stored before it.
 
+0.15.0 (SPD-201 to SPD-245): every family's arithmetic moved (the speed setup's knob defaults in
+engine/settings.py, the joint passes, the 27B's prefill orders, Flash-Next's tensor-core mixers), so no
+model reuses a cache file from before 0.15.0:
+
+  * no family's fingerprint, on the bytes or through any SAME_ROWS variant, is one a release before
+    0.15.0 stored under (0.9.x, 0.10.0-0.11.1, 0.12.2, 0.13.0, SRV-673's tree, the tree before OPS-225);
+  * the 27B's v2 with SAME_ROWS is 0.15.0's (tests/test_adapter_guards.py GOLDEN_V2).
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -90,8 +98,8 @@ M27 = adapter.manifest()
 #: the code fingerprints of 0.9.0-0.9.2 (extra {}), the first 16 hex digits: v2 on the bytes and with
 #: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
 V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
-#: SPD-E5 (2026-10-23): the 27B's v2 with SAME_ROWS after the branch's one move (GOLDEN_V2[0])
-V2_SPDE5 = "3e35a3f647749b8c"
+#: 0.15.0: the 27B's v2 with SAME_ROWS (tests/test_adapter_guards.py GOLDEN_V2[0])
+V2_0150 = "58a0f1a95d3c8187"
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 #: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
 FP4_LFM25_011 = "9049446866c5e4fc"
@@ -102,6 +110,18 @@ FP4_0130_ORNITH = "78496db10e59d74d"
 #: SRV-681: Ornith's fp4 with SRV-673's kernels.py (main 14a0e045..878276c9), LFM2.5's of 0.13.0 (extra {})
 FP4_SRV673_ORNITH = "a42fa30073b4d606"
 FP4_0130_LFM25 = "c22eadcdddc0e12e"
+
+
+def _variants(m) -> list[str]:
+    """A manifest's fingerprints a start adopts under: on the bytes and through every SAME_ROWS variant."""
+    return [mf.fingerprint(ROOT, m, {})] + [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
+
+
+def _adopts_none(name, m, olds) -> str:
+    got = _variants(m)
+    hit = [o for o in olds if any(g.startswith(o) for g in got)]
+    assert not hit, (name, "adopts a file from before 0.15.0", hit)
+    return f"{name} adopts none of {len(olds)} ({len(got)} variants)"
 
 
 def _sha(path):
@@ -115,12 +135,12 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
     assert LOADER in M27.modules
     code = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
     same = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=mf.SAME_ROWS)
-    # SPD-E5 moved the 27B's fingerprint once (tests/test_adapter_guards.py GOLDEN_V2): the entry still
-    # reads loader.py as the bytes it replaced, and the tree's other files are SPD-E5's
-    assert same.startswith(V2_SPDE5), same
+    # 0.15.0 moved the 27B's fingerprint (tests/test_adapter_guards.py GOLDEN_V2): the entry still reads
+    # loader.py as the bytes it replaced, and the tree's other files are 0.15.0's
+    assert same.startswith(V2_0150), same
     assert code != same, "the loader's bytes count without the entry"
     assert mf.adoption() != mf.FORMULA and mf.adoption().startswith(mf.FORMULA + "+same-")
-    return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS (0.7.2's)"
+    return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS"
 
 
 #: SRV-619: engine/grammar.py changed after 0.9 without changing a stored row (a mask on the sampled
@@ -155,30 +175,14 @@ def test_lilicorr_is_in_no_27b_fingerprint():
         assert dc.fingerprint(t, {}, skip=sp.NOT_ARITHMETIC) != before[0]
 
 
-def test_flash_next_and_lfm25_adopt_their_0_9_files():
-    out = []
-    for name, m in (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest())):
-        now = mf.fingerprint(ROOT, m, {})
-        assert not now.startswith(FP4_09[name]), "fn_kernels.py's bytes are 0.9.x's: drop its SPD-125 entry"
-        one = mf.fingerprint(ROOT, m, {}, same=mf.SAME_ROWS)
-        assert not one.startswith(FP4_09[name]), "SAME_ROWS alone reads exl3_linear.py as 0.8.2's"
-        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
-        assert any(f.startswith(FP4_09[name]) for f in got), (name, [f[:16] for f in got])
-        out.append(f"{name} {len(got)} variants")
-    return ", ".join(out)
+def test_flash_next_and_lfm25_adopt_no_0_9_file():
+    """Until 0.15.0 Flash-Next and LFM2.5 adopted their 0.9.x files; 0.15.0 moved both (no file reused)."""
+    return ", ".join(_adopts_none(n, m, [FP4_09[n]]) for n, m in
+                     (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest())))
 
 
-def test_lfm25_adopts_0_11_1s_files_and_an_edit_without_an_entry_breaks_it():
-    m = lfm_serving.manifest()
-    got = [mf.fingerprint(ROOT, m, {}, same=s)[:16] for s in mf.same_variants(ROOT, m)]
-    assert FP4_LFM25_011 in got and FP4_09["lfm25"] in got, ("lfm25", got)
-    with tempfile.TemporaryDirectory() as d:
-        t = _code(d)
-        _edit(os.path.join(t, "engine", "models", "lfm2_moe", "kernels.py"), "from __future__",
-              "# x\nfrom __future__")
-        edited = [mf.fingerprint(t, m, {}, same=s)[:16] for s in mf.same_variants(t, m)]
-    assert FP4_LFM25_011 not in edited and FP4_09["lfm25"] not in edited, ("lfm25", edited)
-    return f"0.9.x {FP4_09['lfm25']} and 0.11.1 {FP4_LFM25_011} among {len(got)} variants"
+def test_lfm25_adopts_no_0_11_1_file():
+    return _adopts_none("lfm25", lfm_serving.manifest(), [FP4_LFM25_011, FP4_09["lfm25"], FP4_0130_LFM25])
 
 
 def test_a_tree_two_releases_on_adopts_the_release_befores_files():
@@ -283,45 +287,24 @@ def test_an_unchanged_fingerprint_keeps_what_it_adopted():
         assert set(also) == {"the RC's fp3", "v2", "v2 on the old loader"}, also
 
 
-def test_flash_next_lfm25_and_nemotron_h_adopt_0_12_2s_files():
+def test_flash_next_lfm25_and_nemotron_h_adopt_no_0_12_2_file():
     from engine.models.nemotron_h import serving as nh_serving
-    out = []
-    for name, m in (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest()),
-                    ("nemotron_h", nh_serving.manifest())):
-        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
-        assert any(g.startswith(FP4_0122[name]) for g in got), (name, [g[:16] for g in got])
-        out.append(f"{name} {FP4_0122[name]}")
-    return ", ".join(out)
+    return ", ".join(_adopts_none(n, m, [FP4_0122[n]]) for n, m in
+                     (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest()),
+                      ("nemotron_h", nh_serving.manifest())))
 
 
-def test_ornith_adopts_0_13_0s_files():
-    """SRV-673: engine/models/qwen3_5_moe/engine.py and kernels.py changed bytes, not rows; with their
-    entries a start adopts what 0.13.0 stored (the disk tier, the spilled conversations)."""
+def test_ornith_adopts_no_0_13_0_file():
+    """SRV-673's entries let Ornith adopt 0.13.0's files until 0.15.0, which moved its fingerprint."""
     from engine.models.qwen3_5_moe import serving as q_serving
-    m = q_serving.manifest()
-    assert not mf.fingerprint(ROOT, m, {}).startswith(FP4_0130_ORNITH), "the files are 0.13.0's: drop the entries"
-    got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
-    assert any(g.startswith(FP4_0130_ORNITH) for g in got), [g[:16] for g in got]
-    return f"ornith {FP4_0130_ORNITH} among {len(got)} variants"
+    return _adopts_none("ornith", q_serving.manifest(), [FP4_0130_ORNITH, FP4_SRV673_ORNITH])
 
 
-def test_srv681_ornith_and_lfm25_adopt_their_files():
-    """SRV-681: Ornith adopts what 0.13.0 and SRV-673's tree stored, LFM2.5 what 0.13.0 stored; NemotronH's
-    MTP head is in no manifest, so its change moves no fingerprint."""
+def test_nemotron_h_mtp_head_is_in_no_manifest():
+    """SRV-681: NemotronH's MTP head drafts only, so its change moves no fingerprint."""
     from engine.models.nemotron_h import serving as nh_serving
-    from engine.models.qwen3_5_moe import serving as q_serving
-    out = []
-    for name, m, want in (("ornith", q_serving.manifest(), (FP4_0130_ORNITH, FP4_SRV673_ORNITH)),
-                          ("lfm25", lfm_serving.manifest(), (FP4_0130_LFM25,))):
-        now = mf.fingerprint(ROOT, m, {})
-        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
-        for w in want:
-            assert not now.startswith(w), (name, "the files are the old tree's: drop the entry")
-            assert any(g.startswith(w) for g in got), (name, w, [g[:16] for g in got])
-        out.append(f"{name} {'+'.join(want)}")
     nh = [os.path.relpath(p, ROOT) for p in mf.files(ROOT, nh_serving.manifest())]
     assert "engine/models/nemotron_h/mtp.py" not in nh, nh
-    return ", ".join(out)
 
 
 #: OPS-225: the fp4 of main before it (d4b1d00a, extra {}), by model; LFM2.5's files did not change
@@ -329,20 +312,15 @@ FP4_BEFORE_OPS225 = {"27b": "432dc8e260606f4c", "flashnext": "492e25cc1bf371fa",
                      "nemotron_h": "3b249057dcfb562b"}
 
 
-def test_ops225_every_model_adopts_the_files_before_it():
-    """OPS-225 changed comments in files of four models' manifests (and the 27B's DFlash2 grouped
-    convolution, the same bits): with the entries a start adopts what the tree before stored."""
+def test_ops225_no_model_adopts_the_files_before_it():
+    """OPS-225's entries let every model adopt the tree before it until 0.15.0, which moved them all."""
     from engine.models.nemotron_h import serving as nh_serving
     from engine.models.qwen3_5_moe import serving as q_serving
-    out = []
-    # the 27B no longer adopts them: SPD-E5 moved its fingerprint once (tests/test_adapter_guards.py)
-    for name, m in (("flashnext", fn_serving.manifest()), ("ornith", q_serving.manifest()),
-                    ("nemotron_h", nh_serving.manifest())):
-        want = FP4_BEFORE_OPS225[name]
-        assert not mf.fingerprint(ROOT, m, {}).startswith(want), (name, "the files are the old tree's: drop the entries")
-        got = [mf.fingerprint(ROOT, m, {}, same=s)[:16] for s in mf.same_variants(ROOT, m)]
-        assert want in got, (name, want, got[:8])
-        out.append(f"{name} {want}")
+    out = [_adopts_none(n, m, [FP4_BEFORE_OPS225[n]]) for n, m in
+           (("flashnext", fn_serving.manifest()), ("ornith", q_serving.manifest()),
+            ("nemotron_h", nh_serving.manifest()))]
+    v3 = mf.fingerprint(ROOT, M27, {}, same=mf.SAME_ROWS)
+    assert not v3.startswith(FP4_BEFORE_OPS225["27b"]), v3
     return ", ".join(out)
 
 
