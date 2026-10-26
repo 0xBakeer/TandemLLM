@@ -40,6 +40,9 @@ def env(m: dict, c: dict, d: str) -> str:
         # SPD-171: the 27B's EXL3 prefill takes up to 512 rows on the skinny kernel (ops/profiles/_exl3.env)
         lines.append("QWEN38_EXL3_CHUNK_UNTIL=512")
     lines += ["QWEN38_SAMPLE_NUCLEUS=1",
+              # SPD-245: a sampled request that names no filter takes the card's top_k and top_p
+              # (generation_config.json; server/sampling_defaults.py), unless TOP_K / TOP_P set the server's
+              "# sampling: the card's top_k / top_p when a request names none (TOP_K / TOP_P override)",
               f"VISION={'on' if c['modalities']['image'] else 'off'}",
               # SPD-167: a text-only pack's limit, which setup.env cannot turn back on (ops/serve.env)
               *([] if c['modalities']['image'] else ["QSE_PACK_VISION=off"]),

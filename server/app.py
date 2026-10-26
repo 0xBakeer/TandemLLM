@@ -62,6 +62,7 @@ from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noq
                              answer_items, parse_tool_calls, rewrite_native, schema_types,
                              strip_blocks)
 from server import compat  # noqa: E402
+from server import sampling_defaults  # noqa: E402  (SPD-245 a request's filters when it names none)
 from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
 from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
 from server import thinking as thinking_mod  # noqa: E402
@@ -7282,6 +7283,9 @@ class Handler(BaseHTTPRequestHandler):
                 "sampling": {"temperature": STATE.get("temperature", 0.0),
                              "top_p": STATE.get("top_p", 1.0),
                              "top_k": STATE.get("top_k", 0),
+                             # SPD-245: what a sampled request that names no filter runs with
+                             "unnamed_filters": sampling_defaults.resolve(
+                                 None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
                              # SRV-241: what a regenerate samples with, and how many there were
                              "regenerate": (STATE["regenerate"].report()
                                             if STATE.get("regenerate") is not None
@@ -7902,13 +7906,12 @@ class Handler(BaseHTTPRequestHandler):
             sampler = Sampler(
                 temperature=float(body["temperature"]) if body.get("temperature") is not None
                 else float(STATE.get("temperature", 0.0)),
-                top_p=float(body["top_p"]) if body.get("top_p") is not None
-                else float(STATE.get("top_p", 1.0)),
-                top_k=int(body["top_k"]) if body.get("top_k") is not None
-                else int(STATE.get("top_k", 0)),
+                # SPD-245: a request that names no filter samples with the card's (server/sampling_defaults.py)
+                **{k: v for k, v in sampling_defaults.resolve(
+                    body, STATE.get("sampling_flags"), STATE.get("card_sampling")).items()
+                   if k != "source"},
                 seed=body.get("seed"),
-                draft_temperature=body.get("draft_temperature"),
-                min_p=float(body["min_p"]) if body.get("min_p") is not None else 0.0)
+                draft_temperature=body.get("draft_temperature"))
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad sampling parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -10300,8 +10303,11 @@ def parser() -> argparse.ArgumentParser:
                     help="server default sampling temperature (0 = greedy, the exact path). "
                          "A request that sends temperature > 0 samples -- via engine/sample.py -- "
                          "and decodes without a drafter until rejection sampling exists")
-    ap.add_argument("--top-p", type=float, default=1.0)
-    ap.add_argument("--top-k", type=int, default=0)
+    ap.add_argument("--top-p", type=float, default=None,
+                    help="server default top_p for a sampled request that names no filter; unset: the "
+                         "checkpoint card's (generation_config.json), else 1.0 (server/sampling_defaults.py)")
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="server default top_k, as --top-p; unset: the card's, else 0")
     ap.add_argument("--no-repeat-ngram", type=int, default=0,
                     help="forbid the token that would complete an n-gram already seen "
                          "(HF's no_repeat_ngram_size; 0 = off, must be >= 2). Deterministic, so "
@@ -11067,7 +11073,9 @@ def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
                  answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
                                      a.frequency_penalty, a.no_repeat_ngram),
-                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
+                 temperature=a.temperature,
+                 top_p=1.0 if a.top_p is None else a.top_p, top_k=0 if a.top_k is None else a.top_k,
+                 sampling_flags={"top_p": a.top_p, "top_k": a.top_k},
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  argloop=a.argloop,
