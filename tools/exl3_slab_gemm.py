@@ -95,6 +95,97 @@ if HAVE_TRITON:
 if HAVE_TRITON:
 
     @triton.jit
+    def _slab_rot_sliced(A, B, SV, C, SL, M, N, s_am, s_bk, s_cm,
+                         BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GROUP: tl.constexpr,
+                         S: tl.constexpr, WK: tl.constexpr, OUT_F32: tl.constexpr):
+        """`_slab_rot` with the skinny GEMM's summation order (tools/exl3_linear.py `gemm_kernel`): K
+        in the S x WK slices of `pick` (SL: their [k0, k1) in 16-row K tiles), each slice a chain of
+        k16 products from zero in K order, the slices of a rank added in warp order, the ranks in rank
+        order; then the same output rotation. So a row gets the skinny kernel's bits, from a decoded slab."""
+        pid = tl.program_id(0)
+        npm = tl.cdiv(M, BM)
+        npn = tl.cdiv(N, BN)
+        gid = pid // (GROUP * npn)
+        fm = gid * GROUP
+        gs = min(npm - fm, GROUP)
+        pm = fm + (pid % gs)
+        pn = (pid % (GROUP * npn)) // gs
+        rm = pm * BM + tl.arange(0, BM)
+        rn = pn * BN + tl.arange(0, BN)
+        rk = tl.arange(0, BK)
+        mm = rm[:, None] < M
+        tot = tl.zeros((BM, BN), dtype=tl.float32)
+        for r in tl.static_range(S):
+            part = tl.zeros((BM, BN), dtype=tl.float32)
+            for w in tl.static_range(WK):
+                k0 = tl.load(SL + 2 * (r * WK + w)) * 16
+                k1 = tl.load(SL + 2 * (r * WK + w) + 1) * 16
+                a = A + rm[:, None] * s_am + (k0 + rk)[None, :]
+                b = B + (k0 + rk)[:, None] * s_bk + rn[None, :]
+                acc = tl.zeros((BM, BN), dtype=tl.float32)
+                for _ in range(k0, k1, BK):
+                    x = tl.load(a, mask=mm, other=0.0)
+                    y = tl.load(b)
+                    acc = tl.dot(x, y, acc)
+                    a += BK
+                    b += BK * s_bk
+                part += acc
+            tot += part
+        v = _wht128_rows(tot, BM, BN)
+        sv = tl.load(SV + rn).to(tl.float32)
+        o = v * RSQRT128 * sv[None, :]
+        if OUT_F32:
+            tl.store(C + rm[:, None] * s_cm + rn[None, :], o, mask=mm)
+        else:
+            tl.store(C + rm[:, None] * s_cm + rn[None, :], o.to(tl.bfloat16), mask=mm)
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _slab_rot_s1(A, B, SV, C, M, N, KT, L, s_am, s_bk, s_cm,
+                     BM: tl.constexpr, BN: tl.constexpr, Q: tl.constexpr, GROUP: tl.constexpr,
+                     OUT_F32: tl.constexpr):
+        """`_slab_rot_sliced` for S = 1 (one rank: every 27B shape): one pass over K, the chain of a
+        slice of L K tiles (the last one shorter) added to the running sum at its end and begun again
+        from zero. Two accumulator tiles instead of three, one software-pipelined loop."""
+        pid = tl.program_id(0)
+        npm = tl.cdiv(M, BM)
+        npn = tl.cdiv(N, BN)
+        gid = pid // (GROUP * npn)
+        fm = gid * GROUP
+        gs = min(npm - fm, GROUP)
+        pm = fm + (pid % gs)
+        pn = (pid % (GROUP * npn)) // gs
+        rm = pm * BM + tl.arange(0, BM)
+        rn = pn * BN + tl.arange(0, BN)
+        rk = tl.arange(0, 16 * Q)
+        mm = rm[:, None] < M
+        a = A + rm[:, None] * s_am + rk[None, :]
+        b = B + rk[:, None] * s_bk + rn[None, :]
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        part = tl.zeros((BM, BN), dtype=tl.float32)
+        for kt in range(0, KT, Q):
+            x = tl.load(a, mask=mm, other=0.0)
+            y = tl.load(b)
+            acc = tl.dot(x, y, acc)
+            a += 16 * Q
+            b += 16 * Q * s_bk
+            if ((kt + Q) % L == 0) | (kt + Q == KT):
+                part += acc
+                acc = tl.zeros((BM, BN), dtype=tl.float32)
+        v = _wht128_rows(part, BM, BN)
+        sv = tl.load(SV + rn).to(tl.float32)
+        o = v * RSQRT128 * sv[None, :]
+        if OUT_F32:
+            tl.store(C + rm[:, None] * s_cm + rn[None, :], o, mask=mm)
+        else:
+            tl.store(C + rm[:, None] * s_cm + rn[None, :], o.to(tl.bfloat16), mask=mm)
+
+
+if HAVE_TRITON:
+
+    @triton.jit
     def _add_norm_rot(R, X, W, H, Y, SUH, XH, M, N, EPS: tl.constexpr, BLOCK: tl.constexpr,
                       G: tl.constexpr, STORE_Y: tl.constexpr):
         """`_add_rms_norm` (tools/norm_kernels.py) and then `rot_in_kernel` of its bf16 output for each
@@ -179,6 +270,85 @@ def slab_rot(xh: torch.Tensor, wi: torch.Tensor, svh: torch.Tensor, out: torch.T
     _slab_rot[grid](xh, wi, svh, out, M, N, K, xh.stride(0), wi.stride(0), out.stride(0),
                     BM=bm, BN=bn, BK=bk, GROUP=8, OUT_F32=out.dtype == torch.float32,
                     num_warps=w, num_stages=st)
+    return out
+
+
+_SLICES: dict = {}
+#: (BM, BN, warps, stages) of the one-rank sliced product, by K; the tiling never moves a bit (each slice's
+#: chain and the slices' sum are per element), so it is picked for speed alone: 128 x 128, 8 warps is the
+#: fastest or within 5 % on the 27B's shapes at 512 and 4,096 rows (2026-10-26 sweep of 7 tilings), with a
+#: fourth stage for the long-K down projection
+def sliced_tile(K: int) -> tuple:
+    return (128, 128, 8, 4 if K > 8192 else 3)
+
+
+def skinny_slices(N: int, Kin: int, kb: int, dev) -> tuple:
+    """(S, WK, bounds [S * WK, 2] int32 on `dev`, K tiles a step): the K slices `gemm_kernel` sums a
+    column block of this shape in (`pick`'s S and wk: ranks, then warps, both contiguous), and the
+    largest step of 1, 2 or 4 K tiles that divides every slice."""
+    from tools import exl3_linear as X
+    key = (N, Kin, kb, str(dev))
+    got = _SLICES.get(key)
+    if got is None:
+        t = X.pick(N, Kin, kb)
+        S, WK, KT = int(t["S"]), int(t["wk"]), Kin // 16
+        per_r = (KT + S - 1) // S
+        sl = []
+        for r in range(S):
+            r0 = min(KT, r * per_r)
+            r1 = min(KT, r0 + per_r)
+            per_w = (r1 - r0 + WK - 1) // WK
+            for w in range(WK):
+                k0 = min(r1, r0 + w * per_w)
+                sl.append((k0, min(r1, k0 + per_w)))
+        q = next(q for q in (4, 2, 1) if all((b - a) % q == 0 for a, b in sl))
+        got = _SLICES[key] = (S, WK, torch.tensor(sl, dtype=torch.int32, device=dev).view(-1), q)
+    return got
+
+
+def slab_rot_sliced(xh: torch.Tensor, wi: torch.Tensor, svh: torch.Tensor, out: torch.Tensor, w,
+                    tile: tuple | None = None) -> torch.Tensor:
+    """`slab_rot` in the skinny kernel's summation order for weight `w` (the block or group the slab is
+    a column range of): out[M, n] gets the bits `tools.exl3_linear.exl3_matmul` gives these rows on the
+    skinny kernel (M <= EXL3_CHUNK_UNTIL there), from the decoded slab wi."""
+    M, K = xh.shape
+    N = wi.shape[1]
+    assert N % 128 == 0 and xh.stride(1) == 1 and wi.stride(1) == 1 and out.stride(1) == 1
+    S, WK, sl, q = skinny_slices(w.N, w.K, w.kb, xh.device)
+    if S == 1:
+        KT = K // 16
+        L = (KT + WK - 1) // WK                    # gemm_kernel's per_w: every slice but the last
+        if L % q == 0:
+            bm, bn, nw, st = tile or sliced_tile(K)
+            grid = (triton.cdiv(M, bm) * (N // bn),)
+            _slab_rot_s1[grid](xh, wi, svh, out, M, N, KT, L, xh.stride(0), wi.stride(0), out.stride(0),
+                               BM=bm, BN=bn, Q=q, GROUP=8, OUT_F32=out.dtype == torch.float32,
+                               num_warps=nw, num_stages=st)
+            return out
+    bm, bn, _, nw, st = pick(M, N)
+    grid = (triton.cdiv(M, bm) * (N // bn),)
+    _slab_rot_sliced[grid](xh, wi, svh, out, sl, M, N, xh.stride(0), wi.stride(0), out.stride(0),
+                           BM=bm, BN=bn, BK=16 * q, GROUP=8, S=S, WK=WK, OUT_F32=out.dtype == torch.float32,
+                           num_warps=nw, num_stages=st)
+    return out
+
+
+def skinny_matmul(x: torch.Tensor | None, w, *, xh: torch.Tensor | None = None, M: int | None = None,
+                  segs: list | None = None) -> torch.Tensor:
+    """SPD-245: `exl3_matmul`'s skinny-kernel bits at any row count, through decoded slabs: the rotated
+    input (unless `xh`), then per slab (`segs`: (member, n0, n1, Wi) decoded once by the caller, else
+    decoded here) the sliced product + rot_out. For rows of several prompts in one call: each row gets
+    what its own <= EXL3_CHUNK_UNTIL-row call gives."""
+    from tools import exl3_linear as X
+    if xh is None:
+        M = x.shape[0]
+        if x.stride(1) != 1 or x.stride(0) % 4 or x.data_ptr() % 8:
+            x = x.contiguous()
+        xh = X.rotate_in(x, w)
+    out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=xh.device)
+    segs = segs or [(g, n0, n1, None) for g, n0, n1 in X.segments(w, X.SLAB_N)]
+    for g, n0, n1, wi in segs:
+        slab_rot_sliced(xh[g], wi if wi is not None else w.inner(n0, n1), w.svh[n0:n1], out[:, n0:n1], w)
     return out
 
 

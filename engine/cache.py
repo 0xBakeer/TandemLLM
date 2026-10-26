@@ -91,6 +91,11 @@ PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
 #: three decoding chats wrote ~1 token a second). The windows' chunks are the same chunks in the
 #: same order, so the cap changes when the turn is offered, never a bit.
 WINDOW_CAP = None
+#: SPD-245: (eng, tokens, start, whole) -> logits or None, called before the first forward of a prefill
+#: (server/app.py `_joint_forward`, the prefill burst): `whole` when that forward is the prompt's only one
+#: (then the logits are what `eng.forward(tokens, start, last_only=True)` returns, from a joint forward
+#: of several prompts); None: the prefill runs as before. None: no hook (the default)
+FIRST_FORWARD = None
 
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
@@ -2750,6 +2755,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                         "t0": time.perf_counter(), "layers": [],
                         "n": int(getattr(getattr(eng, "cfg", None), "num_hidden_layers", 0) or 0)}
                     LAYER.mark = _layer_marks(live, device)
+                if FIRST_FORWARD is not None and i == start:
+                    FIRST_FORWARD(eng, None, i, False)     # SPD-245: a window is no joint forward's
                 try:
                     logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
                 finally:
@@ -2795,7 +2802,9 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 t = n - i
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
             # a chunk before the last one returns logits nobody reads: one row, not `t` of them
-            logits = eng.forward(blk, start=i, last_only=True)
+            got = (FIRST_FORWARD(eng, blk, i, i + t == n) if FIRST_FORWARD is not None and i == start
+                   else None)
+            logits = got if got is not None else eng.forward(blk, start=i, last_only=True)
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
             i += t

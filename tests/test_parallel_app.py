@@ -120,6 +120,21 @@ def test_three_streams_at_once_on_three_slots():
         _stop(proc)
 
 
+def test_the_prefill_burst_changes_no_answer():
+    """SPD-245: with QSE_PREFILL_BURST (wait, joint) three requests at once get the answers they get
+    alone, and /health shows the burst; the fake engine never takes the joint forward."""
+    for mode in ("wait", "joint"):
+        port, proc = _server(("--parallel", "3", "--side-max-len", "8192"), env={"QSE_PREFILL_BURST": mode})
+        try:
+            alone = [_chat(port, t)[0] for t in TEXTS[:3]]
+            spans, _ = _together(port, TEXTS[:3])
+            assert [s[0] for s in spans] == alone, mode
+            b = _get(port, "/health")["parallel"]["prefill_burst"]
+            assert b is not None and not b["open"] and b["joint"] == 0, (mode, b)
+        finally:
+            _stop(proc)
+
+
 def test_the_parallel_view_shows_the_slots():
     port, proc = _server(("--parallel", "2", "--side-max-len", "8192"))
     try:

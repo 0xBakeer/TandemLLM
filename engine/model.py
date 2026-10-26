@@ -2386,6 +2386,115 @@ def forward_tree_multi(items: list) -> list:
         raise
 
 
+def prefill_joint_ok(eng, T: int, start: int) -> bool:
+    """SPD-245: whether `prefill_joint` can take a prompt of `T` rows from `start` on `eng`: a plain text
+    forward with the fused add-norm loop, rows the skinny EXL3 kernel takes alone (33..EXL3_CHUNK_UNTIL),
+    every projection EXL3 with the fused qkv(z) and gate|up groups and the silu-fused down."""
+    if not (isinstance(eng, Qwen38Engine) and _x3.SILU_FUSED and _x3.SKINNY_MAX < T <= _x3.CHUNK_UNTIL
+            and eng.window_ok(start)):
+        return False
+    ok = getattr(eng, "_joint_all", None)
+    if ok is None:
+        cfg, w, E = eng.cfg, eng.w, EXL3Block
+        ok = True
+        for layer in range(cfg.num_hidden_layers):
+            p = f"layers.{layer}"
+            lin = cfg.is_linear(layer)
+            g = w.group(f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv")
+            wo = w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+            gu = w.group(f"{p}.mlp.gate_up")
+            wd = w.proj(f"{p}.mlp.down_proj")
+            ok = ok and all(isinstance(t, E) and t.kb < 10 for t in (g, wo, gu, wd)) and \
+                bool(gu.sizes) and gu.sizes[0] == gu.sizes[1] == wd.K and wd.suh.shape[0] == 1
+        eng._joint_all = ok
+    return ok
+
+
+def prefill_joint(items: list) -> list:
+    """SPD-245: the prompts of several sequences in ONE layer-major forward. `items`: (engine, tokens [T],
+    start) of engines over the same weights, each `prefill_joint_ok`. Returns each one's last-row logits,
+    the engines left as their own `forward(tokens, start, last_only=True)` leaves them.
+
+    Bit for bit each engine's own forward: every operation of a row's own forward in the same order;
+    the rows of all prompts go through each EXL3 projection as one call on a slab decoded once a layer,
+    summed in the skinny kernel's order (`tools.exl3_slab_gemm.skinny_matmul`: a row gets what its own
+    <= EXL3_CHUNK_UNTIL-row call gives), and through the row-local kernels (add + norm, the input
+    rotation with silu) as one launch; the mixers (the convolution, the recurrence, the attention with
+    its cache) run one sequence at a time on its own engine with the joined product's rows (`pre`) and
+    write into the joined buffer (`out`). The head reads each prompt's last row alone."""
+    from tools.norm_kernels import add_rms_norm
+    from tools.exl3_slab_gemm import skinny_matmul
+    eng0 = items[0][0]
+    cfg, w = eng0.cfg, eng0.w
+    assert all(e.w is w for e, _, _ in items)
+    n = cfg.num_hidden_layers
+    rows = [int(t.numel()) for _, t, _ in items]
+    offs = [0]
+    for r in rows:
+        offs.append(offs[-1] + r)
+    R = offs[-1]
+    emb = w.norm("embed_tokens.weight")
+    hs, pos, use = [], [], []
+    for eng, toks, start in items:
+        T = toks.numel()
+        eng.kv.ensure(start + T)
+        eng._settle()
+        h = F.embedding(toks.view(1, T), emb)
+        if eng.tap is not None:
+            eng.tap(h[0].detach())
+        s0 = start + eng.pos_delta
+        pos.append(torch.arange(s0, s0 + T, device=eng.device))
+        use.append(eng.state.primed)
+        hs.append(h)
+    H = torch.cat(hs, dim=1)
+    del hs
+    X = rms_norm(H, w.norm("layers.0.input_layernorm.weight"), cfg.rms_norm_eps)
+    mod = _x3._module()
+    for layer in range(n):
+        p = f"layers.{layer}"
+        lin = cfg.is_linear(layer)
+        g = w.group(f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv")
+        Y = skinny_matmul(X.view(R, -1), g)
+        O = torch.empty(1, R, cfg.value_dim if lin else cfg.num_attention_heads * cfg.head_dim,
+                        dtype=X.dtype, device=X.device)
+        for k, (eng, toks, start) in enumerate(items):
+            a, b = offs[k], offs[k + 1]
+            if lin:
+                eng.linear_attention(X[:, a:b], p, layer, use[k], pre=Y[a:b], out=O[:, a:b])
+            else:
+                eng.attention(X[:, a:b], p, layer, start, pos[k], pre=Y[a:b], out=O[:, a:b])
+        del Y
+        wo = w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+        A = skinny_matmul(O.view(R, -1), wo).view(1, R, -1)
+        del O
+        H, X = add_rms_norm(H, A, w.norm(f"{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)
+        del A
+        gu = w.group(f"{p}.mlp.gate_up")
+        wd = w.proj(f"{p}.mlp.down_proj")
+        yg = skinny_matmul(X.view(R, -1), gu)
+        xd = torch.empty(1, R, wd.K, dtype=torch.float16, device=X.device)
+        mod.exl3_rot_in_silu(yg, wd.suh, xd)
+        del yg
+        Mo = skinny_matmul(None, wd, xh=xd, M=R).view(1, R, -1)
+        del xd
+        nxt = f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n else "norm.weight"
+        H, X = add_rms_norm(H, Mo, w.norm(nxt), cfg.rms_norm_eps)
+        del Mo
+        for k, (eng, _, _) in enumerate(items):
+            if eng.tap is not None:
+                eng.tap(H[0, offs[k]:offs[k + 1]].detach())
+    hw = w.norm("lm_head.weight")
+    out = []
+    for k, (eng, toks, start) in enumerate(items):
+        a, b = offs[k], offs[k + 1]
+        eng.state.primed = True
+        eng.kv.length = start + rows[k]
+        eng.hidden_pre_norm = H[:, a:b]
+        eng.hidden_post_norm = X[:, a:b]
+        out.append(head_logits(X[:, b - 1:b], hw))
+    return out
+
+
 def _join(xs: list, dim: int) -> torch.Tensor:
     """`torch.cat(xs, dim)`, or -- when the parts are the consecutive slices of one tensor along `dim`, as
     a joined request's answer comes back split and is often handed straight to the next request -- that

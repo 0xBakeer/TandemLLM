@@ -12,8 +12,14 @@ Only the order of the work moves: each prefill is the forward its request runs a
 the states and every token are the ones without the burst. A member waits at most `wait_s` (then it
 goes on and the wait counts as a timeout); a member that ends before its prefill leaves (`leave`).
 
+With `join` (QSE_PREFILL_BURST=joint) the members' prompts are not prefilled one after another
+but in one forward: each member hands its prompt over at its prefill (`join(who, job)`) and gives the
+turn back; the last one runs `run(jobs)` (engine/model.py `prefill_joint`: every row bit for bit
+its own forward's, the weights read once a layer for all of them) and hands each member its result.
+A member whose prompt the joint forward cannot take joins with no job and prefills alone.
+
 Plain Python and CPU-testable (tests/test_prefill_burst.py); server/app.py builds one when
-`QSE_PREFILL_BURST` is on and the server runs parallel slots.
+`QSE_PREFILL_BURST` is wait or joint and the server runs parallel slots.
 """
 
 from __future__ import annotations
@@ -31,10 +37,13 @@ class Burst:
         self.done: set = set()             # members that prefilled and wait for the others
         self.gen = 0                       # bumped when a burst closes
         self.size = 0                      # members of the open burst
-        self.stats = {"bursts": 0, "members": 0, "max_members": 0, "timeouts": 0, "wait_ms": 0.0}
+        self.jobs: dict = {}               # join: member -> its job, until the last one takes them
+        self.results: dict = {}            # join: member -> (ok, result or exception)
+        self.stats = {"bursts": 0, "members": 0, "max_members": 0, "timeouts": 0, "wait_ms": 0.0,
+                      "joint": 0, "joint_rows": 0}
 
     def is_open(self) -> bool:
-        return bool(self.pending or self.done)
+        return bool(self.pending or self.done or self.jobs)
 
     def arrive(self, who, idle: bool) -> bool:
         """Request on slot `who`, before its prefill: a member of the open burst, or of a new one when
@@ -67,6 +76,78 @@ class Burst:
                 self.pending.discard(who)
                 if not self.pending and self.done:
                     self._close()
+                elif not self.pending and self.jobs:
+                    # the joint forward's members wait for a leader that will not come: they go alone
+                    for m in self.jobs:
+                        self.results[m] = (False, None)
+                    self.jobs = {}
+                    self._close()
+
+    def join(self, who, job, run, release=None, acquire=None, rows: int = 0):
+        """Member `who` at its prefill, holding the GPU turn. `job`: what `run(jobs)` takes for it (a list
+        of jobs in arrival order -> their results), or None (it prefills alone). The last member to come
+        runs the jobs, holding the turn; the others give the turn back (`release`) and take it again
+        (`acquire`) once their result is in. Returns (True, result) for a job the joint forward ran,
+        (False, None) when the member prefills alone (no job, a burst of one, or `wait_s` passed before
+        the last member came)."""
+        with self.cv:
+            if who not in self.pending:
+                return False, None
+            self.pending.discard(who)
+            if job is not None:
+                self.jobs[who] = job
+                self.stats["joint_rows"] += int(rows)
+            if self.pending:
+                if job is None:
+                    return False, None
+                lead = False
+            else:
+                lead, batch = True, self.jobs
+                self.jobs = {}
+        if lead:
+            if len(batch) <= 1:
+                with self.cv:
+                    for m in batch:
+                        if m != who:
+                            self.results[m] = (False, None)
+                    self._close()
+                return False, None
+            try:
+                out = run(list(batch.values()))
+            except BaseException as e:             # every member hears of it, the leader raises
+                with self.cv:
+                    for m in batch:
+                        if m != who:
+                            self.results[m] = (None, e)
+                    self._close()
+                raise
+            with self.cv:
+                for m, r in zip(batch, out):
+                    if m != who:
+                        self.results[m] = (True, r)
+                self.stats["joint"] += 1
+                self._close()
+            return (True, out[list(batch).index(who)]) if who in batch else (False, None)
+        if release is not None:
+            release()
+        t0 = self.clock()
+        try:
+            with self.cv:
+                while who not in self.results:
+                    if who in self.jobs and self.clock() - t0 >= self.wait_s:
+                        del self.jobs[who]             # not taken yet: it prefills alone
+                        self.stats["timeouts"] += 1
+                        self.results[who] = (False, None)
+                        break
+                    self.cv.wait(0.5)
+                ok, r = self.results.pop(who)
+                self.stats["wait_ms"] += (self.clock() - t0) * 1e3
+        finally:
+            if acquire is not None:
+                acquire()
+        if ok is None:
+            raise r
+        return (True, r) if ok else (False, None)
 
     def prefilled(self, who, release=None, acquire=None) -> bool:
         """Member `who` has prefilled. The last one closes the burst and goes on; the others call

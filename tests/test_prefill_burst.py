@@ -93,6 +93,105 @@ def test_a_new_burst_after_the_close():
     assert b.arrive(2, idle=True) and b.member(2)
 
 
+def test_join_runs_every_job_once_in_the_last_members_thread():
+    b = Burst(wait_s=5)
+    for i in range(4):
+        b.arrive(i, idle=True)
+    runs, got, lock = [], {}, threading.Lock()
+
+    def run(jobs):
+        runs.append((threading.current_thread().name, list(jobs)))
+        return [j * 10 for j in jobs]
+
+    def member(i):
+        r = b.join(i, i + 1, run, release=lambda: None, acquire=lambda: None, rows=512)
+        with lock:
+            got[i] = r
+
+    th = [threading.Thread(target=member, args=(i,), name=f"m{i}") for i in range(3)]
+    for t in th:
+        t.start()
+    time.sleep(0.2)
+    assert not runs and not got
+    member(3)
+    for t in th:
+        t.join(2)
+    assert len(runs) == 1 and runs[0][0] == threading.current_thread().name
+    assert sorted(runs[0][1]) == [1, 2, 3, 4]
+    assert got == {i: (True, (i + 1) * 10) for i in range(4)}
+    assert b.stats["joint"] == 1 and b.stats["joint_rows"] == 2048 and not b.is_open()
+
+
+def test_join_without_a_job_goes_alone_and_the_others_still_join():
+    b = Burst(wait_s=5)
+    for i in range(3):
+        b.arrive(i, idle=True)
+    got = {}
+    t = threading.Thread(target=lambda: got.update({0: b.join(0, "a", lambda js: [j.upper() for j in js])}))
+    t.start()
+    time.sleep(0.1)
+    assert b.join(1, None, None) == (False, None)  # a long prompt: alone, no wait
+    assert b.join(2, "c", lambda js: [j.upper() for j in js]) == (True, "C")
+    t.join(2)
+    assert got[0] == (True, "A") and not b.is_open()
+
+
+def test_join_of_one_runs_alone():
+    b = Burst(wait_s=5)
+    b.arrive(0, idle=True)
+    called = []
+    assert b.join(0, "x", lambda js: called.append(js)) == (False, None) and not called
+
+
+def test_join_leader_error_reaches_every_member():
+    b = Burst(wait_s=5)
+    b.arrive(0, idle=True)
+    b.arrive(1, idle=True)
+    seen = {}
+
+    def m0():
+        try:
+            b.join(0, 1, None)
+        except RuntimeError as e:
+            seen[0] = str(e)
+
+    t = threading.Thread(target=m0)
+    t.start()
+    time.sleep(0.1)
+
+    def boom(jobs):
+        raise RuntimeError("oom")
+    try:
+        b.join(1, 2, boom)
+    except RuntimeError as e:
+        seen[1] = str(e)
+    t.join(2)
+    assert seen == {0: "oom", 1: "oom"} and not b.is_open()
+
+
+def test_join_timeout_before_the_last_member_goes_alone():
+    b = Burst(wait_s=0.2)
+    b.arrive(0, idle=True)
+    b.arrive(1, idle=True)
+    assert b.join(0, "a", None) == (False, None)
+    assert b.stats["timeouts"] == 1
+    assert b.join(1, "b", lambda js: [j for j in js]) == (False, None)   # nothing left to join
+    assert not b.is_open()
+
+
+def test_leave_frees_waiting_joiners():
+    b = Burst(wait_s=5)
+    b.arrive(0, idle=True)
+    b.arrive(1, idle=True)
+    got = {}
+    t = threading.Thread(target=lambda: got.update({0: b.join(0, "a", None)}))
+    t.start()
+    time.sleep(0.1)
+    b.leave(1)
+    t.join(2)
+    assert got[0] == (False, None) and not b.is_open()
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())

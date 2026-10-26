@@ -1325,9 +1325,33 @@ def _burst_prefilled() -> None:
     i = _par_index()
     if not pool.burst.member(i):
         return
+    if PREFILL_BURST == "joint":
+        pool.burst.join(i, None, None)      # a prefill that took no forward hook: out of the burst
+        return
     held = pool.turn is not None and pool.turn.held_by(i)
     pool.burst.prefilled(i, release=(lambda: pool.turn.release(i)) if held else None,
                          acquire=(lambda: pool.turn.acquire(i)) if held else None)
+
+
+def _joint_forward(eng, tokens, start: int, whole: bool):
+    """SPD-245, engine/cache.py `FIRST_FORWARD`: a burst member's prompt into the burst's joint forward,
+    when that forward can take it (the prompt's only forward, `prefill_joint_ok`); its logits, or None
+    (it prefills alone, and is out of the burst)."""
+    from engine import model as model_mod
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.burst is None:
+        return None
+    i = _par_index()
+    if not pool.burst.member(i):
+        return None
+    ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+    held = pool.turn is not None and pool.turn.held_by(i)
+    done, logits = pool.burst.join(
+        i, (eng, tokens, int(start)) if ok else None, model_mod.prefill_joint,
+        release=(lambda: pool.turn.release(i)) if held else None,
+        acquire=(lambda: pool.turn.acquire(i)) if held else None,
+        rows=int(tokens.numel()) if ok else 0)
+    return logits if done else None
 
 
 def _par_index() -> int:
@@ -5282,8 +5306,11 @@ PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
 PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().lower() != "off"
 
 #: SPD-245: requests bound to slots while none decodes prefill as one burst before any of them decodes
-#: (server/prefill_burst.py); a member waits at most QSE_PREFILL_BURST_WAIT_S for the others. Off by default
-PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "off").strip().lower() == "on"
+#: (server/prefill_burst.py). "wait" (or "on"): each prefills alone, then waits for the others; "joint":
+#: their prompts in one forward (engine/model.py `prefill_joint`, each row its own forward's bits), a
+#: prompt it cannot take alone. A member waits at most QSE_PREFILL_BURST_WAIT_S for the others. Off by default
+PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "off").strip().lower()
+PREFILL_BURST = "wait" if PREFILL_BURST == "on" else PREFILL_BURST if PREFILL_BURST in ("wait", "joint") else None
 PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
 
 
@@ -11407,6 +11434,8 @@ def _par_fake_slots(a, engine_cls) -> None:
         slots.append(slots_mod.Slot(i, L, values=values))
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3)
     STATE["pool"] = slots_mod.Pool(slots, turn=turn, meeting=None, admission=adm)
+    if PREFILL_BURST:
+        STATE["pool"].burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245 (no joint forward here)
     LOCK.turn = turn
     print(f"[parallel] FAKE: {len(slots)} slots, side window {L}", flush=True)
 
@@ -11644,6 +11673,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
     if PREFILL_BURST:
         pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
+        if PREFILL_BURST == "joint":
+            cache.FIRST_FORWARD = _joint_forward
     slots[0].lock = LOCK
     if a.parallel_switch_ms > 0:
         # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms
