@@ -413,8 +413,11 @@ def test_more_models():
         shutil.copytree(os.path.join(ROOT, "docs"), os.path.join(root, "docs"))
         os.makedirs(os.path.join(md, "qwen3.8-27b"))
         shutil.copy(SEED, os.path.join(md, "qwen3.8-27b", "model.yaml"))
+        for sub in ("measurements", "community"):          # SPD-245: a speed row's raw file and its pack
+            shutil.copytree(os.path.join(ROOT, "models", "qwen3.8-27b", sub), os.path.join(md, "qwen3.8-27b", sub))
         d = _seed()
         d["id"], d["name"] = "other-9b", "Other-9B"
+        d.pop("parallel", None)                               # its rows name the 27B's files
         os.makedirs(os.path.join(md, "other-9b"))
         with open(os.path.join(md, "other-9b", "model.yaml"), "w") as fh:
             yaml.safe_dump(d, fh)
