@@ -151,12 +151,7 @@ def test_a_store_for_another_family_loads_in_the_engine():
         store = CorpusSuffixStore.load(got, fp)
         assert store is not None and store.n == 20 * len(words) + 1, store and store.n
         assert store.meta[lc.KEY] == fp and int(store.tokens[0]) == 1
-        try:
-            CorpusSuffixStore.load(corpus, fp)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("the root store of another tokenizer must stay refused")
+        assert CorpusSuffixStore.load(corpus, fp) is None   # another tokenizer's root store is skipped (#105)
     return f"{20 * len(words) + 1} tokens"
 
 
