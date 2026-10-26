@@ -342,6 +342,7 @@ class PackedDraftGraph:
         if got is None:
             if len(self.graphs) > 32:
                 self.graphs.clear()
+                self.pool = torch.cuda.graph_pool_handle()      # SPD-223: as JointGraphs._flush
             self.stream.wait_stream(torch.cuda.current_stream())
             projs = [] if LOG_PROJ else None
             inner = ((lambda pj: _packed_body_batched(list(self.ds), self.scal, spans[0], temp, pj))
