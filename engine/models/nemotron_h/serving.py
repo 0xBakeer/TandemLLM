@@ -362,6 +362,18 @@ class NemotronHServing:
         self.stats["verify_rows"] += M
         return rb["logits"][:M]
 
+    #: SPD-233: the rows a joint pass of 8 lanes keeps (QSE_NH_JOINT_ROWS8; 0: the cap, 32), the best lanes'
+    #: nodes by score. The routed experts of a pass are read once for the union the rows pick (Bolt: 9 of 240 a
+    #: row), so a pass's cost grows with its rows faster than a dense model's. Bolt EXL3 4.0, 8 lanes x 2 / 3 / 4
+    #: rows, in process: the pass 79.4 / 93.3 / 103.4 ms; served C8 T1 with the packed draft, 16 rows 78.3 /
+    #: 78.1 tok/s against 75.5 / 74.7 at 32 (2026-10-27)
+    JOINT_ROWS_AT = {8: int(os.environ.get("QSE_NH_JOINT_ROWS8", "16") or 0)}
+
+    def joint_policy(self) -> dict:
+        """The joint pass: 32 rows (the row kernels' range, `tree_batchable`) and, by lanes, the rows a pass
+        keeps (`JOINT_ROWS_AT`)."""
+        return {"max_rows": 32, "rows_at": {e: n for e, n in self.JOINT_ROWS_AT.items() if n}}
+
     def tree_batchable(self, parents) -> bool:
         """A block a joint pass may take: its rows within the row kernels' 32."""
         return len(parents) <= 32

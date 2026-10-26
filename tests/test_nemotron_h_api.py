@@ -126,6 +126,25 @@ def test_bolt_profile_names_its_card_and_prices():
     assert c["label"] == "Nemotron 3.5 Bolt 74B-A9B" and not c["capabilities"]["vision"]
 
 
+def test_joint_policy_rows_at_eight_lanes():
+    """SPD-233: the family's joint pass keeps up to 32 rows, 16 at 8 lanes (the runner's `rows_at`) unless
+    QSE_NH_JOINT_ROWS8 names another count; 0 keeps the cap."""
+    from engine.models.nemotron_h.serving import NemotronHServing
+    s = NemotronHServing.__new__(NemotronHServing)
+    if "QSE_NH_JOINT_ROWS8" not in os.environ:
+        assert s.joint_policy() == {"max_rows": 32, "rows_at": {8: 16}}, s.joint_policy()
+    saved = dict(NemotronHServing.JOINT_ROWS_AT)
+    try:
+        NemotronHServing.JOINT_ROWS_AT[8] = 0
+        assert s.joint_policy() == {"max_rows": 32, "rows_at": {}}
+        NemotronHServing.JOINT_ROWS_AT[8] = 24
+        assert s.joint_policy() == {"max_rows": 32, "rows_at": {8: 24}}
+    finally:
+        NemotronHServing.JOINT_ROWS_AT.clear()
+        NemotronHServing.JOINT_ROWS_AT.update(saved)
+    return f"rows at 8 lanes: {NemotronHServing.JOINT_ROWS_AT[8] or 'the cap (32)'}"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
