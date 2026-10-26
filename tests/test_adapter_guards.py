@@ -78,7 +78,8 @@ GOLDEN_FP4 = {
     # SPD-245: GDN_PREP scan 16 / 4 by default (the 27B's prefill)
     # SPD-245: the GDN gate read in place (gate2d, gate_rows) and no normed-row store before the slab MLP
     # SPD-245: lane-grouped joint attention, the commit's path rows pinned
-    "qwen3_5": "e64c879231f07d03123b4650fe286cd37cb5407ca6a5a1a58cf635297a113c65",
+    # SPD-245: one attention table a launch, kept by the capturing graph
+    "qwen3_5": "320c3308cfa688d5f846d828813215da902496760cc33f0823e120f26ae61d78",
     "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
     "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
     "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",

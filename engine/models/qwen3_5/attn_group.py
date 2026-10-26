@@ -5,13 +5,13 @@ slots (two launches), the split-KV kernel and its combine (tools/attn_kernels.py
 so an 8-lane pass issued about 128 small launches a layer, each a few programs on 48 SMs. Here the
 lanes' blocks are one request of the joint pass (`"attn"`, engine/model.py `_attention_steps`): one
 scatter launch, one split launch over every lane's row groups and one combine, the lanes told apart by
-a table of pointers and lengths on the device.
+a table of pointers and lengths on the device, one a launch.
 
 The arithmetic is `_attn_split` / `_attn_combine`'s, tile for tile: a row's output does not depend on
 which other rows share the launch (the shared kernels' row independence), a split past a lane's length
 runs no iteration and the combine weighs it exactly zero, so each row keeps the bits the lone launch
-gave it. The table is written once a graph at capture (every tensor it names is static for that graph)
-and copied from pinned memory as the graph's own node.
+gave it. A graph's tables are written at its capture (every tensor they name is static for that graph),
+kept with the graph and copied from pinned memory as its own nodes.
 """
 
 from __future__ import annotations
@@ -160,7 +160,10 @@ if HAVE_TRITON:
 
 
 class _Table:
-    """One layer's table of a lane set: pinned host rows and their device copy."""
+    """One launch's table: pinned host rows and their device copy. A table is made for every call: its
+    rows name the call's own q, k and v, so a later call must never rewrite them. Eager, the caching host
+    allocator keeps the pinned rows until the copy has run; under a graph capture the table is kept with
+    the graph (`CAPTURE_KEEP`), whose copy node reads the rows at every replay."""
 
     __slots__ = ("host", "dev", "np")
 
@@ -170,16 +173,15 @@ class _Table:
         self.dev = torch.zeros(E, NF, dtype=torch.int64, device=device)
 
 
-_TABLES: dict = {}
+#: the list the graph being captured keeps its tables in (engine/models/qwen3_5/joint_graphs.py sets it
+#: around a capture); None outside a capture
+CAPTURE_KEEP: list | None = None
 
 
-def _table(engs: list, layer: int, device) -> _Table:
-    key = (tuple(id(e) for e in engs), layer)
-    t = _TABLES.get(key)
-    if t is None:
-        if len(_TABLES) > 4096:
-            _TABLES.clear()
-        t = _TABLES[key] = _Table(len(engs), device)
+def _table(E: int, device) -> _Table:
+    t = _Table(E, device)
+    if CAPTURE_KEEP is not None and torch.cuda.is_current_stream_capturing():
+        CAPTURE_KEEP.append(t)
     return t
 
 
@@ -208,7 +210,7 @@ def run_attn(name: str, payloads: list) -> list:
     scale = 1.0 / math.sqrt(D)
     bm, groups, _, _ = pick_launch(T, rep, 1024)
     R = rep * T
-    tab = _table(engs, layer, dev)
+    tab = _table(E, dev)
     ns_max = 2
     for e, (eng, q, k, v) in enumerate(payloads):
         jg = eng._jg

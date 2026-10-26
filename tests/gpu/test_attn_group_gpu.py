@@ -80,6 +80,59 @@ def test_grouped_bits():
     _case(16, [1024, 1025], 3)                              # the class boundary
 
 
+def _refs(T: int, starts: list, seed: int):
+    dev = torch.device("cuda")
+    g = torch.Generator(device=dev).manual_seed(seed)
+    payloads, refs = [], []
+    for s in starts:
+        eng = _lane(g, T, s, dev)
+        q = (torch.randn(1, HQ, T, D, device=dev, generator=g) * 0.3).to(torch.bfloat16)
+        k = (torch.randn(1, HKV, T, D, device=dev, generator=g) * 0.5).to(torch.bfloat16)
+        v = (torch.randn(1, T, HKV, D, device=dev, generator=g) * 0.5).to(torch.bfloat16).transpose(1, 2)
+        kc, vc = eng.kv.k[0].clone(), eng.kv.v[0].clone()
+        kc.index_copy_(2, eng._jg.slots, k)
+        vc.index_copy_(2, eng._jg.slots, v)
+        refs.append(decode_attention_dev(q, kc, vc, eng._jg.lenp, eng.tree.anc_incl, eng._jg.max_lc))
+        payloads.append((eng, q, k, v))
+    return payloads, refs
+
+
+def test_every_launch_keeps_its_table():
+    """Two graphs of different shapes over the same lane objects, replayed in turn, each give the lone bits:
+    a graph's table is its own (a table shared by the layer gave the last capture's pointers to every
+    graph's replay). Eager calls back to back without a synchronisation keep their rows too."""
+    AG.ON = True
+    pa, ra = _refs(8, [300, 700, 1500, 40], 10)
+    pb, rb = _refs(16, [120, 3000, 640, 2047], 11)
+    graphs = []
+    for payloads in (pa, pb):
+        keep: list = []
+        AG.CAPTURE_KEEP = keep
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            AG.run_attn("0", payloads)                          # warm (compiles)
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=s):
+            outs = AG.run_attn("0", payloads)
+        AG.CAPTURE_KEEP = None
+        assert len(keep) == 1, len(keep)
+        graphs.append((g, outs, keep))
+    for _ in range(3):
+        for (g, outs, _), refs in zip(graphs, (ra, rb)):
+            g.replay()
+            torch.cuda.synchronize()
+            for o, ref in zip(outs, refs):
+                assert torch.equal(o, ref), "a graph's replay lost its table"
+    # eager, back to back
+    oa = AG.run_attn("0", pa)
+    ob = AG.run_attn("0", pb)
+    torch.cuda.synchronize()
+    assert all(torch.equal(o, r) for o, r in zip(oa, ra)) and all(torch.equal(o, r) for o, r in zip(ob, rb))
+
+
 if __name__ == "__main__":
     test_grouped_bits()
+    test_every_launch_keeps_its_table()
     print("ok", AG.STATS)

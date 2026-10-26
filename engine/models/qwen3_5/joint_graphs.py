@@ -32,6 +32,7 @@ import numpy as np
 import torch
 
 from engine import capture_lock
+from engine.models.qwen3_5 import attn_group
 from engine.models.graph_lru import GraphLRU
 from engine.settings import SETTINGS as _S
 
@@ -151,7 +152,7 @@ class _Recorder:
 
 class _Captured:
     __slots__ = ("graph", "logits", "hidden_pre", "hidden_post", "taps", "layers", "factors",
-                 "conv_entry", "rec", "var", "done", "fold")
+                 "conv_entry", "rec", "var", "done", "fold", "attn_tables")
 
     def __init__(self):
         self.graph = torch.cuda.CUDAGraph()
@@ -374,9 +375,12 @@ class JointGraphs:
             for eng, t0, tl in zip(engs, taps0, taps):
                 eng.tap = tl.append if t0 is not None else None
             rec = _Recorder(len(engs), engs[0].device, len(engs[0].cfg.linear_layers))
+            cap.attn_tables = []               # SPD-245: the grouped attention's tables, one a layer
+            attn_group.CAPTURE_KEEP = cap.attn_tables
             with capture_lock.LOCK, torch.cuda.graph(cap.graph, pool=self.pool, stream=self.stream):
                 done, traces = self._body(items, bufs, fold, rec)
         finally:
+            attn_group.CAPTURE_KEEP = None
             for eng, t0 in zip(engs, taps0):
                 eng.tap = t0
         for eng, c, pk in zip(engs, conv_keep, pn_keep):
