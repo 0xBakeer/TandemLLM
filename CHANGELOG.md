@@ -2,6 +2,96 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.15.0, 2026-10-27
+
+0.15.0 serves 8 requests at once by default and rebuilds the path they share. Every lane gets the full window, and a lane that runs out of memory gives way and goes on in the same answer. One thread runs every lane's round: one packed draft, one joint verify pass from CUDA graphs on the 27B, one batch of walks and commits. Flash-Next and Ornith verify their lanes in one joint pass too, and Ornith builds side slots. Requests that arrive together on an idle engine prefill before any of them decodes, the 27B's short prompts in one forward, and the 27B reads long prompts faster. A sampled request that names no filter takes the model card's top_k and top_p. Every weight card carries a speed row of this build. On one DGX Spark the 27B ThinkingCap EXL3 4.0 pack decodes 8 requests of 512 tokens at 155.9 tok/s in total greedy and 146.2 sampled. Two summation orders move on purpose, the 27B's prompt reading and Flash-Next's mixer kernels, each held by a gate. Every family's fingerprint moves once, so saved prompt-cache entries and spilled conversations from 0.14.2 are rebuilt once.
+
+### Lanes
+
+- `ops/serve.env`, the Setup Guide and every profile of a family with side slots run 8 lanes on the KV pool (SRV-707). `--parallel` itself still defaults to 1. Every lane has the window the setup names: `--side-max-len` defaults to 0, which is `--max-len`, and the Setup Guide has no side window of its own any more. With the pool on, a side slot's window is addresses and costs its constant part at load. The guide counts how many lanes can all hold the full window at once (`lanes_full`), says what happens past that, and takes up to 64 lanes. A round of more than 16 decoding lanes verifies in more passes.
+- A lane whose next pages the KV pool refuses after every reclaim, while other lanes run, gives every page back, waits at the head of the line and goes on in the same stream from its prompt and the text it wrote (SRV-709). A streamed client sees `: paused: waiting for memory` meanwhile. Alone, or after 16 times, it stops with `memory_full` (type `server_busy`, `Retry-After` 30) instead of an error, and the Chat tab continues it once memory is free. Admission reserves pages for at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens`. `/health` `parallel.recompute` counts the lanes that gave way.
+- Measured at 8 lanes on 2026-10-24 (1, 2, 4 and 8 requests at once, total tok/s, 3-round medians, N decoding at once): the 27B ThinkingCap EXL3 4.0 38.3 / 67.6 / 100.1 / 154.5, Flash-Next 3.05 36.5 / 45.6 / 57.5 / 71.3, Ornith EXL3 4.0 37.7 / 47.0 / 58.4 / 69.8, Flint EXL3 4.0 111.7 / 154.9 / 193.3 / 232.3 (SRV-711). A card's lanes default is never above the lanes its speed row measured: LFM2.5 and Nemotron Bolt measured 8 and default to 8, Nemotron Lightning and Super VL measured 3 and default to 3 (SPD-245).
+- Ornith builds side slots and verifies them in one joint pass (SPD-217): the row-wise parts once over every lane's rows, the GDN recurrence and the attention per lane. 0.14.2's one-chat limit in the Setup Guide is gone.
+- chatd lets as many runs talk to the engine as it has lanes (`/health` `parallel.n`, 8 until known); `QSE_CHAT_MAX_RUNS` still fixes the number (SRV-707).
+- A side slot gets its drafters' built weights and draft head from slot 0 (SPD-165). Before, each side slot read both drafter checkpoints again, 38 to 40 s a slot, and kept the copies. The drafters drop the BF16 projections their EXL3 blocks replace, 5.72 to 2.74 GiB (SPD-179).
+
+### The round
+
+- One thread runs every lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the proposals, one packed draft of up to 128 rows (SPD-157), one joint verify pass, the walks of every lane's tree on the device, and the tails in two halves around the next draft. `/health` `parallel.round_runner` gives its host and GPU milliseconds by phase.
+- The 27B's joint pass on EXL3 weights takes 64 rows (32 on NVFP4 and FP8), and each engine's rows are bit for bit its own eager verify (SPD-159). From 3 decoding lanes the round cuts all trees together, best nodes first (`--parallel-cut auto`, SPD-155), and a chain-shaped block shares the pass (SPD-153). The row-wise steps run once over every lane's rows, and the GDN recurrence of every lane is one grouped launch (SPD-163). A 4-lane pass keeps 8 rows a lane (`QWEN38_JOINT_ROWS_AT_LANES=4:8`, SPD-245).
+- The 27B's joint pass runs from CUDA graphs once its shape has come 4 times (`QWEN38_JOINT_GRAPHS`, `QWEN38_JOINT_GRAPHS_AFTER`, SPD-163, SPD-245), every lane's logits, state and KV bit for bit the eager pass's. A graphed pass runs every lane's attention of a layer in one scatter, one split and one combine launch (`QWEN38_JOINT_ATTN_GROUP`).
+- Each graph owner captures on a stream of its own (SPD-223). A graph's reset frees the cuBLAS workspace of its capture stream, which every graph captured on that stream reads; with shared streams one owner's eviction freed another's workspace, and its next replay was an illegal memory access in 4- and 8-lane greedy rounds. A full joint set is reset whole and captured into a new pool. A draft graph maps the window pages its gather reads before it runs and is rebuilt when a tensor it baked moved, and a joint pass never gets a tree deeper than the GDN verify carries.
+- The 27B's EXL3 projections at 33 to 64 rows read fragment-major activations, the same bits (SPD-201). The block drafter's walk and tree are built in C++ (`QWEN38_TREE_NATIVE`), with a Python fallback that builds the same tree.
+- Flash-Next's joint pass runs its row-wise parts and grouped experts once over every lane's rows (SPD-215), the GDN delta rule of every lane in one launch (SPD-239), a round's commits in one call (`QSE_RUNNER_COMMIT_MULTI`), the lanes' MTP drafts in one packed pass (`QSE_RUNNER_MTP_PACK`, SPD-235), 24 rows a pass at 8 lanes (SPD-233), and its mixer GEMV on the tensor cores (SPD-241). Measured served C1 to C8: 43.3 / 56.9 / 83.2 / 107.8 tok/s with the tensor-core mixers against 41.6 / 55.4 / 75.5 / 95.0 without, then C2 to C8 58.9 / 85.5 / 108.0 with the PLE read during the layers before it (`QWEN38_FN_PLE_LATE`).
+- NemotronH's lanes draft in one packed LiLiCorr pass (`QSE_NH_LILICORR_PACK`), its joint pass keeps 16 rows at 8 lanes (`QSE_NH_JOINT_ROWS8`), and the round runner takes the joint plain step at a lane count where drafted rounds make fewer tokens a GPU ms (`QSE_RUNNER_LANE_PLAIN=auto`, decided on live rounds, the other mode probed every 16th round) (SPD-233). Nemotron 3.5 Bolt EXL3 4.0 at 8 requests at once, the card's row (temperature 1.0, top-k 20, top-p 0.95, 512 tokens, 3 rounds): 54.3 -> 92.2 tok/s wall; at 8 lanes the runner took 1,503 plain rounds and 340 drafted, 65.2 ms a round of 8 tokens.
+- A lane without a draft joins the round's pass with its plain step as a one-row block (ENG-241, SPD-215, SPD-217). The MTP drafter learns its prices only from rounds it decoded alone, and a turn takes the plain step only when a drafted round's measured price a token is over 20 % above the plain step's (SPD-237, SPD-239).
+
+### Reading prompts
+
+- Requests bound to lanes while no lane decodes prefill before any of them decodes (`QSE_PREFILL_BURST=joint`, SPD-245). On the 27B's EXL3 packs their prompts of up to 512 tokens run in one layer-major forward, each row bit for bit its own prefill: 8 prompts of 512 tokens in 3.55 s against 4.43 s one after another, in process. A request on its way to a lane holds a member that would otherwise run alone, up to `QSE_PREFILL_BURST_WAIT_S` (10 s); a lone request never waits. No token changes; a member's first token comes after every member's prefill.
+- The 27B's GDN prefill runs at a 64-row chunk with a value-block-fastest walk (`QWEN38_GDN_CHUNKED`), the prep kernel's scan at 16 by 4, the GDN gate read in place and no normed-row store before the slab MLP (SPD-245). In process, 8K 7.103 to 6.636 s and 32K 30.149 to 28.038 s with the scan, then 8K -0.31 s and 32K -1.30 s with the chunk-64 walk. Served at 8K in one session: 6.76 s with it, 6.97 s without.
+- A layer-major window runs its chunks' projections and MLP as one call, with the slab product and its rotation in one kernel, bit for bit the chunk-major prefill (SPD-169, SPD-189, SPD-193). The EXL3 skinny kernel takes prefill calls up to 512 rows: on the 27B's cached prefill 160 tokens 0.596 to 0.237 s, 256 tokens 0.653 to 0.330 s (SPD-171).
+- The resident prefix keeps the state at the end of the last prompt (`QWEN38_PROMPT_END`, SPD-215). An agent that sends the conversation back with its own words for the answer resumes there instead of at the grid line below.
+
+### Sampling
+
+- A sampled request that names none of `top_p`, `top_k` and `min_p` takes `--top-p` / `--top-k` when given at start, else the model card's filters (Qwen3.8-27B: top_k 20, top_p 0.95), else the whole vocabulary (SPD-245). Before, a request that sent `temperature` alone sampled the whole vocabulary. `/health` `sampling.unnamed_filters` shows the filters.
+- A sampled request without a `seed` draws one at admission (63 bits of OS entropy) and takes the keyed walk a seeded request takes, a draw from the same filtered distribution (`QWEN38_FRESH_SEED=auto`, SPD-245). Two requests get two seeds. Under an active plan the seed is in the decision row (`extra.seed_drawn`). [docs/exactness.md](docs/exactness.md#sampling) has the argument and the tests.
+
+### Caches and drafting
+
+- A request for the raw engine (`X-Tandem: raw` or `off`, the `raw` or `bench` profile) drafts from the persistent suffix store and writes nothing into it, so a repeated benchmark cannot teach the engine its answers (SPD-151). `QSE_SUFFIX_RAW=write` keeps the old rule.
+- The 27B's drafters keep a 2,048-row window of context KV (SPD-177): a 40K greedy decode gives the same tokens with 0.98 GB of draft KV in the pool instead of 1.69. Resuming below a long session's window maps the pages it uncovers again (SPD-211; before, an illegal memory access past 20K).
+- A text-only community pack starts under a Setup Guide that turned vision on, and a 27B pack's profile carries its base's parallel defaults (SPD-165, SPD-167).
+
+### Server
+
+- A stream that ends at its end token or a stop string closes its source before the request's bookkeeping, so a closed stream no longer keeps the GPU turn and stops every lane (SRV-709).
+- With side slots the shadow reader reads in the idle window only (SRV-711). The Laya decider's encoder loads in 1.35 s instead of 15.9, bit for bit (SRV-717), the decision models' pool reads reuse one allocator snapshot for 5 s, and `QSE_STACK_SAMPLE` samples every thread's busy stacks on a box without ptrace.
+- The small generative model's decode step captures its graph again (SRV-711).
+- A raw request that offers no tools gets its answer streamed as text (SRV-723). The raw path read every answer for tool calls, and LFM2.5 writes its call opener as an ordinary token: an answer to a code prompt that opened with it arrived in one event at the end (512 tokens, the first text at 4.2 s), and one that closed the block went out as `tool_calls`. Now the raw path holds calls only when the request offers tools; without tools the model's call markup is the answer's text, and the finish is `stop` or `length`. With tools nothing changes, and under a conductor plan a call in an answer to a request without tools is still dropped (SRV-247).
+- Flash-Next's idle windows capture the context class past the conversation's length, each further class within 6,144 tokens of it, and every class a turn found without its graphs (SRV-713). A turn through the conductor starts 4.1 to 4.8k tokens long, a class the warm-up had not captured, so StairCut priced the missing graphs into the turn and took the plain step. Code through the conductor, two requests on a fresh server: 39.5 and 59.0 tok/s before, 58.5 and 65.2 after, the same text; 480 graphs over 8 lanes take 20.9 s of idle time and 5.3 GiB.
+- A Flash-Next MTP step keeps the verify block's records until its commit (SRV-713). With the round runner's next draft issued before the commit, an MTP graph captured there emptied the records the commit graph read: a raw 4,024-token request on a class without graphs ended in HTTP 500. The same request now writes its 512 tokens, the text of a run with the class's graphs captured ahead.
+
+### Text and fingerprints
+
+- The 27B's prompt reading moves its summation order once: the GDN prep kernel, its 16 by 4 scan and the chunk-64 walk keep the recurrent state's bits and round a few chunk outputs one BF16 ulp the other way, top-1 64 or 65 of 65 on prose, code and repeated text at 2K, 8K and 32K tokens (`tools/gdn_tile_gate.py`). Flash-Next's tensor-core mixers agree on top-1 99.6, 99.6 and 98.8 % with the kernels before, KL 5e-4 to 1.7e-3. Greedy text can part from 0.14.2's at a near tie. [docs/exactness.md](docs/exactness.md#stronger-than-the-promise-release-identity) lists the gates and the knobs that give the earlier orders.
+- Every family's fingerprint moves once (`tests/test_adapter_guards.py`): the disk tier's files and the spilled conversations 0.14.2 wrote are read again once.
+
+### Weight cards
+
+- Every weight card carries a speed row of this build (SPD-245, SRV-713): `parallel` in `models/<id>/model.yaml`, one row a profile or community pack with the commit and setup it was measured on, and its raw file under `measurements/`, which the registry checks the row against. `tools/parallel_card.py` measures a row against the served profile ([docs/measurement.md](docs/measurement.md#the-weight-cards-speed-rows)). The Setup Guide's Model step shows the rows, and each weight card its rate alone and with 8 requests at once.
+- The rows, 2026-10-26 (LFM2.5 and Bolt 2026-10-27, after SRV-723 and SPD-233): 8 lanes, thinking off, temperature 1.0, top-k 20, top-p 0.95, a seed a request, suffix store and response cache off, `X-Tandem: raw`. Decode is one request of 512 tokens alone (median of 3), the 32K row the time to first token of a cold 32,768-token prompt, the last two columns the total wall tok/s of 1 and 8 prose requests at once (median of 3 rounds, every round with N decoding at once).
+
+| card | decode code / prose | 32K first token | 1 at once | 8 at once |
+|-|-:|-:|-:|-:|
+| 27B EXL3 4.0 | 85.1 / 35.8 | 28.72 s | 35.3 | 146.3 |
+| 27B EXL3 6.0 | 66.2 / 28.1 | 28.26 s | 25.6 | 120.1 |
+| ThinkingCap 27B EXL3 4.00 | 68.7 / 36.2 | 28.4 s | 36.1 | 147.6 |
+| Flash-Next 3.05 | 69.6 / 49.0 | 29.82 s | 44.1 | 108.2 |
+| Ornith 1.5 122B EXL3 4.0 | 53.6 / 42.1 | 25.6 s | 34.5 | 85.5 |
+| Flint EXL3 4.0 | 130.0 / 120.4 | 7.75 s | 108.3 | 215.9 |
+| Flint EXL3 6.0 | 93.5 / 106.2 | 8.09 s | 80.7 | 171.9 |
+| LFM2.5 24B-A2B EXL3 4.0 (131,072-token window) | 130.8 / 129.9 | 5.67 s | 122.8 | 238.6 |
+| Nemotron 3.5 Bolt EXL3 4.0 (2026-10-27, after SPD-233) | 50.4 / 39.1 | 43.53 s | 35.2 | 92.2 |
+
+### Measured
+
+The 27B ThinkingCap EXL3 4.0 pack on one DGX Spark, 2026-10-26: 8 lanes at the 262,144-token window, KV pool on, side graphs off, suffix store off, `X-Tandem: raw`. N requests of 512 prompt tokens sent at once, 512 tokens each, greedy or temperature 1.0 alone (the card's filters and a drawn seed). Wall is all completion tokens over the time from the first send to the last end. Medians of the last two of three rounds, every round with N decoding at once and no fault. Greedy and C4 sampled ran on a3dc1e45, the other sampled rows on 345ab0fa. It is not an A/B against 0.14.2, which served one lane by default.
+
+| N at once | greedy, wall tok/s | sampled, wall tok/s |
+|-:|-:|-:|
+| 1 | 42.5 | 36.5 |
+| 2 | 73.5 | 62.9 |
+| 4 | 108.9 | 99.2 |
+| 8 | 155.9 | 146.2 |
+
+One prompt alone, greedy, time to first token: 2,048 tokens 1.90 s, 8,192 tokens 6.76 s, 32,768 tokens 29.4 s. [docs/parallel-requests.md](docs/parallel-requests.md#spd-245-2026-10-26) has the settings and the A/Bs on the way.
+
+### Tools
+
+- `QWEN38_ROUND_LOG` writes a line per verify round, slot block and packed draft (SPD-187). `tools/joint_graph_check.py`, `tools/fn_joint_check.py`, `tools/joint_lone_diff.py` and `tools/overlap_check.py` check the joint passes against the lone verify; `tools/gdn_tile_gate.py` gates a prefill order change. `bench/speed-prompts-v1.json` holds versioned 1.3k-token code and prose prompts (SPD-183).
+
 ## 0.14.2, 2026-10-23
 
 0.14.2 fixes what an outside test of Ornith found, and the bugs we met on the way. With thinking off, reasoning that a model writes into its answer anyway now goes to `reasoning_content`. Ornith answers up to its card's 131,072 tokens when a request sets no limit, and at 131,072 tokens and above it decodes plain instead of drafting slower than plain. The Setup Guide no longer offers Ornith parallel chats its engine cannot run, and it sets the thinking effort for every model. `cache_prompt: false` reads the whole prompt and leaves the caches as they were. The lookup corpus is built for each model's tokenizer after its download. `tandem-dash serve` starts without the engine installed. No fingerprint moves: every model writes the same tokens as in 0.14.1 and keeps its saved conversations.

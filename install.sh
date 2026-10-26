@@ -33,7 +33,9 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
+# The engine release. v0.15.0 runs 8 lanes by default, each with the full window, one round runner
+# with joint verify passes (CUDA graphs on the 27B), the burst prefill and the card's sampling filters;
+# v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
 # card's answer limit and the plain step at long context, and builds the lookup corpus for each tokenizer;
 # v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
 # answer directly with thinking off and puts the model families behind adapters;
