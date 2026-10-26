@@ -59,6 +59,8 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=12)
     ap.add_argument("--profile", type=int, default=4, help="the last rounds under the torch profiler")
     ap.add_argument("--max-len", type=int, default=8192)
+    ap.add_argument("--draft", default="on", choices=("on", "off"),
+                    help="off: no draft (with --rows 1 a round is the joint plain decode step alone)")
     ap.add_argument("--pack", default="off", choices=("on", "off"))
     ap.add_argument("--check", default="off", choices=("on", "off"),
                     help="with --pack on: a lone twin head a lane drafts from the same rows first; per round whether "
@@ -124,7 +126,9 @@ def main() -> None:
         # draft
         t = time.perf_counter()
         with torch.profiler.record_function("ph:draft"):
-            if a.pack == "on":
+            if a.draft == "off":
+                drafts = [[] for _ in heads]
+            elif a.pack == "on":
                 got = []
                 draft_meet.MEET = lambda h: (got.append(h) or True)
                 try:
@@ -136,7 +140,8 @@ def main() -> None:
             else:
                 for h, x in zip(heads, anchors):
                     h.launch(None, [x])
-            drafts = [h.read()[0] for h in heads]
+            if a.draft == "on":
+                drafts = [h.read()[0] for h in heads]
         hs["draft"] = time.perf_counter() - t
         if twins is not None:
             torch.cuda.synchronize()
