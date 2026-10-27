@@ -1,0 +1,11 @@
+void seq_set_pdl(int64_t on);
+void seq_commit_multi(torch::Tensor E);
+void seq_gdn_rows_multi(torch::Tensor E, int64_t koff, int64_t voff, int64_t H, int64_t rep);
+void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y, torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift);
+void seq_gdn_rows(torch::Tensor qkv, int64_t koff, int64_t voff, torch::Tensor g, torch::Tensor beta, torch::Tensor S, torch::Tensor stk, torch::Tensor ctl, torch::Tensor out, int64_t rep, bool write, c10::optional<torch::Tensor> pre, c10::optional<torch::Tensor> pg, c10::optional<torch::Tensor> pb, c10::optional<torch::Tensor> pn);
+void seq_ple_gate(torch::Tensor key, torch::Tensor qry, torch::Tensor val, torch::Tensor gv, int64_t hc);
+void seq_ple_conv(torch::Tensor gvn, torch::Tensor gv, torch::Tensor ps, torch::Tensor w, torch::Tensor src, torch::Tensor y);
+void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos, torch::Tensor sin, torch::Tensor out, double eps);
+void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc);
+void seq_qsa_pool_multi(torch::Tensor E, int64_t NB, torch::Tensor cos, torch::Tensor sin, double eps);
+void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk);
