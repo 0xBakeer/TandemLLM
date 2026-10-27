@@ -160,6 +160,8 @@ class Runner:
         self._round_acc = 0                 # the drafts the walks accepted
         self._round_plain = False           # SPD-233: every block of the round's pass was its anchor alone
         self._lane: dict = {}               # SPD-233: by lanes, the drafted and plain rounds' rates (`_lane_plain`)
+        self._lane_at = (None, False)       # SPD-233: the round the last mode decision was for, and the decision
+        self._round_cap0 = None             # SPD-233: `_captures` at the round's start
         from server import slots as slots_mod
         self.prices = slots_mod.RowPrices()
         import random
@@ -275,13 +277,14 @@ class Runner:
     def _gpu_read(self) -> None:
         """The finished rounds' GPU segments into `gpu` (a round whose last event is not done waits)."""
         keep = []
-        for rnd, prev, e, tok, rows, plain in self._ev_done:
+        for rnd, prev, e, tok, rows, plain, cap in self._ev_done:
             if not rnd[-1][1].query():
-                keep.append((rnd, prev, e, tok, rows, plain))
+                keep.append((rnd, prev, e, tok, rows, plain, cap))
                 continue
             if prev is not None and prev.query() and e:
                 per = prev.elapsed_time(rnd[-1][1])
-                if LANE_PLAIN and e > 1 and per > 0:
+                if LANE_PLAIN and e > 1 and per > 0 and not cap:
+                    # a round that captured a graph is the capture's time, not its mode's
                     self._lane_note(e, plain, tok / per)
                 st = self._steady.setdefault(e, [])
                 st.append((per, tok))
@@ -316,6 +319,7 @@ class Runner:
         self._round_e, self._round_tok = 0, 0
         self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
         self._round_plain = False
+        self._round_cap0 = self._captures(tasks)
         self._mark("start")
         ms0 = dict(self.ms)
         t_r = t0 = time.perf_counter()
@@ -387,7 +391,7 @@ class Runner:
             me[k] = me.get(k, 0.0) + v - ms0[k]
         if self._ev:
             self._ev_done.append((self._ev, self._ev_last, self._round_e, self._round_tok, self._round_rows,
-                                  self._round_plain))
+                                  self._round_plain, self._captures(tasks) != self._round_cap0))
             self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
             print(f"[runner] {self.report()}", flush=True)
@@ -400,7 +404,10 @@ class Runner:
         self._collect = []
         if MTP_PACK and sum(1 for t in tasks if not t.done) > 1:
             self._mtp_collect = []
-        skip = self._lane_plain() if LANE_PLAIN else False
+        # SPD-233: the mode of the round these drafts are for (a tail's are the next round's), decided once a round
+        # and only in a call with live tasks (the round start's call of the tasks not yet drafted is mostly empty)
+        skip = (self._lane_decide(self.stats["rounds"] + (0 if deadline else 1))
+                if LANE_PLAIN and any(not t.done for t in tasks) else False)
         for t in tasks:
             if t.done:
                 continue
@@ -425,6 +432,25 @@ class Runner:
         if calls:
             self._packed(calls)
         return self._t("packed", t0)
+
+    def _lane_decide(self, target: int) -> bool:
+        """`_lane_plain` once for the round `target` (the probe counter steps once a decided round); a second call
+        for the same round takes the first's decision."""
+        if self._lane_at[0] != target:
+            self._lane_at = (target, self._lane_plain())
+        return self._lane_at[1]
+
+    @staticmethod
+    def _captures(tasks: list) -> tuple:
+        """SPD-233: what tells a round captured a graph, compared at its start and its end: the captures of the
+        joint graph caches the lanes' engines keep (engine/models/graph_lru.py, `fn.joint_graphs`), the lanes' draft
+        heads' captures, and the lanes whose engine says its last call captured (`captured`)."""
+        jg = {id(g): g for t in tasks
+              if (g := getattr(getattr(t.eng, "fn", None), "__dict__", {}).get("joint_graphs")) is not None}
+        joint = sum(int(getattr(g, "captures", 0) or 0) for g in jg.values())
+        heads = sum(int(getattr(getattr(t.drafter, "head", None), "captures", 0) or 0) for t in tasks)
+        engs = tuple(bool(getattr(t.eng, "captured", False)) for t in tasks)
+        return joint, heads, engs
 
     def _lane_plain(self) -> bool:
         """SPD-233: whether the next round's lanes take the plain step (no drafts): at E live lanes, all of them of
