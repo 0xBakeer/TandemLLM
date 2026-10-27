@@ -293,6 +293,85 @@ def test_lanes_take_the_mode_that_makes_more_tokens_a_ms():
     return f"plain after {modes.index(True)} drafted rounds; back to drafting when the drafts made more"
 
 
+def test_the_lane_mode_is_decided_on_live_rounds_and_a_capture_sets_no_rate():
+    """SPD-233: a round's `_propose` calls alternate as served (the round start's call of the tasks not yet drafted,
+    empty, then the tail's for the next round): the mode is decided once a round, in the live call, so in plain
+    mode the 16th decided round drafts (before, the counter stepped on both calls and the probe could land on the
+    empty one every time); a round that captured a graph enters no rate, the next one does."""
+    from types import SimpleNamespace as NS
+
+    from engine.models import graph_lru
+    saved = R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE
+    R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE = True, 16, "1"
+
+    def gen():
+        return
+        yield
+
+    class Drafter:
+        lane_skip = False
+
+        def propose_tree_steps(self, ctx, k):
+            return gen()
+    try:
+        r = R.Runner.__new__(R.Runner)
+        r._lane, r._lane_at, r.stats = {}, (None, False), {"rounds": 0}
+        r.ms = {k: 0.0 for k in ("prop", "packed")}
+        r._ev, r._collect, r._mtp_collect = [], None, None
+        r.pool = NS()
+        r.app = NS(_row_cap=lambda pool, d: None, _launch=lambda steps: (None, None))
+        joint = NS(joint_plain=True)
+        r.tasks = [NS(done=False, pre=False, eng=NS(caps=joint), drafter=Drafter(), slot=NS(index=i), deadline=None,
+                      ctx=[1, 2, 3], k=4, max_new=512, n_out=0) for i in range(8)]
+        modes = []
+        for _ in range(60):
+            r.stats["rounds"] += 1
+            r._propose([], 0.0)                                         # the round start: nothing left to draft
+            r._propose(r.tasks, 0.0, deadline=False)                   # the tail: the next round's drafts
+            plain = r.tasks[0].drafter.lane_skip
+            modes.append(plain)
+            r._lane_note(8, plain, 8 / 64.0 if plain else 11 / 114.0)
+        st = r._lane[8]
+        assert st["n"] == 60 and st["plain"] is True, st
+        probes = [i for i, m in enumerate(modes) if not m and i >= 6]
+        assert probes and all((i + 1) % 16 == 0 for i in probes), (probes, modes)
+        assert all(m for i, m in enumerate(modes[6:], 6) if (i + 1) % 16), modes
+
+        # a capture round's period is the capture's: no rate from it
+        class Ev:
+            def __init__(self, t):
+                self.t = t
+
+            def query(self):
+                return True
+
+            def elapsed_time(self, other):
+                return other.t - self.t
+        r._steady, r._gpu_e, r.gpu, r.gpu_n = {}, {}, {"verify": 0.0, "between": 0.0, "period": 0.0}, 0
+        np0, p0 = st["np"], st["plain_rate"]
+        r._ev_done = [([("start", Ev(0.0)), ("verify", Ev(300.0))], Ev(-1.0), 8, 8, 0, True, True)]
+        r._gpu_read()
+        assert st["np"] == np0 and st["plain_rate"] == p0, st
+        r._ev_done = [([("start", Ev(0.0)), ("verify", Ev(64.0))], Ev(0.0), 8, 8, 0, True, False)]
+        r._gpu_read()
+        assert st["np"] == np0 + 1, st
+        # what tells a round captured: the joint graph caches' count, a head's, an engine's flag
+        for t in r.tasks:
+            t.eng.fn = fn = NS(joint_graphs=graph_lru.GraphLRU())
+        c0 = r._captures(r.tasks)
+        fn.joint_graphs.captures += 1
+        assert r._captures(r.tasks) != c0
+        c0 = r._captures(r.tasks)
+        r.tasks[3].drafter.head = NS(captures=1)
+        assert r._captures(r.tasks) != c0
+        c0 = r._captures(r.tasks)
+        r.tasks[3].eng.captured = True
+        assert r._captures(r.tasks) != c0
+    finally:
+        R.LANE_PLAIN, R.LANE_PROBE, R.LANE_MODE = saved
+    return f"probes at decided rounds {[i + 1 for i in probes]}; a capture round left the plain rate as it was"
+
+
 def test_a_family_that_commits_a_round_at_once_gets_one_call():
     # SPD-239: an engine with `commit_tree_multi` gets each joint round's paths in one call (here the engine's
     # own commit_tree a slot at a time inside it), and no tail commits again: each request writes its alone text
