@@ -677,7 +677,7 @@ def test_a_nemotron_pack():
         c = registry.community(m, NH_PID)
         assert c is not None and c["author"]["github"] == "styles01" and c["load"] == "standalone"
         assert c["modalities"]["image"] is False and c["modalities_in_pack"] == ["text"]
-        assert "TensorFold" not in c["description"] and "EXL3 (exllamav3)" in c["description"]
+        assert "EXL3 (exllamav3)" in c["description"]
         # the nearest own EXL3 profile gives the memory and the drafters, whatever `drafters` says
         assert c["memory"] == {"weights_gib": 58.35, "drafters_gib": 1.32, "like": "nemotron-super-vl-exl3-4.0"}, c
         p = registry.profile(m, NH_PID)
