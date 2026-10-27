@@ -32,7 +32,7 @@ above that & expand to BF16 once, then the library GEMM & \code{tools/nvfp4_line
 
 The skinny kernel rests on one fact about the hardware. The instruction \code{cvt.rn.f16x2.e2m1x2} turns one packed byte into one register holding two 16-bit values, and that register is exactly the operand layout of an \code{mma.m16n8k16} tensor-core instruction. A thread loads 16 bytes of a weight row with one vector load and decodes each byte straight into an operand register, so nothing goes through shared memory. The group scale is decoded by \code{cvt.rn.f16x2.e4m3x2} and multiplied onto the weight in fp16. That product is exact: e2m1 times e4m3 needs six significant bits, and fp16 has eleven. The weights are the B operand (8 rows an instruction) and the activations the A operand (16 rows an instruction), so a 16-row verify costs one instruction per weight tile, and 17 to 32 rows cost two. That is the step in the verify cost at 17 rows that StairCut prices (Figure~\ref{fig:verify-cost}).
 
-It builds on first use with \code{torch.utils.cpp_extension} for \code{sm_121a}, because the e2m1 converter is specific to that chip. A tile table per shape (\code{ops/skinny-tiles.json} up to 16 rows, \code{ops/skinny-tiles-wide.json} for 17 to 32) holds the launch settings a sweep picked.
+It builds on first use from \code{tools/csrc/nvfp4_skinny/} with \code{torch.utils.cpp_extension} for \code{sm_121a}, because the e2m1 converter is specific to that chip. A tile table per shape (\code{ops/skinny-tiles.json} up to 16 rows, \code{ops/skinny-tiles-wide.json} for 17 to 32) holds the launch settings a sweep picked.
 
 \section{FP8 matrix products}
 
@@ -76,6 +76,10 @@ Each RMS norm is one kernel instead of eight small ones, written with the refere
 \section{CUDA graphs}\index{CUDA graphs}
 
 Every verify runs from CUDA graphs (\code{engine/verify_graph.py}), one per shape of round: chain or tree, row count, context class, flags. Positions and lengths live in device buffers, so one captured graph serves every round of that shape. Graphs took the launch gaps inside a verify from about 4.5~ms to about 1.5~ms. The drafter's forward runs from graphs too. Graphed and eager runs agree bit for bit, and the tests check that. Every graph capture holds a process-wide lock (\code{engine/capture_lock.py}), because a CUDA call from another thread during a capture fails the capture; the disk tier's writer holds the same lock around its own CUDA calls.
+
+\section{Where the source lives}
+
+The CUDA and C++ kernels are source files, compiled on first use with \code{torch.utils.cpp_extension.load_inline} and cached under \code{~/.cache/torch_extensions}. A module \code{<dir>/<name>.py} that builds one keeps its sources in \code{<dir>/csrc/<name>/}: a CUDA body as \code{.cu}, the bindings' declarations or host C++ as \code{.cpp}, and the text rewrites a variant applies to a shared kernel as \code{patches/<what>.old.cuh} beside \code{patches/<what>.new.cuh}. The module reads each file at import (\code{engine/native_build.py}) and assembles what it compiles as before: the \code{#define} lines its knobs set, the slices it takes of a shared source, a variant's rewrites. The build's name ends in a hash of the compiled text, so an edited kernel is a new build directory. The shared kernels are under \code{tools/csrc/} (EXL3, NVFP4, Flash-Next), the drafter's host tree under \code{engine/csrc/}, and a family's own kernels in its package (\code{engine/models/qwen3_5/csrc/}). A model's fingerprint reads the source files of every module its manifest reaches, so an edit to a kernel moves exactly those models' fingerprints.
 
 \section{How a kernel gets in}
 

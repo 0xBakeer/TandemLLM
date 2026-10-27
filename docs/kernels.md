@@ -46,7 +46,7 @@ Three kernels share one stored format and pick by row count:
 
 The skinny kernel rests on one fact about the hardware. The instruction `cvt.rn.f16x2.e2m1x2` turns one packed byte into one register holding two 16-bit values, and that register is exactly the operand layout of an `mma.m16n8k16` tensor-core instruction. A thread loads 16 bytes of a weight row with one vector load and decodes each byte straight into an operand register, so nothing goes through shared memory. The group scale is decoded by `cvt.rn.f16x2.e4m3x2` and multiplied onto the weight in fp16. That product is exact: e2m1 times e4m3 needs six significant bits, and fp16 has eleven. The weights are the B operand (8 rows an instruction) and the activations the A operand (16 rows an instruction). A 16-row verify therefore costs one instruction per weight tile, and 17 to 32 rows cost two.
 
-It builds on first use with `torch.utils.cpp_extension` for `sm_121a`, because the e2m1 converter is specific to that chip. A tile table per shape (`ops/skinny-tiles.json` up to 16 rows, `ops/skinny-tiles-wide.json` for 17 to 32) holds the launch settings the sweep picked.
+It builds on first use from `tools/csrc/nvfp4_skinny/` with `torch.utils.cpp_extension` for `sm_121a`, because the e2m1 converter is specific to that chip. A tile table per shape (`ops/skinny-tiles.json` up to 16 rows, `ops/skinny-tiles-wide.json` for 17 to 32) holds the launch settings the sweep picked.
 
 ## FP8 matrix products
 
@@ -86,6 +86,34 @@ Attention uses the library's fused attention with a causal flag, a lower-right c
 ## Graphs
 
 Every verify runs from CUDA graphs (`engine/verify_graph.py`), one per shape of round: chain or tree, row count, context class, flags. Positions and lengths live in device buffers, so one captured graph serves every round of that shape. Graphs took the launch gaps inside a verify from about 4.5 ms to about 1.5 ms. The drafter's forward runs from graphs too (`engine/drafters/draft_graph.py`). Graphed and eager runs agree bit for bit, and the tests check that.
+
+## Where the source lives
+
+The CUDA and C++ kernels are source files, compiled on first use with `torch.utils.cpp_extension.load_inline` and cached under `~/.cache/torch_extensions`. A module `<dir>/<name>.py` that builds one keeps its sources in `<dir>/csrc/<name>/`:
+
+| file | holds |
+|-|-|
+| `<unit>.cu` | a CUDA body (`cuda_sources`) |
+| `<unit>.cpp` | the bindings' declarations, or host C++ (`cpp_sources`) |
+| `<unit>.h` | declarations the build name hashes |
+| `patches/<what>.old.cuh`, `patches/<what>.new.cuh` | a text a shared kernel's source holds once, and what a variant puts in its place |
+
+The module reads each file at import (`engine/native_build.py` `source`, the bytes as written) and assembles what it compiles in Python: the `#define` lines its knobs set, the slices it takes of a shared source (Flash-Next's kernels take the EXL3 decode helpers from `tools/csrc/exl3_linear/exl3.cu`), a variant's rewrites. It builds with `native_build.load`, under a name that ends in `native_build.tag` of the compiled text, so an edited kernel is a new build directory and two trees on one board never rebuild over each other.
+
+| folder | built by | kernels |
+|-|-|-|
+| `tools/csrc/exl3_linear/` | `tools/exl3_linear.py` | the EXL3 skinny GEMM, its rotations, the prefill reconstruct |
+| `tools/csrc/exl3_tall/` | `tools/exl3_tall.py` | the EXL3 64-row tiles and the shared kernel's variants |
+| `tools/csrc/exl3_relu2/` | `tools/exl3_relu2.py` | the EXL3 squared-ReLU expert bank |
+| `tools/csrc/nvfp4_skinny/` | `tools/nvfp4_skinny.py` | the NVFP4 skinny kernel |
+| `tools/csrc/fn_kernels/`, `tools/csrc/fn_seq_kernels/`, `tools/csrc/fn_prefill_kernels/` | `tools/fn_kernels.py`, `tools/fn_seq_kernels.py`, `tools/fn_prefill_kernels.py` | Flash-Next's decode, sequence and prefill kernels |
+| `engine/csrc/native_tree/` | `engine/native_tree.py` | the block drafter's host walk and lattice tree (C++) |
+| `engine/models/qwen3_5/csrc/frag/`, `engine/models/qwen3_5/round/csrc/lattice/` | the 27B's `frag.py`, `round/lattice.py` | its fragment-major EXL3 path, its round's lattice tree (C++) |
+| `tools/csrc/l2_prefetch_bench/` | `tools/l2_prefetch_bench.py` | the L2 prefetch probe |
+
+A family's own kernels stay in its package (`engine/models/<family>/csrc/`); shared code never names a family ([adding-a-model.md](adding-a-model.md#what-a-family-declares)).
+
+The fingerprint reads these files. `engine/methods/manifest.py` `files` lists, after each module of a model's manifest and each `tools/` module those import, the files of the module's `csrc/` folder, then `engine/native_build.py`. An edit to a kernel file moves the fingerprint of every model whose manifest reaches its module, and of no other (`tests/test_native_sources.py`).
 
 ## How a kernel gets in
 
