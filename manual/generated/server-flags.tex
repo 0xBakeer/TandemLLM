@@ -10,8 +10,8 @@
 \texttt{-{}-presence-\allowbreak{}penalty} & \texttt{0} & flat subtraction from tokens already in the history (0 = off). \\
 \texttt{-{}-frequency-\allowbreak{}penalty} & \texttt{0} & subtraction per occurrence, on tokens already in the history (0 = off). \\
 \texttt{-{}-temperature} & \texttt{0} & server default sampling temperature (0 = greedy, the exact path). \\
-\texttt{-{}-top-\allowbreak{}p} & \texttt{1} & server default for top\_p. \\
-\texttt{-{}-top-\allowbreak{}k} & \texttt{0} & server default for top\_k (0 is off). \\
+\texttt{-{}-top-\allowbreak{}p} & \texttt{none} & server default for top\_p. \\
+\texttt{-{}-top-\allowbreak{}k} & \texttt{none} & server default for top\_k (0 is off). \\
 \texttt{-{}-no-\allowbreak{}repeat-\allowbreak{}ngram} & \texttt{0} & forbid the token that would complete an n-gram already seen (HF's no\_repeat\_ngram\_size; 0 = off, must be \textgreater{}= 2). \\
 \texttt{-{}-pattern-\allowbreak{}stop} & \texttt{none} & end a generation that repeats one short pattern forever, as MAX:MIN:COUNT (e.g. 64:1:8, a block of 1..64 tokens repeated 8 times ends the generation with finish\_reason stop). \\
 \texttt{-{}-argloop} & \texttt{on} & the tool-argument loop guard (server/argloop.py): \texttt{on} stops a held tool call whose arguments loop and tells the model on its next turn. One of: on, log, off. \\

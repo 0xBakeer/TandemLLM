@@ -95,6 +95,7 @@
 \texttt{QWEN38\_\allowbreak{}FN\_\allowbreak{}WARM\_\allowbreak{}TABLE} & \texttt{1} & \texttt{engine/\allowbreak{}models/\allowbreak{}flashnext/\allowbreak{}load.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}HEAD} & \texttt{none} & \texttt{engine/\allowbreak{}loader.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}TILES} & \texttt{none} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
+\texttt{QWEN38\_\allowbreak{}FRESH\_\allowbreak{}SEED} & \texttt{auto} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}FUSED\_\allowbreak{}ADDNORM} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}FUSED\_\allowbreak{}ATTN} & \texttt{0} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}FUSED\_\allowbreak{}ATTN\_\allowbreak{}PREP} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
@@ -122,6 +123,11 @@
 \texttt{QWEN38\_\allowbreak{}GDNV\_\allowbreak{}WY\_\allowbreak{}MAXT} & \texttt{32} & \texttt{16} \textbullet{} \texttt{tools/\allowbreak{}gdn\_\allowbreak{}verify\_\allowbreak{}kernels.py} \\
 \texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}AB} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNK} & \texttt{64} & \texttt{engine/\allowbreak{}model.py} \\
+\texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNKED} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
+\texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNKED\_\allowbreak{}BV} & \texttt{16} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}chunked\_\allowbreak{}kernels.py} \\
+\texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNKED\_\allowbreak{}C} & \texttt{64} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}chunked\_\allowbreak{}kernels.py} \\
+\texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNKED\_\allowbreak{}WARPS} & \texttt{4} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}chunked\_\allowbreak{}kernels.py} \\
+\texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}CHUNKED\_\allowbreak{}WARPS\_\allowbreak{}INTRA} & \texttt{8} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}chunked\_\allowbreak{}kernels.py} \\
 \texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}MM} & \texttt{fp32} & \texttt{engine/\allowbreak{}gdn.py} \\
 \texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}MM\_\allowbreak{}FROM} & \texttt{64} & \texttt{engine/\allowbreak{}gdn.py} \\
 \texttt{QWEN38\_\allowbreak{}GDN\_\allowbreak{}PREFILL\_\allowbreak{}BV} & \texttt{32} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}prefill\_\allowbreak{}kernels.py} \\
@@ -154,6 +160,7 @@
 \texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}GRAPHS\_\allowbreak{}AFTER} & \texttt{4} & \texttt{engine/\allowbreak{}models/\allowbreak{}qwen3\_\allowbreak{}5/\allowbreak{}joint\_\allowbreak{}graphs.py} \\
 \texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}GRAPHS\_\allowbreak{}MAX} & \texttt{24} & \texttt{engine/\allowbreak{}models/\allowbreak{}qwen3\_\allowbreak{}5/\allowbreak{}joint\_\allowbreak{}graphs.py} \\
 \texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}MAX\_\allowbreak{}ROWS} & \texttt{none} & \texttt{engine/\allowbreak{}models/\allowbreak{}qwen3\_\allowbreak{}5/\allowbreak{}adapter.py} \\
+\texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}ROWS\_\allowbreak{}AT\_\allowbreak{}LANES} & \texttt{4:\allowbreak{}8} & \texttt{engine/\allowbreak{}models/\allowbreak{}qwen3\_\allowbreak{}5/\allowbreak{}joint\_\allowbreak{}graphs.py} \\
 \texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}ROWS\_\allowbreak{}A\_\allowbreak{}SLOT} & \texttt{0} & \texttt{engine/\allowbreak{}models/\allowbreak{}qwen3\_\allowbreak{}5/\allowbreak{}joint\_\allowbreak{}graphs.py} \\
 \texttt{QWEN38\_\allowbreak{}JOINT\_\allowbreak{}ROWWISE} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}JOIN\_\allowbreak{}VIEWS} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
