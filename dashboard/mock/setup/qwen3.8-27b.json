@@ -1404,6 +1404,260 @@
    }
   ]
  },
+ "parallel": {
+  "method": "tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512 tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1 warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the decode window; a round counts only when /health shows N decoding at once and no other request running. Suffix store and response cache off.",
+  "rows": [
+   {
+    "profile": "exl3-4.0",
+    "build": "0.14.2",
+    "commit": "6d691a11",
+    "date": "2026-10-26",
+    "raw": "models/qwen3.8-27b/measurements/parallel-2026-10-26-exl3-4.0.json",
+    "setup": {
+     "env": "live8-cold",
+     "lanes": 8,
+     "window": 262144,
+     "max_tokens": 512,
+     "suffix_store": false,
+     "response_cache": false,
+     "thinking": false,
+     "sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": "one per request"
+     },
+     "prompts": {
+      "set": "card-v1",
+      "sha256": "eb44b3d5e32e2b9c",
+      "prompt_tokens": {
+       "code": 243,
+       "prose": 191
+      }
+     }
+    },
+    "rounds": 3,
+    "decode": {
+     "code": 85.1,
+     "prose": 35.8
+    },
+    "prefill": {
+     "2048": {
+      "ttft_s": 1.85,
+      "tok_s": 1102.0,
+      "prompt_tokens": 2043
+     },
+     "8192": {
+      "ttft_s": 6.67,
+      "tok_s": 1227.0,
+      "prompt_tokens": 8186
+     },
+     "32768": {
+      "ttft_s": 28.72,
+      "tok_s": 1141.0,
+      "prompt_tokens": 32763
+     }
+    },
+    "levels": {
+     "1": {
+      "wall_tok_s": 35.3,
+      "decode_tok_s": 35.8,
+      "ttft_s": 0.24,
+      "at_once": 1,
+      "rounds": 3
+     },
+     "2": {
+      "wall_tok_s": 59.1,
+      "decode_tok_s": 61.6,
+      "ttft_s": 0.73,
+      "at_once": 2,
+      "rounds": 3
+     },
+     "4": {
+      "wall_tok_s": 98.5,
+      "decode_tok_s": 103.1,
+      "ttft_s": 1.03,
+      "at_once": 4,
+      "rounds": 3
+     },
+     "8": {
+      "wall_tok_s": 146.3,
+      "decode_tok_s": 155.5,
+      "ttft_s": 1.83,
+      "at_once": 8,
+      "rounds": 3
+     }
+    }
+   },
+   {
+    "profile": "exl3-6.0",
+    "build": "0.14.2",
+    "commit": "6d691a11",
+    "date": "2026-10-26",
+    "raw": "models/qwen3.8-27b/measurements/parallel-2026-10-26-exl3-6.0.json",
+    "setup": {
+     "env": "live8-cold",
+     "lanes": 8,
+     "window": 262144,
+     "max_tokens": 512,
+     "suffix_store": false,
+     "response_cache": false,
+     "thinking": false,
+     "sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": "one per request"
+     },
+     "prompts": {
+      "set": "card-v1",
+      "sha256": "eb44b3d5e32e2b9c",
+      "prompt_tokens": {
+       "code": 244,
+       "prose": 189
+      }
+     }
+    },
+    "rounds": 3,
+    "decode": {
+     "code": 66.2,
+     "prose": 28.1
+    },
+    "prefill": {
+     "2048": {
+      "ttft_s": 1.88,
+      "tok_s": 1090.0,
+      "prompt_tokens": 2044
+     },
+     "8192": {
+      "ttft_s": 6.71,
+      "tok_s": 1220.0,
+      "prompt_tokens": 8188
+     },
+     "32768": {
+      "ttft_s": 28.26,
+      "tok_s": 1159.0,
+      "prompt_tokens": 32765
+     }
+    },
+    "levels": {
+     "1": {
+      "wall_tok_s": 25.6,
+      "decode_tok_s": 25.9,
+      "ttft_s": 0.27,
+      "at_once": 1,
+      "rounds": 3
+     },
+     "2": {
+      "wall_tok_s": 46.7,
+      "decode_tok_s": 48.2,
+      "ttft_s": 0.73,
+      "at_once": 2,
+      "rounds": 3
+     },
+     "4": {
+      "wall_tok_s": 77.2,
+      "decode_tok_s": 80.0,
+      "ttft_s": 1.05,
+      "at_once": 4,
+      "rounds": 3
+     },
+     "8": {
+      "wall_tok_s": 120.1,
+      "decode_tok_s": 126.2,
+      "ttft_s": 1.93,
+      "at_once": 8,
+      "rounds": 3
+     }
+    }
+   },
+   {
+    "profile": "community/thinkingcap-27b-kearuga-exl3-4.00",
+    "build": "0.14.2",
+    "commit": "6d691a11",
+    "date": "2026-10-26",
+    "raw": "models/qwen3.8-27b/measurements/parallel-2026-10-26-thinkingcap-27b-kearuga-exl3-4.00.json",
+    "setup": {
+     "env": "live8-cold",
+     "lanes": 8,
+     "window": 262144,
+     "max_tokens": 512,
+     "suffix_store": false,
+     "response_cache": false,
+     "thinking": false,
+     "sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": "one per request"
+     },
+     "prompts": {
+      "set": "card-v1",
+      "sha256": "eb44b3d5e32e2b9c",
+      "prompt_tokens": {
+       "code": 246,
+       "prose": 191
+      }
+     }
+    },
+    "rounds": 3,
+    "decode": {
+     "code": 68.7,
+     "prose": 36.2
+    },
+    "prefill": {
+     "2048": {
+      "ttft_s": 1.89,
+      "tok_s": 1085.0,
+      "prompt_tokens": 2045
+     },
+     "8192": {
+      "ttft_s": 6.69,
+      "tok_s": 1225.0,
+      "prompt_tokens": 8188
+     },
+     "32768": {
+      "ttft_s": 28.4,
+      "tok_s": 1154.0,
+      "prompt_tokens": 32765
+     }
+    },
+    "levels": {
+     "1": {
+      "wall_tok_s": 36.1,
+      "decode_tok_s": 36.7,
+      "ttft_s": 0.24,
+      "at_once": 1,
+      "rounds": 3
+     },
+     "2": {
+      "wall_tok_s": 60.0,
+      "decode_tok_s": 62.5,
+      "ttft_s": 0.71,
+      "at_once": 2,
+      "rounds": 3
+     },
+     "4": {
+      "wall_tok_s": 97.0,
+      "decode_tok_s": 101.4,
+      "ttft_s": 1.09,
+      "at_once": 4,
+      "rounds": 3
+     },
+     "8": {
+      "wall_tok_s": 147.6,
+      "decode_tok_s": 156.8,
+      "ttft_s": 1.83,
+      "at_once": 8,
+      "rounds": 3
+     }
+    }
+   }
+  ]
+ },
  "memory": {
   "parts": [
    {

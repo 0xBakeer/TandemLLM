@@ -250,6 +250,40 @@ measurements:
         - 1
     ttft_s: {}
     lossless: null
+# SPD-245: the weight cards' speed rows on the current build (docs/measurement.md, "The weight cards' speed
+# rows"). Each row is its raw file's `row` (models/<id>/measurements/parallel-*.json, tools/parallel_card.py).
+parallel:
+  method: >-
+    tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts
+    bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its
+    own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512
+    tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the
+    median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1
+    warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the
+    decode window; a round counts only when /health shows N decoding at once and no other request running.
+    Suffix store and response cache off.
+  rows:
+    - profile: "flint-exl3-4.0"
+      build: "0.14.2"
+      commit: "6d691a11"
+      date: "2026-10-26"
+      raw: "models/flint/measurements/parallel-2026-10-26-flint-exl3-4.0.json"
+      setup: {env: "v3-flint-4.0", lanes: 8, window: 262144, max_tokens: 512, suffix_store: false, response_cache: false, thinking: false, sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.0, seed: "one per request"}, prompts: {set: "card-v1", sha256: "eb44b3d5e32e2b9c", prompt_tokens: {code: 241, prose: 184}}}
+      rounds: 3
+      decode: {code: 130.0, prose: 120.4}
+      prefill: {"2048": {ttft_s: 0.47, tok_s: 4386.0, prompt_tokens: 2054}, "8192": {ttft_s: 1.76, tok_s: 4669.0, prompt_tokens: 8199}, "32768": {ttft_s: 7.75, tok_s: 4230.0, prompt_tokens: 32775}}
+      levels: {"1": {wall_tok_s: 108.3, decode_tok_s: 112.3, ttft_s: 0.19, at_once: 1, rounds: 3}, "2": {wall_tok_s: 150.2, decode_tok_s: 154.3, ttft_s: 0.27, at_once: 2, rounds: 3}, "4": {wall_tok_s: 186.9, decode_tok_s: 190.3, ttft_s: 0.46, at_once: 4, rounds: 3}, "8": {wall_tok_s: 215.9, decode_tok_s: 218.3, ttft_s: 0.82, at_once: 8, rounds: 3}}
+    - profile: "flint-exl3-6.0"
+      build: "0.14.2"
+      commit: "6d691a11"
+      date: "2026-10-26"
+      raw: "models/flint/measurements/parallel-2026-10-26-flint-exl3-6.0.json"
+      setup: {env: "v3-flint-6.0", lanes: 8, window: 262144, max_tokens: 512, suffix_store: false, response_cache: false, thinking: false, sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.0, seed: "one per request"}, prompts: {set: "card-v1", sha256: "eb44b3d5e32e2b9c", prompt_tokens: {code: 237, prose: 185}}}
+      rounds: 3
+      decode: {code: 93.5, prose: 106.2}
+      prefill: {"2048": {ttft_s: 0.53, tok_s: 3862.0, prompt_tokens: 2051}, "8192": {ttft_s: 1.83, tok_s: 4473.0, prompt_tokens: 8199}, "32768": {ttft_s: 8.09, tok_s: 4049.0, prompt_tokens: 32775}}
+      levels: {"1": {wall_tok_s: 80.7, decode_tok_s: 83.7, ttft_s: 0.23, at_once: 1, rounds: 3}, "2": {wall_tok_s: 115.4, decode_tok_s: 117.9, ttft_s: 0.31, at_once: 2, rounds: 3}, "4": {wall_tok_s: 148.4, decode_tok_s: 150.9, ttft_s: 0.54, at_once: 4, rounds: 3}, "8": {wall_tok_s: 171.9, decode_tok_s: 173.8, ttft_s: 1.04, at_once: 8, rounds: 3}}
+
 memory:
   parts:
   - id: engine

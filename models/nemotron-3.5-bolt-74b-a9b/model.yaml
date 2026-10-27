@@ -414,6 +414,30 @@ measurements:
     lossless: null
     note: 'Plain (--drafter none) prose / chat / code 29.16 / 29.12 / 29.07 tok/s; edit and copy asks 110.83 and 157.27 drafted (29.0 and 28.92 plain); every text the plain run''s.'
 
+# SPD-245: the weight cards' speed rows on the current build (docs/measurement.md, "The weight cards' speed
+# rows"). Each row is its raw file's `row` (models/<id>/measurements/parallel-*.json, tools/parallel_card.py).
+parallel:
+  method: >-
+    tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts
+    bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its
+    own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512
+    tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the
+    median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1
+    warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the
+    decode window; a round counts only when /health shows N decoding at once and no other request running.
+    Suffix store and response cache off.
+  rows:
+    - profile: "nemotron-bolt-exl3-4.0"
+      build: "0.14.2"
+      commit: "6d691a11"
+      date: "2026-10-26"
+      raw: "models/nemotron-3.5-bolt-74b-a9b/measurements/parallel-2026-10-26-nemotron-bolt-exl3-4.0.json"
+      setup: {env: "v3-nem-bolt-4.0", lanes: 8, window: 262144, max_tokens: 512, suffix_store: false, response_cache: false, thinking: false, sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.0, seed: "one per request"}, prompts: {set: "card-v1", sha256: "eb44b3d5e32e2b9c", prompt_tokens: {code: 247, prose: 191}}}
+      rounds: 3
+      decode: {code: 49.9, prose: 37.4}
+      prefill: {"2048": {ttft_s: 3.22, tok_s: 634.0, prompt_tokens: 2044}, "8192": {ttft_s: 11.04, tok_s: 742.0, prompt_tokens: 8188}, "32768": {ttft_s: 43.2, tok_s: 758.0, prompt_tokens: 32764}}
+      levels: {"1": {wall_tok_s: 33.4, decode_tok_s: 35.8, ttft_s: 1.04, at_once: 1, rounds: 3}, "2": {wall_tok_s: 40.0, decode_tok_s: 41.7, ttft_s: 1.57, at_once: 2, rounds: 3}, "4": {wall_tok_s: 46.5, decode_tok_s: 47.6, ttft_s: 2.66, at_once: 4, rounds: 3}, "8": {wall_tok_s: 54.3, decode_tok_s: 55.0, ttft_s: 4.8, at_once: 8, rounds: 3}}
+
 memory:
   parts:
   - id: engine
@@ -585,9 +609,11 @@ components:
   docs: docs/caches.md
   note: null
 parallelism:
+  # eight lanes measured (SPD-245, EXL3 4.0, 0.14.2, 2026-10-26): 1/2/4/8 at once 33.4 / 40.0 / 46.5 / 54.3 tok/s,
+  # N decoding at once in every round (`parallel`)
   slots:
     min: 1
-    max: 3
+    max: 8
     default: 8
   window:
     min: 8192

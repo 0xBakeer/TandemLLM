@@ -1006,6 +1006,435 @@
       "minimum": 0,
       "type": "integer"
     },
+    "parallel": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "rows": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "build": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "commit": {
+                "pattern": "^[0-9a-f]{7,40}$",
+                "type": "string"
+              },
+              "date": {
+                "pattern": "^20[0-9]{2}-[01][0-9]-[0-3][0-9]$",
+                "type": "string"
+              },
+              "decode": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "prose": {
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                },
+                "required": [],
+                "type": "object"
+              },
+              "levels": {
+                "additionalProperties": false,
+                "properties": {
+                  "1": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "at_once": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "decode_tok_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "rounds": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "wall_tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "wall_tok_s",
+                      "decode_tok_s",
+                      "ttft_s",
+                      "at_once",
+                      "rounds"
+                    ],
+                    "type": "object"
+                  },
+                  "2": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "at_once": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "decode_tok_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "rounds": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "wall_tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "wall_tok_s",
+                      "decode_tok_s",
+                      "ttft_s",
+                      "at_once",
+                      "rounds"
+                    ],
+                    "type": "object"
+                  },
+                  "4": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "at_once": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "decode_tok_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "rounds": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "wall_tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "wall_tok_s",
+                      "decode_tok_s",
+                      "ttft_s",
+                      "at_once",
+                      "rounds"
+                    ],
+                    "type": "object"
+                  },
+                  "8": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "at_once": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "decode_tok_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "rounds": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "wall_tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "wall_tok_s",
+                      "decode_tok_s",
+                      "ttft_s",
+                      "at_once",
+                      "rounds"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "1"
+                ],
+                "type": "object"
+              },
+              "note": {
+                "maxLength": 2000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prefill": {
+                "additionalProperties": false,
+                "properties": {
+                  "2048": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "prompt_tokens": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "ttft_s",
+                      "tok_s",
+                      "prompt_tokens"
+                    ],
+                    "type": "object"
+                  },
+                  "32768": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "prompt_tokens": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "ttft_s",
+                      "tok_s",
+                      "prompt_tokens"
+                    ],
+                    "type": "object"
+                  },
+                  "8192": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "prompt_tokens": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "tok_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "ttft_s": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "ttft_s",
+                      "tok_s",
+                      "prompt_tokens"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [],
+                "type": "object"
+              },
+              "profile": {
+                "pattern": "^(community/)?[a-z0-9][a-z0-9._-]{0,79}$",
+                "type": "string"
+              },
+              "raw": {
+                "pattern": "^models/[a-z0-9.-]+/measurements/[A-Za-z0-9._-]+\\.json$",
+                "type": "string"
+              },
+              "rounds": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "setup": {
+                "additionalProperties": false,
+                "properties": {
+                  "env": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "lanes": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_tokens": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "prompts": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "prompt_tokens": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "code": {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "prose": {
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      },
+                      "set": {
+                        "maxLength": 2000,
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "pattern": "^[0-9a-f]{16}$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "set",
+                      "sha256",
+                      "prompt_tokens"
+                    ],
+                    "type": "object"
+                  },
+                  "response_cache": {
+                    "type": "boolean"
+                  },
+                  "sampling": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "min_p": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "seed": {
+                        "maxLength": 2000,
+                        "type": "string"
+                      },
+                      "temperature": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "top_k": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "top_p": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "temperature",
+                      "top_k",
+                      "top_p",
+                      "min_p",
+                      "seed"
+                    ],
+                    "type": "object"
+                  },
+                  "suffix_store": {
+                    "type": "boolean"
+                  },
+                  "thinking": {
+                    "type": "boolean"
+                  },
+                  "window": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "env",
+                  "lanes",
+                  "window",
+                  "max_tokens",
+                  "suffix_store",
+                  "response_cache",
+                  "thinking",
+                  "sampling",
+                  "prompts"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "profile",
+              "build",
+              "commit",
+              "date",
+              "raw",
+              "setup",
+              "rounds",
+              "levels"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "method",
+        "rows"
+      ],
+      "type": "object"
+    },
     "parallelism": {
       "additionalProperties": false,
       "properties": {

@@ -31,12 +31,12 @@
   "added": "2026-10-13",
   "status": "verified",
   "verified": {
-    "build": "0.8.2",
+    "build": "0.14.2",
     "device": "dgx-spark",
-    "date": "2026-10-13",
-    "tok_s": {"prose": 39.6, "code": 95.9, "chat": 51.3, "plain": 15.2},
-    "tokens_per_round": {"prose": 3.09, "code": 7.69, "chat": 4.11},
-    "notes": "text only; one run per kind"
+    "date": "2026-10-26",
+    "tok_s": {"prose": 42.3, "code": 84.0, "chat": 41.4},
+    "tokens_per_round": {"prose": 3.47, "code": 7.1, "chat": 3.53},
+    "notes": "text only; tools/q35m_ab.py, one greedy request a kind of up to 512 tokens, thinking off, through the conductor, 8 lanes, suffix store and response cache off; raw file models/qwen3.8-27b/measurements/verified-2026-10-26-thinkingcap-27b-kearuga-exl3-4.00.json"
   },
   "links": {"pr": "https://github.com/0xBakeer/TandemLLM-early-access/pull/1"}
 }

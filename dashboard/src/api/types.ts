@@ -1198,6 +1198,41 @@ export interface SetupMeasurements {
   rows: SetupMeasureRow[];
 }
 
+/** SPD-245: a weight card's speed row on one build (tools/parallel_card.py, the raw file in `raw`). */
+export type SetupParallelLevel = '1' | '2' | '4' | '8';
+export type SetupParallelDepth = '2048' | '8192' | '32768';
+export interface SetupParallelRow {
+  /** a profile id, or community/<pack> */
+  profile: string;
+  build: string;
+  commit: string;
+  date: string;
+  raw: string;
+  setup: {
+    env: string;
+    lanes: number;
+    window: number;
+    max_tokens: number;
+    suffix_store: boolean;
+    response_cache: boolean;
+    thinking: boolean;
+    sampling: { temperature: number; top_k: number; top_p: number; min_p: number; seed: string };
+    prompts: { set: string; sha256: string; prompt_tokens: { code?: number; prose?: number } };
+  };
+  rounds: number;
+  /** one request alone, decode tok/s by workload */
+  decode?: { code?: number; prose?: number };
+  /** the first token of a cold prompt, by its length in tokens */
+  prefill?: Partial<Record<SetupParallelDepth, { ttft_s: number; tok_s: number; prompt_tokens: number }>>;
+  /** N requests at once: total tok/s with the first tokens (wall) and over the decode window; `at_once` is N */
+  levels: Partial<Record<SetupParallelLevel, { wall_tok_s: number; decode_tok_s: number | null; ttft_s: number | null; at_once: number; rounds: number }>>;
+  note?: string | null;
+}
+export interface SetupParallel {
+  method: string;
+  rows: SetupParallelRow[];
+}
+
 export type SetupComponentGroup = 'speed' | 'roles' | 'caches' | 'disk' | 'features';
 /** A tool that runs beside the model (the narrator, Laya, the caches, ...). */
 export interface SetupComponent {
@@ -1293,6 +1328,8 @@ export interface SetupModel {
   icon: string | null;
   profiles: SetupProfile[];
   measurements: SetupMeasurements;
+  /** SPD-245: the weight cards' speed rows (absent: none measured) */
+  parallel?: SetupParallel;
   components: SetupComponent[];
   parallelism: SetupParallelism;
   methods: SetupField[];

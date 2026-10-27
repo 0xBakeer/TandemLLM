@@ -177,11 +177,15 @@ def test_the_first_entry():
         assert c["modalities"] == {"text": True, "image": False, "audio": False, "video": False}
         assert c["modalities_in_pack"] == ["text", "image"]
         assert c["license"].startswith("PolyForm-Small-Business-1.0.0") and "Apache-2.0" in c["license"]
+        # SPD-245: the verified block is its run's (one greedy request a kind, tools/q35m_ab.py)
+        with open(os.path.join(ROOT, "models", "qwen3.8-27b", "measurements",
+                               "verified-2026-10-26-thinkingcap-27b-kearuga-exl3-4.00.json")) as fh:
+            run = json.load(fh)
         assert c["status"] == "verified" and c["verified"]["tok_s"] == \
-            {"prose": 39.6, "code": 95.9, "chat": 51.3, "plain": 15.2}
-        assert c["verified"]["tokens_per_round"] == {"prose": 3.09, "code": 7.69, "chat": 4.11}
+            {k: round(run["answers"][k]["tok_s"], 1) for k in ("prose", "code", "chat")}
+        assert c["verified"]["tokens_per_round"] == {k: run["answers"][k]["per_block"] for k in ("prose", "code", "chat")}
         assert (c["verified"]["build"], c["verified"]["device"], c["verified"]["date"]) == \
-            ("0.8.2", "dgx-spark", "2026-10-13")
+            (run["build"], run["device"], run["date"]) == ("0.14.2", "dgx-spark", "2026-10-26")
         assert c["links"] == {"pr": "https://github.com/0xBakeer/TandemLLM-early-access/pull/1"}
         assert c["memory"] == {"weights_gib": 14.76, "drafters_gib": 5.41, "like": "exl3-4.0"}
         p = registry.profile(m, PID)

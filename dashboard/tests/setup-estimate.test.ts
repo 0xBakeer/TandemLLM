@@ -77,15 +77,14 @@ describe('the estimate fixture (models/estimate-cases.json)', () => {
 });
 
 describe('#104: the engine family caps parallel chats', () => {
-  it('Ornith (no side slots) takes one chat, the others the engine limit', async () => {
+  it('every model takes the engine limit, Ornith too since its side slots (SPD-217)', async () => {
     const { slotsRange } = await import('../src/setup/slots');
     const { ENGINE_MAX_SLOTS, slotsMax } = await import('../src/setup/fields');
     const orn = fixture.models?.['ornith-1.5-122b'] as SetupModel;
-    expect(slotsMax(orn)).toBe(1);
-    expect(slotsRange(orn).max).toBe(1);
-    expect(orn.parallelism.slots.engine_max_reason).toMatch(/one chat at a time/);
-    expect(() => estimate(orn, { model: orn.id, slots: 2 } as never)).toThrow(SelectionError);
-    for (const m of [fixture.model, ...Object.values(fixture.models ?? {})].filter((x) => x.id !== orn.id)) {
+    expect(slotsRange(orn).max).toBe(ENGINE_MAX_SLOTS);
+    expect(orn.parallelism.slots.engine_max_reason).toBeNull();
+    expect(() => estimate(orn, { model: orn.id, slots: ENGINE_MAX_SLOTS + 1 } as never)).toThrow(SelectionError);
+    for (const m of [fixture.model, ...Object.values(fixture.models ?? {})]) {
       expect(slotsMax(m)).toBe(ENGINE_MAX_SLOTS);
     }
   });
