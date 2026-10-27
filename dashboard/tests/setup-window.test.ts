@@ -55,11 +55,10 @@ describe('the range and the ladder', () => {
     expect(stepWindow(131_072, 1, r)).toBe(208_896);
     expect(checkWindow('256k', r)).toEqual({ ok: false, why: r.maxWhy });
   });
-  it('the extra chats never hold more than the first chat (the engine cuts a side slot to slot 0)', () => {
-    const r = windowRange(VL1M, { ...defaults(VL1M), window: 131_072 }, 'side_window');
-    expect(r.max).toBe(131_072);
-    expect(r.maxWhy).toBe("The extra chats hold at most the first chat's 131,072 tokens.");
-    expect(checkWindow('262144', r)).toEqual({ ok: false, why: r.maxWhy });
+  it('one window for every chat: the range is the card\'s and the profile\'s, whatever the window is now (SRV-707)', () => {
+    const r = windowRange(VL1M, { ...defaults(VL1M), window: 131_072 });
+    expect(r.max).toBe(1_048_576);
+    expect(checkWindow('262144', r)).toEqual({ ok: true, n: 262_144 });
   });
   it('+ and − walk the rungs; from a typed value between two, the next rung that way', () => {
     const r = windowRange(VL1M, defaults(VL1M), 'window');
@@ -73,7 +72,7 @@ describe('the range and the ladder', () => {
   });
   it('nothing caps it at 262,144 but a card that says so: Bolt stops there, Super VL goes on to 1M', () => {
     expect(VL.parallelism.window.max).toBe(1_048_576);
-    expect(VL.parallelism.side_window.max).toBe(1_048_576);
+    expect('side_window' in VL.parallelism).toBe(false);
     const r = windowRange(BOLT, defaults(BOLT), 'window');
     expect(rungs(r).at(-1)).toBe(262_144);
     expect(stepWindow(262_144, 1, r)).toBe(262_144);
@@ -108,11 +107,12 @@ describe('checkWindow: never clamped, always a reason', () => {
 });
 
 describe('the memory follows the window', () => {
-  it('1M on Super VL fits the estimate; the extra chats\' cost line follows their window', () => {
-    const sel = { ...defaults(VL1M), window: 1_048_576, side_window: 524_288 };
+  it('1M on Super VL fits the estimate at two chats; the extra chat\'s cost line follows the one window', () => {
+    const sel = { ...defaults(VL1M), window: 1_048_576, slots: 2 };
     const e = estimate(VL1M, sel);
-    expect(e.parts.find((p) => p.id === 'kv')!.gb).toBeGreaterThan(estimate(VL1M, defaults(VL1M)).parts.find((p) => p.id === 'kv')!.gb);
-    expect(chatCost(VL1M, sel)).toMatchObject({ window: 524_288, full: 5.1 });
+    expect(e.fits).toBe(true);
+    expect(e.parts.find((p) => p.id === 'kv')!.gb).toBeGreaterThan(estimate(VL1M, { ...defaults(VL1M), slots: 2 }).parts.find((p) => p.id === 'kv')!.gb);
+    expect(chatCost(VL1M, sel)).toMatchObject({ window: 1_048_576, full: 9.1 });
   });
   it('the short form', () => {
     expect([8192, 131_072, 262_144, 258_048, 1_048_576].map(shortTokens)).toEqual(['8k', '128k', '256k', '252k', '1M']);

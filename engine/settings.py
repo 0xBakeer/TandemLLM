@@ -41,6 +41,9 @@ KNOBS: dict[str, tuple] = {
     'SKINNY_TILES_C': (None, 'tools/nvfp4_skinny.py'),
     'SKINNY_TILES_WIDE_B': (None, 'tools/nvfp4_skinny.py'),
     'BLOCKING_SYNC': ('0', 'server/app.py'),
+    'ROUND_LOG': (None, 'server/roundlog.py'),
+    'ROUND_LOG_HIDDEN': ('0', 'server/roundlog.py'),
+    'ROUND_LOG_LATTICE': ('0', 'server/roundlog.py'),
     'COMMIT_IN_VERIFY': ('0', 'engine/model.py'),
     'CORPUS': ('', 'engine/drafters/ngram.py'),
     'DECODE_ATTN': ('0', 'engine/model.py'),
@@ -55,6 +58,18 @@ KNOBS: dict[str, tuple] = {
     'DEEP_AFTER': ('2', 'server/app.py'),
     'DF2_TEMP': ('1.0', 'engine/drafters/dflash2.py'),
     'DF2_TREE_MODE': ('paths', 'engine/drafters/dflash2.py'),
+    'DF2_KV_WINDOW': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_DEFER_SYNC': ('1', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_KP': ('1', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_GQA': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_FOLD': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_TAIL': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_TOPK': ('0', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_BATCH': ('1', 'engine/drafters/dflash2.py'),
+    'DF2_PACK_HOST1': ('1', 'engine/drafters/draft_graph.py'),
+    'DF2_SPAN_STEP': ('256', 'engine/drafters/draft_graph.py'),
+    'DF2_TOPK_FAST': ('1', 'engine/drafters/topk_small.py'),
+    'TREE_NATIVE': ('1', 'engine/native_tree.py'),
     'DFLASH2': (None, 'engine/drafters/dflash2.py'),
     'DRAFT_FC_NVFP4': ('0', 'engine/drafters/dflash2.py'),
     'DRAFT_GRAPH': ('0', 'engine/drafters/dflash2.py'),
@@ -69,7 +84,7 @@ KNOBS: dict[str, tuple] = {
     'FP8_HEAD': (None, 'engine/loader.py'),
     'FUSED_ADDNORM': ('0', 'engine/model.py'),
     'FUSED_ATTN': ('0', 'engine/model.py'),
-    'FUSED_ATTN_PREP': ('0', 'engine/model.py'),
+    'FUSED_ATTN_PREP': ('1', 'engine/model.py'),
     'FUSED_COMMIT': ('0', 'engine/model.py'),
     'FUSED_GDN': ('1', 'engine/model.py'),
     'FUSED_GDNBLOCK': ('1', 'engine/model.py'),
@@ -90,12 +105,34 @@ KNOBS: dict[str, tuple] = {
     'GDNV_WY_CHAIN_MAXT': ('32', 'tools/gdn_verify_kernels.py'),
     'GDNV_WY_FUSED': ('0', 'tools/gdn_verify_kernels.py'),
     'GDNV_WY_FUSED_MAXT': ('32', 'tools/gdn_verify_kernels.py'),
-    'GDNV_WY_KC': ('0', 'tools/gdn_verify_kernels.py'),
+    'GDNV_WY_KC': ('32', 'tools/gdn_verify_kernels.py'),
     'GDNV_WY_MAXT': ('32', 'tools/gdn_verify_kernels.py'),
-    'GDN_AB': ('0', 'engine/model.py'),
+    'GDN_AB': ('1', 'engine/model.py'),
+    'GDN_SEQ': ('0', 'tools/gdn_seq_kernels.py'),
+    'GDN_SEQ_BV': ('16', 'tools/gdn_seq_kernels.py'),
+    'GDN_SEQ_WARPS': ('1', 'tools/gdn_seq_kernels.py'),
+    'GDN_SEQ_BYNODE': ('0', 'tools/gdn_seq_kernels.py'),
+    'WINDOW_MLP': ('0', 'engine/model.py'),
+    'WINDOW_ROWWISE': ('1', 'engine/model.py'),
+    'GDN_PREP': ('1', 'engine/model.py'),
+    'WINDOW_NORM_ROT': ('1', 'engine/model.py'),
+    'SLAB_TRITON': ('1', 'engine/model.py'),
+    'GDN_PREP_BV': ('16', 'engine/model.py'),
+    'GDN_PREP_WARPS': ('4', 'engine/model.py'),
+    'GDN_CHUNKED': ('1', 'engine/model.py'),
+    'GDN_CHUNKED_C': ('64', 'tools/gdn_chunked_kernels.py'),
+    'GDN_CHUNKED_BV': ('16', 'tools/gdn_chunked_kernels.py'),
+    'GDN_CHUNKED_WARPS': ('4', 'tools/gdn_chunked_kernels.py'),
+    'GDN_CHUNKED_WARPS_INTRA': ('8', 'tools/gdn_chunked_kernels.py'),
+    'JOINT_ROWWISE': ('1', 'engine/model.py'),
+    'JOINT_GDN': ('1', 'engine/model.py'),
+    'JOIN_VIEWS': ('1', 'engine/model.py'),
     'GDN_CHUNK': ('64', 'engine/model.py'),
     'GDN_PREFILL_NOREP': ('0', 'engine/model.py'),
     'ATTN_STAGES3': ('1', 'tools/attn_kernels.py'),
+    'ATTN_INV': ('0', 'tools/attn_kernels.py'),
+    'ATTN_INV_NT': ('4', 'tools/attn_kernels.py'),
+    'ATTN_INV_SPLIT': ('1024', 'tools/attn_kernels.py'),
     'GDN_MM': ('fp32', 'engine/gdn.py'),
     'GDN_MM_FROM': ('64', 'engine/gdn.py'),
     'GDN_PREFILL_BV': ('32', 'tools/gdn_prefill_kernels.py'),
@@ -107,6 +144,8 @@ KNOBS: dict[str, tuple] = {
     'GDN_PREFILL_WARPS_INTRA': ('8', 'tools/gdn_prefill_kernels.py'),
     'GDN_PREFILL_WARPS_SCAN': ('8', 'tools/gdn_prefill_kernels.py'),
     'GQA_FROM': ('64', 'engine/model.py'),
+    'GRAPH_SHARE_OUT': ('0', 'engine/verify_graph.py'),
+    'GRAPH_SHARE_FROM': ('2', 'engine/verify_graph.py'),
     'GRAPH_MAX_CTX': ('32768', 'engine/verify_graph.py'),
     'HEAD_GEMM': ('', 'tools/head_gemv.py'),
     'HOST_ASYNC': ('0', 'engine/model.py'),
@@ -208,6 +247,8 @@ KNOBS: dict[str, tuple] = {
     'END_ALIGN_REASONING': ('on', 'server/endalign.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
+    # SRV-717: how long a snapshot of the allocator's segments is reused by the decision models' pool reads (s)
+    'POOL_SNAPSHOT_TTL_S': ('5.0', 'engine/decision/device.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),
     'SHADOW_GB': ('4', 'server/conductor/shadow.py'),
     'SHADOW_GRID': ('512', 'server/conductor/shadow.py'),
@@ -221,12 +262,16 @@ KNOBS: dict[str, tuple] = {
     'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
-    'EXL3_SILU_FUSED': ('0', 'tools/exl3_linear.py'),
+    'EXL3_SILU_FUSED': ('1', 'tools/exl3_linear.py'),
     'EXL3_MLP_BRIDGE': ('1', 'tools/exl3_linear.py'),
     'EXL3_STAGES': ('3', 'tools/exl3_linear.py'),
+    'EXL3_PDL': ('0', 'tools/exl3_linear.py'),
     'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),
     'SAMPLE_BATCH': ('1', 'engine/sample.py'),
     'SAMPLE_NUCLEUS': ('1', 'engine/sample.py'),
+    # SPD-201: a round's keyed draws from one kernel bit for bit torch.rand (engine/keyed_noise.py); 0: a launch a depth
+    'SAMPLE_KEYED_KERNEL': ('0', 'engine/sample.py'),
+    'SAMPLE_SPARSE_KEYED': ('1', 'engine/sample.py'),
     'SAMPLED_CUT': ('0', 'engine/router.py'),
     # the layer-major prefill (engine/model.py `prefill_window`): rows a window takes when its chunk
     # lines hand out anchors/snapshots (each line holds a recurrent-state copy), and when none do;
@@ -273,17 +318,21 @@ KNOBS: dict[str, tuple] = {
     'STAIR_RHO': ('', 'engine/lenrouter.py'),
     'STAIR_SKIP': ('0', 'engine/lenrouter.py'),
     'STAIR_MAX_NODES': ('', 'engine/lenrouter.py'),
+    'STAIR_TEMP_SAMPLED': ('', 'engine/lenrouter.py'),
     'TWO_STREAM': ('0', 'engine/model.py'),
     'UT_INVERSE': ('1', 'engine/gdn.py'),
     'VERIFY_GRAPH': ('0', 'engine/model.py'),
     'VERIFY_ROWS': ('16', 'engine/model.py'),
     'VERIFY_TILES': ('1', 'tools/nvfp4_verify_tiles.py'),
     'WY_BLOCK': ('8', 'tools/gdn_wy_kernels.py'),
-    'WY_BV': ('32', 'tools/gdn_wy_kernels.py'),
+    'WY_BV': ('16', 'tools/gdn_wy_kernels.py'),
     'WY_DBG': ('0', 'tools/gdn_wy_kernels.py'),
     'WY_PREC': ('ieee', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS': ('4', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS_PREP': ('4', 'tools/gdn_wy_kernels.py'),
+    # SPD-245: an unseeded sampled request draws its own seed and takes the keyed walk (server/sampling_defaults.py
+    # `admit_seed`): auto = where the sampled verify carries no q (--sampled-tree det), on, off
+    'FRESH_SEED': ('auto', 'server/app.py'),
     # SRV-241 (0.4.4-test): the regenerate rule (server/regenerate.py): `sample` = a regenerate of
     # an answered conversation under a TandemLLM plan samples with a fresh seed, `off` = no
     # detection; the defaults of --regenerate and its sampling flags (docs/server.md, Regenerate)
@@ -313,6 +362,7 @@ KNOBS: dict[str, tuple] = {
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
     # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
+    'PROMPT_END': ('1', 'engine/cache.py'),      # SPD-215: the resident prefix keeps the last prompt's end
     # read the n-gram table into the page cache at load (POSIX_FADV_WILLNEED, in the background)
     'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
     # drop the shards' page cache after the load (the table's is kept); 0 = keep it (a warm reload)
@@ -337,6 +387,17 @@ KNOBS: dict[str, tuple] = {
     # GEMVs of few output rows (mixer down, router, GDN a/b) with each row's K split over the warps of a
     # CTA (more loads in flight); sets their summation order, so a build keeps one value
     'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),
+    # SPD-231: M > 1 rows of the mixers' GEMV (gemv_split) and mix_up on the register-blocked kernels (several
+    # weight rows a CTA, each row's bits the one-row kernels'); 0: the one-row-a-CTA kernels for every M
+    'FN_GEMV_NB': ('0', 'tools/fn_kernels.py'),
+    # SPD-239: the mixer kernels' rows a pass and CTAs an SM for M > 1 (gemv_split / mix_up; 0: 8 rows, no
+    # bound; 1-5: tools/fn_kernels.py g_gemv_mc); the bits are the same at every setting
+    'FN_GEMV_MC': ('0', 'tools/fn_kernels.py'),
+    # SPD-241: the mixers' int8 group-scaled GEMV and mix_up on tensor cores at every row count, a one-time
+    # summation-order change (tools/fn_mma_agree.py: top-1 99.6 / 99.6 / 98.8 %, KL 5e-4..1.7e-3, the class of the
+    # GEMV_SPLIT order change); served Flash-Next C1-C8 43.3 / 56.9 / 83.2 / 107.8 (CUDA cores 41.6 / 55.4 / 75.5 / 95.0);
+    # 0: the CUDA-core kernels
+    'FN_MIXER_MMA': ('1', 'tools/fn_kernels.py'),
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
     'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),

@@ -176,7 +176,7 @@ export interface ConfigOverview {
     model: string; base_model: string | null; embedded: boolean;
     /** PL1: this engine's own parallel requests (never a relayed backend's: those get no limit
      *  from us) and the small models it runs beside Qwen */
-    parallel?: { n: number; requested: number; side_max_len: number | null; side_graphs: string | null; floor_gib: number | null };
+    parallel?: { n: number; requested: number; side_max_len: number | null; side_graphs: string | null; floor_gib: number | null; max_len?: number | null };
     roles?: { deciders?: string[]; narrator?: { model: string | null; state: string } };
   } | null;
   generation: number;

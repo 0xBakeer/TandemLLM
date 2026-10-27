@@ -79,9 +79,16 @@
 \texttt{QSE\_\allowbreak{}USAGE\_\allowbreak{}LEDGER} & \texttt{(a path)} & server setting \\
 \texttt{QSE\_\allowbreak{}CONDUCTOR\_\allowbreak{}CONFIG} & \texttt{(a path)} & server setting \\
 \texttt{QSE\_\allowbreak{}BACKENDS} & \texttt{(empty)} & server setting \\
-\texttt{QSE\_\allowbreak{}PARALLEL} & \texttt{1} & server setting \\
-\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN} & \texttt{65536} & server setting \\
+\texttt{QSE\_\allowbreak{}PARALLEL} & \texttt{8} & server setting \\
+\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN} & \texttt{0} & server setting \\
 \texttt{QSE\_\allowbreak{}PARALLEL\_\allowbreak{}FLOOR\_\allowbreak{}GB} & \texttt{15} & server setting \\
+\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}GRAPHS} & \texttt{off} & server setting \\
+\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}SLOT\_\allowbreak{}CONST\_\allowbreak{}GB} & \texttt{1.5} & server setting \\
+\texttt{QSE\_\allowbreak{}KV\_\allowbreak{}POOL} & \texttt{on} & server setting \\
+\texttt{QSE\_\allowbreak{}KV\_\allowbreak{}HARD\_\allowbreak{}FLOOR\_\allowbreak{}GB} & \texttt{10} & server setting \\
+\texttt{QSE\_\allowbreak{}KV\_\allowbreak{}RECOMPUTE} & \texttt{on} & server setting \\
+\texttt{QSE\_\allowbreak{}KV\_\allowbreak{}ADMIT\_\allowbreak{}ROWS} & \texttt{8192} & server setting \\
+\texttt{QSE\_\allowbreak{}BARRIER\_\allowbreak{}IDLE\_\allowbreak{}OWNER} & \texttt{on} & server setting \\
 \texttt{QWEN38\_\allowbreak{}GDNV\_\allowbreak{}CONV\_\allowbreak{}BLOCK} & \texttt{32} & engine switch \\
 \texttt{QWEN38\_\allowbreak{}GDNV\_\allowbreak{}CONV\_\allowbreak{}WARPS} & \texttt{1} & engine switch \\
 \texttt{QWEN38\_\allowbreak{}GDNV\_\allowbreak{}WY} & \texttt{1} & engine switch \\
@@ -113,5 +120,8 @@
 \texttt{RESPONSE\_\allowbreak{}CACHE} & \texttt{off} & read by ops/start.sh \\
 \texttt{QSE\_\allowbreak{}STATUS\_\allowbreak{}PORT} & \texttt{(empty)} & server setting \\
 \texttt{QSE\_\allowbreak{}PROFILE\_\allowbreak{}NAME} & \texttt{(a path)} & server setting \\
+\texttt{QSE\_\allowbreak{}PACK\_\allowbreak{}VISION} & \texttt{(empty)} & server setting \\
 \texttt{QSE\_\allowbreak{}SETUP\_\allowbreak{}ENV\_\allowbreak{}FILE} & \texttt{(a path)} & server setting \\
+\texttt{QSE\_\allowbreak{}VISION\_\allowbreak{}ASKED} & \texttt{(a path)} & server setting \\
+\texttt{VISION} & \texttt{off} & read by ops/start.sh \\
 \end{reftable}

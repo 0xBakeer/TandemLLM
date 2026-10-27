@@ -360,7 +360,7 @@ def test_the_setup_path_takes_a_pack():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _resolve(profile_env: str, keys: tuple) -> dict:
+def _resolve(profile_env: str, keys: tuple, setup_env: str | None = None) -> dict:
     """The keys as ops/serve.env resolves them for community/<id> with `profile_env` written where
     a dry run writes it (QSE_COMMUNITY_ENV_DIR); HOME a temporary folder, shown as ~."""
     with tempfile.TemporaryDirectory() as home:
@@ -372,6 +372,9 @@ def _resolve(profile_env: str, keys: tuple) -> dict:
         script = f"set -a; . {ROOT}/ops/serve.env; " + "; ".join(f'echo "{k}=${{{k}-<unset>}}"' for k in keys)
         env = {"HOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "QSE_PROFILE_OVERRIDE": "community/x",
                "QSE_COMMUNITY_ENV_DIR": cdir, "QWEN38_EXL3": "/leak", "QWEN38_DRAFT_EXL3": "/leak"}
+        if setup_env is not None:
+            open(os.path.join(cdir, "setup.env"), "w").write(setup_env)
+            env["QSE_SETUP_ENV"] = os.path.join(cdir, "setup.env")
         out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
         return {k: v.replace(home, "~") for k, v in (l.split("=", 1) for l in out.splitlines())}
 
@@ -708,12 +711,28 @@ def test_a_nemotron_pack():
         assert e["QSE_ASSETS"] == "~/models/nemotron-3.5-super-vl-lilicorr/model.safetensors", e
         assert e["VISION"] == "off" and e["QSE_PAGE_CACHE_DROP"] == d and e["QWEN38_EXL3"] == "<unset>", e
         assert e["QSE_DISK_CACHE"] == f"~/.qwen38-spark-engine/cache/disk-community-{NH_SLUG}", e
-        assert (e["QSE_MEM_NEED_GIB"], e["MAX_LEN"], e["QSE_PARALLEL"]) == ("92", "262144", "3"), e
+        assert (e["QSE_MEM_NEED_GIB"], e["MAX_LEN"], e["QSE_PARALLEL"]) == ("92", "262144", "8"), e     # SRV-707: _nemotron.env runs 8 lanes
         assert e["QWEN38_SUFFIX_STORE"] == "~/.qwen38-spark-engine/suffix-nemotron", e
         # the served card is Super VL's, named after the pack, vision off
         card = model_card.find(NH_PID)
         assert card["model"] == NH and card["label"] == c["name"] and card["capabilities"]["vision"] is False, card
 
+
+def test_the_flashnext_verified_block_is_its_run():
+    """SRV-713: the 3.05 pack's verified block is its run's (one greedy request a kind, tools/q35m_ab.py,
+    through the conductor), after the idle captures took the conductor's prompt class ahead."""
+    with open(os.path.join(ROOT, "models", "qwen3.8-flash-next", "measurements",
+                           "verified-2026-10-26-turboderp-flashnext-3.05.json")) as fh:
+        run = json.load(fh)
+    with open(FN_ENTRY) as fh:
+        v = json.load(fh)["verified"]
+    kinds = ("prose", "code", "chat")
+    assert v["tok_s"] == {k: round(run["answers"][k]["tok_s"], 1) for k in kinds}, v
+    assert v["tokens_per_round"] == {k: run["answers"][k]["per_block"] for k in kinds}, v
+    assert (v["build"], v["device"], v["date"]) == (run["build"], run["device"], run["date"]) == \
+        ("0.14.2", "dgx-spark", "2026-10-26")
+    assert all(run["answers"][k]["per_block"] > 1.0 for k in kinds), run      # drafted, not plain turns
+    assert run["version"].endswith("+flashnext-3.05") and "through the conductor" in v["notes"]
 
 def test_the_nemotron_card_is_the_raw_data():
     with open(os.path.join(ROOT, "models", NH, "measurements", "0.12.1-summary.json")) as fh:
@@ -897,3 +916,39 @@ if __name__ == "__main__":
             print(f"  {name:68s} ok")
             passed += 1
     print(f"{passed} passed")
+
+
+def test_spd167_a_text_only_pack_keeps_vision_off_under_a_setup_guide_overlay():
+    """2026-10-23: the box's run/setup.env (VISION='on', written for the 27B) is read after the community
+    profile, and the ThinkingCap pack's start crashed on its tower. The pack's limit wins now; a pack
+    whose entry serves images keeps the setup guide's switch."""
+    with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-"), QSE_COMMUNITY_URL="off"):
+        m = _models()["qwen3.8-27b"]
+        c = m["community"][0]
+        keys = ("VISION", "QSE_PACK_VISION", "QSE_VISION_ASKED")
+        e = _resolve(community.env(m, c), keys, setup_env="VISION='on'\n")
+        assert e == {"VISION": "off", "QSE_PACK_VISION": "off", "QSE_VISION_ASKED": "on"}, e
+        oc = copy.deepcopy(_entry())
+        oc["modalities"]["image"] = True
+        o = _resolve(community.env(m, registry.community_entry(oc, m)), keys, setup_env="VISION='on'\n")
+        assert o["VISION"] == "on" and o["QSE_PACK_VISION"] in ("", "<unset>"), o
+        o = _resolve(community.env(m, registry.community_entry(oc, m)), keys, setup_env="VISION='off'\n")
+        assert o["VISION"] == "off", o
+
+
+def test_spd165_a_27b_pack_serves_its_bases_parallel_defaults():
+    """ops/use-profile.sh community/<id> on the 27B writes the Setup Guide's parallel defaults (4 slots, the
+    KV pool, the side window, the floor, the fixed keys); a box's setup.env still wins."""
+    with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-"), QSE_COMMUNITY_URL="off"):
+        m = _models()["qwen3.8-27b"]
+        c = m["community"][0]
+        p = m["parallelism"]
+        keys = ("QSE_PARALLEL", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL", "QSE_PARALLEL_FLOOR_GB", "QSE_SIDE_GRAPHS",
+                "QSE_SIDE_SLOT_CONST_GB", "QSE_KV_HARD_FLOOR_GB", "QSE_BARRIER_IDLE_OWNER")
+        e = _resolve(community.env(m, c), keys)
+        assert e["QSE_PARALLEL"] == str(min(p["slots"]["default"], p["slots"]["engine_max"])) == "8", e   # SRV-707: 8 lanes
+        assert e["QSE_SIDE_MAX_LEN"] == str(p["window"]["default"]) and e["QSE_KV_POOL"] == "on", e   # SRV-707
+        assert e["QSE_PARALLEL_FLOOR_GB"] == f"{p['floor_gb']['default']:g}", e
+        assert all(e[k] == v for k, v in p["fixed"].items()), e
+        o = _resolve(community.env(m, c), keys, setup_env="QSE_PARALLEL='1'\n")
+        assert o["QSE_PARALLEL"] == "1", o

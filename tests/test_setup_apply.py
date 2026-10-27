@@ -242,10 +242,11 @@ def _plan(sel=None, **kw):
 
 def test_the_plan():
     with Box():
-        p = _plan()
+        p = _plan(_sel(slots=4))
         assert p["ok"], p["errors"]
         keys = {c["key"]: c for c in p["changes"]}
-        assert keys["QSE_PARALLEL"]["current"] == "1" and keys["QSE_PARALLEL"]["next"] == "4"
+        # SRV-707: serve.env runs 8 lanes
+        assert keys["QSE_PARALLEL"]["current"] == "8" and keys["QSE_PARALLEL"]["next"] == "4"
         assert keys["QSE_PARALLEL"]["from"] == "parallelism.slots"
         assert keys["QWEN38_NARRATOR_MODEL"]["next"] == "qwen3.5-2b"
         assert "PORT" not in keys                              # unchanged keys are not listed
@@ -254,7 +255,7 @@ def test_the_plan():
         assert any("use-profile.sh exl3-4.5" in c for c in p["commands"])
         assert not any("--fetch-only" in c for c in p["commands"])
         assert any("No admin password" in w for w in p["warnings"])
-        assert any("full window" in w for w in p["warnings"])
+        assert any("lanes can hold the full" in w for w in p["warnings"]), p["warnings"]
         assert p["estimate"]["fits"] is True and p["restart"] is True
         p = _plan(_sel(kv_pool=False))
         assert not p["ok"] and p["error_codes"][0] == "over_budget", p
@@ -856,10 +857,10 @@ def test_the_routes():
             app.INFLIGHT["running"] = 0
             code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, kv_pool=False)})
             assert code == 409 and b["error"]["code"] == "over_budget" and "plan" in b
-            # VIS-199: the engine's limit, 16 parallel chats, whatever the card measured
-            code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, slots=17)})
+            # VIS-199, SRV-707: the setup's limit, 64 lanes, whatever the card measured
+            code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, slots=65)})
             assert code == 422 and b["error"]["code"] == "out_of_range", b
-            assert "above 16" in b["error"]["message"], b
+            assert "above 64" in b["error"]["message"], b
             code, b = _api("POST", "/v1/setup/apply", {"selection": sel})
             assert code == 202 and b["job"]["state"] == "queued", b
             assert spawned == [b["job"]["id"]] and w.unloads == ["apply"]

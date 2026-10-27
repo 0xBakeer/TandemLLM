@@ -212,23 +212,21 @@ export const S = {
     Math.abs(full - now) < 0.05 ? `Each extra chat takes about ${gib(full)} at a ${tokens(window)}-token window.` : `Each extra chat takes about ${gib(now)} to start, up to ${gib(full)} at a ${tokens(window)}-token window.`,
   slotsUntested: (measured: number) => `Measured up to ${measured} on this model. More is untested.`,
   slotsOver: (n: number, over: number, most: number) => `${n} chats do not fit: ${gib(over)} over. At most ${most} fit with these settings.`,
-  slotsEngineMax: (max: number) => `The engine runs at most ${max} chats at once. Its shared check pass holds 32 tokens, and each chat needs 2.`,
+  slotsEngineMax: (max: number) => `The setup takes at most ${max} chats at once. Memory decides how many of them fit.`,
+  slotsPasses: (passes: number) => `Past 16 chats a step checks the drafts in ${passes} passes instead of one, so each chat runs slower.`,
   slotsEmpty: 'Type how many chats, 1 or more.',
   slotsNotWhole: 'Type a whole number, like 2 or 3.',
   slotsBelow: (min: number) => `At least ${min} ${min === 1 ? 'chat' : 'chats'}.`,
-  slotsAtMax: (max: number) => `${max} is the most the engine runs at once.`,
+  slotsAtMax: (max: number) => `${max} is the most the setup takes at once.`,
   nextRefused: (why: string) => `Next stays on this step. ${why}`,
   window: 'Longest conversation',
-  windowWhat: 'The most tokens one chat can hold. Memory is only used as a chat grows, so a long window costs nothing until it is used.',
-  sideWindow: 'Longest conversation in the extra chats',
-  sideWindowWhat: (n: number) => `The same limit for ${n > 2 ? `chats 2 to ${n}` : 'chat 2'}. Lower it to keep room for one long session.`,
+  windowWhat: 'The most tokens each chat can hold; every chat has the same limit. With the shared pool memory is only used as a chat grows, so a long window costs nothing until it is used.',
   kvPool: 'Shared memory pool',
   kvPoolWhat: 'Chats take memory from one pool as they grow. Off, every chat holds its whole window from the start.',
   floor: 'Memory kept free',
   floorWhat: 'The engine stops taking new memory when less than this is free, so the box stays responsive.',
   windowClamped: (n: number) => `Set to ${tokens(n)} tokens, the nearest length this model supports.`,
   windowAtMost: (max: number) => `This model holds at most ${tokens(max)} tokens.`,
-  sideWindowAboveMain: (main: number) => `The extra chats hold at most the first chat's ${tokens(main)} tokens.`,
   windowAtLeast: (min: number) => `At least ${tokens(min)} tokens.`,
   windowNotANumber: 'Type a number of tokens, like 32k or 131,072.',
   windowOffStep: (step: number, lo: number, hi: number) => `Use a multiple of ${tokens(step)} tokens, like ${lo === hi ? tokens(lo) : `${tokens(lo)} or ${tokens(hi)}`}.`,
@@ -238,6 +236,12 @@ export const S = {
   windowNone: (label: string) => `${label} does not fit this machine at any length.`,
   fitsUnit: 'tokens of conversation fit, over all chats.',
   fitsPerSlot: (n: number, slots: number) => (slots > 1 ? `That is about ${tokens(n)} tokens for each of ${slots} chats if all are long at once.` : `One chat can grow to about ${tokens(n)} tokens.`),
+  lanesFull: (full: number, n: number, window: number, laneGb: number, pool: boolean) =>
+    full >= n
+      ? `All ${n} chats can be ${tokens(window)} tokens long at the same time (${gib(laneGb)} each).`
+      : full === 0
+        ? `Not one chat can reach ${tokens(window)} tokens with these settings: chats grow until memory is used up, then a new chat waits for memory.`
+        : `${full} of ${n} chats can be ${tokens(window)} tokens long at the same time (${gib(laneGb)} each). Past that they share what is left: a new chat waits for memory before it starts${pool ? ', idle chats give their memory back first, and a chat that runs out of memory mid-answer pauses and continues when memory is free' : ''}.`,
   worstCase: (gb: number, fits: boolean) => (fits ? `Even with every chat at its full window (${gib(gb)}), it fits.` : `Every chat at its full window would need ${gib(gb)}. The engine pauses or parks a chat before that happens.`),
   tokensUnit: 'tokens',
 

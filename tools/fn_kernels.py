@@ -164,6 +164,60 @@ __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bf
         for (int o = LPR / 2; o > 0; o >>= 1) acc[m] += __shfl_xor_sync(0xffffffffu, acc[m], o);
 }
 
+// SPD-231: `row_dot` for NB weight rows at once (rows wr + nb ldw, nb < nlive): each activation chunk is
+// loaded once for the NB rows. Every (row, activation row) sum is `row_dot`'s own: the lane's chunks in K
+// order, a chunk's products in element order (summed on their own, then times the group's scale, with
+// GS), the same xor tree -- U changes nothing of that, and here a pass is one chunk.
+template <typename TW, int LPR, int MC, int NB>
+__device__ __forceinline__ void row_dot_nb(const TW* __restrict__ wr, size_t ldw, int nlive,
+                                           const __nv_bfloat16* __restrict__ X, int ldx, int m0, int mc, int K,
+                                           int sl, float (&acc)[NB][MC], const float* __restrict__ GS = nullptr,
+                                           size_t ldg = 0, int G = 0) {
+    constexpr int VEC = WVec<TW>::VEC;
+    constexpr int STEP = LPR * VEC;
+#pragma unroll
+    for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+        for (int m = 0; m < MC; ++m) acc[nb][m] = 0.f;
+    for (int k0 = sl * VEC; k0 < K; k0 += STEP) {
+        float w[NB][VEC], gs[NB];
+#pragma unroll
+        for (int nb = 0; nb < NB; ++nb)
+            if (nb < nlive) {
+                WVec<TW>::load(wr + nb * ldw + k0, w[nb]);
+                gs[nb] = GS ? GS[nb * ldg + k0 / G] : 1.0f;
+            }
+#pragma unroll
+        for (int m = 0; m < MC; ++m) {
+            if (m < mc) {
+                float x[VEC];
+                load_x8(X + (size_t)(m0 + m) * ldx + k0, x);
+                if (VEC == 16) load_x8(X + (size_t)(m0 + m) * ldx + k0 + 8, x + 8);
+#pragma unroll
+                for (int nb = 0; nb < NB; ++nb) {
+                    if (nb < nlive) {
+                        if (GS) {
+                            float t = 0.f;
+#pragma unroll
+                            for (int e = 0; e < VEC; ++e) t = fmaf(x[e], w[nb][e], t);
+                            acc[nb][m] = fmaf(gs[nb], t, acc[nb][m]);
+                        } else {
+#pragma unroll
+                            for (int e = 0; e < VEC; ++e) acc[nb][m] = fmaf(x[e], w[nb][e], acc[nb][m]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+        for (int m = 0; m < MC; ++m)
+#pragma unroll
+            for (int o = LPR / 2; o > 0; o >>= 1) acc[nb][m] += __shfl_xor_sync(0xffffffffu, acc[nb][m], o);
+}
+
 __device__ __forceinline__ void store_out(float* y, float v) { *y = v; }
 __device__ __forceinline__ void store_out(__nv_bfloat16* y, float v) { *y = __float2bfloat16_rn(v); }
 
@@ -197,8 +251,8 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
 // The same dot products for a weight of few rows (`gemv_split`): one CTA a row, its K split into KS
 // contiguous slices, warp w the slice w with gemv_kernel's lane-strided sums, the slices added in warp
 // order; KS is a function of the weight's shape, so a row's bits do not depend on M.
-template <typename TW, int MC, typename TY>
-__global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+template <typename TW, int MC, typename TY, int MINB = 1>
+__global__ void __launch_bounds__(256, MINB) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K, int G) {
     __shared__ float red[8][MC];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
@@ -225,12 +279,50 @@ __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __
     }
 }
 
+// SPD-231: `gemv_split_kernel` for M > 1 with NB weight rows a CTA: the same KS warps, slices, lanes and
+// warp-order slice sums for every row (its bits), each activation chunk loaded once for the NB rows (the
+// one-row-a-CTA kernel read all of x again for each of N rows: 212 MB of L2 a call at 32 rows).
+template <typename TW, int MC, int NB, typename TY>
+__global__ void __launch_bounds__(256) gemv_split_nb_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K, int G) {
+    __shared__ float red[8][NB][MC];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
+    const int n0 = blockIdx.x * NB, nlive = min(NB, N - n0), kc = K / ks, k0 = warp * kc;
+    const TW* wr = W + (size_t)n0 * K + k0;
+    for (int nb = 0; nb < nlive; ++nb)
+        for (int off = lane * 128; off < kc * (int)sizeof(TW); off += 32 * 128)
+            prefetch_l2(reinterpret_cast<const char*>(wr + (size_t)nb * K) + off);
+    pdl_wait();
+    pdl_trigger();
+    const float* gs = G ? S + (size_t)n0 * (K / G) + k0 / G : nullptr;
+    for (int m0 = 0; m0 < M; m0 += MC) {
+        const int mc = min(MC, M - m0);
+        float acc[NB][MC];
+        row_dot_nb<TW, 32, MC, NB>(wr, (size_t)K, nlive, X + k0, ldx, m0, mc, kc, lane, acc, gs, (size_t)(G ? K / G : 0), G);
+        if (lane == 0)
+#pragma unroll
+            for (int nb = 0; nb < NB; ++nb)
+#pragma unroll
+                for (int m = 0; m < MC; ++m) red[warp][nb][m] = acc[nb][m];
+        __syncthreads();
+        if (threadIdx.x < NB * MC) {
+            const int nb = threadIdx.x / MC, m = threadIdx.x % MC;
+            if (nb < nlive && m < mc) {
+                float t = red[0][nb][m];
+                for (int w = 1; w < ks; ++w) t += red[w][nb][m];
+                store_out(Y + (size_t)(m0 + m) * ldy + n0 + nb, t * (S && !G ? S[n0 + nb] : 1.0f));
+            }
+        }
+        __syncthreads();
+    }
+}
+
 // ----------------------------------------------------------------------------------- mix_up
 // A[M, R] = bf16(silu(bf16(D) / HC)) staged in shared memory (bf16), then per column j (one warp,
 // four groups of 8 lanes = the four streams): u_s = bf16(up row (s H + j) . a), x = mean of
 // bf16(bf16(sigmoid(u_s)) * n_s).
-template <typename TW, int MC>
-__global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D, int ldd,
+template <typename TW, int MC, int MINB = 1>
+__global__ void __launch_bounds__(256, MINB) mix_up_kernel(const float* __restrict__ D, int ldd,
         const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
         __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc, int G) {
     extern __shared__ __nv_bfloat16 a_s[];                 // [M, R]
@@ -271,6 +363,243 @@ __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D
             if (lane == 0 && m < mc)
                 Xo[(size_t)(m0 + m) * ldxo + j] = __float2bfloat16_rn((((p + p1) + p2) + p3) * inv_hc);
         }
+    }
+}
+
+// SPD-231: mix_up for M > 1. A = bf16(silu(bf16(D) / HC)) [M, R] written once (`mix_a_kernel`, mix_up_kernel's
+// staging arithmetic), then a group of 8 lanes owns one column j and its 4 stream rows s H + j in-lane:
+// each A chunk is loaded once for the 4 rows. Per (row, stream) the sums are mix_up_kernel's (the same 8
+// lanes, chunks and xor tree), the products bf16(bf16(sigmoid(bf16(u))) n) likewise, and their sum
+// (((p0 + p1) + p2) + p3) / HC in mix_up_kernel's order. 4 columns a warp, 16 a CTA of 4 warps.
+__global__ void __launch_bounds__(256) mix_a_kernel(const float* __restrict__ D, int ldd, __nv_bfloat16* __restrict__ A,
+                                                    int M, int R, float inv_hc) {
+    pdl_wait();
+    pdl_trigger();
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < M * R) {
+        const int m = e / R, r = e % R;
+        A[e] = __float2bfloat16_rn(silu(bfr(bfr(D[(size_t)m * ldd + r]) * inv_hc)));
+    }
+}
+
+template <typename TW, int MC>
+__global__ void __launch_bounds__(128) mix_up_nb_kernel(const __nv_bfloat16* __restrict__ A,
+        const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc, int G) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int sl = lane & 7, grp = lane >> 3;
+    const int j = (blockIdx.x * 4 + warp) * 4 + grp;
+    const bool live = j < H;
+    const int jj = live ? j : 0;
+    if (live)
+        for (int s = 0; s < 4; ++s)
+            for (int off = sl * 128; off < R * (int)sizeof(TW); off += 8 * 128)
+                prefetch_l2(reinterpret_cast<const char*>(W + (size_t)(s * H + jj) * R) + off);
+    pdl_wait();
+    pdl_trigger();
+    const TW* wr = W + (size_t)jj * R;                    // stream s's row: wr + s H R
+    const float* gs = G ? S + (size_t)jj * (R / G) : nullptr;
+    for (int m0 = 0; m0 < M; m0 += MC) {
+        const int mc = min(MC, M - m0);
+        float acc[4][MC];
+        row_dot_nb<TW, 8, MC, 4>(wr, (size_t)H * R, live ? 4 : 0, A, R, m0, mc, R, sl, acc, gs,
+                                 (size_t)H * (G ? R / G : 0), G);
+        if (live && sl == 0) {
+#pragma unroll
+            for (int m = 0; m < MC; ++m) {
+                if (m < mc) {
+                    float p[4];
+#pragma unroll
+                    for (int s = 0; s < 4; ++s) {
+                        const int n = s * H + j;
+                        const float sc = S && !G ? S[n] : 1.0f;
+                        const float u = bfr(sigm(bfr(acc[s][m] * sc)));
+                        p[s] = bfr(u * __bfloat162float(Nn[(size_t)(m0 + m) * ldn + n]));
+                    }
+                    Xo[(size_t)(m0 + m) * ldxo + j] = __float2bfloat16_rn((((p[0] + p[1]) + p[2]) + p[3]) * inv_hc);
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------------- mixers on tensor cores
+// SPD-241 (QWEN38_FN_MIXER_MMA): the mixers' int8 group-scaled GEMVs on mma.sync m16n8k16 bf16 at every M (the
+// decode step's one row included, so a row's bits never depend on its call's rows). A warp owns 8 weight rows
+// (B's n) and up to 16 activation rows a tile (A's m; rows past M read as zero). Inside each 64-wide K chunk the
+// logical k of a kstep maps to physical k so a lane's fragment is 16 contiguous bytes of its weight row: lane
+// (g, t) at kstep s holds physical k = 16 t + 4 s + {0, 1} (b0 / a0) and + {2, 3} (b1 / a2), for A and B alike.
+// int8 is exact in bf16 and products are exact in fp32; the order of a row's sums is fixed: the tensor core's
+// sum of a kstep, ksteps in order into a group's fresh fragment, then acc = fma(scale, group sum, acc) in group
+// order (and, for the GEMV, its K slices added in slice order by the column's last slice CTA).
+__device__ __forceinline__ void mma_bf16(float* c, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                         uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+// two int8 of a word (bytes b, b + 1) as a bf16 pair (exact)
+__device__ __forceinline__ uint32_t i8x2_bf16(uint32_t w, int b) {
+    const float lo = (float)(int8_t)((w >> (8 * b)) & 0xff), hi = (float)(int8_t)((w >> (8 * b + 8)) & 0xff);
+    __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
+    return *reinterpret_cast<uint32_t*>(&v);
+}
+
+// a K range of one 16-row tile: CH chunks of 64 from the lane's registers WV (16 bytes a chunk) and the tile's
+// rows in shared memory (XS + row * LDS, the range's first column at 0); GC chunks a scale group; SC(c) the
+// scales of the lane's two C columns for chunk group c. acc[4] += the tile's sums (c0/c1 row g, c2/c3 row g + 8).
+template <int CH, int GC>
+__device__ __forceinline__ void mma_tile(const uint4* WV, const __nv_bfloat16* XS, int lds, int r0, int M,
+                                         const float* sc0, const float* sc1, float* acc) {
+    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const bool l0 = r0 + g < M, l1 = r0 + g + 8 < M;
+    const __nv_bfloat16* x0 = XS + (size_t)(r0 + g) * lds + 16 * t;
+    const __nv_bfloat16* x1 = XS + (size_t)(r0 + g + 8) * lds + 16 * t;
+#pragma unroll
+    for (int q = 0; q < CH / GC; ++q) {
+        float part[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+        for (int cc = 0; cc < GC; ++cc) {
+            const int c = q * GC + cc;
+            const uint32_t w[4] = {WV[c].x, WV[c].y, WV[c].z, WV[c].w};
+#pragma unroll
+            for (int st = 0; st < 4; ++st) {
+                const uint2 xa = l0 ? *reinterpret_cast<const uint2*>(x0 + 64 * c + 4 * st) : make_uint2(0u, 0u);
+                const uint2 xb = l1 ? *reinterpret_cast<const uint2*>(x1 + 64 * c + 4 * st) : make_uint2(0u, 0u);
+                mma_bf16(part, xa.x, xb.x, xa.y, xb.y, i8x2_bf16(w[st], 0), i8x2_bf16(w[st], 2));
+            }
+        }
+        acc[0] = fmaf(sc0[q], part[0], acc[0]);
+        acc[1] = fmaf(sc1[q], part[1], acc[1]);
+        acc[2] = fmaf(sc0[q], part[2], acc[2]);
+        acc[3] = fmaf(sc1[q], part[3], acc[3]);
+    }
+}
+
+#define MIX_KSLICE 512
+#define MIX_LDS (MIX_KSLICE + 8)
+#define MIX_SLICES 24          // the most K slices a tensor-core GEMV adds (K <= 12,288)
+// down|inject GEMV: X bf16 [M, K] (M <= 64), W int8 [N, K], S fp32 [N, K / G] (G a multiple of 64 dividing the
+// slice) -> P fp32 [K / MIX_KSLICE][M][N] partial sums; the last of a column's slice CTAs to finish (CNT, a
+// ticket a column, back to 0 after) adds the column's partials in slice order into Y fp32 [M, ldy]. grid (ceil(N / 32), K / MIX_KSLICE), 128 threads: warp w the 8 rows from
+// 32 blockIdx.x + 8 w; the CTA's slice of X staged once in shared memory.
+template <int GC>
+__global__ void __launch_bounds__(128) mixer_mma_gemv_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const int8_t* __restrict__ W, const float* __restrict__ S, float* __restrict__ P, int M, int N, int K, int G,
+        float* __restrict__ Y, int ldy, int* __restrict__ CNT) {
+    extern __shared__ __nv_bfloat16 xs[];                  // [M rounded to 16][MIX_LDS]
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int n0 = blockIdx.x * 32 + warp * 8, k0 = blockIdx.y * MIX_KSLICE;
+    const int n = n0 + g;
+    uint4 wv[MIX_KSLICE / 64];
+    const uint4 z4 = make_uint4(0u, 0u, 0u, 0u);
+#pragma unroll
+    for (int c = 0; c < MIX_KSLICE / 64; ++c)        // the weights and scales do not depend on the predecessor
+        wv[c] = n < N ? *reinterpret_cast<const uint4*>(W + (size_t)n * K + k0 + 64 * c + 16 * t) : z4;
+    const int ng = K / G, q0 = k0 / G;
+    constexpr int NQ = MIX_KSLICE / 64 / GC;
+    float sc0[NQ], sc1[NQ];
+    const int na = n0 + 2 * t, nb = na + 1;
+#pragma unroll
+    for (int q = 0; q < NQ; ++q) {
+        sc0[q] = na < N ? S[(size_t)na * ng + q0 + q] : 0.f;
+        sc1[q] = nb < N ? S[(size_t)nb * ng + q0 + q] : 0.f;
+    }
+    pdl_wait();
+    pdl_trigger();
+    for (int e = threadIdx.x; e < M * (MIX_KSLICE / 8); e += blockDim.x) {
+        const int m = e / (MIX_KSLICE / 8), k8 = e % (MIX_KSLICE / 8);
+        *reinterpret_cast<uint4*>(xs + (size_t)m * MIX_LDS + 8 * k8) =
+            *reinterpret_cast<const uint4*>(X + (size_t)m * ldx + k0 + 8 * k8);
+    }
+    __syncthreads();
+    float* p = P + (size_t)blockIdx.y * M * N;
+    if (n0 < N) {
+        for (int r0 = 0; r0 < M; r0 += 16) {
+            float acc[4] = {0.f, 0.f, 0.f, 0.f};
+            mma_tile<MIX_KSLICE / 64, GC>(wv, xs, MIX_LDS, r0, M, sc0, sc1, acc);
+            const int m0 = r0 + g, m1 = m0 + 8;
+            if (m0 < M && na < N) p[(size_t)m0 * N + na] = acc[0];
+            if (m0 < M && nb < N) p[(size_t)m0 * N + nb] = acc[1];
+            if (m1 < M && na < N) p[(size_t)m1 * N + na] = acc[2];
+            if (m1 < M && nb < N) p[(size_t)m1 * N + nb] = acc[3];
+        }
+    }
+    // the column's last slice adds every slice's partials in slice order
+    __shared__ int last;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) last = atomicAdd(CNT + blockIdx.x, 1) == (int)gridDim.y - 1;
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    const int KS = gridDim.y, c0 = blockIdx.x * 32, nc = min(32, N - c0);
+    for (int e = threadIdx.x; e < M * nc; e += blockDim.x) {
+        const int m = e / nc, nn = c0 + e % nc;
+        const size_t o = (size_t)m * N + nn;
+        float a[MIX_SLICES];                            // every slice's partial in flight, then added in order
+#pragma unroll
+        for (int sl = 0; sl < MIX_SLICES; ++sl) a[sl] = sl < KS ? __ldcg(P + (size_t)sl * M * N + o) : 0.f;
+        float v = a[0];
+#pragma unroll
+        for (int sl = 1; sl < MIX_SLICES; ++sl) if (sl < KS) v += a[sl];
+        Y[(size_t)m * ldy + nn] = v;
+    }
+    if (threadIdx.x == 0) CNT[blockIdx.x] = 0;
+}
+
+#define MIXUP_R 320
+#define MIXUP_LDS (MIXUP_R + 8)
+// mix_up: A bf16 [M, R] (`mix_a_kernel`'s), Nn bf16 [M, 4 H], W int8 [4 H, R] (scales a group of 64: [4 H, R / 64])
+// -> Xo bf16 [M, H]. grid (H / 8), 128 threads: warp s the stream s's 8 rows s H + j0.., the whole K; the
+// epilogue is mix_up_kernel's: u = bf16(sigmoid(bf16(sum))), p = bf16(u n), x = bf16((((p0 + p1) + p2) + p3) / hc).
+__global__ void __launch_bounds__(128) mixer_mma_mixup_kernel(const __nv_bfloat16* __restrict__ A,
+        const __nv_bfloat16* __restrict__ Nn, int ldn, const int8_t* __restrict__ W, const float* __restrict__ S,
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, float inv_hc) {
+    extern __shared__ __nv_bfloat16 sm[];
+    __nv_bfloat16* as = sm;                                         // [M rounded to 16][MIXUP_LDS]
+    const int mr = (M + 15) / 16 * 16;
+    float* ps = reinterpret_cast<float*>(sm + (size_t)mr * MIXUP_LDS);   // [4][M][8]
+    const int lane = threadIdx.x & 31, s = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int j0 = blockIdx.x * 8, n = s * H + j0 + g;
+    uint4 wv[MIXUP_R / 64];
+#pragma unroll
+    for (int c = 0; c < MIXUP_R / 64; ++c)                // the weights and scales do not depend on the predecessor
+        wv[c] = *reinterpret_cast<const uint4*>(W + (size_t)n * MIXUP_R + 64 * c + 16 * t);
+    constexpr int NQ = MIXUP_R / 64;
+    float sc0[NQ], sc1[NQ];
+    const int na = s * H + j0 + 2 * t, nb = na + 1;
+#pragma unroll
+    for (int q = 0; q < NQ; ++q) { sc0[q] = S[(size_t)na * NQ + q]; sc1[q] = S[(size_t)nb * NQ + q]; }
+    pdl_wait();
+    pdl_trigger();
+    for (int e = threadIdx.x; e < M * (MIXUP_R / 8); e += blockDim.x) {
+        const int m = e / (MIXUP_R / 8), k8 = e % (MIXUP_R / 8);
+        *reinterpret_cast<uint4*>(as + (size_t)m * MIXUP_LDS + 8 * k8) =
+            *reinterpret_cast<const uint4*>(A + (size_t)m * MIXUP_R + 8 * k8);
+    }
+    __syncthreads();
+    for (int r0 = 0; r0 < M; r0 += 16) {
+        float acc[4] = {0.f, 0.f, 0.f, 0.f};
+        mma_tile<MIXUP_R / 64, 1>(wv, as, MIXUP_LDS, r0, M, sc0, sc1, acc);
+        const int m0 = r0 + g, m1 = m0 + 8;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const int m = i < 2 ? m0 : m1, jj = 2 * t + (i & 1);
+            if (m < M) {
+                const float u = bfr(sigm(bfr(acc[i])));
+                ps[((size_t)s * M + m) * 8 + jj] = bfr(u * __bfloat162float(Nn[(size_t)m * ldn + s * H + j0 + jj]));
+            }
+        }
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < M * 8; e += blockDim.x) {
+        const int m = e / 8, jj = e % 8;
+        const float p0 = ps[(0 * M + m) * 8 + jj], p1 = ps[(1 * M + m) * 8 + jj];
+        const float p2 = ps[(2 * M + m) * 8 + jj], p3 = ps[(3 * M + m) * 8 + jj];
+        Xo[(size_t)m * ldxo + j0 + jj] = __float2bfloat16_rn((((p0 + p1) + p2) + p3) * inv_hc);
     }
 }
 
@@ -1282,6 +1611,31 @@ __global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __re
 // --------------------------------------------------------------------------------- host side
 static int g_pdl = 1;      // fn_set_pdl: launch with programmatic stream serialization (QWEN38_FN_PDL)
 static int g_gemv_split = 1;   // fn_set_gemv_split: few-row weights on gemv_split_kernel (QWEN38_FN_GEMV_SPLIT)
+static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_nb / mix_up_nb (QWEN38_FN_GEMV_NB)
+// fn_set_gemv_mc: SPD-239, the rows a pass and the CTAs an SM of gemv_split / mix_up for M > 1 (QWEN38_FN_GEMV_MC):
+// 0 = 8 rows, no bound; 1 = 4 rows, 2 CTAs; 2 = 4 rows, 3 CTAs; 3 = 2 rows, 4 CTAs; 4 = 8 rows, 2 CTAs; 5 = 2 rows,
+// 3 CTAs. A row's sums are the same chunks in the same order whatever the rows a pass (its bits)
+static int g_gemv_mc = 0;
+static int g_mixer_mma = 0;    // fn_set_mixer_mma: SPD-241, the mixers' int8 GEMV and mix_up on tensor cores (QWEN38_FN_MIXER_MMA)
+
+// the tensor-core GEMV's tickets: an int a column block, zero between launches (each launch's last CTA of a
+// column sets its ticket back), one buffer a device
+static int* mix_tickets(c10::Device dev, int n) {
+    static torch::Tensor t;
+    if (!t.defined() || t.numel() < n || t.device() != dev)
+        t = torch::zeros({std::max(n, 256)}, torch::TensorOptions().dtype(torch::kInt).device(dev));
+    return (int*)t.data_ptr();
+}
+
+// a kernel's dynamic shared memory past 48 KiB, set once
+template <typename... KArgs>
+static void mix_smem_once(void (*k)(KArgs...)) {
+    static std::vector<const void*> done;
+    for (const void* p : done) if (p == (const void*)k) return;
+    TORCH_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024) == cudaSuccess,
+                "mixer kernel shared memory");
+    done.push_back((const void*)k);
+}
 
 template <typename... KArgs, typename... Args>
 static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
@@ -1297,6 +1651,9 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
 
 void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
+void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
+void fn_set_gemv_mc(int64_t v) { g_gemv_mc = (int)v; }
+void fn_set_mixer_mma(int64_t on) { g_mixer_mma = on ? 1 : 0; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -1482,10 +1839,39 @@ static int gemv_split_ks(int N, int K, int vec) {
 template <typename TW, typename TY>
 static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const float* s_ptr,
                           torch::Tensor& y, int M, int N, int K, cudaStream_t st, int G = 0) {
+    if (g_mixer_mma && std::is_same<TW, int8_t>::value && std::is_same<TY, float>::value && (G == 64 || G == 128)
+        && K % MIX_KSLICE == 0 && K / MIX_KSLICE <= MIX_SLICES && x.stride(0) % 8 == 0) {
+        // SPD-241: the tensor-core GEMV at every M (64 rows a launch: a row's sums never depend on the call)
+        const int KS = K / MIX_KSLICE, NB = (N + 31) / 32;
+        auto P = torch::empty({KS, std::min(M, 64), N}, x.options().dtype(torch::kFloat));
+        auto cnt = mix_tickets(x.device(), NB);
+        auto k = G == 64 ? mixer_mma_gemv_kernel<1> : mixer_mma_gemv_kernel<2>;
+        mix_smem_once(k);
+        for (int r0 = 0; r0 < M; r0 += 64) {
+            const int mm = std::min(64, M - r0);
+            launch(k, dim3(NB, KS), dim3(128), (size_t)mm * MIX_LDS * 2, st,
+                   (const __nv_bfloat16*)x.data_ptr() + (size_t)r0 * x.stride(0), (int)x.stride(0),
+                   (const int8_t*)w.data_ptr(), s_ptr, (float*)P.data_ptr(), mm, N, K, G,
+                   (float*)y.data_ptr() + (size_t)r0 * y.stride(0), (int)y.stride(0), cnt);
+        }
+        return;
+    }
     int ks = g_gemv_split ? gemv_split_ks(N, K, WVec<TW>::VEC) : 1;
     while (G && ks > 1 && (K / ks) % G) ks /= 2;           // a slice holds whole scale groups
+    // SPD-231: int8 weights of at least 256 rows (fp16 ones and narrow ones were slower on the board)
+    if (ks > 1 && g_gemv_nb && M > 1 && N >= 256 && std::is_same<TW, int8_t>::value) {
+        launch(gemv_split_nb_kernel<TW, 8, 4, TY>, dim3((N + 3) / 4), dim3(32 * ks), 0, st,
+               (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(), s_ptr,
+               (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G);
+        return;
+    }
     if (ks > 1) {
         auto kern = M == 1 ? gemv_split_kernel<TW, 1, TY> : gemv_split_kernel<TW, 8, TY>;
+        if (M > 1 && g_gemv_mc == 1) kern = gemv_split_kernel<TW, 4, TY, 2>;
+        if (M > 1 && g_gemv_mc == 2) kern = gemv_split_kernel<TW, 4, TY, 3>;
+        if (M > 1 && g_gemv_mc == 3) kern = gemv_split_kernel<TW, 2, TY, 4>;
+        if (M > 1 && g_gemv_mc == 4) kern = gemv_split_kernel<TW, 8, TY, 2>;
+        if (M > 1 && g_gemv_mc == 5) kern = gemv_split_kernel<TW, 2, TY, 3>;
         launch(kern, dim3(N), dim3(32 * ks), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
                (const TW*)w.data_ptr(), s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G);
         return;
@@ -1610,11 +1996,50 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
     const size_t smem = (size_t)M * R * 2;
     dim3 grid((H + 7) / 8);
     const float inv = 1.0f / (float)hc;
+    if (g_mixer_mma && w.dtype() == torch::kInt8 && R == MIXUP_R && H % 8 == 0 && M <= 64 && s.has_value()
+        && s->numel() == (int64_t)4 * H * (R / 64) && n.stride(0) % 8 == 0) {
+        // SPD-241: A once, then the tensor-core mix_up (every M; the wrapper hands it at most 64 rows)
+        auto a = torch::empty({M, R}, n.options());
+        launch(mix_a_kernel, dim3((M * R + 255) / 256), dim3(256), 0, st, (const float*)d.data_ptr(), (int)d.stride(0),
+               (__nv_bfloat16*)a.data_ptr(), M, R, inv);
+        mix_smem_once(mixer_mma_mixup_kernel);
+        const int mr = (M + 15) / 16 * 16;
+        launch(mixer_mma_mixup_kernel, dim3(H / 8), dim3(128), (size_t)mr * MIXUP_LDS * 2 + (size_t)4 * M * 8 * 4, st,
+               (const __nv_bfloat16*)a.data_ptr(), (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0),
+               (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(), (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+               M, H, inv);
+        return;
+    }
+    if (g_gemv_nb && M > 1 && w.dtype() == torch::kInt8) {
+        // SPD-231: A once, then 16 columns a CTA with the streams in-lane (int8 weights; fp16 ones were slower)
+        auto a = torch::empty({M, R}, n.options());
+        launch(mix_a_kernel, dim3((M * R + 255) / 256), dim3(256), 0, st, (const float*)d.data_ptr(), (int)d.stride(0),
+               (__nv_bfloat16*)a.data_ptr(), M, R, inv);
+        if (w.dtype() == torch::kInt8) {
+            TORCH_CHECK(s.has_value() && s->is_contiguous() && s->numel() % (4 * H) == 0 && R % 16 == 0, "int8 scales, R % 16");
+            const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
+            TORCH_CHECK(!G || (R % ng == 0 && G % 16 == 0), "scale groups: R / groups a multiple of 16");
+            launch(mix_up_nb_kernel<int8_t, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
+                (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
+                (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
+        } else {
+            TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
+            launch(mix_up_nb_kernel<__half, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
+                (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const __half*)w.data_ptr(), (const float*)nullptr,
+                (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, 0);
+        }
+        return;
+    }
     if (w.dtype() == torch::kInt8) {
         TORCH_CHECK(s.has_value() && s->is_contiguous() && s->numel() % (4 * H) == 0 && R % 16 == 0, "int8 scales, R % 16");
         const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
         TORCH_CHECK(!G || (R % ng == 0 && G % 16 == 0), "scale groups: R / groups a multiple of 16");
         auto k = M == 1 ? mix_up_kernel<int8_t, 1> : mix_up_kernel<int8_t, 8>;
+        if (M > 1 && g_gemv_mc == 1) k = mix_up_kernel<int8_t, 4, 2>;
+        if (M > 1 && g_gemv_mc == 2) k = mix_up_kernel<int8_t, 4, 3>;
+        if (M > 1 && g_gemv_mc == 3) k = mix_up_kernel<int8_t, 2, 4>;
+        if (M > 1 && g_gemv_mc == 4) k = mix_up_kernel<int8_t, 8, 2>;
+        if (M > 1 && g_gemv_mc == 5) k = mix_up_kernel<int8_t, 2, 3>;
         launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
             (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
@@ -1787,6 +2212,9 @@ _CPP = (
     "void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);\n"
     "void fn_set_pdl(int64_t on);\n"
     "void fn_set_gemv_split(int64_t on);\n"
+    "void fn_set_gemv_nb(int64_t on);\n"
+    "void fn_set_gemv_mc(int64_t v);\n"
+    "void fn_set_mixer_mma(int64_t on);\n"
     "void fn_set_moe_st(int64_t st);\n"
     "void fn_set_moe_warps(int64_t w);\n"
     "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
@@ -1817,12 +2245,15 @@ def _module():
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                       "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                       "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                       "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
+        _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
+        _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
+        _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
     return _MOD

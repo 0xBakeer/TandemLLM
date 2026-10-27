@@ -1,15 +1,15 @@
-// The parallel-chats stepper of the memory step (VIS-199): what a typed count means, what one more
-// chat costs, and whether the count fits. No card cap: a card's slots.max is how far the model was
-// measured (above it the step says untested), the engine's limit is ENGINE_MAX_SLOTS, and memory
-// decides everything below that with the estimate the bar draws (estimate.ts, the server's copy),
-// so the stepper and the bar can never disagree.
+// The parallel-lanes stepper of the memory step (VIS-199, SRV-707): what a typed count means, what one
+// more lane costs, how many lanes can all hold the full window at once, and whether the count fits. No
+// card cap: a card's slots.max is how far the model was measured (above it the step says untested),
+// the setup's limit is ENGINE_MAX_SLOTS, and memory decides everything below that with the estimate
+// the bar draws (estimate.ts, the server's copy), so the stepper and the bar can never disagree.
 
 import type { SetupModel, SetupSelection } from '../api/types';
 import { estimateLoose, GIB, KV_TYPICAL_TOKENS, kvBytes, overBy } from './estimate';
-import { ENGINE_MAX_SLOTS, slotsMax } from './fields';
+import { ENGINE_MAX_SLOTS, JOINT_PASS_LANES, slotsMax } from './fields';
 import { S } from './strings';
 
-export { ENGINE_MAX_SLOTS };
+export { ENGINE_MAX_SLOTS, JOINT_PASS_LANES };
 
 export interface SlotsRange {
   min: number;
@@ -43,25 +43,25 @@ export function stepSlots(n: number, delta: number, r: SlotsRange): number {
 }
 
 export interface ChatCost {
-  /** what one more chat adds to the bar now: its fixed part and its KV as committed (the pool on:
+  /** what one more lane adds to the bar now: its fixed part and its KV as committed (the pool on:
    *  up to the typical fill; off: its whole window) */
   now: number;
-  /** the same chat at its full window */
+  /** the same lane at its full window */
   full: number;
-  /** the extra chats' window, tokens */
+  /** every lane's window, tokens */
   window: number;
 }
 
-/** One extra chat, from the estimate's own terms (side_slot_const_gib + side window x KV a token). */
+/** One extra lane, from the estimate's own terms (side_slot_const_gib + window x KV a token). */
 export function chatCost(m: SetupModel, sel: SetupSelection): ChatCost {
   const p = m.parallelism;
-  const side = Math.min(sel.side_window ?? sel.window, sel.window);
+  const w = sel.window;
   const fill = p.typical_fill_tokens ?? KV_TYPICAL_TOKENS;
   const kvb = kvBytes(m, sel);
-  const full = (side * kvb) / GIB;
-  const typical = (Math.min(side, fill) * kvb) / GIB;
+  const full = (w * kvb) / GIB;
+  const typical = (Math.min(w, fill) * kvb) / GIB;
   const c = p.side_slot_const_gib;
-  return { now: c + (sel.kv_pool ? typical : full), full: c + full, window: side };
+  return { now: c + (sel.kv_pool ? typical : full), full: c + full, window: w };
 }
 
 /** The most chats that fit with the rest of the selection as it is; 0 when not even one does. */
@@ -88,6 +88,10 @@ export interface SlotsVerdict {
   overGb: number;
   fitMax: number;
   cost: ChatCost;
+  /** SRV-707: the lanes that can all hold the full window at once (the estimate's lanes_full) */
+  full: number;
+  /** SRV-707: past one joint verify pass (JOINT_PASS_LANES): a round verifies in more passes */
+  passes: number;
 }
 
 export function slotsVerdict(m: SetupModel, sel: SetupSelection): SlotsVerdict {
@@ -96,7 +100,17 @@ export function slotsVerdict(m: SetupModel, sel: SetupSelection): SlotsVerdict {
   const most = fitMax(m, sel);
   const e = estimateLoose(m, sel);
   const overGb = e ? overBy(e) : 0;
-  return { n, range, untested: n > range.measured, over: most >= 1 && n > most, overGb, fitMax: most, cost: chatCost(m, sel) };
+  return {
+    n,
+    range,
+    untested: n > range.measured,
+    over: most >= 1 && n > most,
+    overGb,
+    fitMax: most,
+    cost: chatCost(m, sel),
+    full: e ? e.lanes_full : 0,
+    passes: Math.max(1, Math.ceil(n / JOINT_PASS_LANES)),
+  };
 }
 
 /** What stops Next on the memory step because of the count: a typed value the engine does not take,

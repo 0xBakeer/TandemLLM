@@ -647,6 +647,61 @@ def test_head_interface_counts_rows_and_reads_tokens():
     return f"tokens {[t[0] for t in tok]}"
 
 
+def test_packed_drafts_are_each_lanes_own_draft():
+    """SPD-233: three heads over their own rings at their own lengths, drafted together through the
+    round's draft meeting (`run_packed`: the context rows in one product, `draft_multi`), read as each
+    lone twin reads its draft: the same walk, the same probabilities (fp32)."""
+    if SKIP:
+        return SKIP
+    from types import SimpleNamespace
+
+    from engine.drafters import lilicorr as LC
+    from engine.methods import draft_meet
+    W = lc_weights()
+    c, m, _, _, _ = _model(W, torch.float32, nvfp4=False)
+    R = WINDOW + 64
+    lanes = []
+    for j, n in enumerate((40, 23, 190)):
+        g = torch.Generator().manual_seed(20 + j)
+        ring = torch.randn(R, len(TAPS), c.hidden_size, generator=g).to(DEV)
+        srv = SimpleNamespace(st=_St(ring), kv=SimpleNamespace(length=n), fn=None)
+        lanes.append((srv, n, 3 + 2 * j))
+    lone = [LC.LiLiCorrHead(s, m, graph=False) for s, _, _ in lanes]
+    packed = [LC.LiLiCorrHead(s, m) for s, _, _ in lanes]
+    want = []
+    for h, (_, n, x) in zip(lone, lanes):
+        h.launch(None, [x])
+        want.append(h.read())
+    got, real = [], (LC.PACK, draft_meet.MEET)
+    LC.PACK, draft_meet.MEET = True, (lambda h: got.append(h) or True)
+    try:
+        for h, (_, n, x) in zip(packed, lanes):
+            h.launch(None, [x])
+    finally:
+        LC.PACK, draft_meet.MEET = real
+    assert got == packed
+    LC.LiLiCorrHead.run_packed(got)
+    for h, w, lh in zip(packed, want, lone):
+        tok, prob = h.read()
+        assert tok == w[0], (tok, w[0])
+        assert max(abs(a - b) for p, q in zip(prob, w[1]) for a, b in zip(p, q)) < 1e-4
+        assert h.stats["context_rows"] == lh.stats["context_rows"], (h.stats, lh.stats)
+    # a second round (one more committed row a lane): the packed heads feed only the new rows
+    for (s, n, x), h in zip(lanes, packed):
+        s.kv.length = n + 1
+    LC.PACK, draft_meet.MEET = True, (lambda h: True)
+    try:
+        for h, (s, _, x) in zip(packed, lanes):
+            h.launch(None, [x])
+    finally:
+        LC.PACK, draft_meet.MEET = real
+    LC.LiLiCorrHead.run_packed(packed)
+    for h, (s, n, x) in zip(packed, lanes):
+        e = LC.LiLiCorrHead(s, m, graph=False)
+        assert [t[0] for t in h.read()[0]] == e.draft_at(x, n + 1)[:, 0].long().tolist() and h.fed == n + 1
+    return f"{len(lanes)} lanes packed: walks {[w[0][0][0] for w in want]} as drafted alone"
+
+
 def test_serving_drafts_a_round_with_the_head_and_a_long_lookup():
     """The NemotronH adapter's tree drafter with LiLiCorr: a round after a prompt drafts the head's block
     beside a lookup of the longer minimum match; QSE_NH_LOOKUP=off drafts with the head alone; a side
@@ -682,6 +737,12 @@ def test_serving_drafts_a_round_with_the_head_and_a_long_lookup():
     finally:
         del os.environ["QSE_NH_LOOKUP"]
     assert d3.ngram is None and srv.side_slot(256, d3)[1].ngram is None
+    # SPD-233: a round the runner gives to the joint plain step (`lane_skip`) drafts nothing
+    n0, d.lane_skip = d.stats["skipped"], True
+    try:
+        assert d.propose_tree(PROMPT.tolist() + [anchor], 16) is None and d.stats["skipped"] == n0 + 1
+    finally:
+        d.lane_skip = False
     return f"a round of {len(tree.tokens) - 1} drafted tokens; lookup min order {LOOK_MIN_ORDER_HEAD}"
 
 

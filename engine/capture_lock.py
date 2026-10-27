@@ -22,3 +22,56 @@ from __future__ import annotations
 import threading
 
 LOCK = threading.RLock()
+
+
+# ------------------------------------------------------------------ SPD-223: a capture stream of one's own
+#
+# torch's `CUDAGraph.reset()` (an eviction, `graphs.clear()`, a graph's destructor) drops the cuBLAS workspace
+# torch keeps for the graph's CAPTURE STREAM (`at::cuda::clearCublasWorkspacesForStream`). Every graph captured
+# on that stream bakes that workspace into its GEMM nodes. `torch.cuda.Stream()` hands out one of a fixed pool of
+# streams round robin, so the lone draft graphs, every packed draft set, the joint graphs and the verify graphs
+# shared streams: an evicted packed set took the workspace of a kept graph on the same stream, whose next replay
+# stored a split-K GEMM's partials into a block given back (an illegal memory access at a draft replay, C4/C8
+# greedy, once the bench's lane sets outran the 24-set caches). A leased stream belongs to one graph owner until
+# it gives it back, after its own graphs are reset.
+
+_LEASE_LK = threading.Lock()
+_FREE: list = []
+LEASES = {"made": 0, "out": 0}
+
+
+def _new_stream():
+    import ctypes
+
+    import torch
+    from engine import kvpool
+    drv = kvpool.Driver.get(torch.cuda.current_device())
+    if drv is None:
+        return torch.cuda.Stream()
+    drv._bind()
+    h = ctypes.c_void_p()
+    drv.lib.cuStreamCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
+    drv._check(drv.lib.cuStreamCreate(ctypes.byref(h), 1), "cuStreamCreate")      # CU_STREAM_NON_BLOCKING
+    return torch.cuda.ExternalStream(h.value)
+
+
+def lease_stream():
+    """A capture stream no other graph owner holds (a returned one, else a new non-blocking stream)."""
+    with _LEASE_LK:
+        if _FREE:
+            LEASES["out"] += 1
+            return _FREE.pop()
+    s = _new_stream()
+    with _LEASE_LK:
+        LEASES["made"] += 1
+        LEASES["out"] += 1
+    return s
+
+
+def give_back(stream) -> None:
+    """The owner's graphs on `stream` are reset (so is torch's workspace for it): the stream may serve another."""
+    if stream is None:
+        return
+    with _LEASE_LK:
+        _FREE.append(stream)
+        LEASES["out"] -= 1

@@ -314,8 +314,9 @@ class Qwen35Model(GenerativeModel):
                     slots=torch.zeros(1, dtype=torch.long, device=dev),
                     lenp=torch.zeros(2, dtype=torch.int32, device=dev),
                     max_lc=self.max_ctx, graph=torch.cuda.CUDAGraph(), next=None)
+                # share_view: the 27B's sharing capture's hook (SPD-179); a small model's step shares nothing
                 gv = types.SimpleNamespace(pos={1: gs.pos}, slots={1: gs.slots}, lenp=gs.lenp,
-                                           max_lc=self.max_ctx)
+                                           max_lc=self.max_ctx, share_view=None)
                 with torch.inference_mode():
                     eng.reset()
                     eng.forward(torch.arange(8, device=dev), start=0)

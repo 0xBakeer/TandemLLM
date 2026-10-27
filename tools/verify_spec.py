@@ -127,9 +127,9 @@ def tree_router(eng, a, narrow: bool = True):
     from engine.lenrouter import LengthRouter
     from engine.router import MergedRouter, served_tree_table, tree_nodes
     small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
-                           max_len=a.max_len, block=8)
+                           max_len=a.max_len, block=8, kv_window=True)
     large = DFlash2Drafter(eng, os.path.expanduser(a.lenrouter), blocks=1,
-                           path=a.dflash2_path, max_len=a.max_len, block=16)
+                           path=a.dflash2_path, max_len=a.max_len, block=16, kv_window=True)
     small._build()
     large._build()
     tree_table = served_tree_table()

@@ -366,6 +366,12 @@ def verify_mixer(mixed: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Te
     H = value_heads
     dev = mixed.device
     tree = window is not None
+    from tools import gdn_seq_kernels as Q
+    if Q.ON and tree and anc is not None and T <= 32 and mixed.is_cuda:
+        # SPD-201: the recurrence one node at a time along its path (tools/gdn_seq_kernels.py)
+        return Q.lone(mixed, conv_state, conv_w, a_raw, b_raw, a_log, dt_bias, state, key_dim=key_dim,
+                      key_heads=key_heads, value_heads=value_heads, head_k=head_k, head_v=head_v,
+                      window=window, anc=anc, pend=pend, fac_out=fac_out)
     assert mixed.stride(1) == 1, mixed.stride()
     st = conv_state.reshape(C, W - 1)
     # a chain that stores its walked state keeps the walk: the WY form's S_T product spills at a

@@ -1092,34 +1092,6 @@
           "minimum": 0,
           "type": "number"
         },
-        "side_window": {
-          "additionalProperties": false,
-          "properties": {
-            "default": {
-              "minimum": 0,
-              "type": "number"
-            },
-            "max": {
-              "minimum": 0,
-              "type": "number"
-            },
-            "min": {
-              "minimum": 0,
-              "type": "number"
-            },
-            "step": {
-              "minimum": 0,
-              "type": "number"
-            }
-          },
-          "required": [
-            "min",
-            "max",
-            "default",
-            "step"
-          ],
-          "type": "object"
-        },
         "slots": {
           "additionalProperties": false,
           "properties": {
@@ -1179,7 +1151,6 @@
       "required": [
         "slots",
         "window",
-        "side_window",
         "kv_pool",
         "floor_gb",
         "kv_hard_floor_gb",

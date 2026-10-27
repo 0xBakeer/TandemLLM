@@ -39,15 +39,57 @@ from engine.models import REGISTRY  # noqa: E402
 #: v0.14.0 (7c682ab0), extra {}: the 27B's v2 (skip NOT_ARITHMETIC, then the tier's) read through SAME_ROWS
 #: (the bytes every release since 0.7.2 adopts under; engine/grammar.py's 0.14.0 and pre-0.14.0 bytes both
 #: count as 0.9's), and each adapter's fp4 on its raw bytes
-GOLDEN_V2 = ("9ac3d8a94c8a91990b83b3674d94f2f95a50e07441e56cafbe8e6f5d8d5c2a3d",
-             "36852358bfa9287407ae56fe4dabc7a90936528619a3ca9da36dc5bcb560a7dc")
+#: SPD-E5 (2026-10-23): the 27B's v2 and fp4 move once for the branch (engine/model.py's joint row-wise
+#: steps and window-MLP knob, engine/drafters/draft_graph.py's packed-graph cap, two knobs in engine/settings.py;
+#: the 27B's prefill knobs SPD-169/189/191/193 and their modules tools/exl3_slab_gemm.py, tools/gdn_prep_kernels.py)
+#: SPD-201 (2026-10-24): and again once: the round host cut (engine/rowcopy.py, engine/native_tree.py, the drafters'
+#: row copies, two-pass top-k and span step), the sequential GDN verify (tools/gdn_seq_kernels.py) and the
+#: invariant verify attention, every one behind a knob that is off
+#: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
+#: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
+#: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
+GOLDEN_V2 = ("58a0f1a95d3c8187e8b1890440c123787b89c5ded2048236d8cc65ccf9cb5c80",
+             "17a331201c4e7857c46dbd885abf3b6582843eb26381af2daed52027d14683ae")
 GOLDEN_FP4 = {
-    "qwen3_5": "5d57bf7b7e57f24a561d9e316da3a5c89ce78841bffb2741836045df03f5752f",
-    "qwen4_exp": "fd94876e1bee57126384604bee0232bc5c109cc1557448acc5f53ca5f54c4421",
-    "nemotron_h": "7fdc694358e113492eab5bdf3ac96562937e1282876dd83933c44874627b8d4d",
-    "lfm2_moe": "9a10d58fc924dab2c6e6b74abe07dcd69eea64640401469ed2ecb1dffde20115",
-    "qwen3_5_moe": "b01a8f9a072512bf9f97a691a23eee86b3f0aeb1ef68fa4d146c1262a068a22d",
-    "flint": "cb88704742e3ea32545ffd50d85afc7fe80aac426f01003d447d01cfe17c995b",
+    # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
+    # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
+    # SPD-217: Ornith's joint verify pass (qwen3_5_moe once more)
+    # SPD-229: each state parks its own GDN rows; Ornith's joint pass on the grouped experts (Flash-Next and Ornith)
+    # SPD-227: the prefill's int8 mixer GEMM on the tensor cores as an option (Flash-Next's kernels)
+    # SPD-231: the register-blocked mixer kernels behind QWEN38_FN_GEMV_NB (off)
+    # SPD-227: mm_i8_tc compiles once a weight shape
+    # SPD-233/235: Flash-Next's 8-lane row count; the packed MTP draft (Flash-Next, Ornith)
+    # SPD-231: QWEN38_FN_GEMV_NB in the shared table beside FN_GEMV_SPLIT
+    # SRV-717: the allocator snapshot reused 5 s
+    # SPD-223: draft graphs check their window pages and every pointer they bake
+    # SPD-239: FN_JOINT_TIMING knob, the joint pass's part timing in _timed
+    # SPD-239: the joint timing's host parts
+    # SPD-239: staging parts, FN_GEMV_MC
+    # SPD-239: PLE rows in one batch
+    # SPD-239: FN_PLE_THREADS
+    # SPD-239: commit_multi
+    # SPD-239: FN_GDN_MULTI
+    # SPD-239: FN_GDN_MULTI default
+    # SPD-241: mixer MMA kernels
+    # SPD-239: Ornith grouped GDN, lane-aware skip
+    # SPD-241: FN_MIXER_MMA default
+    # SPD-239: FN_POOL_MULTI
+    # SPD-245: QWEN38_EXL3_PDL (off): the skinny GEMM's launch under programmatic serialization, no arithmetic moved
+    # SPD-245: GDN_PREP scan 16 / 4 by default (the 27B's prefill)
+    # SPD-245: the GDN gate read in place (gate2d, gate_rows) and no normed-row store before the slab MLP
+    # SPD-245: lane-grouped joint attention, the commit's path rows pinned
+    # SPD-245: one attention table a launch, kept by the capturing graph
+    # SPD-223: a capture stream for each graph owner
+    # SPD-223: a new pool after a joint flush
+    # SPD-245: GDN_CHUNKED knob (off), the gate tool's --flag
+    # SPD-245: GDN_CHUNKED on (the GDN prefill walk value-block fastest, the UT transform in fewer registers)
+    # SPD-245: prefill_joint and the skinny-order slab product
+    "qwen3_5": "be7b55433345d94de0f34eefd843e48363086f039cb09571ba97705fa25b3af8",
+    "qwen4_exp": "9f6b0e11d023ed04ade8bd85276a9c266743df9db2b086c26034cbb21e52ec24",
+    "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
+    "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",
+    "qwen3_5_moe": "80305c014bfd3f35a2f31d8d8cd34cb17751ea752dad14580b2b8ceb1d507393",
+    "flint": "be812ac05a869010d6c5d82450b8eb440eb3a387195ebf1e880312c04a635a07",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

@@ -99,6 +99,13 @@ class MTPTreeDrafter:
         self.req = self._req()              # this request's own counts (the verbose report)
         self.cls = 0                        # the context class of the last round
         self._t_prev = None                 # the last round's start (perf_counter)
+        # SPD-239: the lanes that decoded in this drafter's last round (the round runner sets it): a round other
+        # lanes shared is priced by every lane's work, so only a round of one lane teaches the plain and drafted
+        # prices the turn and the skip weigh
+        self.lanes = 1
+        # SPD-233: the round runner found the joint plain step makes more tokens a ms at this many lanes than the
+        # drafted rounds (server/round_runner.py `_lane_plain`): the round takes the plain step without a draft
+        self.lane_skip = False
         self._cls_prev = 0
         self._obs = None                    # what the last round was, to price at the next start
         self._plain = None                  # a plain step was taken: None, or whether it captured
@@ -126,7 +133,9 @@ class MTPTreeDrafter:
         c = self.cut
         V, delta = c.prices.learned(c.kind, self.cls)
         q = self.req
-        return (f"mtp request: turn={q['turn']} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
+        ti = q.get("turn_in") or {}
+        ti = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ti.items()}
+        return (f"mtp request: turn={q['turn']} turn_in={ti} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
                 f"draft_ms={q['draft_ms']:.0f} verify_ms={q['verify_ms']:.0f} ({q['verify_rows']} rows) "
                 f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows, {q['primes']} calls) commit_ms={q['commit_ms']:.0f} "
                 f"spans={ {k: [n, round(ms), t] for k, (n, ms, t) in q['spans'].items()} } "
@@ -141,7 +150,7 @@ class MTPTreeDrafter:
     @staticmethod
     def _req() -> dict:
         return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
-                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None,
+                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None, "turn_in": None,
                 "spans": {"block": [0, 0.0, 0], "anchor": [0, 0.0, 0], "plain": [0, 0.0, 0],
                           "unpriced": [0, 0.0, 0]}}
 
@@ -225,6 +234,9 @@ class MTPTreeDrafter:
             self._obs = None
         self._plain, self.round, self.verify_ms = None, None, None
 
+    #: SPD-215: a joint round (server/round_runner.py) prices this drafter's round by its share of the pass
+    joint_priced = True
+
     def on_verify(self, rows: int, ms: float) -> None:
         self.verify_ms = ms
         self.req["verify_ms"] += ms
@@ -252,7 +264,7 @@ class MTPTreeDrafter:
             span[0] += 1
             span[1] += ms
             span[2] += self._obs[3] if self._obs is not None and self._obs[0] != "plain" else 0
-        if self._obs is not None and self._t_prev is not None:
+        if self._obs is not None and self._t_prev is not None and self.lanes <= 1:
             if self._obs[0] == "plain":
                 self.cut.observe_plain(ms, self._cls_prev)
             else:
@@ -281,7 +293,9 @@ class MTPTreeDrafter:
         if self._backoff_left > 0:
             self._backoff_left -= 1
             backoff = True
-        if self.head.depth and (backoff or self.cut.skip(self.cls)):
+        # SPD-239: the class's skip (its drafted rounds priced above its plain step) weighs lone prices: a round
+        # other lanes share keeps drafting
+        if self.head.depth and (backoff or self.lane_skip or (self.lanes <= 1 and self.cut.skip(self.cls))):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -296,6 +310,10 @@ class MTPTreeDrafter:
         if self.head.depth == 0:
             # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
             # one, so the drafted rounds' price is learned from rounds that drafted
+            if self.lane_skip:
+                self.pending = None
+                self.stats["skipped"] += 1
+                return None
             if self._look_left > 0:
                 self._look_left -= 1
                 self.pending = None
@@ -319,7 +337,11 @@ class MTPTreeDrafter:
             look = self._look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
-        tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
+        # SPD-225: the rows' calibrated path probabilities as the tree's scores (a joint round's cut ranks
+        # every lane's nodes by them; without them every draft scored 0 and the cut went by lane order)
+        sc = getattr(self.cut, "last_scores", None)
+        tree = DraftTree(tokens=toks, parents=parents,
+                         scores=list(sc) if sc is not None and len(sc) == len(toks) else []).truncate(int(k) + 1)
         if self.anchor_backoff:
             if len(toks) <= 1:
                 self._anchor_streak += 1
@@ -355,7 +377,15 @@ class MTPTreeDrafter:
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
         # no draft head: no backlog to read into it, and each round's match decides (above)
-        self._turn = self.req["turn"] = (not self.head.depth
+        # the decision's inputs, for the request's line (a plain turn whose reason is not seen cannot be argued)
+        c = self.cut
+        self.req["turn_in"] = {"plain_ms": c.plain_ms(self.cls), "spec_ms": c.spec_ms(self.cls), "backlog": unfed,
+                               "answer": self.answer, "extra_ms": round(float(extra), 1)}
+        if getattr(self.s, "last_owed", None):
+            self.req["turn_in"]["owed"] = self.s.last_owed
+        # SPD-239: a lane whose last round other lanes shared drafts its turn: in a joint pass its rows cost a share
+        # of the pass, so the lone prices the turn weighs do not apply (a plain turn there gives 1 token a round)
+        self._turn = self.req["turn"] = (not self.head.depth or self.lanes > 1
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None

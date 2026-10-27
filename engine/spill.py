@@ -85,7 +85,7 @@ SETTINGS = {"budget_gb": 64.0, "ttl_hours": 48.0, "min_tokens": 16384,
 CODEC_FRAME = 8 << 20
 CODEC_NAME = "zs1"
 #: engine files that change how state is kept, not the arithmetic that writes it
-NOT_ARITHMETIC = ("cache.py", "disk_cache.py", "spill.py", "capture_lock.py")
+NOT_ARITHMETIC = ("cache.py", "disk_cache.py", "spill.py", "capture_lock.py", "rowcopy.py")
 #: the drained conversation is read back at the next start only when the stop was this recent
 DRAIN_FRESH_S = 6 * 3600.0
 

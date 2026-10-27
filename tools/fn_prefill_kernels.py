@@ -484,14 +484,75 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
 # tensor cores (QWEN38_FN_PREFILL_MM). 2026-10-11: fp16 failed the agreement gate at 3k code (kernels vs
 # decode path 95.6 % against the decode path's 97.2 % with the reference), fp32 passed every context
 # and class at 1k/3k/8k, at 1,243 vs 1,441 tok/s (8k); two fp16 terms failed too and were slower.
+# "tc" (SPD-227): the int8 weights on the tensor cores with nothing rounded -- x bf16 and q int8 are exact
+# in bf16, their products exact, summed in fp32 over each scale group, the group's sum times its scale,
+# the groups added in order (`mm_i8_tc`); fp16 weights as "fp32".
 MM = _S.get("FN_PREFILL_MM")
+
+_TC = None
+
+
+def _tc_kernel():
+    global _TC
+    if _TC is None:
+        import triton
+        import triton.language as tl
+
+        # one compile a weight shape: a chunk's row count (the last chunk of a prompt any number) is not specialised
+        @triton.jit(do_not_specialize=["M", "N", "K", "NG", "sxm", "sqn", "ssn", "sym"])
+        def mm_i8_kernel(X, Q, S, Y, M, N, K, NG, sxm, sqn, ssn, sym,
+                         G: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+            pm, pn = tl.program_id(0), tl.program_id(1)
+            rm = pm * BM + tl.arange(0, BM)
+            rn = pn * BN + tl.arange(0, BN)
+            rk = tl.arange(0, BK)
+            mm, mn = rm < M, rn < N
+            acc = tl.zeros((BM, BN), dtype=tl.float32)
+            for g in range(0, NG):
+                part = tl.zeros((BM, BN), dtype=tl.float32)
+                for k0 in range(0, G, BK):
+                    k = g * G + k0 + rk
+                    x = tl.load(X + rm[:, None] * sxm + k[None, :], mask=mm[:, None], other=0.0)
+                    q = tl.load(Q + rn[None, :] * sqn + k[:, None], mask=mn[None, :], other=0)
+                    part = tl.dot(x, q.to(tl.bfloat16), part)
+                sc = tl.load(S + rn * ssn + g, mask=mn, other=0.0)
+                acc += part * sc[None, :]
+            tl.store(Y + rm[:, None] * sym + rn[None, :], acc, mask=mm[:, None] & mn[None, :])
+
+        _TC = mm_i8_kernel
+    return _TC
+
+
+def mm_i8_tc(x: torch.Tensor, w) -> torch.Tensor:
+    """x [M, K] bf16 @ (q s)^T for `pack.Int8Rows` w -> fp32 [M, N], nothing rounded but the fp32 sums: each
+    scale group's products (exact in the tensor cores' bf16 inputs) summed in fp32, times the group's scale,
+    the groups added in order (one group of K for a scale a row)."""
+    import triton
+    q, s = w.q, w.s
+    M, K = x.shape
+    N = q.shape[0]
+    ng = 1 if s.dim() == 1 else s.shape[1]
+    G = K // ng
+    BK = 64 if G % 64 == 0 else 32
+    if G % BK or x.stride(1) != 1:
+        raise ValueError(f"mm_i8_tc: K {K} in {ng} groups of {G}")
+    BM, BN = (128, 64) if N >= 2048 else (64, 64)
+    y = torch.empty(M, N, dtype=torch.float32, device=x.device)
+    sv = s if s.dim() == 2 else s.view(N, 1)
+    _tc_kernel()[(triton.cdiv(M, BM), triton.cdiv(N, BN))](
+        x, q, sv, y, M, N, K, ng, x.stride(0), q.stride(0), sv.stride(0), y.stride(0),
+        G=G, BM=BM, BN=BN, BK=BK, num_warps=4, num_stages=3)
+    return y
 
 
 def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
     group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
-    dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores."""
-    if MM == "fp32":
+    dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores; tc: int8 weights
+    through `mm_i8_tc`, fp16 ones as fp32."""
+    if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
+        return mm_i8_tc(x.contiguous(), w)
+    if MM in ("fp32", "tc"):
         wf = w.dequant() if hasattr(w, "q") else w.float()
         return x.float() @ wf.T
     if hasattr(w, "q"):

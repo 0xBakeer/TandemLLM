@@ -73,7 +73,7 @@ if HAVE_TRITON:
         tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask=m)
 
     @triton.jit
-    def _rms_norm_gated(X, Z, W, Y, N, EPS: tl.constexpr, BLOCK: tl.constexpr,
+    def _rms_norm_gated(X, Z, W, Y, N, s_zt, ZH, EPS: tl.constexpr, BLOCK: tl.constexpr,
                         PDL: tl.constexpr = False):
         if PDL:
             gdc_launch_dependents()
@@ -87,7 +87,8 @@ if HAVE_TRITON:
         # is the difference between a drop-in and a change of numerics.
         w = tl.load(W + cols, mask=m, other=0.0).to(Y.dtype.element_ty)
         h = (w * (x * rstd).to(Y.dtype.element_ty)).to(tl.float32)
-        z = tl.load(Z + row * N + cols, mask=m, other=0.0).to(tl.float32)
+        # the gate's row: head row % ZH of token row // ZH, tokens s_zt apart (s_zt = N, ZH = 1: dense rows)
+        z = tl.load(Z + (row // ZH) * s_zt + (row % ZH) * N + cols, mask=m, other=0.0).to(tl.float32)
         y = h * (z * tl.sigmoid(z))
         tl.store(Y + row * N + cols, y.to(Y.dtype.element_ty), mask=m)
 
@@ -124,14 +125,25 @@ def add_rms_norm(res: torch.Tensor, x: torch.Tensor, weight: torch.Tensor,
     return h.view_as(res), y.view_as(res)
 
 
+def gate_rows(gate: torch.Tensor, n: int, rows: int) -> tuple:
+    """(tensor, token stride, heads a token) the gated norm reads its gate rows through: a [T, H * n]
+    gate with unit column stride as it lies (a column slice of a fused projection's output: no
+    copy, SPD-245), anything else as dense [rows, n] rows."""
+    if (gate.dim() == 2 and gate.stride(1) == 1 and gate.shape[1] % n == 0
+            and gate.shape[0] * (gate.shape[1] // n) == rows):
+        return gate, gate.stride(0), gate.shape[1] // n
+    return gate.reshape(-1, n).contiguous(), n, 1
+
+
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
                    eps: float) -> torch.Tensor:
-    """`weight * normalise(x) * silu(gate)`, fused. Drop-in for `engine.model.rms_norm_gated`."""
+    """`weight * normalise(x) * silu(gate)`, fused. Drop-in for `engine.model.rms_norm_gated`; the gate
+    may also be the [T, H * n] rows of x's [T * H, n] (`gate_rows`)."""
     n = x.shape[-1]
     flat = x.reshape(-1, n).contiguous()
-    g = gate.reshape(-1, n).contiguous()
+    g, s_zt, zh = gate_rows(gate, n, flat.shape[0])
     y = torch.empty_like(flat)
-    _rms_norm_gated[(flat.shape[0],)](flat, g, weight, y, n, EPS=eps, BLOCK=_block(n),
+    _rms_norm_gated[(flat.shape[0],)](flat, g, weight, y, n, s_zt, zh, EPS=eps, BLOCK=_block(n),
                                       PDL=_pdl(), num_warps=8 if n >= 4096 else 4)
     return y.view_as(x)
 

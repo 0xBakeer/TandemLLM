@@ -91,6 +91,11 @@ PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
 #: three decoding chats wrote ~1 token a second). The windows' chunks are the same chunks in the
 #: same order, so the cap changes when the turn is offered, never a bit.
 WINDOW_CAP = None
+#: SPD-245: (eng, tokens, start, whole) -> logits or None, called before the first forward of a prefill
+#: (server/app.py `_joint_forward`, the prefill burst): `whole` when that forward is the prompt's only one
+#: (then the logits are what `eng.forward(tokens, start, last_only=True)` returns, from a joint forward
+#: of several prompts); None: the prefill runs as before. None: no hook (the default)
+FIRST_FORWARD = None
 
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
@@ -983,6 +988,10 @@ def _kv_views(eng, drafter) -> list:
     return views
 
 
+#: SPD-215: the resident prefix keeps the state at the end of the last prompt (`keep_prompt_end`)
+PROMPT_END = _S.get("PROMPT_END") == "1"
+
+
 class ResidentPrefix:
     """The live KV buffer used as the prefix cache, with the recurrent state at a few boundaries.
 
@@ -1145,6 +1154,12 @@ class ResidentPrefix:
         self.end: dict | None = None
         self.end_lost: str | None = None   # why the last end anchor went (`_drop_end`)
         self._end_bufs: tuple | None = None
+        # SPD-215: the end of the last prompt the prefill read (`keep_prompt_end`): its line `at` and its
+        # tokens; its state in `_pend_bufs`. An agent's next turn shares the conversation up to there
+        # and parts at the answer the client sends back in its own words: it resumes here instead of at
+        # the grid line below (4,096 tokens a grid on Flash-Next)
+        self.pend: dict | None = None
+        self._pend_bufs: tuple | None = None
         # the tokenizer's whitespace-only tokens (the server's, at load): where the client's copy
         # of an answer may differ from the rows next to a hidden span (`replay`)
         self.glue: frozenset = frozenset()
@@ -1164,6 +1179,7 @@ class ResidentPrefix:
                       "refused_anchor": 0, "refused_stash": 0, "refused_pin": 0,
                       "refused_park": 0,
                       "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
+                      "pend_kept": 0, "pend_refused": 0, "pend_hits": 0, "pend_saved": 0,
                       "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
                       "end_cut": 0,
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
@@ -1301,6 +1317,44 @@ class ResidentPrefix:
         self.end_lost = None
         self.stats["end_kept"] += 1
         return "kept"
+
+    def keep_prompt_end(self, eng, drafter, tokens, n: int) -> str:
+        """SPD-215: after a prefill that read the prompt to its end `n`: the state there, with the prompt's
+        tokens, for the next turn that shares them (`pend_offer`). Not for a guest, a scratch prefill or a
+        prompt whose rows are not the resident's; the memory policy may refuse the buffers (an anchor's
+        are not taken for it)."""
+        if not PROMPT_END or not self.end_on or self.chunk <= 0 or not resident_capable(drafter):
+            return "off"
+        if self._stash is not None or not self.capturing or int(self.valid) != int(n):
+            return "not_resident"
+        if self._pend_bufs is None:
+            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
+                self.stats["pend_refused"] += 1
+                return "memory"
+            self._pend_bufs = state_empty(eng)
+        eng.settle()
+        state_save(self._pend_bufs, eng)
+        self.pend = {"at": int(n), "tokens": [int(t) for t in tokens[:n]]}
+        self.stats["pend_kept"] += 1
+        return "kept"
+
+    def pend_offer(self, c: int, max_len: int) -> int:
+        """SPD-215: the last prompt's end, when this prompt shares every token up to it (`c`), the rows in
+        place hold them, and it beats the anchors in place; else 0."""
+        p = int(self.pend["at"]) if self.pend is not None else 0
+        if not p or c < p or p > max_len or p > int(self.valid) or p <= self.best(c, max_len):
+            return 0
+        return p if self.tokens[:p] == self.pend["tokens"] else 0
+
+    def resume_pend(self, eng, drafter, saved: int = 0) -> None:
+        """Bring the engine to the last prompt's end: its state, the rows in place."""
+        p = int(self.pend["at"])
+        state_load(eng, self._pend_bufs)
+        eng.resume_at(p)
+        if drafter is not None and hasattr(drafter, "state_resume"):
+            drafter.state_resume(p)
+        self.stats["pend_hits"] += 1
+        self.stats["pend_saved"] += max(0, int(saved))
 
     def end_offer(self, c: int, max_len: int, mm_ok: bool = False) -> int:
         """The end anchor's line, when the prompt starts with every token up to it (`c`, its
@@ -1450,8 +1504,9 @@ class ResidentPrefix:
         self.valid = start
         self.owner = session
         self.capturing = self.chunk > 0 and not scratch
-        if kind == "end":
-            # a prefill from the end of a generation writes a session's rows
+        if kind in ("end", "pend"):
+            # a prefill from the end of a generation (or of the last prompt: off the grid) writes a
+            # session's rows
             self.taint = start if self.taint is None else min(self.taint, start)
         elif kind != "resident" or self.taint is None or start <= self.taint:
             # a cold start, a store or disk restore, or an anchor of a cold grid's: what this
@@ -2563,18 +2618,19 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     # the server has replayed the client's copy already: the park's end only for every token
     bk = res.park_offer(keys, c, n - 1, align=False, mm_ok=end_mm) if res is not None else 0
     be = res.end_offer(c, n - 1, mm_ok=end_mm) if res is not None else 0
+    bpe = res.pend_offer(c, n - 1) if (res is not None and not end_mm) else 0
     hit, via, dh = None, None, None
     if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be))
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be, bpe))
     if disk is not None:
         # after every cache in RAM: the disk only where it starts later than all of them, and
         # over the rows a session's state wrote (from `taint`), which are not a cold grid's
         have = c if res is None or res.taint is None else min(c, res.taint)
-        dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, be, hit[0] if hit else 0),
+        dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, be, bpe, hit[0] if hit else 0),
                    have)
         if dh is not None:
             hit = None
-    if hit is None and dh is None and max(bp, bk) > be:
+    if hit is None and dh is None and max(bp, bk) > max(be, bpe):
         # the parked session or the pinned head beats the rows in place and every store entry
         if disk is not None:
             _disk(disk, "fence", 0)
@@ -2597,12 +2653,14 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         start, kind = L, entry.kind
     elif be:
         start, kind = be, "end"
+    elif bpe and via is None:
+        start, kind = bpe, "pend"
     elif b > 0:
         start, kind = b, "resident"
     _no_key_ids(eng, ids, start)
     if disk is not None:
         # the rows this prefill leaves as they are: a write still copying them may go on
-        _disk(disk, "fence", start if kind in ("resident", "end")
+        _disk(disk, "fence", start if kind in ("resident", "end", "pend")
               else dh.have if dh is not None else 0)
     if info is not None:
         info["why"] = (reread_words(res, c, start, n, kind, was_valid,
@@ -2643,9 +2701,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.resume(eng, drafter, start)
     elif kind == "end":
         res.resume_end(eng, drafter, saved=start - b)
+    elif kind == "pend":
+        res.resume_pend(eng, drafter, saved=start - b)
     else:
         eng.reset()
-    if res is not None and kind not in ("resident", "end"):
+    if res is not None and kind not in ("resident", "end", "pend"):
         res.stats["misses"] += 1
     if info is not None:
         info["kind"] = kind
@@ -2695,6 +2755,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                         "t0": time.perf_counter(), "layers": [],
                         "n": int(getattr(getattr(eng, "cfg", None), "num_hidden_layers", 0) or 0)}
                     LAYER.mark = _layer_marks(live, device)
+                if FIRST_FORWARD is not None and i == start:
+                    FIRST_FORWARD(eng, None, i, False)     # SPD-245: a window is no joint forward's
                 try:
                     logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
                 finally:
@@ -2740,7 +2802,9 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 t = n - i
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
             # a chunk before the last one returns logits nobody reads: one row, not `t` of them
-            logits = eng.forward(blk, start=i, last_only=True)
+            got = (FIRST_FORWARD(eng, blk, i, i + t == n) if FIRST_FORWARD is not None and i == start
+                   else None)
+            logits = got if got is not None else eng.forward(blk, start=i, last_only=True)
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
             i += t
@@ -2754,6 +2818,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             _disk(disk, "seal", job, eng, drafter, i)
     if mem is not None:
         mem.prefilled(n)
+    if res is not None and i >= n and not scratch:
+        try:
+            res.keep_prompt_end(eng, drafter, keys, n)        # SPD-215
+        except Exception:                                      # noqa: BLE001
+            pass
     if store is not None:
         store.stats["tokens_reused"] += start
         store.stats["tokens_forwarded"] += n - start

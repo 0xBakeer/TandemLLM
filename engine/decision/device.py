@@ -29,7 +29,12 @@ import torch
 # 1000 references off `True` and off each id int; a call with `None` takes none. So the pools
 # are read from the one snapshot of every segment (`None`), filtered by `segment_pool_id`.
 # tests/test_pool_snapshot_refcount.py holds the measurement and the fix.
-SNAPSHOT_TTL_S = 0.25          # one /metrics render asks ~30 times; the pools barely move meanwhile
+# SRV-717: reused for 5 s. A snapshot of every segment builds its whole list under the GIL and the allocator's
+# lock; asked every 0.25 s by the polls that read a decision model's pool (/health, /metrics, the live view)
+# while the 27B decoded 8 lanes, it cost ~10 % (C1 / C8 35.2 / 123.6 with the shadow reader loaded against
+# 38.3 / 137.9 without, 2026-10-25). A pool's size 5 s old is what those polls report anyway.
+from engine.settings import SETTINGS as _S  # noqa: E402
+SNAPSHOT_TTL_S = float(_S.get("POOL_SNAPSHOT_TTL_S") or 5.0)
 _SNAP_LOCK = threading.Lock()
 _SNAP: dict = {"t": None, "segments": None}
 

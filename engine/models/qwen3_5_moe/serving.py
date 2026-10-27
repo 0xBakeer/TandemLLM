@@ -33,7 +33,7 @@ MODULES = ("engine/models/qwen3_5_moe/__init__.py", "engine/models/qwen3_5_moe/c
            "engine/models/qwen3_5_moe/load.py", "engine/models/qwen3_5_moe/pack.py",
            "engine/models/qwen3_5_moe/ref.py", "engine/models/flashnext/engine.py",
            "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py", "engine/models/flashnext/vision.py",
-           "engine/settings.py")
+           "engine/models/flashnext/knobs.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 #: the model's name in ops/prices/ and models/
@@ -45,10 +45,13 @@ def manifest() -> Manifest:
 
 
 class Qwen35MoeServing(FlashNextServing):
-    """`Qwen35MoeEngine` with one state and its graphs, in the server's engine interface. One sequence
-    slot for now: the joint verify of several slots is Flash-Next's mixer-shaped pass (not built here)."""
+    """`Qwen35MoeEngine` with one state and its graphs, in the server's engine interface. SPD-217: side
+    slots over the same weights (Flash-Next's `side_slot`, this class) whose blocks verify in one pass
+    (`Qwen35MoeEngine.verify_multi`)."""
 
-    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096, shadow=False, side_lane=False)
+    JOINT_ROWS_AT: dict = {}           # SPD-233: Flash-Next's 8-lane row count is not measured here
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
+                        joint_plain=True)
 
     def __init__(self, fn, max_len: int):
         super().__init__(fn, max_len)

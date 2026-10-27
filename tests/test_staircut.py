@@ -269,6 +269,22 @@ def test_staircut():
     return "confident chain kept, unsure dropped, a paying sibling first, calibration learned, prices monotone"
 
 
+def test_the_cut_scores_each_row_by_its_path_probability():
+    """SPD-225: a block's rows carry their calibrated path probabilities (`last_scores`, the tree's scores the
+    joint round's cut ranks lanes by): one a row, the anchor 1, a spine row its parent's times its own q (so
+    never above its parent), and for a merged block with a lookup likewise one a row."""
+    sc = _new(True)
+    tok = [[10 + k, 20 + k] for k in range(5)]
+    for prob in ([[0.99, 0.005]] * 5, [[0.3, 0.65]] + [[0.97, 0.01]] * 4, [[0.8, 0.15]] * 5):
+        toks, par = sc.cut(1, tok, prob)
+        s_ = sc.last_scores
+        assert len(s_) == len(toks) and s_[0] == 1.0, (toks, s_)
+        assert all(0.0 <= s_[i] <= s_[par[i]] + 1e-12 for i in range(1, len(toks))), (toks, par, s_)
+    toks, par = sc.cut(1, tok, [[0.5, 0.1]] * 5, ([10, 11, 90, 91, 92], 0.97))
+    assert len(sc.last_scores) == len(toks) and sc.last_scores[0] == 1.0, (toks, sc.last_scores)
+    return "one score a row, the anchor 1, a child never above its parent (spine, siblings, lookup)"
+
+
 def test_the_lookup_joins_the_cut_in_one_tree():
     """ENG-229: the lookup's continuation shares the spine while their tokens agree (a shared node is
     likelier: either being right), leaves it where they differ, and runs on past the spine's end; the
@@ -379,7 +395,8 @@ def test_one_slow_request_does_not_keep_a_class_plain():
             assert n < 400
         return n
     back = plain_turns_to_return()
-    assert 2 <= back <= 8 and sc.plain_turns[0] == 0, back
+    # SPD-237: a measured drafted price weighs TURN_MARGIN less, so the return comes after 1..8 plain turns
+    assert 1 <= back <= 8 and sc.plain_turns[0] == 0, back
     # the return loses again (its rounds cost 30 ms a token): the next return takes about twice as long
     for _ in range(40):
         sc.observe_spec(30.0, 0)

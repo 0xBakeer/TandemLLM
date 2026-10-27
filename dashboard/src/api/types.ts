@@ -1252,8 +1252,8 @@ export interface SetupParallelism {
   /** engine_max (#104): the most chats the model's engine serves (ENGINE_MAX_SLOTS, or 1 for a family with no
    *  side slots), with the reason when it is 1 */
   slots: { min: number; max: number; default: number; engine_max?: number; engine_max_reason?: string | null };
+  /** every lane's window (SRV-707: one for all) */
   window: { min: number; max: number; default: number; step: number };
-  side_window: { min: number; max: number; default: number; step: number };
   kv_pool: { default: boolean };
   floor_gb: { min: number; max: number; default: number };
   kv_hard_floor_gb: number;
@@ -1261,6 +1261,7 @@ export interface SetupParallelism {
   kv_bytes_per_token: number;
   /** a side slot's bytes beyond its window (verify graphs off) */
   side_slot_const_gib: number;
+  /** `side_window`: the serve.env key the window is also written to (QSE_SIDE_MAX_LEN) */
   knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
   /** 1.0+: a slot's conversation in the estimate's typical case (32,768) */
   typical_fill_tokens: number;
@@ -1321,11 +1322,10 @@ export interface SetupSelection {
   model: string;
   profile: string;
   components: Record<string, boolean>;
+  /** the parallel lanes (QSE_PARALLEL) */
   slots: number;
-  /** slot 0's window (MAX_LEN) */
+  /** every lane's window (MAX_LEN, and QSE_SIDE_MAX_LEN with it: SRV-707) */
   window: number;
-  /** each side slot's window (QSE_SIDE_MAX_LEN); default = window */
-  side_window?: number;
   kv_pool: boolean;
   floor_gb: number;
   methods: Record<string, SetupValue>;
@@ -1377,6 +1377,10 @@ export interface SetupEstimate {
   fits_worst: boolean;
   /** 1.0+ */
   typical_fill_tokens: number;
+  /** SRV-707: one lane at its full window, GiB */
+  lane_full_gb: number;
+  /** SRV-707: the lanes that can all hold the full window at once (the guarantee); past it they share */
+  lanes_full: number;
 }
 
 /** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
@@ -1609,7 +1613,8 @@ export interface SetupJobSummary {
   tools: string[];
   slots: number | null;
   window: number | null;
-  side_window: number | null;
+  /** an older server's: each extra lane's window */
+  side_window?: number | null;
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {

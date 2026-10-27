@@ -93,6 +93,52 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
+// ------------------------------------------------------------------------------ commits (SPD-239)
+// The copies of many states' commits in one launch: E [ne][16] int64, one entry a CTA column (grid (ne, 8)).
+// kind 0, rows: dst row i (i < n) = src row idx[i], `words` 4-byte words a row (strides in words):
+//   [0, src, src_stride, dst, dst_stride, words, idx (int64 [n] on the device), n]
+// kind 1, a bf16 window [C, w] (w <= 9) in place from its own columns and a block's rows: column j becomes
+//   cols[j] < w ? the window's column cols[j] : row cols[j] - w of src (a row's C channels at src + row * stride);
+//   a thread owns a channel, so every read of the channel is before its writes:
+//   [1, window, src, src_stride (elements), C, w, 0, cols[0..w-1]]
+__global__ void __launch_bounds__(256) commit_multi_kernel(const long long* __restrict__ E) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.x * 16;
+    const int step = gridDim.y * blockDim.x, first = blockIdx.y * blockDim.x + threadIdx.x;
+    if (e[0] == 0) {
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(e[1]);
+        uint32_t* dst = reinterpret_cast<uint32_t*>(e[3]);
+        const long long ss = e[2], ds = e[4];
+        const int words = (int)e[5], n = (int)e[7];
+        const long long* idx = reinterpret_cast<const long long*>(e[6]);
+        for (int i = 0; i < n; ++i) {
+            const uint32_t* s = src + idx[i] * ss;
+            uint32_t* d = dst + (long long)i * ds;
+            for (int w = first; w < words; w += step) d[w] = s[w];
+        }
+        return;
+    }
+    __nv_bfloat16* win = reinterpret_cast<__nv_bfloat16*>(e[1]);
+    const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(e[2]);
+    const long long ss = e[3];
+    const int C = (int)e[4], w = (int)e[5];
+    for (int c = first; c < C; c += step) {
+        __nv_bfloat16 old[9], nv[9];
+#pragma unroll
+        for (int j = 0; j < 9; ++j) if (j < w) old[j] = win[(size_t)c * w + j];
+#pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            if (j < w) {
+                const int col = (int)e[7 + j];
+                nv[j] = col < w ? old[col] : src[(size_t)(col - w) * ss + c];
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < 9; ++j) if (j < w) win[(size_t)c * w + j] = nv[j];
+    }
+}
+
 // ------------------------------------------------------------------------------ GDN conv + gates
 // grid (nC + 1, M), 256 threads. CTA x < nC: 256 channels of row m. The window of row m is
 // [tap3, tap2, tap1, x_m]; SRC[m][j] (j = 0, 1, 2 for distance 3, 2, 1) is a row of the block
@@ -199,14 +245,12 @@ __device__ __forceinline__ void tile_store(const float (&s)[4][4], float* __rest
 // (load, save): load -1 continue from the previous row's tile, -2 the entry state S, >= 0 scratch
 // slot; save >= 0 leaves the tile in that slot after the row. WRITE: the last row's tile goes back
 // to S (a decode step).
-__global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
+__device__ __forceinline__ void gdn_rows_body(const __nv_bfloat16* __restrict__ QKV, int ldq,
         int koff, int voff, const float* __restrict__ G, const float* __restrict__ BETA,
         float* __restrict__ S, float* __restrict__ STK, const int* __restrict__ CTL, int M,
         __nv_bfloat16* __restrict__ OUT, int H, int REP, int write,
         const __nv_bfloat16* __restrict__ PRE, int ldp, const float* __restrict__ PG, const float* __restrict__ PB,
         const int* __restrict__ PN) {
-    pdl_wait();
-    pdl_trigger();
     const int h = blockIdx.x, vb = blockIdx.y;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int c0 = vb * 16 + warp * 4;
@@ -229,6 +273,33 @@ __global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __re
         if (sv >= 0) tile_store(s, STK + (size_t)sv * H * 128 * 128 + hs, lane, c0);
     }
     if (write && M > 0) tile_store(s, S + hs, lane, c0);
+}
+
+__global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
+        int koff, int voff, const float* __restrict__ G, const float* __restrict__ BETA,
+        float* __restrict__ S, float* __restrict__ STK, const int* __restrict__ CTL, int M,
+        __nv_bfloat16* __restrict__ OUT, int H, int REP, int write,
+        const __nv_bfloat16* __restrict__ PRE, int ldp, const float* __restrict__ PG, const float* __restrict__ PB,
+        const int* __restrict__ PN) {
+    pdl_wait();
+    pdl_trigger();
+    gdn_rows_body(QKV, ldq, koff, voff, G, BETA, S, STK, CTL, M, OUT, H, REP, write, PRE, ldp, PG, PB, PN);
+}
+
+// SPD-239: `gdn_rows_kernel` for several states in one launch, grid (H, 8, states): state z's call from its
+// entry E[z] = [qkv, ldq, g, beta, S, scratch (its own slots), ctl, M, out, pre, ldp, pg, pb, pn, write, 0]
+// (pre / pg / pb / pn 0: no parked rows), each CTA the one-state kernel's own arithmetic
+__global__ void __launch_bounds__(128) gdn_rows_multi_kernel(const long long* __restrict__ E, int koff, int voff,
+                                                             int H, int REP) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.z * 16;
+    gdn_rows_body(reinterpret_cast<const __nv_bfloat16*>(e[0]), (int)e[1], koff, voff,
+                  reinterpret_cast<const float*>(e[2]), reinterpret_cast<const float*>(e[3]),
+                  reinterpret_cast<float*>(e[4]), reinterpret_cast<float*>(e[5]), reinterpret_cast<const int*>(e[6]),
+                  (int)e[7], reinterpret_cast<__nv_bfloat16*>(e[8]), H, REP, (int)e[14],
+                  reinterpret_cast<const __nv_bfloat16*>(e[9]), (int)e[10], reinterpret_cast<const float*>(e[11]),
+                  reinterpret_cast<const float*>(e[12]), reinterpret_cast<const int*>(e[13]));
 }
 
 // --------------------------------------------------------------------------------------- PLE
@@ -290,15 +361,12 @@ __global__ void __launch_bounds__(256) ple_conv_kernel(const __nv_bfloat16* __re
 // keys (fp32, in key order, / 4, rounded to bf16), the RMS norm (1 + w), the rope at the block's first
 // position (bf16(bf16(n c) + bf16(rot(n) s)) over the first ROT dims). SLOTS[b][0..3]: the cache slots
 // of the block's keys; POSB[b]: its first position.
-__global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __restrict__ IKC,
+__device__ __forceinline__ float qsa_pool_body(const __nv_bfloat16* __restrict__ IKC,
         const int* __restrict__ SLOTS, const int* __restrict__ POSB, const __nv_bfloat16* __restrict__ KLN,
-        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, __nv_bfloat16* __restrict__ OUT,
-        int ROT, float eps) {
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, int b, int ROT, float eps) {
     __shared__ float sh[4];
     __shared__ float nv[128];
-    pdl_wait();
-    pdl_trigger();
-    const int b = blockIdx.x, t = threadIdx.x;
+    const int t = threadIdx.x;
     float acc = 0.f;
 #pragma unroll
     for (int i = 0; i < 4; ++i) acc += b2f(IKC[(size_t)SLOTS[b * 4 + i] * 128 + t]);
@@ -314,7 +382,34 @@ __global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __re
         const float rh = t < ROT / 2 ? -nv[t + ROT / 2] : nv[t - ROT / 2];
         o = bfr(bfr(n * c) + bfr(rh * sn));
     }
-    OUT[(size_t)b * 128 + t] = __float2bfloat16_rn(o);
+    return o;
+}
+
+__global__ void __launch_bounds__(128) qsa_pool_kernel(const __nv_bfloat16* __restrict__ IKC,
+        const int* __restrict__ SLOTS, const int* __restrict__ POSB, const __nv_bfloat16* __restrict__ KLN,
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, __nv_bfloat16* __restrict__ OUT,
+        int ROT, float eps) {
+    pdl_wait();
+    pdl_trigger();
+    const int b = blockIdx.x;
+    const float o = qsa_pool_body(IKC, SLOTS, POSB, KLN, COS, SIN, b, ROT, eps);
+    OUT[(size_t)b * 128 + threadIdx.x] = __float2bfloat16_rn(o);
+}
+
+// SPD-239: `qsa_pool` of many (state, layer) pairs into their pools in one launch, grid (NB, pairs): pair z's
+// entry E[z] = [ikc, slots, posb, kln, pool, rows (int64 [NB], the pool row of each block)]; a CTA computes
+// qsa_pool_kernel's block and writes it at its pool row (what `pool.index_copy_(0, rows, qsa_pool(...))` writes)
+__global__ void __launch_bounds__(128) qsa_pool_multi_kernel(const long long* __restrict__ E,
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN, int ROT, float eps) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.y * 16;
+    const int b = blockIdx.x;
+    const float o = qsa_pool_body(reinterpret_cast<const __nv_bfloat16*>(e[0]), reinterpret_cast<const int*>(e[1]),
+                                  reinterpret_cast<const int*>(e[2]), reinterpret_cast<const __nv_bfloat16*>(e[3]),
+                                  COS, SIN, b, ROT, eps);
+    const long long row = reinterpret_cast<const long long*>(e[5])[b];
+    reinterpret_cast<__nv_bfloat16*>(e[4])[row * 128 + threadIdx.x] = __float2bfloat16_rn(o);
 }
 
 // The indexer's score of block b for row t: sum over the NH query heads in order of
@@ -419,6 +514,23 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, cudaStream_t st, 
 
 void seq_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 
+void seq_gdn_rows_multi(torch::Tensor E, int64_t koff, int64_t voff, int64_t H, int64_t rep) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0) return;
+    launch(gdn_rows_multi_kernel, dim3((unsigned)H, 8, (unsigned)E.size(0)), dim3(128), st, (const long long*)E.data_ptr(),
+           (int)koff, (int)voff, (int)H, (int)rep);
+}
+
+void seq_commit_multi(torch::Tensor E) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0) return;
+    launch(commit_multi_kernel, dim3((unsigned)E.size(0), 8), dim3(256), st, (const long long*)E.data_ptr());
+}
+
 void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y,
                  torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
@@ -504,6 +616,16 @@ void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, to
         (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)cos.size(1), (float)eps);
 }
 
+void seq_qsa_pool_multi(torch::Tensor E, int64_t NB, torch::Tensor cos, torch::Tensor sin, double eps) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    TORCH_CHECK(cos.dtype() == torch::kBFloat16 && cos.size(1) <= 128, "cos/sin bf16 [L, ROT]");
+    if (E.size(0) == 0 || NB == 0) return;
+    launch(qsa_pool_multi_kernel, dim3((unsigned)NB, (unsigned)E.size(0)), dim3(128), st, (const long long*)E.data_ptr(),
+        (const __nv_bfloat16*)cos.data_ptr(), (const __nv_bfloat16*)sin.data_ptr(), (int)cos.size(1), (float)eps);
+}
+
 void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk) {
     const at::cuda::OptionalCUDAGuard guard(sc.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -541,6 +663,8 @@ void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, tor
 
 _CPP = (
     "void seq_set_pdl(int64_t on);\n"
+    "void seq_commit_multi(torch::Tensor E);\n"
+    "void seq_gdn_rows_multi(torch::Tensor E, int64_t koff, int64_t voff, int64_t H, int64_t rep);\n"
     "void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tensor src, torch::Tensor y, "
     "torch::Tensor ab, torch::Tensor alog, torch::Tensor dtb, torch::Tensor g, torch::Tensor beta, bool shift);\n"
     "void seq_gdn_rows(torch::Tensor qkv, int64_t koff, int64_t voff, torch::Tensor g, torch::Tensor beta, "
@@ -553,6 +677,7 @@ _CPP = (
     "void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos, "
     "torch::Tensor sin, torch::Tensor out, double eps);\n"
     "void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc);\n"
+    "void seq_qsa_pool_multi(torch::Tensor E, int64_t NB, torch::Tensor cos, torch::Tensor sin, double eps);\n"
     "void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk);\n")
 
 _MOD = None
@@ -567,12 +692,40 @@ def _module():
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
         tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                           functions=["seq_set_pdl", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
-                                      "seq_qsa_pool", "seq_qsa_scores", "seq_qsa_topk"],
+                           functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
+                                      "seq_qsa_pool", "seq_qsa_pool_multi", "seq_qsa_scores", "seq_qsa_topk"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1"))
     return _MOD
+
+
+# ------------------------------------------------------------------------------------- commits
+#: the int64 fields of a `commit_multi` entry
+COMMIT_FIELDS = 16
+
+
+def commit_multi(entries: torch.Tensor) -> None:
+    """SPD-239: the copies of many commits in one launch, `entries` int64 [n, COMMIT_FIELDS] on the device: a row
+    gather (kind 0) or a bf16 window shifted in place from a block's rows (kind 1); the layouts at the kernel."""
+    _module().seq_commit_multi(entries)
+
+
+def rows_entry(src: torch.Tensor, dst: torch.Tensor, idx: torch.Tensor, n: int) -> list:
+    """A kind 0 entry: dst rows 0..n-1 = src rows idx (rows of 4-byte words, unit stride within a row)."""
+    eb = src.element_size()
+    words = src.shape[1] * eb // 4
+    assert src.stride(1) == 1 and dst.stride(1) == 1 and (src.shape[1] * eb) % 4 == 0 and src.dtype == dst.dtype
+    return [0, src.data_ptr(), src.stride(0) * eb // 4, dst.data_ptr(), dst.stride(0) * eb // 4, words,
+            idx.data_ptr(), n] + [0] * (COMMIT_FIELDS - 8)
+
+
+def window_entry(win: torch.Tensor, src: torch.Tensor, cols: list[int]) -> list:
+    """A kind 1 entry: the bf16 window [1, C, w] gets cols (`_tail_cols`) of [its columns | src's rows]."""
+    C, w = win.shape[-2], win.shape[-1]
+    assert win.is_contiguous() and win.dtype == src.dtype == torch.bfloat16 and src.stride(1) == 1 and w <= 9
+    assert len(cols) == w and src.shape[1] >= C
+    return [1, win.data_ptr(), src.data_ptr(), src.stride(0), C, w, 0] + list(cols) + [0] * (COMMIT_FIELDS - 7 - w)
 
 
 # ------------------------------------------------------------------------------------- GDN
@@ -604,6 +757,26 @@ def gdn_rows(qkv, key_dim: int, g, beta, S, scratch, ctl, rep: int, write: bool,
     pr, pg, pb, pn = pre if pre is not None else (None, None, None, None)
     _module().seq_gdn_rows(qkv, key_dim, 2 * key_dim, g, beta, S, scratch, ctl, out, rep, write, pr, pg, pb, pn)
     return out
+
+
+def gdn_rows_entry(qkv, g, beta, S, scratch, ctl, out, write: bool, pre=None) -> list:
+    """SPD-239: one state's `gdn_rows` call as a `gdn_rows_multi` entry (the same tensors and checks' shapes; the
+    scratch is this state's own slots)."""
+    M = qkv.shape[0]
+    assert qkv.dtype == torch.bfloat16 and qkv.stride(1) == 1 and S.is_contiguous() and scratch.is_contiguous()
+    assert ctl.dtype == torch.int32 and ctl.is_contiguous() and ctl.numel() == 2 * M and out.is_contiguous()
+    assert g.is_contiguous() and beta.is_contiguous() and g.dtype == beta.dtype == torch.float32
+    pr, pg, pb, pn = pre if pre is not None else (None, None, None, None)
+    return [qkv.data_ptr(), qkv.stride(0), g.data_ptr(), beta.data_ptr(), S.data_ptr(), scratch.data_ptr(),
+            ctl.data_ptr(), M, out.data_ptr(), pr.data_ptr() if pr is not None else 0,
+            pr.stride(0) if pr is not None else 0, pg.data_ptr() if pg is not None else 0,
+            pb.data_ptr() if pb is not None else 0, pn.data_ptr() if pn is not None else 0, int(write), 0]
+
+
+def gdn_rows_multi(entries: torch.Tensor, key_dim: int, H: int, rep: int) -> None:
+    """SPD-239: `gdn_rows` of several states in one launch (`entries` int64 [states, 16] on the device, one
+    `gdn_rows_entry` a state): every CTA computes what the state's own call computes."""
+    _module().seq_gdn_rows_multi(entries, key_dim, 2 * key_dim, H, rep)
 
 
 def gdn_rows_reference(qkv, key_dim: int, g, beta, S, parents: list[int], rep: int):
@@ -708,6 +881,18 @@ def qsa_pool(ikc, slots, posb, kln, cos, sin, eps: float, out=None):
         out = torch.empty(NB, 128, dtype=torch.bfloat16, device=ikc.device)
     _module().seq_qsa_pool(ikc, slots, posb, kln, cos, sin, out, eps)
     return out
+
+
+def qsa_pool_entry(ikc, slots, posb, kln, pool, rows) -> list:
+    """SPD-239: one (state, layer)'s `qsa_pool` + `pool.index_copy_(0, rows, ...)` as a `qsa_pool_multi` entry."""
+    assert ikc.is_contiguous() and pool.is_contiguous() and slots.is_contiguous() and posb.is_contiguous()
+    assert pool.shape[-1] == 128 and rows.dtype == torch.int64 and rows.is_contiguous()
+    return [ikc.data_ptr(), slots.data_ptr(), posb.data_ptr(), kln.data_ptr(), pool.data_ptr(), rows.data_ptr()] + [0] * 10
+
+
+def qsa_pool_multi(entries: torch.Tensor, NB: int, cos, sin, eps: float) -> None:
+    """SPD-239: `qsa_pool` of many (state, layer) pairs, each block written at its pool row, in one launch."""
+    _module().seq_qsa_pool_multi(entries, NB, cos, sin, eps)
 
 
 def qsa_scores(iq, pool, own, qctl, NB: int, out=None):

@@ -38,6 +38,7 @@ from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
+from engine.settings import SETTINGS as _S
 from engine.models.flashnext.engine import CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
@@ -49,7 +50,8 @@ MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/confi
            "engine/models/flashnext/engine.py", "engine/models/flashnext/load.py",
            "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
            "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py",
-           "engine/models/flashnext/vision.py", "engine/settings.py")
+           "engine/models/flashnext/vision.py", "engine/models/flashnext/knobs.py",
+           "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 
@@ -165,7 +167,10 @@ class FlashNextServing:
     # chunks a cold one runs; side slots: ENG-241; the shadow reader: validated on the 27B's text only
     # side_lane: Borrow keeps the 27B's pending commit, not this engine's chain and folded commit
     # (lending it raised `'FlashNextCacheState' object has no attribute 'primed'`, rc-0.8.0 live)
-    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False)
+    # SPD-215: a lane's plain step joins the round's joint pass as a one-row block (`joint_plain`): the MTP
+    # cut skips drafts often at C8, and each plain step alone held the other lanes' round
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
+                        joint_plain=True)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
@@ -183,6 +188,8 @@ class FlashNextServing:
         # each for chains of 2-6 rows (a class's idle captures need shapes before the first rounds)
         self.uses: dict = dict(PRIOR_USES)
         self._fresh: set = set()            # graphs captured while idle and not replayed yet
+        self._owed: dict = {}               # class -> a length a turn found it at without its graphs
+        self.last_owed = None               # the last `capture_cost`'s class and missing graphs (the turn's line)
         self.capture_ms = None              # one verify or commit graph's capture, ms (EMA 0.2)
         self._width = 0                     # the last verify block's rows (its commit's key)
         self.picks = None
@@ -221,6 +228,16 @@ class FlashNextServing:
     def pos_delta(self, d: int) -> None:
         for st in self._states():
             st.delta = int(d)
+
+    #: SPD-233: the rows a joint pass of 8 lanes keeps (QWEN38_FN_JOINT_ROWS8; 0: the cap, 32), the best
+    #: lanes' nodes by score: served 2026-10-25, Flash-Next 3.05 at C8, 8 / 16 / 24 / 32 rows a pass:
+    #: 63.1 / 73.4 / 75.3 / 72.2 tok/s
+    JOINT_ROWS_AT = {8: int(_S.get("FN_JOINT_ROWS8") or 0)}
+
+    def joint_policy(self) -> dict:
+        """The joint pass of this family: 32 rows (the row-invariant widths of its kernels, `tree_batchable`)
+        and, by lanes, the rows a pass keeps (`JOINT_ROWS_AT`, a class's measured table)."""
+        return {"max_rows": 32, "rows_at": {e: n for e, n in self.JOINT_ROWS_AT.items() if n}}
 
     def price_class(self, n: int) -> int:
         """The draft prices' context class of a round at context length `n` (engine/methods/staircut.py):
@@ -264,7 +281,7 @@ class FlashNextServing:
         if drafter is None:
             return None
         self.kv.length = 0
-        steps = self.idle_captures()
+        steps = self.idle_captures(ahead=False)       # the classes ahead are the idle windows' (SRV-713)
         return sum(1 for _ in steps) if steps is not None else 0
 
     def draft_heads(self) -> dict:
@@ -279,9 +296,9 @@ class FlashNextServing:
         a call on one state applies another's parked GDN rows first (`FlashNextEngine.settle`), each
         MTP head drafts into its own buffers, and decoding slots verify their blocks in one pass
         (`forward_tree_multi`)."""
-        e2 = FlashNextServing(self.fn, max_len)
+        e2 = type(self)(self.fn, max_len)      # SPD-217: a subclass's slot is its own class (Ornith's)
         d2 = None
-        if drafter0 is not None:
+        if drafter0 is not None and hasattr(drafter0, "cut"):
             ng = None
             if drafter0.ngram is not None:
                 from engine.drafters.ngram import NgramDrafter
@@ -313,8 +330,8 @@ class FlashNextServing:
         """Land what is pending, so the state's sections are the sequence's whole (before a
         snapshot): a chain block's commit, and the GDN rows the folded commit parked for the next call."""
         self._settle_chain()
-        if self.fn._pend_owner is self.st:
-            self.fn.flush()
+        if self.fn.parked(self.st):
+            self.fn.flush(self.st)
 
     def cache_state(self) -> FlashNextCacheState:
         return self.state
@@ -373,9 +390,7 @@ class FlashNextServing:
         last verify's picks and the GDN rows parked for the state that was there."""
         self._chain = None
         self.picks = None
-        if self.fn._pend_owner is self.st:
-            self.fn._pend_n.zero_()
-            self.fn._pend_owner = None
+        self.fn.drop_parked(self.st)
 
     def trim_pending(self, n: int) -> bool:
         """Bring the state back to length `n` inside work not yet committed: a chain block
@@ -410,10 +425,7 @@ class FlashNextServing:
         differently from a cold prefill, 67 of 75 sections wrong)."""
         self._chain = None
         self.picks = None
-        fn = self.fn
-        if fn._pend_owner is self.st:
-            fn._pend_n.zero_()
-            fn._pend_owner = None
+        self.fn.drop_parked(self.st)
         self.st.reset_inplace()
 
     # --- a context class's graphs, captured while the server is idle -----------------------------
@@ -450,20 +462,85 @@ class FlashNextServing:
     def capture_cost(self, n: int) -> float:
         """What a drafted turn at context length `n` would spend capturing the graphs its class lacks,
         ms: the first drafted request in each class paid 3.4-5.1 s of captures (P0, 2026-10-12)
-        until the idle captures below took them (`StairCut.turn` weighs it with the backlog)."""
-        miss = self._missing(self.fn.qsa_class(n))
+        until the idle captures below took them (`StairCut.turn` weighs it with the backlog). A class
+        that lacks graphs here is owed them: the next idle window captures it whatever length the state
+        is left at (a conductor box leaves it at a side question's)."""
+        cls = self.fn.qsa_class(n)
+        miss = self._missing(cls)
+        if miss:
+            self._owed.setdefault(cls, int(n))
+        # what the turn's line names: the class and its missing verify, commit and draft graphs
+        self.last_owed = f"{cls}:" + "".join(f"{k}{sum(1 for m in miss if m[0] == k)}" for k in "vcm")
         return len(miss) * (self.capture_ms if self.capture_ms is not None else CAPTURE_MS)
 
-    def idle_captures(self):
+    def _next_class_len(self, n: int) -> int | None:
+        """The shortest context past `n` in another class (`qsa_class` grows with the length), or None
+        when no context under `max_len` is."""
+        q, cls, top = self.fn.qsa_class, self.fn.qsa_class(n), int(self.max_len) - 1
+        lo, hi = int(n), max(int(n) + 1, 1)
+        while hi < top and q(hi) == cls:
+            lo, hi = hi, min(top, hi * 2)
+        if hi <= lo or q(hi) == cls:
+            return None
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            lo, hi = (mid, hi) if q(mid) == cls else (lo, mid)
+        return hi
+
+    #: SRV-713: the span past the state's length whose classes an idle window captures ahead: a request
+    #: through the conductor starts 4.1-4.8k tokens long (its plan's prompt, 2026-10-26), two classes past an
+    #: empty state's (1,024 from 2,051 tokens, 2,048 from 4,096)
+    AHEAD_TOKENS = 6144
+
+    def _capture_lengths(self, ahead: bool) -> list:
+        """The lengths whose classes the idle captures serve, in order: the state's own; with `ahead`,
+        those turns found without graphs (`capture_cost`), then the next class past the state's length
+        (the one a conversation grows into) and every further one that starts within `AHEAD_TOKENS` of
+        it. SRV-713: every request through the conductor starts in the 2,048 class (its plan's prompt
+        is 4.1-4.8k tokens), the warm-up captures class 0 only and the class of a short state's length
+        is class 0, so each such turn took the plain step: 39.5 tok/s on code against 81.4 raw."""
+        n = int(self.st.length)
+        out = [n]
+        if ahead:
+            out += sorted(self._owed.values())
+            x, first = self._next_class_len(n), True
+            while x is not None and (first or x <= n + self.AHEAD_TOKENS):
+                out.append(x)
+                x, first = self._next_class_len(x), False
+        return out
+
+    def idle_captures(self, ahead: bool = True, wants=None):
         """The graphs the class of the state's length lacks, one capture a step (a generator: the
         server stops between two when a request waits), or None when it lacks none. An empty state
         (a side slot after its warm-up) captures class 0's: its first drafted turn would pay them, so
         it would never draft (2026-10-12: 3 requests at once, the side slots drafted nothing). Every
         capture leaves the state as it was: a verify writes only rows past the length, a commit's and the
-        MTP chain's warm-ups are undone (engine.py)."""
-        cls = self.fn.qsa_class(self.st.length)
-        miss = self._missing(cls)
-        return self._capture_steps(cls, miss) if miss else None
+        MTP chain's warm-ups are undone (engine.py).
+
+        With `ahead`, then the classes of `_capture_lengths` past the state's own, each where `wants(n)`
+        (the drafter's `wants_graphs`) says drafting can pay. A class's graphs fit any length: the rows'
+        positions, the visible keys and the dense flag of each row are the replay's inputs. A capture's
+        rows read no position the state has not committed: a dense row (a short state's) reads up to
+        its own, a sparse one only complete blocks (the scores past them are -inf)."""
+        todo, seen = [], set()
+        for i, n in enumerate(self._capture_lengths(ahead)):
+            cls = self.fn.qsa_class(n)
+            if cls in seen:
+                continue
+            seen.add(cls)
+            if i and wants is not None and not wants(n):
+                continue
+            miss = self._missing(cls)
+            if miss:
+                todo.append((cls, miss))
+            else:
+                self._owed.pop(cls, None)
+        return self._capture_classes(todo) if todo else None
+
+    def _capture_classes(self, todo: list):
+        for cls, miss in todo:
+            yield from self._capture_steps(cls, miss)
+            self._owed.pop(cls, None)
 
     @torch.no_grad()
     def _capture_steps(self, cls: int, miss: list):
@@ -570,11 +647,16 @@ class FlashNextServing:
         and streams as its `forward_tree` leaves them, and its block committed by its `commit_tree`."""
         fn = items[0][0].fn
         jobs = []
+        t0 = time.perf_counter()
         for s, block, parents, start in items:
             s._settle_chain()
             s._at(start)
             s._ensure(start + block.numel())
             jobs.append(([int(t) for t in block.view(-1).tolist()], [int(p) for p in parents], s.st))
+        jt = getattr(fn, "joint_timing", None)
+        if jt is not None:
+            # SPD-239: the host before the pass (a chain's commit, the window, the blocks to the host)
+            jt["host_pre"] = jt.get("host_pre", 0.0) + 1e3 * (time.perf_counter() - t0)
         outs = fn.verify_multi(jobs)
         torch.cuda.current_stream().synchronize()
         res = []
@@ -604,6 +686,32 @@ class FlashNextServing:
             self.captured = True
         if path:
             self._h_last.copy_(stack[len(path) - 1:len(path)])
+
+    @staticmethod
+    @torch.no_grad()
+    def commit_tree_multi(items: list) -> None:
+        """SPD-239: [(serving, path)] of one joint pass's slots committed at once (`FlashNextEngine.commit_multi`:
+        every lane's copies in one launch), each slot left as its `commit_tree` leaves it; a slot whose block was
+        not in the joint pass takes its own `commit_tree`."""
+        fn = items[0][0].fn
+        mine = [(s, path) for s, path in items if id(s.st) in fn._joint]
+        for s, path in items:
+            if id(s.st) not in fn._joint:
+                s.commit_tree(path)
+        if not mine:
+            return
+        t0 = time.perf_counter()
+        stacks = fn.commit_multi([(s.st, [int(p) for p in path]) for s, path in mine])
+        ms = (time.perf_counter() - t0) * 1e3 / len(mine)
+        for (s, path), stack in zip(mine, stacks):
+            s.commit_ms = ms
+            k = (s._width, len(path), any(int(p) != j for j, p in enumerate(path)))
+            s.uses[k] = s.uses.get(k, 0) + 1
+            if k + (getattr(fn, "_vcls", 0),) in s._fresh:
+                s._fresh.discard(k + (getattr(fn, "_vcls", 0),))
+                s.captured = True
+            if path:
+                s._h_last.copy_(stack[len(path) - 1:len(path)])
 
     @torch.no_grad()
     def forward_block(self, block: torch.Tensor, start: int) -> torch.Tensor:

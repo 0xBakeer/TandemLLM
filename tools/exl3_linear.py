@@ -96,6 +96,9 @@ ROWGRID = _S.get("EXL3_ROWGRID") == "1"
 # cp.async stages of the skinny GEMM's trellis pipeline (a warp's stages in flight); the
 # summation order does not depend on it
 STAGES = int(_S.get("EXL3_STAGES"))
+#: SPD-245: the skinny GEMM launched with programmatic stream serialization: its CTAs start in the previous
+#: kernel's tail and fetch their first trellis stages, then wait for it (griddepcontrol). No arithmetic moves.
+PDL = _S.get("EXL3_PDL") == "1"
 SLAB_N = 16384                            # columns a prefill slab decodes at once (fp16 Kin x SLAB_N)
 
 _CUDA = r"""
@@ -300,6 +303,12 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* glob) {
 }
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;" ::: "memory"); }
 template <int n> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" :: "n"(n) : "memory"); }
+#if EXL3_PDL
+// SPD-245: programmatic dependent launch of the skinny GEMM (QWEN38_EXL3_PDL). The trellis is a weight, so
+// its first stages are fetched before the wait; the activations and every store come after it.
+__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+#endif
 
 // natural-order Walsh-Hadamard over 128 values held 4 a lane (index 4 lane + e), unnormalised
 __device__ __forceinline__ void wht128(float& v0, float& v1, float& v2, float& v3, int lane) {
@@ -555,8 +564,14 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
         }
     };
 
+#if EXL3_PDL
+    if (XSM) pdl_wait();                            // the stages carry activations
+#endif
 #pragma unroll
     for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+#if EXL3_PDL
+    if (!XSM) pdl_wait();
+#endif
     if (!XSM && k0 < k1) load_x(k0);
     for (int kt = k0; kt < k1; ++kt) {
         const int i = kt - k0;
@@ -596,6 +611,9 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
         __syncwarp();
     }
     cp_wait<0>();
+#if EXL3_PDL
+    pdl_trigger();
+#endif
 
     // the CTA's warps, in K order (wk), into the reduction buffer [16 MT][128]
     for (int step = 0; step < WK; ++step) {
@@ -684,6 +702,13 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
     at[0].val.clusterDim.x = S; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
     cfg.attrs = at;
     cfg.numAttrs = S > 1 ? 1 : 0;           // one CTA a column block: a plain launch
+#if EXL3_PDL
+    cudaLaunchAttribute at2[2] = {at[0]};
+    at2[cfg.numAttrs].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at2[cfg.numAttrs].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at2;
+    cfg.numAttrs += 1;
+#endif
     cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
         (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
         (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
@@ -852,7 +877,7 @@ def _module():
         venv_bin = os.path.dirname(sys.executable)
         if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        src = f"#define EXL3_ST {STAGES}\n" + _CUDA
+        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL)}\n" + _CUDA
         tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                            functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon",

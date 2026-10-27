@@ -40,7 +40,7 @@ describe('defaults', () => {
     const d = defaults(M);
     expect(d.profile).toBe('exl3-4.5');
     for (const c of M.components) expect(d.components[c.id]).toBe(c.required || c.default);
-    expect(d.slots).toBe(4);
+    expect(d.slots).toBe(8);                              // SRV-707: 8 lanes by default
     expect(d.window).toBe(262_144);
     expect(d.kv_pool).toBe(true);
     expect(d.methods.sampled_tree).toBe('det');
@@ -98,7 +98,7 @@ describe('setupReducer', () => {
     expect(s.notice).toMatch(/98,304/);
     s = run([{ type: 'parallel', key: 'window', value: 999_999 }], s);
     expect(s.selection!.window).toBe(262_144);
-    expect(s.selection!.side_window).toBeLessThanOrEqual(262_144);
+    expect('side_window' in s.selection!).toBe(false);       // SRV-707: one window for every chat
   });
   it("a profile's largest window caps the window, and a switch to it takes the window down (SRV-337)", () => {
     // the registry's packs all reach 262,144 on the Spark today: a copy with a shorter one
@@ -113,7 +113,6 @@ describe('setupReducer', () => {
     expect(s.selection!.window).toBe(262_144);
     s = go([{ type: 'profile', id: 'flashnext-4.05' }], s);
     expect(s.selection!.window).toBe(131_072);
-    expect(s.selection!.side_window).toBe(131_072);
     expect(s.notice).toMatch(/131,072/);
     s = go([{ type: 'parallel', key: 'window', value: 262_144 }], s);
     expect(s.selection!.window).toBe(131_072);
@@ -126,19 +125,23 @@ describe('setupReducer', () => {
   it('Flash-Next: the recommended pack fits the Spark at 262,144 with the small models off; 6.05 fits none', () => {
     const d = defaults(FN);
     expect(d.profile).toBe('flashnext-3.05');
-    expect(d.slots).toBe(1);
+    expect(d.slots).toBe(8);                              // SRV-707: 8 lanes on the pool
+    expect(d.kv_pool).toBe(true);
     expect(estimate(FN, d).fits).toBe(true);
     const big = estimate(FN, { ...d, profile: 'flashnext-6.05' });
     expect(big.fits).toBe(false);
     expect(big.context_tokens_fit).toBe(0);
   });
-  it('the side window follows the main window down', () => {
-    const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'window', value: 65_536 }]);
-    expect(s.selection!.side_window).toBe(65_536);
+  it('a saved side window (an older page\'s) is left behind: every chat has the window', () => {
+    const r = restoreSelection(M, { ...defaults(M), window: 65_536, side_window: 8192 });
+    expect(r.selection.window).toBe(65_536);
+    expect('side_window' in r.selection).toBe(false);
+    expect(r.notices).toEqual([]);
   });
   it('clamps slots to the engine limit (not the card) and floor to the registry range', () => {
     const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 40 }, { type: 'parallel', key: 'floor_gb', value: 2 }]);
-    expect(s.selection!.slots).toBe(16);
+    expect(s.selection!.slots).toBe(40);                  // SRV-707: the setup's 64 is the cap
+    expect(run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 99 }]).selection!.slots).toBe(64);
     expect(run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 9 }]).selection!.slots).toBe(9);
     expect(s.selection!.floor_gb).toBe(10);
   });
@@ -198,8 +201,8 @@ describe('restoreSelection', () => {
     expect(notices.join(' ')).toMatch(/flux/);
   });
   it('rejects out-of-range numbers and bad enum values', () => {
-    const { selection, notices } = restoreSelection(M, { ...defaults(M), slots: 17, methods: { reasoning_effort: 'max' } });
-    expect(selection.slots).toBe(4);
+    const { selection, notices } = restoreSelection(M, { ...defaults(M), slots: 65, methods: { reasoning_effort: 'max' } });
+    expect(selection.slots).toBe(8);
     expect(selection.methods.reasoning_effort).toBe('medium');
     expect(notices).toHaveLength(2);
   });
@@ -254,7 +257,7 @@ describe('localStorage tandem.setup.v1', () => {
 describe('the memory check on Review', () => {
   it('exl3-6.0, every tool, 4 slots of 262,144 without the pool does not fit; How to fix names the pool first', () => {
     const all = Object.fromEntries(M.components.map((c) => [c.id, true]));
-    const sel = { ...defaults(M), profile: 'exl3-6.0', components: normaliseComponents(M, all), kv_pool: false };
+    const sel = { ...defaults(M), profile: 'exl3-6.0', components: normaliseComponents(M, all), kv_pool: false, slots: 4 };
     const e = estimate(M, sel);
     expect(e.fits).toBe(false);
     expect(stepIssues(M, sel, null, e).review?.[0]).toMatch(/does not fit/);
@@ -263,7 +266,7 @@ describe('the memory check on Review', () => {
     expect(fixes.some((f) => /Lower the longest conversation/.test(f.text))).toBe(true);
     expect(overSentence(M, sel, e)).toMatch(/^Over by \d+\.\d GiB\. Turn on the shared memory pool, or use 1 parallel chat\.$/);
     // lowering the window until it fits
-    expect(estimate(M, { ...sel, window: 65_536, side_window: 65_536 }).fits).toBe(true);
+    expect(estimate(M, { ...sel, window: 65_536 }).fits).toBe(true);
   });
   it('a private profile that is not on the box and no token blocks the weights step', () => {
     // OPS-95 made every published profile public, so the private ones are marked here, as the

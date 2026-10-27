@@ -88,7 +88,7 @@ export function howToFix(m: SetupModel, sel: SetupSelection): Fix[] {
     fixes.push({ text: S.fixPool, step: 'parallelism', saves: base.total_gb - e.total_gb });
   }
   for (const w of WINDOWS.filter((x) => x < sel.window && x >= m.parallelism.window.min)) {
-    const e = try_({ ...sel, window: w, side_window: Math.min(sel.side_window ?? sel.window, w) });
+    const e = try_({ ...sel, window: w });
     if (e.fits) {
       fixes.push({ text: S.fixWindow(w), step: 'parallelism', saves: base.total_gb - e.total_gb });
       break;
@@ -138,7 +138,7 @@ export function buildPageState(m: SetupModel | null, step: SetupStepId, sel: Set
   // nothing the page holds is a secret (the admin password is keep or generate); a value under a
   // secret-looking name that is anything else is still never sent
   const redact = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, SECRET.test(k) && v !== 'keep' && v !== 'generate' ? '<set>' : v])) as SetupSelection['advanced'];
-  page.selection = { model: sel.model, profile: sel.profile, components: sel.components, slots: sel.slots, window: sel.window, side_window: sel.side_window, kv_pool: sel.kv_pool, floor_gb: sel.floor_gb, methods: redact(sel.methods), advanced: redact(sel.advanced) };
+  page.selection = { model: sel.model, profile: sel.profile, components: sel.components, slots: sel.slots, window: sel.window, kv_pool: sel.kv_pool, floor_gb: sel.floor_gb, methods: redact(sel.methods), advanced: redact(sel.advanced) };
   const schema = stepsOf(m).find((s) => s.id === step);
   const valueOf = (field: string): unknown => {
     if (step === 'weights') return sel.profile;

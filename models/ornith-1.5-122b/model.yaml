@@ -3,8 +3,8 @@
 # Ornith's agentic and coding model on the Qwen3.5 mixture-of-experts architecture (engine/models/qwen3_5_moe), from our
 # EXL3 pack, drafting with its own MTP layer (the public DFlash2 drafter for it is the other head). weights_gib: allocated at load (measured 2026-10-20). Window
 # 262,144 tokens (max_position_embeddings); its KV is 24,576 bytes a token (12 attention layers, 2 KV heads of 256).
-# One sequence slot: the joint verify of several slots is not built for this trunk yet. Rows of the measured table come
-# from real runs only.
+# Eight lanes (SPD-217): side slots over one trunk and a joint verify pass (Qwen35MoeEngine.verify_multi), measured
+# 2026-10-24 at 1/2/4/8 at once: 37.7 / 47.0 / 58.4 / 69.8 tok/s. Rows of the measured table come from real runs only.
 schema: 1
 id: ornith-1.5-122b
 name: Ornith-1.5-122B
@@ -345,17 +345,12 @@ components:
 parallelism:
   slots:
     min: 1
-    max: 1
-    default: 1
+    max: 8
+    default: 8
   window:
     min: 8192
     max: 262144
     default: 262144
-    step: 4096
-  side_window:
-    min: 8192
-    max: 262144
-    default: 65536
     step: 4096
   kv_pool:
     default: false

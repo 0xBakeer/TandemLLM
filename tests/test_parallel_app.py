@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -117,6 +118,21 @@ def test_three_streams_at_once_on_three_slots():
         assert _overlap(spans) == 3, "at most three at once on three slots"
     finally:
         _stop(proc)
+
+
+def test_the_prefill_burst_changes_no_answer():
+    """SPD-245: with QSE_PREFILL_BURST (wait, joint) three requests at once get the answers they get
+    alone, and /health shows the burst; the fake engine never takes the joint forward."""
+    for mode in ("wait", "joint"):
+        port, proc = _server(("--parallel", "3", "--side-max-len", "8192"), env={"QSE_PREFILL_BURST": mode})
+        try:
+            alone = [_chat(port, t)[0] for t in TEXTS[:3]]
+            spans, _ = _together(port, TEXTS[:3])
+            assert [s[0] for s in spans] == alone, mode
+            b = _get(port, "/health")["parallel"]["prefill_burst"]
+            assert b is not None and not b["open"] and b["joint"] == 0, (mode, b)
+        finally:
+            _stop(proc)
 
 
 def test_the_parallel_view_shows_the_slots():
@@ -232,6 +248,124 @@ def test_a_window_offers_the_turn_between_layers_only_to_a_waiting_slot():
     finally:
         dict.__setitem__(A.STATE, "pool", old)
     assert A.PAR_LAYER_YIELD is True
+
+
+def test_every_side_slot_gets_the_one_window():
+    """SRV-707: `--side-max-len` 0 (the default) is `--max-len` for every side slot; a shorter
+    value is kept (an old setup), a longer one is cut to `--max-len`."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from argparse import Namespace
+
+    from server import app as A
+    old = os.environ.pop("QSE_SIDE_MAX_LEN", None)
+    try:
+        a = A.parser().parse_args(["--max-len", "131072"])
+        assert a.side_max_len == 0 and A.side_window(a) == 131072
+    finally:
+        if old is not None:
+            os.environ["QSE_SIDE_MAX_LEN"] = old
+    assert A.side_window(Namespace(max_len=262144, side_max_len=65536)) == 65536
+    assert A.side_window(Namespace(max_len=40960, side_max_len=65536)) == 40960
+    assert A.side_window(Namespace(max_len=262144, side_max_len=None)) == 262144
+
+
+def test_side_slots_on_the_fake_engine_take_the_full_window():
+    port, proc = _server(("--parallel", "3", "--max-len", "32768"))
+    try:
+        h = _get(port, "/health")["parallel"]
+        assert h["n"] == 3 and [s["max_len"] for s in h["slots"]] == [32768] * 3, h["slots"]
+    finally:
+        _stop(proc)
+
+
+def test_a_full_pool_stops_the_answer_with_memory_full():
+    """SRV-709: a commit the KV pool refuses after every reclaim (`PoolFull`) is the box at its
+    floor, not a failure: a streamed answer keeps its text and ends with finish_reason "error"
+    beside the `memory_full` error; one not streamed yet gets a 503 with Retry-After."""
+    port, proc = _server(("--parallel", "2"))
+    try:
+        body = {"messages": [{"role": "user", "content": "FAKE_POOL_FULL go"}], "max_tokens": 64,
+                "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        text, last = [], None
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for raw in r:
+                line = raw.decode().strip()
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                d = json.loads(line[6:])
+                for c in d.get("choices") or []:
+                    if (c.get("delta") or {}).get("content"):
+                        text.append(c["delta"]["content"])
+                    if c.get("finish_reason"):
+                        last = d
+        assert last is not None and last["choices"][0]["finish_reason"] == "error", last
+        err = last["error"]
+        assert err["code"] == "memory_full" and err["type"] == "server_busy", err
+        assert "memory is full" in err["message"] and err["retry_after"] == 30, err
+        assert text, "the text before the stop is kept"
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(dict(body, stream=False)).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=60)
+            raise AssertionError("a full pool must not answer 200")
+        except urllib.error.HTTPError as exc:
+            got = json.loads(exc.read())["error"]
+            assert exc.code == 503 and exc.headers.get("Retry-After") == "30", exc.code
+            assert got["code"] == "memory_full", got
+    finally:
+        _stop(proc)
+
+
+def test_a_lane_the_pool_refuses_gives_way_and_goes_on():
+    """SRV-709: with another lane running, a lane whose next pages the pool refuses gives its
+    memory back, waits at the head of the line and goes on in the same stream from its prompt and
+    its text: no error, the answer finishes, /health counts one give-way and one resume. The other
+    lane is not touched."""
+    port, proc = _server(("--parallel", "2"))
+    try:
+        def ask(content, out, key):
+            body = {"messages": [{"role": "user", "content": content}], "max_tokens": 48,
+                    "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                         data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            text, fin, comments = [], None, []
+            with urllib.request.urlopen(req, timeout=120) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if line.startswith(":"):
+                        comments.append(line)
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    d = json.loads(line[6:])
+                    for c in d.get("choices") or []:
+                        if (c.get("delta") or {}).get("content"):
+                            text.append(c["delta"]["content"])
+                        if c.get("finish_reason"):
+                            fin = d
+            out[key] = ("".join(text), fin, comments)
+
+        out: dict = {}
+        other = threading.Thread(target=ask, args=("FAKE_SLOW tell a long story", out, "other"))
+        other.start()
+        time.sleep(1.0)
+        ask("FAKE_POOL_FULL_ONCE go", out, "lane")
+        other.join(120)
+        text, fin, _ = out["lane"]
+        assert fin is not None and fin["choices"][0]["finish_reason"] != "error", fin
+        assert "error" not in fin, fin
+        assert text, "the lane's text came through"
+        ofin = out["other"][1]
+        assert ofin is not None and ofin["choices"][0]["finish_reason"] != "error", ofin
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as r:
+            rc = json.loads(r.read())["parallel"]["recompute"]
+        assert rc["on"] and rc["gave_way"] == 1 and rc["resumed"] == 1 and rc["gave_up"] == 0, rc
+    finally:
+        _stop(proc)
 
 
 if __name__ == "__main__":

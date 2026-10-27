@@ -1,0 +1,1629 @@
+"""SPD-163 step 8: the EXL3 skinny GEMM with a 64-row tile, for the 27B's joint verify pass and packed draft.
+
+`tools/exl3_linear.py` takes 33-64 rows as two adjacent 32-row chunks (the row grid, ENG-213): the second
+chunk reads the trellis from L2, but decodes it again, and on GB10 the decode is the kernel's work. In
+the 27B's served joint pass (64 rows at four or eight slots) that second decode is the 32-to-64-row step
+of the joint staircase (E=4: 84 -> 100 ms, E=8: 101 -> 117 ms a pass); the packed draft (8 x 16 rows) runs
+four chunks.
+
+This module builds the same kernel source with MT = 4 (four 16-row tiles a CTA, one decode of each trellis
+tile for all 64 rows) as its own extension, and leaves `tools/exl3_linear.py`'s bytes (and every other
+family's fingerprint) alone; only the 27B's engine/model.py calls it. A row's arithmetic is the MT = 2
+kernel's: each 16-row tile `a` keeps its own accumulator, the K range is split into the same rank and
+warp slices (`pick`: a function of the weight's shape only) and reduced in the same order, so every row is
+the bits the row grid gives it whatever the row count. `check()` holds that on the 27B's projection shapes
+at every row count 1..128.
+
+cfg (the column tiling, never the order): 5 -> MT4 NTW2 WN4, 6 -> MT4 NTW4 WN2 (the activations in
+registers).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import sys
+
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch  # noqa: E402
+
+from tools import exl3_linear as X  # noqa: E402
+
+#: rows a tall chunk takes
+TALL = 64
+
+_EXTRA = r"""
+#define EXL3_TALL_WK_CASES(KB, MT, NTW, WN, OF32, XSM, MINB)                                     \
+    switch (wk) {                                                                                \
+        case 4: launch_gemm<KB, MT, NTW, WN, 4, EXL3_ST, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        case 8: launch_gemm<KB, MT, NTW, WN, 8, EXL3_ST, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        default: TORCH_CHECK(false, "exl3 tall gemm: wk must be 4 or 8, got ", wk);              \
+    }
+#define EXL3_TALL_CFG_CASES(KB, OF32)                                                            \
+    switch (cfg) {                                                                               \
+        case 5: EXL3_TALL_WK_CASES(KB, 4, 2, 4, OF32, false, 1)                                  \
+        case 6: EXL3_TALL_WK_CASES(KB, 4, 4, 2, OF32, false, 1)                                  \
+        default: TORCH_CHECK(false, "exl3 tall gemm: bad cfg ", cfg);                            \
+    }
+#define EXL3_TALL_KB_CASES(OF32)                                                                 \
+    switch (kb) {                                                                                \
+        case 2: EXL3_TALL_CFG_CASES(2, OF32)                                                     \
+        case 3: EXL3_TALL_CFG_CASES(3, OF32)                                                     \
+        case 4: EXL3_TALL_CFG_CASES(4, OF32)                                                     \
+        case 5: EXL3_TALL_CFG_CASES(5, OF32)                                                     \
+        case 6: EXL3_TALL_CFG_CASES(6, OF32)                                                     \
+        case 7: EXL3_TALL_CFG_CASES(7, OF32)                                                     \
+        case 8: EXL3_TALL_CFG_CASES(8, OF32)                                                     \
+        default: TORCH_CHECK(false, "exl3 tall gemm: K bits must be 2..8, got ", kb);            \
+    }
+
+void exl3_gemm_tall(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
+                    int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+    const at::cuda::OptionalCUDAGuard guard(xh.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
+    TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense");
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+    const int ldt = t.stride(0) / t.stride(1);
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1, "rows");
+    TORCH_CHECK(S >= 1 && S <= 16, "cluster size");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
+    if (y.dtype() == torch::kFloat) { EXL3_TALL_KB_CASES(true) }
+    else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); EXL3_TALL_KB_CASES(false) }
+}
+"""
+
+_CPP = ("void exl3_gemm_tall(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
+        "int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+
+_MOD = None
+
+
+def _module():
+    global _MOD
+    if _MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        src = f"#define EXL3_ST {X.STAGES}\n" + X._CUDA + _EXTRA
+        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
+        _MOD = load_inline(name=f"qwen38_exl3_tall_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
+                           functions=["exl3_gemm_tall"],
+                           extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                           verbose=False)
+    return _MOD
+
+
+# ---- T64 (SPD-199): one decode of each trellis tile for all 64 rows of a chunk ----------------------------
+# A warp owns one 16-column tile of the CTA's 128 columns for all MT 16-row groups and walks the CTA's whole
+# K range; `pick`'s WK warp slices become WK consecutive stretches of that walk. A stretch starts from zero
+# and is added into the reduction buffer when it ends (the first with `=`, the rest with `+=`, empty ones
+# too), so every output element is the production kernel's ((s0 + s1) + s2) ... over the same K tiles in the
+# same mma chain; the cluster fold and the output rotation are the production kernel's lines.
+_T64 = r"""
+template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32, int MINB>
+__global__ void __launch_bounds__(32 * WN, MINB) gemm_t64_kernel(
+        const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
+        void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
+    constexpr int TW = 8 * KB;
+    constexpr int RP = 132;
+    extern __shared__ uint32_t smem[];
+    const int lane = threadIdx.x & 31, wn = threadIdx.x >> 5;
+    const int g = lane >> 2, t = lane & 3;
+    const int rank = blockIdx.x % S, chunk = blockIdx.x / S;
+    const int cb = blockIdx.y;
+    const int KT = Kin / 16;
+    const int member = (cb >= b1) + (cb >= b2);
+    const int M = min(16 * MT, Mtot - chunk * 16 * MT);
+    const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 16 * MT * Kin;
+    Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 16 * MT * ldy)
+              : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 16 * MT * ldy);
+    uint32_t* stage = smem + (size_t)wn * ST * NTW * TW;
+    float* red = reinterpret_cast<float*>(smem + (size_t)WN * ST * NTW * TW);
+
+    const int per_r = (KT + S - 1) / S;
+    const int r0 = min(KT, rank * per_r), r1 = min(KT, r0 + per_r);
+    const int per_w = (r1 - r0 + WK - 1) / WK;      // the production kernel's warp slices
+    const int nt0 = cb * 8 + wn * NTW;
+
+    float acc[MT][NTW][2][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[a][j][h][c] = 0.f;
+
+    auto issue = [&](int kt, int buf) {
+        if (kt < r1) {
+            const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
+            uint4* dst = reinterpret_cast<uint4*>(stage + buf * NTW * TW);
+            for (int c = lane; c < NTW * TW / 4; c += 32) cp_async16(dst + c, src + c);
+        }
+        cp_commit();
+    };
+    uint32_t xn[MT][4];
+    auto load_x = [&](int kt) {
+        const int kk = kt * 16 + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int ra = 16 * a + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xn[a][0] = ra < M ? __ldg(pa) : 0u;
+            xn[a][1] = rb < M ? __ldg(pb) : 0u;
+            xn[a][2] = ra < M ? __ldg(pa + 4) : 0u;
+            xn[a][3] = rb < M ? __ldg(pb + 4) : 0u;
+        }
+    };
+    // a stretch's sum into the reduction buffer (its columns are this warp's alone)
+    auto flush = [&](int s) {
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int col = (wn * NTW + j) * 16 + h * 8 + 2 * t;
+                float* r_lo = red + (16 * a + g) * RP + col;
+                float* r_hi = red + (16 * a + 8 + g) * RP + col;
+                if (s == 0) {
+                    r_lo[0] = acc[a][j][h][0]; r_lo[1] = acc[a][j][h][1];
+                    r_hi[0] = acc[a][j][h][2]; r_hi[1] = acc[a][j][h][3];
+                } else {
+                    r_lo[0] += acc[a][j][h][0]; r_lo[1] += acc[a][j][h][1];
+                    r_hi[0] += acc[a][j][h][2]; r_hi[1] += acc[a][j][h][3];
+                }
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[a][j][h][c] = 0.f;
+            }
+    };
+
+#pragma unroll
+    for (int s = 0; s < ST - 1; ++s) issue(r0 + s, s);
+    if (r0 < r1) load_x(r0);
+    int sl = 0;                                     // the stretch being summed
+    int end = min(r1, r0 + per_w);                  // where it ends
+    for (int kt = r0; kt < r1; ++kt) {
+        while (kt >= end) {                         // a stretch ended (empty ones end at once)
+            flush(sl);
+            ++sl;
+            end = min(r1, r0 + (sl + 1) * per_w);
+        }
+        const int i = kt - r0;
+        uint32_t xa[MT][4];
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) xa[a][c] = xn[a][c];
+        if (kt + 1 < r1) load_x(kt + 1);
+        issue(kt + ST - 1, (i + ST - 1) % ST);
+        cp_wait<ST - 1>();
+        __syncwarp();
+#pragma unroll
+        for (int j = 0; j < NTW; ++j) {
+            FragB f0, f1;
+            dq_tile<KB>(stage + (i % ST) * NTW * TW + j * TW, lane * 8, f0, f1);
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                if (16 * a < M) {
+                    mma(acc[a][j][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
+                    mma(acc[a][j][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+                }
+            }
+        }
+        __syncwarp();
+    }
+    cp_wait<0>();
+    for (; sl < WK; ++sl) flush(sl);                // the last stretch, then the empty ones
+    __syncthreads();
+
+    const int nthreads = 32 * WN;
+    const int rows = min(M, 16 * MT);
+    if (S > 1) {
+        cg::cluster_group cluster = cg::this_cluster();
+        cluster.sync();
+        if (rank == 0) {
+            for (int r = 1; r < S; ++r) {
+                const float* rem = cluster.map_shared_rank(red, r);
+                for (int e = threadIdx.x; e < rows * 128; e += nthreads) {
+                    const int m = e >> 7, c = e & 127;
+                    red[m * RP + c] += rem[m * RP + c];
+                }
+                __syncthreads();
+            }
+        }
+        cluster.sync();
+        if (rank != 0) return;
+    }
+    for (int m = wn; m < rows; m += WN) {
+        const float* rr = red + m * RP + 4 * lane;
+        float v0 = rr[0], v1 = rr[1], v2 = rr[2], v3 = rr[3];
+        wht128(v0, v1, v2, v3, lane);
+        const int n = cb * 128 + 4 * lane;
+        const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+        v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+        v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+        if constexpr (OF32) {
+            float4* y = reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + (size_t)m * ldy + n);
+            *y = make_float4(v0, v1, v2, v3);
+        } else {
+            __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+            *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)m * ldy + n) = o;
+        }
+    }
+}
+
+template <int KB, int MT, int NTW, int WK, bool OF32>
+void launch_t64(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
+                int M, int Kin, int N, int ldt, int S, int b1, int b2, int st_, cudaStream_t stream) {
+    constexpr int TW = 8 * KB, WN = 8 / NTW, ST = EXL3_T64_ST;
+    const size_t smem = (size_t)WN * ST * NTW * TW * 4 + (size_t)16 * MT * 132 * 4;
+    auto kern = gemm_t64_kernel<KB, MT, NTW, WN, WK, ST, OF32, (MT * NTW <= 4 ? 2 : 1)>;
+    static bool attr = false;
+    if (!attr) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+        attr = true;
+    }
+    cudaLaunchConfig_t cfg = {};
+    const int R = (M + 16 * MT - 1) / (16 * MT);
+    cfg.gridDim = dim3(S * R, N / 128, 1);
+    cfg.blockDim = dim3(32 * WN, 1, 1);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = stream;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = S; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = S > 1 ? 1 : 0;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
+        (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
+    TORCH_CHECK(e == cudaSuccess, "exl3 t64 launch: ", cudaGetErrorString(e));
+}
+
+#define T64_WK(KB, MT, NTW, OF32) switch (wk) { \
+    case 4: launch_t64<KB, MT, NTW, 4, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
+    case 8: launch_t64<KB, MT, NTW, 8, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, 0, st); return; \
+    default: TORCH_CHECK(false, "t64: wk must be 4 or 8, got ", wk); }
+#define T64_NTW(KB, MT, OF32) switch (ntw) { \
+    case 1: T64_WK(KB, MT, 1, OF32) \
+    case 2: T64_WK(KB, MT, 2, OF32) \
+    case 4: T64_WK(KB, MT, 4, OF32) \
+    default: TORCH_CHECK(false, "t64: ntw must be 1, 2 or 4, got ", ntw); }
+#define T64_MT(KB, OF32) switch (mt) { \
+    case 4: T64_NTW(KB, 4, OF32) \
+    case 8: T64_NTW(KB, 8, OF32) \
+    default: TORCH_CHECK(false, "t64: mt must be 4 or 8, got ", mt); }
+#define T64_KB(OF32) switch (kb) { \
+    case 3: T64_MT(3, OF32) \
+    case 4: T64_MT(4, OF32) \
+    case 5: T64_MT(5, OF32) \
+    case 6: T64_MT(6, OF32) \
+    default: TORCH_CHECK(false, "t64: K bits 3..6, got ", kb); }
+
+void exl3_gemm_t64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
+                   int64_t kb, int64_t mt, int64_t ntw, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+    const at::cuda::OptionalCUDAGuard guard(xh.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
+    TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense");
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+    const int ldt = t.stride(0) / t.stride(1);
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1 && S >= 1 && S <= 16, "rows / cluster size");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
+    if (y.dtype() == torch::kFloat) { T64_KB(true) }
+    else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); T64_KB(false) }
+}
+"""
+_T64_CPP = ("void exl3_gemm_t64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
+            "int64_t kb, int64_t mt, int64_t ntw, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+#: column tiles a T64 warp owns (WN = 8 / NTW warps a CTA); the order is the same at any NTW
+T64_NTW = int(os.environ.get("QWEN38_EXL3_T64_NTW", "2") or 2)
+#: cp.async stages a T64 warp keeps in flight (one 16x16 tile a stage; a function of nothing that moves bits)
+T64_ST = int(os.environ.get("QWEN38_EXL3_T64_ST", "8") or 8)
+_T64_MOD = None
+
+
+def _t64_module():
+    global _T64_MOD
+    if _T64_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_T64_ST {T64_ST}\n" + X._CUDA + _T64
+        tag = hashlib.sha1((_T64_CPP + src).encode()).hexdigest()[:10]
+        _T64_MOD = load_inline(name=f"qwen38_exl3_t64_{tag}", cpp_sources=[_T64_CPP], cuda_sources=[src],
+                               functions=["exl3_gemm_t64"],
+                               extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                               verbose=False)
+    return _T64_MOD
+
+
+def t64_matmul(x: torch.Tensor, w, *, mt: int = 4, ntw: int | None = None, xh: torch.Tensor | None = None,
+               out: torch.Tensor | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` with each trellis tile decoded once for 16 mt rows (the same bits)."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    _t64_module().exl3_gemm_t64(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, mt,
+                                T64_NTW if ntw is None else ntw, tile["wk"], tile["S"], w.bounds[0], w.bounds[1])
+    return out
+
+
+def check_t64(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 128), bench: bool = True) -> list[str]:
+    """T64 (mt 4 and 8) against the production kernels' bits at every row count named, on the 27B's shapes;
+    with `bench`, the times at 32, 64 and 128 rows."""
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        for M in rows:
+            ref = X.exl3_matmul(x[:M], w)
+            for mt in (4, 8):
+                for ntw in (1, 2, 4):
+                    assert torch.equal(t64_matmul(x[:M], w, mt=mt, ntw=ntw), ref), ("t64", N, K, kb, M, mt, ntw)
+        line = f"{N}x{K} K{kb} ST{T64_ST}: rows {min(rows)}..{max(rows)} through T64 (mt 4/8, ntw 1/2/4) = the production bits"
+        if bench:
+            line += "; " + _bench_t64(x, w)
+        out.append(line)
+    return out
+
+
+def _bench_t64(x, w) -> str:
+    import time
+    res = []
+    for M in (32, 64, 128):
+        xs = x[:M]
+        for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)),) + tuple(
+                (f"t{16 * mt}n{ntw}", (lambda mt=mt, ntw=ntw: t64_matmul(xs, w, mt=mt, ntw=ntw)))
+                for mt in (4, 8) for ntw in (1, 2, 4)):
+            for _ in range(3):
+                fn()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(30):
+                fn()
+            torch.cuda.synchronize()
+            res.append(f"M{M} {name} {(time.perf_counter() - t0) / 30 * 1e6:.0f}us")
+    return ", ".join(res)
+
+
+# ---- P2 (SPD-199): each trellis tile decoded once for 64 rows, the production order kept ------------------------
+# A CTA owns the production kernel's 128 columns and K range, for 64 rows. pick()'s WK warp slices run in phases
+# of 4: 4 slice groups x 4 row-group warps (16 rows each); at each K step a group's 4 warps decode its 8 column
+# tiles once into shared memory (two buffers, one named barrier a step) and every warp of the group applies them
+# to its own 16 rows, its accumulators starting from zero for the slice. A phase's slices are added into the
+# reduction buffer in slice order (= then +=, empty ones too), then the next phase's: every output is the
+# production ((s0 + s1) + s2) ... over the same tiles and mma chain; the cluster fold and the rotation are the
+# production lines.
+_P2 = r"""
+__device__ __forceinline__ void bar_named(int id, int n) {
+    asm volatile("bar.sync %0, %1;" :: "r"(id), "r"(n) : "memory");
+}
+
+template <int KB, int WK, int ST, bool OF32>
+__global__ void __launch_bounds__(512, 1) gemm_p2_kernel(
+        const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
+        void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
+    constexpr int TW = 8 * KB, RP = 132, G = 4, NT = 8;     // G slice groups a phase, NT column tiles
+    extern __shared__ uint32_t smem[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int sg = warp >> 2, rg = warp & 3;                  // slice group, row group
+    const int g = lane >> 2, t = lane & 3;
+    const int rank = blockIdx.x % S, chunk = blockIdx.x / S;
+    const int cb = blockIdx.y;
+    const int KT = Kin / 16;
+    const int member = (cb >= b1) + (cb >= b2);
+    const int M = min(64, Mtot - chunk * 64);
+    const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 64 * Kin;
+    Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 64 * ldy)
+              : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 64 * ldy);
+    uint32_t* raw = smem + (size_t)sg * ST * NT * TW;                      // [ST][NT tiles][TW]
+    uint32_t* dec = smem + (size_t)G * ST * NT * TW + (size_t)sg * 2 * NT * 128;   // [2][NT][32 lanes x 4]
+    float* red = reinterpret_cast<float*>(smem + (size_t)G * ST * NT * TW + (size_t)G * 2 * NT * 128);
+
+    const int per_r = (KT + S - 1) / S;
+    const int r0 = min(KT, rank * per_r), r1 = min(KT, r0 + per_r);
+    const int per_w = (r1 - r0 + WK - 1) / WK;
+    const int nt0 = cb * 8;
+    const int gtid = rg * 32 + lane;                          // a thread's index in its slice group (128)
+
+    for (int ph = 0; ph < WK / G; ++ph) {
+        const int sl = ph * G + sg;                           // the slice this group sums in this phase
+        const int k0 = min(r1, r0 + sl * per_w), k1 = min(r1, k0 + per_w);
+        float acc[NT][2][4];
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+        auto issue = [&](int kt, int buf) {
+            if (kt < k1) {
+                const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
+                uint4* dst = reinterpret_cast<uint4*>(raw + buf * NT * TW);
+                for (int c = gtid; c < NT * TW / 4; c += 128) cp_async16(dst + c, src + c);
+            }
+            cp_commit();
+        };
+        uint32_t xn[4];
+        auto load_x = [&](int kt) {
+            const int kk = kt * 16 + 2 * t;
+            const int ra = 16 * rg + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xn[0] = ra < M ? __ldg(pa) : 0u;
+            xn[1] = rb < M ? __ldg(pb) : 0u;
+            xn[2] = ra < M ? __ldg(pa + 4) : 0u;
+            xn[3] = rb < M ? __ldg(pb + 4) : 0u;
+        };
+#pragma unroll
+        for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+        if (k0 < k1) load_x(k0);
+        for (int kt = k0; kt < k1; ++kt) {
+            const int i = kt - k0;
+            uint32_t xa[4] = {xn[0], xn[1], xn[2], xn[3]};
+            if (kt + 1 < k1) load_x(kt + 1);
+            issue(kt + ST - 1, (i + ST - 1) % ST);
+            cp_wait<ST - 1>();
+            bar_named(1 + sg, 128);                           // the group's raw stage is in
+            uint32_t* db = dec + (i & 1) * NT * 128;
+            // this warp decodes 2 of the 8 tiles for the whole group
+#pragma unroll
+            for (int q = 0; q < 2; ++q) {
+                const int j = rg * 2 + q;
+                FragB f0, f1;
+                dq_tile<KB>(raw + (i % ST) * NT * TW + j * TW, lane * 8, f0, f1);
+                uint4 v = make_uint4(f0.r[0], f0.r[1], f1.r[0], f1.r[1]);
+                *reinterpret_cast<uint4*>(db + j * 128 + lane * 4) = v;
+            }
+            bar_named(1 + sg, 128);                           // every tile of this step decoded
+            if (16 * rg < M) {
+#pragma unroll
+                for (int j = 0; j < NT; ++j) {
+                    const uint4 v = *reinterpret_cast<const uint4*>(db + j * 128 + lane * 4);
+                    mma(acc[j][0], xa[0], xa[1], xa[2], xa[3], v.x, v.y);
+                    mma(acc[j][1], xa[0], xa[1], xa[2], xa[3], v.z, v.w);
+                }
+            }
+        }
+        cp_wait<0>();
+        // the phase's slices into the reduction buffer in slice order (16 rows a warp)
+        for (int step = 0; step < G; ++step) {
+            if (sg == step) {
+                const int s = ph * G + step;
+#pragma unroll
+                for (int j = 0; j < NT; ++j)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int col = j * 16 + h * 8 + 2 * t;
+                        float* r_lo = red + (16 * rg + g) * RP + col;
+                        float* r_hi = red + (16 * rg + 8 + g) * RP + col;
+                        if (s == 0) {
+                            r_lo[0] = acc[j][h][0]; r_lo[1] = acc[j][h][1];
+                            r_hi[0] = acc[j][h][2]; r_hi[1] = acc[j][h][3];
+                        } else {
+                            r_lo[0] += acc[j][h][0]; r_lo[1] += acc[j][h][1];
+                            r_hi[0] += acc[j][h][2]; r_hi[1] += acc[j][h][3];
+                        }
+                    }
+            }
+            __syncthreads();
+        }
+    }
+
+    const int nthreads = 512;
+    const int rows = min(M, 64);
+    if (S > 1) {
+        cg::cluster_group cluster = cg::this_cluster();
+        cluster.sync();
+        if (rank == 0) {
+            for (int r = 1; r < S; ++r) {
+                const float* rem = cluster.map_shared_rank(red, r);
+                for (int e = threadIdx.x; e < rows * 128; e += nthreads) {
+                    const int m = e >> 7, c = e & 127;
+                    red[m * RP + c] += rem[m * RP + c];
+                }
+                __syncthreads();
+            }
+        }
+        cluster.sync();
+        if (rank != 0) return;
+    }
+    for (int m = warp; m < rows; m += 16) {
+        const float* rr = red + m * RP + 4 * lane;
+        float v0 = rr[0], v1 = rr[1], v2 = rr[2], v3 = rr[3];
+        wht128(v0, v1, v2, v3, lane);
+        const int n = cb * 128 + 4 * lane;
+        const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+        v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+        v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+        if constexpr (OF32) {
+            float4* y = reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + (size_t)m * ldy + n);
+            *y = make_float4(v0, v1, v2, v3);
+        } else {
+            __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+            *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)m * ldy + n) = o;
+        }
+    }
+}
+
+template <int KB, int WK, bool OF32>
+void launch_p2(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
+               int M, int Kin, int N, int ldt, int S, int b1, int b2, cudaStream_t stream) {
+    constexpr int TW = 8 * KB, ST = EXL3_P2_ST, G = 4, NT = 8;
+    const size_t smem = ((size_t)G * ST * NT * TW + (size_t)G * 2 * NT * 128) * 4 + (size_t)64 * 132 * 4;
+    auto kern = gemm_p2_kernel<KB, WK, ST, OF32>;
+    static bool attr = false;
+    if (!attr) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+        attr = true;
+    }
+    cudaLaunchConfig_t cfg = {};
+    const int R = (M + 63) / 64;
+    cfg.gridDim = dim3(S * R, N / 128, 1);
+    cfg.blockDim = dim3(512, 1, 1);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = stream;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = S; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = S > 1 ? 1 : 0;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
+        (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
+    TORCH_CHECK(e == cudaSuccess, "exl3 p2 launch: ", cudaGetErrorString(e));
+}
+
+#define P2_WK(KB, OF32) switch (wk) { \
+    case 4: launch_p2<KB, 4, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+    case 8: launch_p2<KB, 8, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+    default: TORCH_CHECK(false, "p2: wk must be 4 or 8, got ", wk); }
+#define P2_KB(OF32) switch (kb) { \
+    case 3: P2_WK(3, OF32) \
+    case 4: P2_WK(4, OF32) \
+    case 5: P2_WK(5, OF32) \
+    case 6: P2_WK(6, OF32) \
+    default: TORCH_CHECK(false, "p2: K bits 3..6, got ", kb); }
+
+void exl3_gemm_p2(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
+                  int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+    const at::cuda::OptionalCUDAGuard guard(xh.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
+    TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense");
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+    const int ldt = t.stride(0) / t.stride(1);
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1 && S >= 1 && S <= 16, "rows / cluster size");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
+    if (y.dtype() == torch::kFloat) { P2_KB(true) }
+    else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); P2_KB(false) }
+}
+"""
+_P2_CPP = ("void exl3_gemm_p2(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
+           "int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+#: raw trellis stages a P2 slice group keeps in flight
+P2_ST = int(os.environ.get("QWEN38_EXL3_P2_ST", "4") or 4)
+_P2_MOD = None
+
+
+def _p2_module():
+    global _P2_MOD
+    if _P2_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_P2_ST {P2_ST}\n" + X._CUDA + _P2
+        tag = hashlib.sha1((_P2_CPP + src).encode()).hexdigest()[:10]
+        _P2_MOD = load_inline(name=f"qwen38_exl3_p2_{tag}", cpp_sources=[_P2_CPP], cuda_sources=[src],
+                              functions=["exl3_gemm_p2"],
+                              extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                              verbose=False)
+    return _P2_MOD
+
+
+def p2_matmul(x: torch.Tensor, w, *, xh: torch.Tensor | None = None, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` with each trellis tile decoded once for 64 rows (the same bits)."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    _p2_module().exl3_gemm_p2(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, tile["wk"], tile["S"],
+                              w.bounds[0], w.bounds[1])
+    return out
+
+
+def check_p2(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 128), bench: bool = True) -> list[str]:
+    """P2 against the production kernels' bits at every row count named, on the 27B's shapes; with `bench`, the
+    times at 32, 64 and 128 rows."""
+    import time
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        bad = [M for M in rows if not torch.equal(p2_matmul(x[:M], w), X.exl3_matmul(x[:M], w))]
+        line = (f"{N}x{K} K{kb} wk{X.pick(w.tile_n, w.K, w.kb)['wk']} S{X.pick(w.tile_n, w.K, w.kb)['S']} P2ST{P2_ST}: "
+                + ("rows 1..128 = the production bits" if not bad else f"DIFFER at rows {bad}"))
+        if bench:
+            res = []
+            for M in (32, 64, 128):
+                xs = x[:M]
+                for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)), ("p2", lambda: p2_matmul(xs, w))):
+                    for _ in range(3):
+                        fn()
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
+                    for _ in range(30):
+                        fn()
+                    torch.cuda.synchronize()
+                    res.append(f"M{M} {name} {(time.perf_counter() - t0) / 30 * 1e6:.0f}us")
+            line += "; " + ", ".join(res)
+        out.append(line)
+    return out
+
+
+# ---- P2C (SPD-199): P2 with the 128 columns split over a CTA pair ---------------------------------------------
+# P2 holds 8 column tiles x 16 rows a warp (64 accumulators a lane), so one 512-thread CTA fills an SM's registers.
+# Here a CTA owns 64 of the block's 128 columns (4 tiles) for 64 rows: 2 slice groups x 4 row-group warps (256
+# threads, 32 accumulators a lane), pick()'s WK slices in phases of 2, each tile decoded once for the 64 rows. The
+# two column halves and the S K ranks of one (chunk, column block) are one cluster of 2S CTAs: each half's rank 0
+# folds its ranks in rank order (the production fold), then the first CTA reads the other half's 64 columns over
+# the cluster and rotates the full 128-column rows (the production lines). Every output is the production sum:
+# the same tiles, mma chain, slice order, fold and rotation.
+_P2C = r"""
+template <int KB, int WK, int ST, bool OF32>
+__global__ void __launch_bounds__(256, 3) gemm_p2c_kernel(
+        const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
+        void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
+    constexpr int TW = 8 * KB, RQ = 68, G = 2, NT = 4;      // G slice groups a phase, NT column tiles
+    extern __shared__ uint32_t smem[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int sg = warp >> 2, rg = warp & 3;
+    const int g = lane >> 2, t = lane & 3;
+    const int rank = blockIdx.x % S, half = (blockIdx.x / S) & 1, chunk = blockIdx.x / (2 * S);
+    const int cb = blockIdx.y;
+    const int KT = Kin / 16;
+    const int member = (cb >= b1) + (cb >= b2);
+    const int M = min(64, Mtot - chunk * 64);
+    const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 64 * Kin;
+    Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 64 * ldy)
+              : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 64 * ldy);
+    uint32_t* raw = smem + (size_t)sg * ST * NT * TW;
+    uint32_t* dec = smem + (size_t)G * ST * NT * TW + (size_t)sg * 2 * NT * 128;
+    float* red = reinterpret_cast<float*>(smem + (size_t)G * ST * NT * TW + (size_t)G * 2 * NT * 128);
+
+    const int per_r = (KT + S - 1) / S;
+    const int r0 = min(KT, rank * per_r), r1 = min(KT, r0 + per_r);
+    const int per_w = (r1 - r0 + WK - 1) / WK;
+    const int nt0 = cb * 8 + half * NT;
+    const int gtid = rg * 32 + lane;
+
+    for (int ph = 0; ph < WK / G; ++ph) {
+        const int sl = ph * G + sg;
+        const int k0 = min(r1, r0 + sl * per_w), k1 = min(r1, k0 + per_w);
+        float acc[NT][2][4];
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+        auto issue = [&](int kt, int buf) {
+            if (kt < k1) {
+                const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
+                uint4* dst = reinterpret_cast<uint4*>(raw + buf * NT * TW);
+                for (int c = gtid; c < NT * TW / 4; c += 128) cp_async16(dst + c, src + c);
+            }
+            cp_commit();
+        };
+        uint32_t xn[4];
+        auto load_x = [&](int kt) {
+            const int kk = kt * 16 + 2 * t;
+            const int ra = 16 * rg + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xn[0] = ra < M ? __ldg(pa) : 0u;
+            xn[1] = rb < M ? __ldg(pb) : 0u;
+            xn[2] = ra < M ? __ldg(pa + 4) : 0u;
+            xn[3] = rb < M ? __ldg(pb + 4) : 0u;
+        };
+#pragma unroll
+        for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+        if (k0 < k1) load_x(k0);
+        for (int kt = k0; kt < k1; ++kt) {
+            const int i = kt - k0;
+            uint32_t xa[4] = {xn[0], xn[1], xn[2], xn[3]};
+            if (kt + 1 < k1) load_x(kt + 1);
+            issue(kt + ST - 1, (i + ST - 1) % ST);
+            cp_wait<ST - 1>();
+            bar_named(1 + sg, 128);
+            uint32_t* db = dec + (i & 1) * NT * 128;
+            {
+                const int j = rg;                                 // this warp decodes 1 of the 4 tiles
+                FragB f0, f1;
+                dq_tile<KB>(raw + (i % ST) * NT * TW + j * TW, lane * 8, f0, f1);
+                *reinterpret_cast<uint4*>(db + j * 128 + lane * 4) = make_uint4(f0.r[0], f0.r[1], f1.r[0], f1.r[1]);
+            }
+            bar_named(1 + sg, 128);
+            if (16 * rg < M) {
+#pragma unroll
+                for (int j = 0; j < NT; ++j) {
+                    const uint4 v = *reinterpret_cast<const uint4*>(db + j * 128 + lane * 4);
+                    mma(acc[j][0], xa[0], xa[1], xa[2], xa[3], v.x, v.y);
+                    mma(acc[j][1], xa[0], xa[1], xa[2], xa[3], v.z, v.w);
+                }
+            }
+        }
+        cp_wait<0>();
+        for (int step = 0; step < G; ++step) {
+            if (sg == step) {
+                const int s = ph * G + step;
+#pragma unroll
+                for (int j = 0; j < NT; ++j)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int col = j * 16 + h * 8 + 2 * t;
+                        float* r_lo = red + (16 * rg + g) * RQ + col;
+                        float* r_hi = red + (16 * rg + 8 + g) * RQ + col;
+                        if (s == 0) {
+                            r_lo[0] = acc[j][h][0]; r_lo[1] = acc[j][h][1];
+                            r_hi[0] = acc[j][h][2]; r_hi[1] = acc[j][h][3];
+                        } else {
+                            r_lo[0] += acc[j][h][0]; r_lo[1] += acc[j][h][1];
+                            r_hi[0] += acc[j][h][2]; r_hi[1] += acc[j][h][3];
+                        }
+                    }
+            }
+            __syncthreads();
+        }
+    }
+
+    const int rows = min(M, 64);
+    cg::cluster_group cluster = cg::this_cluster();
+    cluster.sync();
+    if (S > 1 && rank == 0) {
+        for (int r = 1; r < S; ++r) {
+            const float* rem = cluster.map_shared_rank(red, half * S + r);
+            for (int e = threadIdx.x; e < rows * 64; e += 256) {
+                const int m = e >> 6, c = e & 63;
+                red[m * RQ + c] += rem[m * RQ + c];
+            }
+            __syncthreads();
+        }
+    }
+    cluster.sync();
+    if (half == 0 && rank == 0) {
+        const float* other = cluster.map_shared_rank(red, S);
+        for (int m = warp; m < rows; m += 8) {
+            const float* rr = (lane < 16 ? red : other) + m * RQ + 4 * (lane & 15);
+            float v0 = rr[0], v1 = rr[1], v2 = rr[2], v3 = rr[3];
+            wht128(v0, v1, v2, v3, lane);
+            const int n = cb * 128 + 4 * lane;
+            const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+            const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+            v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+            v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+            if constexpr (OF32) {
+                float4* y = reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + (size_t)m * ldy + n);
+                *y = make_float4(v0, v1, v2, v3);
+            } else {
+                __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+                uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+                *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)m * ldy + n) = o;
+            }
+        }
+    }
+    cluster.sync();                                   // the other half's buffer stays until it is read
+}
+
+template <int KB, int WK, bool OF32>
+void launch_p2c(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
+                int M, int Kin, int N, int ldt, int S, int b1, int b2, cudaStream_t stream) {
+    constexpr int TW = 8 * KB, ST = EXL3_P2_ST, G = 2, NT = 4;
+    const size_t smem = ((size_t)G * ST * NT * TW + (size_t)G * 2 * NT * 128) * 4 + (size_t)64 * 68 * 4;
+    auto kern = gemm_p2c_kernel<KB, WK, ST, OF32>;
+    static bool attr = false;
+    if (!attr) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+        attr = true;
+    }
+    cudaLaunchConfig_t cfg = {};
+    const int R = (M + 63) / 64;
+    cfg.gridDim = dim3(2 * S * R, N / 128, 1);
+    cfg.blockDim = dim3(256, 1, 1);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = stream;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = 2 * S; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
+        (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
+    TORCH_CHECK(e == cudaSuccess, "exl3 p2c launch: ", cudaGetErrorString(e));
+}
+
+#define P2C_WK(KB, OF32) switch (wk) { \
+    case 4: launch_p2c<KB, 4, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+    case 8: launch_p2c<KB, 8, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+    default: TORCH_CHECK(false, "p2c: wk must be 4 or 8, got ", wk); }
+#define P2C_KB(OF32) switch (kb) { \
+    case 3: P2C_WK(3, OF32) \
+    case 4: P2C_WK(4, OF32) \
+    case 5: P2C_WK(5, OF32) \
+    case 6: P2C_WK(6, OF32) \
+    default: TORCH_CHECK(false, "p2c: K bits 3..6, got ", kb); }
+
+void exl3_gemm_p2c(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
+                   int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+    const at::cuda::OptionalCUDAGuard guard(xh.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
+    TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense");
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+    const int ldt = t.stride(0) / t.stride(1);
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1 && S >= 1 && 2 * S <= 16, "rows / cluster size");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
+    if (y.dtype() == torch::kFloat) { P2C_KB(true) }
+    else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); P2C_KB(false) }
+}
+"""
+_P2C_CPP = ("void exl3_gemm_p2c(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
+            "int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n")
+_P2C_MOD = None
+
+
+def _p2c_module():
+    global _P2C_MOD
+    if _P2C_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        bar = _P2[:_P2.index("template <int KB, int WK, int ST, bool OF32>")]   # bar_named
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_P2_ST {P2_ST}\n" + X._CUDA + bar + _P2C
+        tag = hashlib.sha1((_P2C_CPP + src).encode()).hexdigest()[:10]
+        _P2C_MOD = load_inline(name=f"qwen38_exl3_p2c_{tag}", cpp_sources=[_P2C_CPP], cuda_sources=[src],
+                               functions=["exl3_gemm_p2c"],
+                               extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                               verbose=False)
+    return _P2C_MOD
+
+
+def p2c_matmul(x: torch.Tensor, w, *, xh: torch.Tensor | None = None, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` with each trellis tile decoded once for 64 rows over a column-split CTA pair (the same bits)."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    _p2c_module().exl3_gemm_p2c(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, tile["wk"],
+                                tile["S"], w.bounds[0], w.bounds[1])
+    return out
+
+
+def check_p2c(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 128), bench: bool = True) -> list[str]:
+    """P2C against the production kernels' bits at every row count named, on the 27B's shapes; with `bench`, the
+    times at 32, 64 and 128 rows against production and P2."""
+    import time
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        bad = [M for M in rows if not torch.equal(p2c_matmul(x[:M], w), X.exl3_matmul(x[:M], w))]
+        tile = X.pick(w.tile_n, w.K, w.kb)
+        line = (f"{N}x{K} K{kb} wk{tile['wk']} S{tile['S']}: "
+                + ("rows 1..128 = the production bits" if not bad else f"DIFFER at rows {bad}"))
+        if bench:
+            res = []
+            for M in (32, 64, 128):
+                xs = x[:M]
+                for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)), ("p2", lambda: p2_matmul(xs, w)),
+                                 ("p2c", lambda: p2c_matmul(xs, w))):
+                    for _ in range(3):
+                        fn()
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
+                    for _ in range(30):
+                        fn()
+                    torch.cuda.synchronize()
+                    res.append(f"M{M} {name} {(time.perf_counter() - t0) / 30 * 1e6:.0f}us")
+            line += "; " + ", ".join(res)
+        out.append(line)
+    return out
+
+
+# ---- H64 (SPD-199): a column-half CTA pair, every K slice live, each trellis tile decoded once for 64 rows ------
+# The row grid decodes a column block's trellis once a 32-row chunk, and the discriminator (no-mma kernel) says that
+# decode, not the tensor pipe, is what 64 rows pay for. A CTA here owns 64 of the block's 128 columns for 64 rows:
+# pick()'s WK slices are WK live warps a column pair (the production K split, all slices at once), a warp decodes
+# its 2 column tiles once and applies them to 4 row groups (64 accumulators a lane, the production budget). The two
+# column halves and the S ranks of one (chunk, column block) are one cluster of 2S CTAs; each half's rank 0 folds
+# its ranks in rank order, then the first CTA rotates the full 128-column rows. Every output is the production sum:
+# the same tiles, mma chain, slice order, fold and rotation.
+_H64 = r"""
+template <int KB, int WK, int ST, bool OF32, bool PF>
+__global__ void __launch_bounds__(64 * WK, 1) gemm_h64_kernel(
+        const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
+        void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
+    constexpr int TW = 8 * KB, RQ = 68, MT = 4, NTW = 2, WN = 2;
+    constexpr int SW = NTW * TW;
+    extern __shared__ uint32_t smem[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int wn = warp % WN, wk = warp / WN;
+    const int g = lane >> 2, t = lane & 3;
+    const int rank = blockIdx.x % S, half = (blockIdx.x / S) & 1, chunk = blockIdx.x / (2 * S);
+    const int cb = blockIdx.y;
+    const int KT = Kin / 16;
+    const int member = (cb >= b1) + (cb >= b2);
+    const int M = min(64, Mtot - chunk * 64);
+    const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 64 * Kin;
+    Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 64 * ldy)
+              : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 64 * ldy);
+    uint32_t* stage = smem + (size_t)warp * ST * SW;
+    float* red = reinterpret_cast<float*>(smem + (size_t)WN * WK * ST * SW);
+
+    const int per_r = (KT + S - 1) / S;
+    const int r0 = min(KT, rank * per_r), r1 = min(KT, r0 + per_r);
+    const int per_w = (r1 - r0 + WK - 1) / WK;
+    const int k0 = min(r1, r0 + wk * per_w), k1 = min(r1, k0 + per_w);
+    const int nt0 = cb * 8 + half * 4 + wn * NTW;
+
+    float acc[MT][NTW][2][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[a][j][h][c] = 0.f;
+
+    auto issue = [&](int kt, int buf) {
+        if (kt < k1) {
+            const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
+            uint4* dst = reinterpret_cast<uint4*>(stage + buf * SW);
+            for (int c = lane; c < SW / 4; c += 32) cp_async16(dst + c, src + c);
+        }
+        cp_commit();
+    };
+    uint32_t xn[MT][4];
+    auto load_x = [&](int kt, uint32_t (&xd)[MT][4]) {
+        const int kk = kt * 16 + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int ra = 16 * a + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xd[a][0] = ra < M ? __ldg(pa) : 0u;
+            xd[a][1] = rb < M ? __ldg(pb) : 0u;
+            xd[a][2] = ra < M ? __ldg(pa + 4) : 0u;
+            xd[a][3] = rb < M ? __ldg(pb + 4) : 0u;
+        }
+    };
+
+#pragma unroll
+    for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+    if (PF && k0 < k1) load_x(k0, xn);
+    for (int kt = k0; kt < k1; ++kt) {
+        const int i = kt - k0;
+        uint32_t xa[MT][4];
+        if (PF) {
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) xa[a][c] = xn[a][c];
+            if (kt + 1 < k1) load_x(kt + 1, xn);
+        } else {
+            load_x(kt, xa);
+        }
+        issue(kt + ST - 1, (i + ST - 1) % ST);
+        cp_wait<ST - 1>();
+        __syncwarp();
+        const uint32_t* buf = stage + (i % ST) * SW;
+#pragma unroll
+        for (int j = 0; j < NTW; ++j) {
+            FragB f0, f1;
+            dq_tile<KB>(buf + j * TW, lane * 8, f0, f1);
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                if (16 * a < M) {
+                    mma(acc[a][j][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
+                    mma(acc[a][j][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+                }
+            }
+        }
+        __syncwarp();
+    }
+    cp_wait<0>();
+
+    for (int step = 0; step < WK; ++step) {
+        if (wk == step) {
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int j = 0; j < NTW; ++j)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int col = (wn * NTW + j) * 16 + h * 8 + 2 * t;
+                        float* r_lo = red + (16 * a + g) * RQ + col;
+                        float* r_hi = red + (16 * a + 8 + g) * RQ + col;
+                        if (step == 0) {
+                            r_lo[0] = acc[a][j][h][0]; r_lo[1] = acc[a][j][h][1];
+                            r_hi[0] = acc[a][j][h][2]; r_hi[1] = acc[a][j][h][3];
+                        } else {
+                            r_lo[0] += acc[a][j][h][0]; r_lo[1] += acc[a][j][h][1];
+                            r_hi[0] += acc[a][j][h][2]; r_hi[1] += acc[a][j][h][3];
+                        }
+                    }
+        }
+        __syncthreads();
+    }
+
+    const int nthreads = 64 * WK;
+    const int rows = min(M, 64);
+    cg::cluster_group cluster = cg::this_cluster();
+    cluster.sync();
+    if (S > 1 && rank == 0) {
+        for (int r = 1; r < S; ++r) {
+            const float* rem = cluster.map_shared_rank(red, half * S + r);
+            for (int e = threadIdx.x; e < rows * 64; e += nthreads) {
+                const int m = e >> 6, c = e & 63;
+                red[m * RQ + c] += rem[m * RQ + c];
+            }
+            __syncthreads();
+        }
+    }
+    cluster.sync();
+    if (half == 0 && rank == 0) {
+        const float* other = cluster.map_shared_rank(red, S);
+        for (int m = warp; m < rows; m += WN * WK) {
+            const float* rr = (lane < 16 ? red : other) + m * RQ + 4 * (lane & 15);
+            float v0 = rr[0], v1 = rr[1], v2 = rr[2], v3 = rr[3];
+            wht128(v0, v1, v2, v3, lane);
+            const int n = cb * 128 + 4 * lane;
+            const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+            const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+            v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+            v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+            if constexpr (OF32) {
+                float4* y = reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + (size_t)m * ldy + n);
+                *y = make_float4(v0, v1, v2, v3);
+            } else {
+                __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+                uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+                *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)m * ldy + n) = o;
+            }
+        }
+    }
+    cluster.sync();                                   // the other half's buffer stays until it is read
+}
+
+template <int KB, int WK, bool OF32, bool PF>
+void launch_h64(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
+                int M, int Kin, int N, int ldt, int S, int b1, int b2, cudaStream_t stream) {
+    constexpr int TW = 8 * KB, ST = EXL3_H64_ST;
+    const size_t smem = (size_t)2 * WK * ST * 2 * TW * 4 + (size_t)64 * 68 * 4;
+    auto kern = gemm_h64_kernel<KB, WK, ST, OF32, PF>;
+    static bool attr = false;
+    if (!attr) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+        cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+        attr = true;
+    }
+    cudaLaunchConfig_t cfg = {};
+    const int R = (M + 63) / 64;
+    cfg.gridDim = dim3(2 * S * R, N / 128, 1);
+    cfg.blockDim = dim3(64 * WK, 1, 1);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = stream;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = 2 * S; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
+        (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
+    TORCH_CHECK(e == cudaSuccess, "exl3 h64 launch: ", cudaGetErrorString(e));
+}
+
+#define H64_PF(KB, WK, OF32) if (pf) { launch_h64<KB, WK, OF32, true>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; } \
+    else { launch_h64<KB, WK, OF32, false>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; }
+#define H64_WK(KB, OF32) switch (wk) { \
+    case 4: H64_PF(KB, 4, OF32) \
+    case 8: H64_PF(KB, 8, OF32) \
+    default: TORCH_CHECK(false, "h64: wk must be 4 or 8, got ", wk); }
+#define H64_KB(OF32) switch (kb) { \
+    case 2: H64_WK(2, OF32) \
+    case 3: H64_WK(3, OF32) \
+    case 4: H64_WK(4, OF32) \
+    case 5: H64_WK(5, OF32) \
+    case 6: H64_WK(6, OF32) \
+    case 8: H64_WK(8, OF32) \
+    default: TORCH_CHECK(false, "h64: K bits 2..6 or 8, got ", kb); }
+
+void exl3_gemm_h64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
+                   int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2, int64_t pf) {
+    const at::cuda::OptionalCUDAGuard guard(xh.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3, "trellis: int16 [Kin/16, N/16, 16K]");
+    TORCH_CHECK(t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis tiles must be dense");
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;
+    const int ldt = t.stride(0) / t.stride(1);
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1 && S >= 1 && 2 * S <= 16, "rows / cluster size");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
+    if (y.dtype() == torch::kFloat) { H64_KB(true) }
+    else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); H64_KB(false) }
+}
+"""
+_H64_CPP = ("void exl3_gemm_h64(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
+            "int64_t kb, int64_t wk, int64_t S, int64_t b1, int64_t b2, int64_t pf);\n")
+#: cp.async stages a H64 warp keeps in flight (a function of nothing that moves bits)
+H64_ST = int(os.environ.get("QWEN38_EXL3_H64_ST", "4") or 4)
+#: the activations one K tile ahead in registers (16 more a lane) or loaded at the step
+H64_PF = os.environ.get("QWEN38_EXL3_H64_PF", "0") == "1"
+_H64_MOD = None
+
+
+def _h64_module():
+    global _H64_MOD
+    if _H64_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        venv_bin = os.path.dirname(sys.executable)
+        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_H64_ST {H64_ST}\n" + X._CUDA + _H64
+        tag = hashlib.sha1((_H64_CPP + src).encode()).hexdigest()[:10]
+        _H64_MOD = load_inline(name=f"qwen38_exl3_h64_{tag}", cpp_sources=[_H64_CPP], cuda_sources=[src],
+                               functions=["exl3_gemm_h64"],
+                               extra_cuda_cflags=["-O3", "-lineinfo", "-Xptxas=-v",
+                                                  "-gencode=arch=compute_121a,code=sm_121a"],
+                               verbose=False)
+    return _H64_MOD
+
+
+def h64_matmul(x: torch.Tensor, w, *, xh: torch.Tensor | None = None, out: torch.Tensor | None = None,
+               pf: bool | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` with each trellis tile decoded once for 64 rows over a column-half CTA pair (the same bits)."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    _h64_module().exl3_gemm_h64(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, tile["wk"],
+                                tile["S"], w.bounds[0], w.bounds[1], int(H64_PF if pf is None else pf))
+    return out
+
+
+def check_h64(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 128), bench: bool = True) -> list[str]:
+    """H64 against the production kernels' bits at every row count named, on the 27B's shapes; with `bench`, the
+    times at 32, 48, 64 and 128 rows against production."""
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        bad = [(M, pf) for M in rows for pf in (False, True)
+               if not torch.equal(h64_matmul(x[:M], w, pf=pf), X.exl3_matmul(x[:M], w))]
+        tile = X.pick(w.tile_n, w.K, w.kb)
+        line = (f"{N}x{K} K{kb} wk{tile['wk']} S{tile['S']}: "
+                + (f"rows {min(rows)}..{max(rows)} = the production bits" if not bad else f"DIFFER at {bad}"))
+        if bench:
+            res = []
+            for M in (32, 48, 64, 128):
+                xs = x[:M]
+                for name, fn in (("prod", lambda: X.exl3_matmul(xs, w)), ("h64", lambda: h64_matmul(xs, w, pf=False)),
+                                 ("h64pf", lambda: h64_matmul(xs, w, pf=True))):
+                    res.append(f"M{M} {name} {_time_us(fn):.0f}us")
+            line += "; " + ", ".join(res)
+        out.append(line)
+    return out
+
+
+def _time_us(fn, n: int = 30) -> float:
+    for _ in range(3):
+        fn()
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    e0.record()
+    for _ in range(n):
+        fn()
+    e1.record()
+    torch.cuda.synchronize()
+    return e0.elapsed_time(e1) / n * 1e3
+
+
+# ---- fragment-major activations (SPD-199): the rotated input stored in the mma's A-fragment order ------------------
+# The profile of the row grid at 64 rows: the warps wait on the activation loads (long scoreboard), four 4-byte
+# loads a lane a 16-row group and K tile. Stored as [G, row groups, K tiles, 32 lanes, 4 words] (lane l's a0..a3 of
+# m16n8k16), a lane's operands are one coalesced 16-byte load. The values and every instruction that uses them are
+# the same: only where they sit in memory moves.
+_FRAG_LOAD_OLD = """            const int ra = 16 * a + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xn[a][0] = ra < M ? __ldg(pa) : 0u;
+            xn[a][1] = rb < M ? __ldg(pb) : 0u;
+            xn[a][2] = ra < M ? __ldg(pa + 4) : 0u;
+            xn[a][3] = rb < M ? __ldg(pb + 4) : 0u;"""
+_FRAG_LOAD_NEW = """            uint4 v = make_uint4(0u, 0u, 0u, 0u);
+            if (16 * a < M) v = __ldg(reinterpret_cast<const uint4*>(xh + (size_t)16 * a * Kin) + (size_t)kt * 32 + lane);
+            (void)kk;
+            xn[a][0] = v.x; xn[a][1] = v.y; xn[a][2] = v.z; xn[a][3] = v.w;"""
+_FRAG_OFF_OLD = "const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 16 * MT * Kin;"
+_FRAG_OFF_NEW = "const __half* xh = XH + (size_t)member * ((Mtot + 15) / 16 * 16) * Kin + (size_t)chunk * 16 * MT * Kin;"
+_FRAG_MOD = None
+
+
+def _frag_module():
+    global _FRAG_MOD
+    if _FRAG_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        assert X._CUDA.count(_FRAG_LOAD_OLD) == 1 and X._CUDA.count(_FRAG_OFF_OLD) == 1, "the shared kernel moved"
+        src = (f"#define EXL3_ST {X.STAGES}\n"
+               + X._CUDA.replace(_FRAG_LOAD_OLD, _FRAG_LOAD_NEW).replace(_FRAG_OFF_OLD, _FRAG_OFF_NEW))
+        tag = hashlib.sha1((X._CPP + src).encode()).hexdigest()[:10]
+        _FRAG_MOD = load_inline(name=f"qwen38_exl3_frag_{tag}", cpp_sources=[X._CPP], cuda_sources=[src],
+                                functions=["exl3_gemm"],
+                                extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                                verbose=False)
+    return _FRAG_MOD
+
+
+def frag_layout(xh: torch.Tensor) -> torch.Tensor:
+    """[G, M, Kin] fp16 (rotate_in's) -> the same values in A-fragment order, rows padded to 16 with zeros."""
+    G, M, K = xh.shape
+    RG = (M + 15) // 16
+    p = torch.zeros(G, RG * 16, K, dtype=xh.dtype, device=xh.device)
+    p[:, :M] = xh
+    v = p.view(G, RG, 2, 8, K // 16, 2, 4, 2)          # g, rg, r_hi, r_lo, kt, k_hi, t, pair
+    return v.permute(0, 1, 4, 3, 6, 5, 2, 7).contiguous().view(G, RG * 16, K)
+
+
+def frag_matmul(x: torch.Tensor, w, *, xf: torch.Tensor | None = None, out: torch.Tensor | None = None,
+                cfg: int | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` on the fragment-major activations (a register-path cfg; the same bits)."""
+    M = x.shape[0]
+    Mp = (M + 15) // 16 * 16                            # the padded rows are computed and dropped
+    if out is None:
+        out = torch.empty(Mp, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    c = tile["cfg2"] if cfg is None else cfg
+    mt = 2 if c in (2, 3) else 1
+    xf = frag_layout(X.rotate_in(x, w)) if xf is None else xf
+    _frag_module().exl3_gemm(xf, w.t, w.svh, out, w.kb, c, tile["wk"], tile["S"], w.bounds[0], w.bounds[1],
+                             (Mp + 16 * mt - 1) // (16 * mt))
+    return out[:M]
+
+
+def check_frag(rows=(1, 2, 7, 16, 17, 31, 32, 33, 40, 48, 63, 64, 65, 96, 127, 128), bench: bool = True) -> list[str]:
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        bad = [(M, c) for M in rows for c in (2, 3) if not torch.equal(frag_matmul(x[:M], w, cfg=c), X.exl3_matmul(x[:M], w))]
+        line = f"{N}x{K} K{kb}: " + ("rows 1..128 = the production bits" if not bad else f"DIFFER at {bad[:6]}")
+        if bench:
+            res = []
+            for M in (1, 16, 32, 64, 128):
+                xs = x[:M]
+                xh = X.rotate_in(xs, w)
+                xf = frag_layout(xh)
+                tile = X.pick(w.tile_n, w.K, w.kb)
+                res.append(f"M{M} prod {_time_us(lambda: X.exl3_matmul(None, w, xh=xh, M=M, dev=x.device)):.0f}")
+                for c in (2, 3):
+                    res.append(f"frag{c} {_time_us(lambda: frag_matmul(xs, w, xf=xf, cfg=c)):.0f}")
+            line += "; " + ", ".join(res)
+        out.append(line)
+    return out
+
+
+_H64F_LOAD_OLD = """            const int ra = 16 * a + g, rb = ra + 8;
+            const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)ra * Kin + kk);
+            const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)rb * Kin + kk);
+            xd[a][0] = ra < M ? __ldg(pa) : 0u;
+            xd[a][1] = rb < M ? __ldg(pb) : 0u;
+            xd[a][2] = ra < M ? __ldg(pa + 4) : 0u;
+            xd[a][3] = rb < M ? __ldg(pb + 4) : 0u;"""
+_H64F_LOAD_NEW = """            uint4 v = make_uint4(0u, 0u, 0u, 0u);
+            if (16 * a < M) v = __ldg(reinterpret_cast<const uint4*>(xh + (size_t)16 * a * Kin) + (size_t)kt * 32 + lane);
+            (void)kk;
+            xd[a][0] = v.x; xd[a][1] = v.y; xd[a][2] = v.z; xd[a][3] = v.w;"""
+_H64F_OFF_OLD = "const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 64 * Kin;"
+_H64F_OFF_NEW = "const __half* xh = XH + (size_t)member * ((Mtot + 15) / 16 * 16) * Kin + (size_t)chunk * 64 * Kin;"
+_H64F_MOD = None
+
+
+def _h64f_module():
+    global _H64F_MOD
+    if _H64F_MOD is None:
+        from torch.utils.cpp_extension import load_inline
+        assert _H64.count(_H64F_LOAD_OLD) == 1 and _H64.count(_H64F_OFF_OLD) == 1
+        body = _H64.replace(_H64F_LOAD_OLD, _H64F_LOAD_NEW).replace(_H64F_OFF_OLD, _H64F_OFF_NEW)
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_H64_ST {H64_ST}\n" + X._CUDA + body
+        tag = hashlib.sha1((_H64_CPP + src).encode()).hexdigest()[:10]
+        _H64F_MOD = load_inline(name=f"qwen38_exl3_h64f_{tag}", cpp_sources=[_H64_CPP], cuda_sources=[src],
+                                functions=["exl3_gemm_h64"],
+                                extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                                verbose=False)
+    return _H64F_MOD
+
+
+def h64f_matmul(x: torch.Tensor, w, *, xf: torch.Tensor | None = None, pf: bool = True) -> torch.Tensor:
+    """H64 on the fragment-major activations (the same bits)."""
+    M = x.shape[0]
+    Mp = (M + 15) // 16 * 16
+    out = torch.empty(Mp, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    xf = frag_layout(X.rotate_in(x, w)) if xf is None else xf
+    _h64f_module().exl3_gemm_h64(xf, w.t, w.svh, out, w.kb, tile["wk"], tile["S"], w.bounds[0], w.bounds[1], int(pf))
+    return out[:M]
+
+
+def check_h64f(rows=(1, 7, 16, 17, 32, 33, 48, 63, 64, 65, 128), bench: bool = True) -> list[str]:
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        bad = [(M, pf) for M in rows for pf in (False, True)
+               if not torch.equal(h64f_matmul(x[:M], w, pf=pf), X.exl3_matmul(x[:M], w))]
+        line = f"{N}x{K} K{kb}: " + ("= the production bits" if not bad else f"DIFFER at {bad[:6]}")
+        if bench:
+            res = []
+            for M in (32, 64, 128):
+                xs = x[:M]
+                xh = X.rotate_in(xs, w)
+                xf = frag_layout(xh)
+                res.append(f"M{M} prod {_time_us(lambda: X.exl3_matmul(None, w, xh=xh, M=M, dev=x.device)):.0f}")
+                res.append(f"frag2 {_time_us(lambda: frag_matmul(xs, w, xf=xf, cfg=2)):.0f}")
+                for pf in (False, True):
+                    res.append(f"h64f{int(pf)} {_time_us(lambda: h64f_matmul(xs, w, xf=xf, pf=pf)):.0f}")
+            line += "; " + ", ".join(res)
+        out.append(line)
+    return out
+
+
+# ---- source variants of the shared kernel (built as their own extensions; exl3_linear.py's bytes stay) ----
+_MMA = """            for (int a = 0; a < MT; ++a) {
+                mma(acc[a][j][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
+                mma(acc[a][j][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+            }"""
+#: "skip": a 16-row group past the chunk's rows issues no mma (its rows are never stored: the row grid's
+#: last chunk of 33..48 rows paid two groups for one); every row < M runs the same instructions
+_SKIP = """            for (int a = 0; a < MT; ++a) {
+                if (16 * a < M) {
+                    mma(acc[a][j][0], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f0.r[0], f0.r[1]);
+                    mma(acc[a][j][1], xa[a][0], xa[a][1], xa[a][2], xa[a][3], f1.r[0], f1.r[1]);
+                }
+            }"""
+#: "nomma" (timing only, wrong numbers): the mma replaced by an xor into the accumulator that keeps the decode
+#: and the loads live -- the discriminator between the tensor pipe and the decode's ALU work
+_NOMMA = """            for (int a = 0; a < MT; ++a) {
+                acc[a][j][0][0] += __uint_as_float((f0.r[0] ^ xa[a][0]) & 0x3f800000u);
+                acc[a][j][1][0] += __uint_as_float((f1.r[1] ^ xa[a][1]) & 0x3f800000u);
+            }"""
+_VARIANTS: dict = {}
+
+
+def variant(name: str):
+    """The shared kernels with the mma loop as `name` says ("skip", "nomma"), as their own extension."""
+    mod = _VARIANTS.get(name)
+    if mod is None:
+        from torch.utils.cpp_extension import load_inline
+        body = {"skip": _SKIP, "nomma": _NOMMA}[name]
+        assert X._CUDA.count(_MMA) == 1, "the shared kernel's mma loop moved"
+        src = f"#define EXL3_ST {X.STAGES}\n" + X._CUDA.replace(_MMA, body)
+        tag = hashlib.sha1((X._CPP + src).encode()).hexdigest()[:10]
+        mod = _VARIANTS[name] = load_inline(
+            name=f"qwen38_exl3_{name}_{tag}", cpp_sources=[X._CPP], cuda_sources=[src], functions=["exl3_gemm"],
+            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"], verbose=False)
+    return mod
+
+
+def skip_matmul(x: torch.Tensor, w, *, xh: torch.Tensor | None = None, out: torch.Tensor | None = None,
+                mod_name: str = "skip") -> torch.Tensor:
+    """`exl3_matmul`'s row grid (33..CHUNK_UNTIL rows) on the dead-group-skip kernel: the same bits."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    variant(mod_name).exl3_gemm(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, tile["cfg2"],
+                                tile["wk"], tile["S"], w.bounds[0], w.bounds[1], (M + X.SKINNY_MAX - 1) // X.SKINNY_MAX)
+    return out
+
+
+def discriminate(shape=(10240, 5120, 4), rows=(16, 32, 48, 64)) -> list[str]:
+    """The row grid's time with and without its mma (the decode and loads kept), by row count: tensor-bound
+    when the full kernel grows with rows and the no-mma one does not."""
+    import time
+    N, K, kb = shape
+    w = X.random_block(N, K, kb, seed=1)
+    x = (torch.randn(max(rows), K, generator=torch.Generator().manual_seed(2)) * 0.7).to(torch.bfloat16).cuda()
+    out = []
+    for M in rows:
+        xs = x[:M]
+        res = []
+        for name, fn in (("full", lambda: X.exl3_matmul(xs, w)), ("skip", lambda: skip_matmul(xs, w)),
+                         ("nomma", lambda: skip_matmul(xs, w, mod_name="nomma"))):
+            if M <= X.SKINNY_MAX and name != "full":
+                continue
+            for _ in range(5):
+                fn()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(50):
+                fn()
+            torch.cuda.synchronize()
+            res.append(f"{name} {(time.perf_counter() - t0) / 50 * 1e6:.1f} us")
+        out.append(f"{N}x{K} K{kb} M={M}: " + ", ".join(res))
+    return out
+
+
+def check_skip(rows=range(33, 129)) -> list[str]:
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        x = (torch.randn(max(rows), K, generator=torch.Generator().manual_seed(N)) * 0.7).to(torch.bfloat16).cuda()
+        ref = X.exl3_matmul(x, w)
+        for M in rows:
+            assert torch.equal(skip_matmul(x[:M], w), X.exl3_matmul(x[:M], w)), (N, K, kb, M)
+        out.append(f"{N}x{K} K{kb}: rows {min(rows)}..{max(rows)} on the dead-group skip = the row grid's bits")
+    return out
+
+
+#: the column tiling a tall call takes (the order is `pick`'s); per (N, Kin, kb) overrides from a sweep
+CFG = int(os.environ.get("QWEN38_EXL3_TALL_CFG", "5") or 5)
+_CFG_BY: dict = {}
+
+
+def eligible(w, M: int) -> bool:
+    """A call the tall kernel takes: an integer-rate EXL3 projection at 33..CHUNK_UNTIL rows."""
+    return (isinstance(w, X.EXL3Block) and w.kb < 10 and X.SKINNY_MAX < M <= X.CHUNK_UNTIL
+            and w.t.is_cuda)
+
+
+def tall_matmul(x: torch.Tensor, w, *, cfg: int | None = None, xh: torch.Tensor | None = None,
+                out: torch.Tensor | None = None) -> torch.Tensor:
+    """`exl3_matmul(x, w)` for 33..CHUNK_UNTIL rows, the rows in 64-row tiles (the same bits)."""
+    M = x.shape[0] if x is not None else xh.shape[1]
+    dev = (x if x is not None else xh).device
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=dev)
+    tile = X.pick(w.tile_n, w.K, w.kb)
+    c = cfg if cfg is not None else _CFG_BY.get((w.tile_n, w.K, w.kb), CFG)
+    _module().exl3_gemm_tall(X.rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, c, tile["wk"],
+                             tile["S"], w.bounds[0], w.bounds[1])
+    return out
+
+
+#: the 27B's projection shapes (N, Kin, K bits) as the ThinkingCap EXL3 4.0 pack holds them, and the drafter
+SHAPES = ((16384, 5120, 4), (10240, 5120, 4), (5120, 6144, 4), (34816, 5120, 4), (5120, 17408, 5),
+          (14336, 5120, 4), (5120, 12288, 4), (1024, 5120, 4), (248320, 5120, 4), (5120, 5120, 3))
+
+
+def check(rows=range(1, 129), bench: bool = True) -> list[str]:
+    out = []
+    for N, K, kb in SHAPES:
+        if N * K > 300_000_000:
+            N = 32768                                   # the head's columns, a slice of them
+        w = X.random_block(N, K, kb, seed=N + K + kb)
+        g = torch.Generator(device="cpu").manual_seed(N)
+        x = (torch.randn(max(rows), K, generator=g) * 0.7).to(torch.bfloat16).cuda()
+        ref = X.exl3_matmul(x, w)
+        for M in rows:
+            if M <= X.SKINNY_MAX:
+                continue
+            for c in (5, 6):
+                got = tall_matmul(x[:M], w, cfg=c)
+                assert torch.equal(got, ref[:M]), (N, K, kb, M, c)
+            assert torch.equal(X.exl3_matmul(x[:M], w), ref[:M]), ("row grid", N, K, M)
+        line = f"{N}x{K} K{kb}: rows 33..{max(rows)} through the 64-row tile (cfg 5/6) = the row grid's bits"
+        if bench:
+            line += "; " + _bench(x, w)
+        out.append(line)
+    return out
+
+
+def _bench(x, w) -> str:
+    import time
+    res = []
+    for M in (64, 128):
+        xs = x[:M]
+        for name, fn in (("grid", lambda: X.exl3_matmul(xs, w)),) + tuple(
+                (f"tall{c}", (lambda c=c: tall_matmul(xs, w, cfg=c))) for c in (5, 6)):
+            for _ in range(3):
+                fn()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(20):
+                fn()
+            torch.cuda.synchronize()
+            res.append(f"M{M} {name} {(time.perf_counter() - t0) / 20 * 1e3:.3f} ms")
+    return ", ".join(res)
+
+
+if __name__ == "__main__":
+    if "--p2" in sys.argv:
+        for line in check_p2():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    if "--h64f" in sys.argv:
+        for line in check_h64f():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    if "--frag" in sys.argv:
+        for line in check_frag():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    if "--h64" in sys.argv:
+        for line in check_h64():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    if "--t64" in sys.argv:
+        for line in check_t64():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    if "--discriminate" in sys.argv:
+        for shape in ((10240, 5120, 4), (17408, 5120, 4), (5120, 17408, 5)):
+            for line in discriminate(shape):
+                print("exl3_tall:", line, flush=True)
+        for line in check_skip():
+            print("exl3_tall:", line, flush=True)
+        sys.exit(0)
+    for line in check():
+        print("exl3_tall:", line, flush=True)

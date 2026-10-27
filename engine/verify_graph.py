@@ -40,6 +40,14 @@ from engine import capture_lock  # noqa: E402
 # The longest context a verify is served from a graph at. 32,768 is the code as it was; the 32k
 # probe's prompt (32,795 tokens) was one past it and every verify of it ran eager.
 MAX_CTX = int(_S.get("GRAPH_MAX_CTX"))
+#: SPD-179: the graphs of one fold parity write their kept outputs (logits, taps, the trace's raw
+#: projections and conv tails, the hidden rows) into one set of buffers instead of a set each: a
+#: graph's outputs are read before the next verify, which writes the other parity's set, so 122 graphs
+#: hold two sets (about 0.4 GiB) where they held about 7 GiB. 0 = a set a graph.
+SHARE_OUT = _S.get("GRAPH_SHARE_OUT") == "1"
+#: the narrowest graph that shares: the wide graphs hold most of the outputs (17-32 rows about 74 %) and
+#: the narrow ones are the common verify, which keeps its own buffers and pays nothing
+SHARE_FROM = int(_S.get("GRAPH_SHARE_FROM"))
 MIN_CLASS = 1024
 
 
@@ -78,12 +86,29 @@ class Captured:
         self.taps: list[torch.Tensor] = []
 
 
+class _SharedOut:
+    """One fold parity's output buffers, by name, each sized for the widest verify."""
+
+    def __init__(self, rows: int):
+        self.rows = rows
+        self.bufs: dict = {}
+
+    def put(self, name: str, t, T: int, per_row: bool = True):
+        need = (-(-t.numel() // T) * self.rows) if per_row else t.numel()
+        buf = self.bufs.get(name)
+        if buf is None or buf.dtype != t.dtype or buf.numel() < t.numel():
+            buf = self.bufs[name] = torch.empty(max(need, t.numel()), dtype=t.dtype, device=t.device)
+        view = buf[:t.numel()].view(t.shape)
+        view.copy_(t)
+        return view
+
+
 class VerifyGraphs:
     def __init__(self, eng):
         self.eng = eng
         dev = eng.device
         self.pool = torch.cuda.graph_pool_handle()
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
         self.graphs: dict = {}
         self.tokens = {}                          # T -> static token buffer
         self.pos = {}                             # T -> static rotary positions
@@ -94,6 +119,9 @@ class VerifyGraphs:
         self.max_lc = 0                           # the class being captured or replayed
         self.last_picks = None                    # the replayed graph's argmax, or None
         self.stats = {"captured": 0, "replayed": 0, "eager": 0}
+        self._shared: dict = {}                    # fold parity -> _SharedOut (SHARE_OUT)
+        self.logits_out = None                     # set while a sharing capture runs its body
+        self.share_view = None                     # (name, shape, dtype) -> a view of the shared set
 
     @staticmethod
     def signature() -> tuple:
@@ -110,7 +138,8 @@ class VerifyGraphs:
                 M.FUSED["norm"], V.ONE_WARP, V.WARPS, M.GDN_AB, M.FUSED_ATTN_PREP, V.WY,
                 V.WY_FUSED, V.WY_MAXT, V.WY_CHAIN_MAXT, V.WY_FUSED_MAXT, V.CONV_BLOCK,
                 V.CONV_WARPS, M.HOST_ASYNC, V.WY_KC, nvfp4_skinny.LDW, nvfp4_skinny.WIDE_B,
-                V.TREE_PF, H.HEAD_BN, H.HEAD_WARPS, H.HEAD_STAGES, nvfp4_skinny.WIDE_LDW)
+                V.TREE_PF, H.HEAD_BN, H.HEAD_WARPS, H.HEAD_STAGES, nvfp4_skinny.WIDE_LDW,
+                SHARE_OUT, SHARE_FROM)
 
     @staticmethod
     def ctx_class(lc: int) -> int:
@@ -215,7 +244,13 @@ class VerifyGraphs:
         from engine.model import BlockTrace
         eng.trace = BlockTrace()
         eng.trace.S_entry = eng.state.S
-        eng.trace.conv_entry = eng.state.conv.clone()
+        if self.share_view is not None:
+            # SPD-179: the entry tails straight into the shared set (a copy either way)
+            eng.trace.conv_entry = self.share_view("conv_entry", tuple(eng.state.conv.shape),
+                                                   eng.state.conv.dtype)
+            eng.trace.conv_entry.copy_(eng.state.conv)
+        else:
+            eng.trace.conv_entry = eng.state.conv.clone()
         eng.trace.fold_par = eng._fold_par          # no walk to store, factors static
         eng._gv = self
         eng._walk_scratch = kind == "chain" and eng._fold_par is None
@@ -253,6 +288,27 @@ class VerifyGraphs:
         eng.state.conv.copy_(conv_keep)
         taps: list[torch.Tensor] = []
         eng.tap = taps.append if tap is not None else None
+        share = SHARE_OUT and eng._fold_par is not None and T >= SHARE_FROM
+        if share:
+            sh = self._shared.setdefault(eng._fold_par, _SharedOut(M.VERIFY_ROWS))
+            # the head writes this parity's logits buffer itself: no copy of the widest output
+            if "logits" not in sh.bufs:
+                with torch.cuda.stream(self.stream):
+                    sh.bufs["logits"] = torch.empty(M.VERIFY_ROWS * eng.cfg.vocab_size,
+                                                    dtype=torch.float32, device=eng.device)
+            self.logits_out = lambda n, b=sh.bufs["logits"]: b[:n]
+
+            def view(name, shape, dtype, sh=sh, T=T):
+                # a buffer sized for the widest verify (shape[-2] or shape[0] scales with the rows),
+                # allocated on first use outside any replay, viewed at this capture's shape
+                n = 1
+                for d in shape:
+                    n *= int(d)
+                buf = sh.bufs.get(name)
+                if buf is None or buf.dtype != dtype or buf.numel() < n:
+                    buf = sh.bufs[name] = torch.empty(-(-n // T) * sh.rows, dtype=dtype, device=eng.device)
+                return buf[:n].view(shape)
+            self.share_view = view
         try:
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(cap.graph, pool=self.pool,
@@ -260,8 +316,28 @@ class VerifyGraphs:
                 logits, trace = self._body(kind, T, tree)
                 # the greedy picks inside the graph, the same argmax kernel the loop ran
                 picks = logits.argmax(-1) if M.HOST_ASYNC else None
+                if share:
+                    # SPD-179: the other outputs a replay leaves for the loop, copied into this
+                    # parity's shared buffers; the graph's own tensors are released after the capture
+                    own = {b.untyped_storage().data_ptr() for b in sh.bufs.values()}
+
+                    def keep(name, t, per_row=True):
+                        # a tensor the body already wrote into the shared set stays as it is
+                        if not torch.is_tensor(t) or t.untyped_storage().data_ptr() in own:
+                            return t
+                        return sh.put(name, t, T, per_row=per_row)
+                    logits = keep("logits_copy", logits)
+                    for layer, tup in list(trace.layers.items()):
+                        if tup and torch.is_tensor(tup[0]):
+                            trace.layers[layer] = (keep(f"raw{layer}", tup[0]),) + tuple(tup[1:])
+                    trace.conv_entry = keep("conv_entry_copy", trace.conv_entry, per_row=False)
+                    taps[:] = [keep(f"tap{i}", h) for i, h in enumerate(taps)]
+                    eng.hidden_pre_norm = keep("hidden_pre", eng.hidden_pre_norm)
+                    eng.hidden_post_norm = keep("hidden_post", eng.hidden_post_norm)
         finally:
             eng.tap = tap
+            self.logits_out = None
+            self.share_view = None
         eng.state.conv.copy_(conv_keep)
         if pn_keep is not None:
             eng._pn.copy_(pn_keep)

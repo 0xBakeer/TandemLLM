@@ -65,12 +65,16 @@ MAKER_KINDS = ("ours", "vendor", "community")
 MODEL_ID = r"^[a-z0-9][a-z0-9.-]{0,63}$"
 # a string field without a pattern of its own: what a value written into serve.env may hold
 SAFE_VALUE = r"^[A-Za-z0-9._:-]{1,64}$"
-#: VIS-199: the most parallel chats (sequence slots) the guide and apply take, whatever a card
-#: measured. A joint verify pass holds at most 32 rows (server/slots.py `Meeting`,
-#: `--parallel-max-rows`) and a decoding chat keeps at least 2 of them (`share`), so 16 is the most
-#: that verify in one pass. A card's `slots.max` is how far it was measured; above it the guide says
-#: untested, and memory decides the rest (the estimate's `fits`).
-ENGINE_MAX_SLOTS = 16
+#: VIS-199, SRV-707: the most parallel lanes (sequence slots) the guide and apply take, whatever a
+#: card measured. A joint verify pass holds at most the family's row cap (32 by default, 64 for the 27B
+#: on EXL3; server/slots.py `Meeting`, `--parallel-max-rows`) and a decoding lane keeps at least 2 of
+#: them (`share`), so 16 lanes verify in one pass at 32 rows (JOINT_PASS_LANES); more verify in more
+#: passes a round, each pass reading the weights once, with a 2-row share each. The engine sets no
+#: limit of its own: this one keeps a typed count sane, and memory decides the rest (the estimate's
+#: `fits` and `lanes_full`). A card's `slots.max` is how far it was measured; above it the guide says
+#: untested.
+ENGINE_MAX_SLOTS = 64
+JOINT_PASS_LANES = 16
 
 _NUM = {"type": "number"}
 _NUM0 = {"type": "number", "minimum": 0}
@@ -212,7 +216,9 @@ SCHEMA = _obj({
                                                                  "source"))}},
                    required=("parts", "sources")),
     "components": {"type": "array", "items": _COMPONENT},
-    "parallelism": _obj({"slots": _RANGE, "window": _SRANGE, "side_window": _SRANGE,
+    # SRV-707: one window for every lane (no side window of its own); `knobs.side_window` is the
+    # serve.env key the window is also written to (QSE_SIDE_MAX_LEN)
+    "parallelism": _obj({"slots": _RANGE, "window": _SRANGE,
                          "kv_pool": _obj({"default": {"type": "boolean"}}),
                          "floor_gb": _RANGE, "kv_hard_floor_gb": _NUM0,
                          "kv_bytes_per_token": {"type": "integer", "minimum": 1},
@@ -485,10 +491,15 @@ def _cross(m: dict, root: str) -> list[str]:
     if loop:
         errs.append(f"$.components: {loop!r} depends on itself")
     p = m["parallelism"]
-    for k in ("slots", "window", "side_window", "floor_gb"):
+    for k in ("window", "floor_gb"):
         r = p[k]
         if not r["min"] <= r["default"] <= r["max"]:
             errs.append(f"$.parallelism.{k}: the default is outside min..max")
+    # SRV-707: the lanes' default may be past the card's measured max (8 lanes by default), never
+    # past what the engine family serves
+    r, top = p["slots"], slots_limit(m)["engine_max"]
+    if not r["min"] <= r["default"] <= top or r["max"] < r["min"]:
+        errs.append(f"$.parallelism.slots: the default is outside min..{top} (the engine's lanes)")
     for k, v in (p.get("fixed") or {}).items():
         if not re.match(ENV_KEY, k) or not isinstance(v, str) or not re.fullmatch(SAFE_VALUE, v):
             errs.append(f"$.parallelism.fixed.{k}: a serve.env key and a plain string value")
@@ -685,17 +696,16 @@ def config_max_len(folder: str | None) -> int | None:
 def with_config_window(m: dict, folders: list) -> dict:
     """ENG-363: the model with its window range up to what its checkpoint holds. The first folder of
     `folders` (the weight folders of its profiles present on this box) with a config sets the largest
-    window and side window (`config_max_len`); a box without the weights keeps the card's, which name
-    the same numbers. The defaults stay the card's (lowered only to the new largest)."""
+    window (`config_max_len`), every lane's (SRV-707); a box without the weights keeps the card's,
+    which names the same number. The default stays the card's (lowered only to the new largest)."""
     n = next((x for x in map(config_max_len, folders) if x), None)
     par = m["parallelism"]
-    if not n or all(par[k]["max"] == n for k in ("window", "side_window")):
+    if not n or par["window"]["max"] == n:
         return m
     m = copy.deepcopy(m)
-    for k in ("window", "side_window"):
-        r = m["parallelism"][k]
-        r["max"] = n - n % r["step"]
-        r["default"] = min(r["default"], r["max"])
+    r = m["parallelism"]["window"]
+    r["max"] = n - n % r["step"]
+    r["default"] = min(r["default"], r["max"])
     return m
 
 
@@ -765,12 +775,10 @@ def wizard_fields(m: dict) -> list[dict]:
         "components": [{"field": c["id"], "label": c["label"], "type": "bool"}
                        for c in m["components"]],
         "parallelism": [
-            {"field": "slots", "label": "Parallel requests", "type": "int",
+            {"field": "slots", "label": "Parallel lanes", "type": "int",
              "min": p["slots"]["min"], "max": slots_max(m)},
-            {"field": "window", "label": "Context window, first slot", "type": "int",
+            {"field": "window", "label": "Context window, every lane", "type": "int",
              "min": p["window"]["min"], "max": p["window"]["max"]},
-            {"field": "side_window", "label": "Context window, other slots", "type": "int",
-             "min": p["side_window"]["min"], "max": p["side_window"]["max"]},
             {"field": "kv_pool", "label": "Shared KV pool", "type": "bool"},
             {"field": "floor_gb", "label": "Memory kept free (GiB)", "type": "number",
              "min": p["floor_gb"]["min"], "max": p["floor_gb"]["max"]}],

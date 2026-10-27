@@ -111,6 +111,37 @@ def test_gdn_rows_parked_commit_folded():
     return "5 parked rows folded into a 12-row tree call = commit walk then the call, bit for bit"
 
 
+def test_gdn_rows_multi_equals_each_states_call():
+    """SPD-239: `gdn_rows_multi` over three states in one launch (a tree with scratch slots, a chain, a tree after
+    5 parked rows; each state's slots its own part of one scratch) leaves each state's out and written state of its
+    own `gdn_rows` call, bit for bit."""
+    trees = (TREE, [-1, 0, 1, 2], [-1, 0, 0, 2, 2])
+    cases, ents, slot = [], [], 0
+    stk = torch.zeros(31, H, D, D, device=DEV)
+    stk1 = torch.zeros(31, H, D, D, device=DEV)
+    for k, tr in enumerate(trees):
+        M = len(tr)
+        qkv, gg, beta, S = _gdn_inputs(M + 5, 10 + k)
+        ctl_l, ns = SK.tree_ctl(tr)
+        ctl = torch.tensor(ctl_l, dtype=torch.int32, device=DEV)
+        pre = None
+        if k == 2:
+            pre = (qkv[M:].contiguous(), gg[M:].contiguous(), beta[M:].contiguous(),
+                   torch.tensor([5], dtype=torch.int32, device=DEV))
+        q, g_, b_ = qkv[:M].contiguous(), gg[:M].contiguous(), beta[:M].contiguous()
+        want_s = S.clone()
+        want_o = SK.gdn_rows(q, KD, g_, b_, want_s, stk1, ctl, 3, k == 1, pre=pre)
+        got_s, got_o = S.clone(), torch.empty(M, H, D, dtype=torch.bfloat16, device=DEV)
+        ents.append(SK.gdn_rows_entry(q, g_, b_, got_s, stk[slot:slot + max(ns, 1)], ctl, got_o, k == 1, pre=pre))
+        slot += ns
+        cases.append((want_s, want_o, got_s, got_o, q, g_, b_, ctl, pre))
+    SK.gdn_rows_multi(torch.tensor(ents, dtype=torch.int64, device=DEV), KD, H, 3)
+    torch.cuda.synchronize()
+    for k, (ws, wo, gs, go, *_) in enumerate(cases):
+        assert torch.equal(wo, go) and torch.equal(ws, gs), k
+    return f"{len(trees)} states ({slot} scratch slots, parked rows, a written state) in one launch = each state's call"
+
+
 def test_gdn_pre_windows_equal_decode_shift():
     M = len(TREE)
     g = _g(2)
@@ -278,6 +309,34 @@ def _rope_tables(n, rot=64):
     return torch.cat([ang.cos(), ang.cos()], -1).to(torch.bfloat16), torch.cat([ang.sin(), ang.sin()], -1).to(torch.bfloat16)
 
 
+def test_qsa_pool_multi_equals_pool_then_index_copy():
+    """SPD-239: `qsa_pool_multi` over 6 (state, layer) pairs leaves every pool as `pool.index_copy_(0, rows,
+    qsa_pool(...))` leaves it, bit for bit."""
+    g = _g(23)
+    cap, eps = 2048, 1e-6
+    cos, sin = _rope_tables(cap)
+    ents, cases = [], []
+    for k in range(6):
+        ikc = torch.randn(cap, 128, generator=g, device=DEV).to(torch.bfloat16)
+        kln = (torch.randn(128, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+        b0 = 40 + 37 * k
+        b = b0 + torch.arange(SK.OWN, dtype=torch.int32, device=DEV)
+        slots = (b[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=DEV)).contiguous()
+        posb = (b * 4).contiguous()
+        rows = b.long().contiguous()
+        pool0 = torch.randn(cap // 4, 128, generator=g, device=DEV).to(torch.bfloat16)
+        want = pool0.clone()
+        want.index_copy_(0, rows, SK.qsa_pool(ikc, slots, posb, kln, cos, sin, eps))
+        got = pool0.clone()
+        ents.append(SK.qsa_pool_entry(ikc, slots, posb, kln, got, rows))
+        cases.append((want, got, ikc, slots, posb, kln, rows))
+    SK.qsa_pool_multi(torch.tensor(ents, dtype=torch.int64, device=DEV), SK.OWN, cos, sin, eps)
+    torch.cuda.synchronize()
+    for k, (want, got, *_) in enumerate(cases):
+        assert torch.equal(want, got), k
+    return f"{len(cases)} pairs x {SK.OWN} blocks in one launch = pool then index_copy"
+
+
 def test_qsa_pool_scores_and_selection():
     """Pooled keys within a bf16 step of the reference's arithmetic; scores rows = one-row calls and
     the own blocks equal the shared pool's for the same keys; the selection over 3,000 random keys
@@ -374,9 +433,47 @@ def test_qsa_topk_kernel_equals_torch():
     return f"bit-equal to the torch sorts at {out} blocks with ties"
 
 
-TESTS = [test_tree_helpers, test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
+def test_commit_multi_equals_the_commits_gathers():
+    """SPD-239: one `commit_multi` launch over several states' entries leaves what each state's own commit
+    gathers leave (`commit_dev`: index_select into the parked rows and the streams, cat + index_select into the
+    conv and PLE windows), bit for bit, for paths of 1 to 5 rows, moved or not."""
+    from engine.models.flashnext.engine import FlashNextEngine
+    g = torch.Generator(device=DEV).manual_seed(17)
+    want, ents, keep = [], [], []
+    for j, path in enumerate(([0], [0, 1, 2], [0, 2, 3], [0, 1, 3, 4, 5], [0, 1])):
+        M, n = 6, len(path)
+        idx = torch.tensor(path, dtype=torch.int64, device=DEV)
+        y = torch.randn(M, C, generator=g, device=DEV).to(torch.bfloat16)
+        gg = torch.randn(M, H, generator=g, device=DEV)
+        qkvz = torch.randn(M, C + 64, generator=g, device=DEV).to(torch.bfloat16)
+        stack = torch.randn(M + 3, 4 * 256, generator=g, device=DEV).to(torch.bfloat16)[1:M + 1]   # a view of rows
+        conv = torch.randn(1, C, 3, generator=g, device=DEV).to(torch.bfloat16)
+        ple = torch.randn(1, 1024, 9, generator=g, device=DEV).to(torch.bfloat16)
+        gvn = torch.randn(M, 1024, generator=g, device=DEV).to(torch.bfloat16)
+        py = torch.zeros(33, C, dtype=torch.bfloat16, device=DEV)
+        pg = torch.zeros(33, H, device=DEV)
+        so = torch.zeros(33, 4 * 256, dtype=torch.bfloat16, device=DEV)
+        c3, c9 = FlashNextEngine._tail_cols(path, 3), FlashNextEngine._tail_cols(path, 9)
+        want.append((y.index_select(0, idx), gg.index_select(0, idx), stack.index_select(0, idx),
+                     torch.cat([conv[0], qkvz[:, :C].T], 1).index_select(1, torch.tensor(c3, device=DEV)),
+                     torch.cat([ple[0], gvn.T], 1).index_select(1, torch.tensor(c9, device=DEV))))
+        ents += [SK.rows_entry(y, py, idx, n), SK.rows_entry(gg, pg, idx, n), SK.rows_entry(stack, so, idx, n),
+                 SK.window_entry(conv, qkvz, c3), SK.window_entry(ple, gvn, c9)]
+        keep.append((n, py, pg, so, conv, ple, idx, y, gg, qkvz, stack, gvn))
+    SK.commit_multi(torch.tensor(ents, dtype=torch.int64, device=DEV))
+    torch.cuda.synchronize()
+    for (n, py, pg, so, conv, ple, *_), w in zip(keep, want):
+        assert torch.equal(py[:n], w[0]) and torch.equal(pg[:n], w[1]) and torch.equal(so[:n], w[2])
+        assert torch.equal(conv[0], w[3]) and torch.equal(ple[0], w[4])
+        assert not py[n:].any() and not pg[n:].any()
+    return f"{len(keep)} states, {len(ents)} entries in one launch: rows, streams and windows as the commit's gathers"
+
+
+TESTS = [test_tree_helpers, test_commit_multi_equals_the_commits_gathers, test_gdn_rows_multi_equals_each_states_call,
+         test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
-         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows, test_qsa_pool_scores_and_selection,
+         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows,
+         test_qsa_pool_multi_equals_pool_then_index_copy, test_qsa_pool_scores_and_selection,
          test_attn_prep_indexer_query, test_qsa_topk_kernel_equals_torch]
 
 
