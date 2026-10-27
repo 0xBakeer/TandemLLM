@@ -48,8 +48,9 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-201 (2026-10-24, later): the measured speed setup defaults on (engine/settings.py, the 27B's knobs.py) and
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
-GOLDEN_V2 = ("58a0f1a95d3c8187e8b1890440c123787b89c5ded2048236d8cc65ccf9cb5c80",
-             "17a331201c4e7857c46dbd885abf3b6582843eb26381af2daed52027d14683ae")
+#: ENG-411: the kernel source strings leave engine/native_tree.py and the tools/ kernels (csrc/ files): v2 again
+GOLDEN_V2 = ("faf028096854cce746c42f570e94f7e04a62775902d5d3b1f75640582c427b5a",
+             "fe2e7ba3ee4fc933eff399243aa4d7d506e142be73fd4910d6611dff950c396f")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -86,12 +87,14 @@ GOLDEN_FP4 = {
     # SPD-245: prefill_joint and the skinny-order slab product
     # SRV-713: a Flash-Next MTP step leaves the verify block's records for its commit (engine/models/flashnext/engine.py,
     # no row changes); Flash-Next and Ornith
-    "qwen3_5": "be7b55433345d94de0f34eefd843e48363086f039cb09571ba97705fa25b3af8",
-    "qwen4_exp": "b41ebca1bd94daf939f1a198b04145547e7c7753b641484a2dd2eb3771cdf3bb",
-    "nemotron_h": "d3e365f847df2f74486029ab132d7c29379c6e16a98725587d2bf165e43c1af7",
-    "lfm2_moe": "eae9da4634edd3fa29312763dd0eeb4c33498e407795fc1ca86c9da2cefda67c",
-    "qwen3_5_moe": "c3db84a3452b9cbb57744c3bca4d659a23c17f622a3a9d4bbf030049a3d6a75f",
-    "flint": "be812ac05a869010d6c5d82450b8eb440eb3a387195ebf1e880312c04a635a07",
+    # ENG-411: the kernel sources move into csrc/ files beside their modules and count in the fingerprint (the
+    # compiled text unchanged); every adapter
+    "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
+    "qwen4_exp": "25b36ced9a41d1873adba9d63f487c0a46932fb69c93ca48856c07a663c3cdc0",
+    "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
+    "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
+    "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
+    "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

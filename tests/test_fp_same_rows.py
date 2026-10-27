@@ -64,6 +64,12 @@ model reuses a cache file from before 0.15.0:
     0.15.0 stored under (0.9.x, 0.10.0-0.11.1, 0.12.2, 0.13.0, SRV-673's tree, the tree before OPS-225);
   * the 27B's v2 with SAME_ROWS is 0.15.0's (tests/test_adapter_guards.py GOLDEN_V2).
 
+ENG-411: the kernel sources moved out of the modules into csrc/ files, the compiled text byte for byte
+0.15.0's. SAME_ROWS takes no entry (it cannot count a file a tree did not have), so:
+
+  * no family's fingerprint, on the bytes or through any SAME_ROWS variant, is 0.15.0's;
+  * the 27B's v2 with SAME_ROWS is GOLDEN_V2's of this tree.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -98,8 +104,14 @@ M27 = adapter.manifest()
 #: the code fingerprints of 0.9.0-0.9.2 (extra {}), the first 16 hex digits: v2 on the bytes and with
 #: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
 V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
-#: 0.15.0: the 27B's v2 with SAME_ROWS (tests/test_adapter_guards.py GOLDEN_V2[0])
+#: 0.15.0: the 27B's v2 with SAME_ROWS
 V2_0150 = "58a0f1a95d3c8187"
+#: ENG-411: the 27B's v2 with SAME_ROWS once the kernel sources left the modules (tests/test_adapter_guards.py
+#: GOLDEN_V2[0])
+V2_NOW = "faf028096854cce7"
+#: 0.15.0's fp4 by adapter (extra {}): what no family adopts after ENG-411
+FP4_0150 = {"qwen3_5": "be7b55433345d94d", "qwen4_exp": "b41ebca1bd94daf9", "nemotron_h": "d3e365f847df2f74",
+            "lfm2_moe": "eae9da4634edd3fa", "qwen3_5_moe": "c3db84a3452b9cbb", "flint": "be812ac05a869010"}
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 #: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
 FP4_LFM25_011 = "9049446866c5e4fc"
@@ -135,9 +147,9 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
     assert LOADER in M27.modules
     code = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
     same = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=mf.SAME_ROWS)
-    # 0.15.0 moved the 27B's fingerprint (tests/test_adapter_guards.py GOLDEN_V2): the entry still reads
-    # loader.py as the bytes it replaced, and the tree's other files are 0.15.0's
-    assert same.startswith(V2_0150), same
+    # 0.15.0 and ENG-411 moved the 27B's fingerprint (tests/test_adapter_guards.py GOLDEN_V2): the entry still
+    # reads loader.py as the bytes it replaced, and the tree's other files are this tree's
+    assert same.startswith(V2_NOW) and not same.startswith(V2_0150), same
     assert code != same, "the loader's bytes count without the entry"
     assert mf.adoption() != mf.FORMULA and mf.adoption().startswith(mf.FORMULA + "+same-")
     return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS"
@@ -323,6 +335,13 @@ def test_ops225_no_model_adopts_the_files_before_it():
     assert not v3.startswith(FP4_BEFORE_OPS225["27b"]), v3
     return ", ".join(out)
 
+
+
+def test_eng411_no_model_adopts_a_0_15_0_file():
+    """ENG-411: the kernel sources are new files in every family's manifest; no SAME_ROWS entry reaches 0.15.0."""
+    from engine.models import REGISTRY
+    out = [_adopts_none(n, REGISTRY[n].manifest_of(), [FP4_0150[n]]) for n in sorted(FP4_0150)]
+    return "; ".join(out)
 
 if __name__ == "__main__":
     fails = 0
