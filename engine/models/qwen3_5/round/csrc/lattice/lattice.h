@@ -1,0 +1,1 @@
+std::vector<torch::Tensor> lattice_tree_cpp(int64_t anchor, torch::Tensor cand, torch::Tensor logp, std::vector<int64_t> greedy, int64_t budget);
