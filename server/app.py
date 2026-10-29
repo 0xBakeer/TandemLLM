@@ -896,6 +896,129 @@ def _side_ok(waited_s: float, holder) -> bool:
     return holder is None or waited_s >= SIDE_AFTER_OWN_S
 
 
+#: SPD-249: `on`: the router skips its Qwen stage when `_own_eta_ms` says the answer cannot come
+#: inside the stage's timeout; `off`: it asks and waits the timeout out, as before
+OWN_ETA = (_S.get("OWN_ETA") or "on").strip().lower()
+#: SPD-249: the chat template's rows around a raw question's two messages (a margin, not a count)
+OWN_TEMPLATE_ROWS = 16
+#: SPD-249: the decode turns a question's answer takes after its prefill (a choice id: its first token
+#: comes with the prefill, the rest in a block or two)
+OWN_ANSWER_TURNS = 2
+#: SPD-249: a decoding round's time before the runner has measured one (ms)
+OWN_ROUND_MS = 200.0
+
+
+#: SPD-249: the requests inside the router now (`_planning`): a burst's other chats, whose questions
+#: and then prefills share the GPU with a question asked now
+PLANNING = {"n": 0}
+
+
+@contextlib.contextmanager
+def _planning():
+    with QUEUE:
+        PLANNING["n"] += 1
+    try:
+        yield
+    finally:
+        with QUEUE:
+            PLANNING["n"] -= 1
+
+
+def _burst_others() -> int:
+    """SPD-249: the requests of a burst that a question asked now competes with and that no slot
+    shows yet: the other requests inside the router (the asker's own request is one of them) and
+    the client requests waiting for a slot. Each prefills at least a question's rows within its
+    timeout (its own question, or its prompt once the router is done with it)."""
+    with QUEUE:
+        planning = PLANNING["n"]
+        waiting = sum(1 for w in WAITERS if not w.get("own"))
+    return max(0, planning - 1) + waiting
+
+
+def _turn_units_ms(rate: float) -> list[float]:
+    """SPD-249: the other GPU holders' units now, each the most it holds the shared turn before its
+    next safe point: the round runner's round (one unit for all its lanes), a slot loop's block
+    (one unit for the lanes in the joint barrier, one each alone), a prefill chunk at `rate` for a
+    busy slot that does not decode (a prompt's prefill, TandemLLM's own job on slot 0)."""
+    pool = dict.get(STATE, "pool")
+    if pool is None:
+        return []
+    rr = _round_runner.RUNNER
+    rnd = OWN_ROUND_MS
+    if rr is not None and rr.stats.get("rounds"):
+        rnd = rr.ms.get("round", 0.0) / rr.stats["rounds"] or OWN_ROUND_MS
+    chunk = int(STATE.get("prefix_chunk") or 0) or 4096
+    units = []
+    # slot 0 runs under the engine lock (its pool slot may have a lock of its own that nobody takes)
+    phases = [s.phase for s in pool.slots if (LOCK.locked() if s.index == 0 else s.busy)]
+    if "runner" in phases:
+        units.append(rnd)
+    if "decode" in phases:
+        units.append(rnd)
+    units += [rnd for p in phases if p == "solo"]
+    units += [1e3 * chunk / rate for p in phases if p not in ("runner", "decode", "solo")]
+    return units
+
+
+def _own_side_free(rows: int, max_new: int, lane_job: bool, holder) -> bool:
+    """SPD-249: whether an idle side slot takes a raw internal question of `rows` prompt rows now,
+    as the handler's admission does: a job short enough for the side lane waits for slot 0's lane
+    (`_par_side_need`), a longer one takes a side slot when `_side_ok` lets it."""
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.n < 2 or lane_job or not _side_ok(0.0, holder):
+        return False
+    need = int(rows) + int(max_new) + SIDE_MARGIN
+    return any(not s.busy and need <= s.max_len for s in pool.side())
+
+
+def _own_eta_ms(texts, max_new: int = 24) -> float | None:
+    """SPD-249 (the router's `own_eta`): ms from now until a raw question of `texts` (its system
+    prompt and its message) to this server has its prefill done (`queue_wait.own_eta_ms`): at
+    once on a free slot; through the side lane after the jobs pending there; behind slot 0's
+    holder otherwise (TandemLLM's own question: what is left of its prefill, then the own
+    questions waiting; a client's turn: not in time). A question on its own slot shares the GPU
+    turn with the slots that run (`_turn_units_ms`): its prefill chunks and answer blocks each
+    wait a unit of every other holder (live 2026-10-29: a 449-token question beside slot 0's
+    background prefill took 17.9 s on a free side slot). The burst it arrives in is not on any slot
+    yet: every other request inside the router or waiting for a slot (`_burst_others`) will prefill
+    beside it, and with the turn shared the question's rows come after as many rows of each
+    (8 chats of 2k at once, live: 16 of 32 questions ran out their 8 s). None without a measured
+    prefill rate, or when slot 0 is held by something that is no request: the question is asked
+    as before."""
+    tok = STATE.get("tok")
+    rows = OWN_TEMPLATE_ROWS
+    for t in texts:
+        try:
+            rows += len(tok(t, add_special_tokens=False).input_ids)
+        except Exception:                                          # noqa: BLE001
+            rows += int(len(t or "") / 3.5) + 1
+    rate = _peek_rate()
+    if not rate:
+        return None
+    lane = STATE.get("lane")
+    lane_job = lane is not None and lane.eligible(rows, max_new)
+    with QUEUE:
+        who = HOLDER["who"]
+        own_rows = sum(int(w.get("rows") or 0) for w in WAITERS if w.get("own"))
+    chunk = int(STATE.get("prefix_chunk") or 0) or 4096
+    turns = -(-rows // chunk) + OWN_ANSWER_TURNS
+    share = (qwait.turn_wait_ms(turns, _turn_units_ms(rate))
+             + 1e3 * rows * _burst_others() / rate)
+    if not LOCK.locked() or _own_side_free(rows, max_new, lane_job, _own_holder()):
+        return qwait.own_eta_ms(rows, rate, free=True, turn_ms=share)
+    if lane_job:
+        ahead = sum(len(j.ids) for j in list(lane.jobs) if j.state == "pending")
+        return qwait.own_eta_ms(rows, rate, free=False, ahead_rows=ahead, holder_ms=0.0)
+    if who is None:
+        return None
+    if who.get("own"):
+        held = time.monotonic() - float(who.get("t_hold") or time.monotonic())
+        left = 1e3 * int(who.get("rows") or 0) / rate - 1e3 * held
+        return qwait.own_eta_ms(rows, rate, free=False, ahead_rows=own_rows, holder_ms=left,
+                                turn_ms=share)
+    return qwait.own_eta_ms(rows, rate, free=False, holder_ms=None)
+
+
 def _holder_name() -> str:
     """Who holds slot 0 now, in words (the `[parallel]` line): free, a request, or TandemLLM's own
     work by its rank."""
@@ -8101,11 +8224,12 @@ class Handler(BaseHTTPRequestHandler):
             rec.queue_why = OWN_WAIT["question"]
             try:
                 # the prompt's length is rendered only if the in-context stage asks for it
-                plan = rec.plan = STATE["conductor"].plan(
-                    body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
-                    count_tokens=lambda: build_prompt(body, client, count=True,
-                                                       left_out=left_out),
-                    user=self._memory_user(rec))
+                with _planning():
+                    plan = rec.plan = STATE["conductor"].plan(
+                        body, self.headers, client_kind=rec.client_kind, request_id=cid,
+                        chat=chat, count_tokens=lambda: build_prompt(body, client, count=True,
+                                                                     left_out=left_out),
+                        user=self._memory_user(rec))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -8422,6 +8546,8 @@ class Handler(BaseHTTPRequestHandler):
               # the conductor's own question to Qwen (server/conductor/classify.py's agent): the
               # waiting line of a turn behind it says so
               "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA),
+              # SPD-249: its prompt rows, for the router's `own_eta` behind it
+              "rows": len(par_why.get("ids") or ()),
               "rec": rec}                 # SRV-249: the holder's live work, for the estimate
         rec.queue_why = _queue_why(par, par_why, side_need, 0.0, me)     # 0.8.2, the Lanes view
         with QUEUE:
@@ -11886,6 +12012,8 @@ def _serve(a, led) -> None:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         cond.router.session_tokens = STATE["session_tokens"]
+        # SPD-249: no Qwen question whose answer cannot come in time
+        cond.router.own_eta = _own_eta_ms if OWN_ETA == "on" else None
         # stored documents a fix must reach (a shipped default reaches only a box without one)
         from server.conductor import migrations as cond_migrations
         cond_migrations.run(cond.store, cond.journal)

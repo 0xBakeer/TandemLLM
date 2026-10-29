@@ -841,6 +841,241 @@ def test_session_shape_counts_people_and_hashes_the_first_turn():
     assert signals.shape(body(tr, tools=False)).n_user == 1
 
 
+# ------------------------------------------------------------------ SPD-249: qwen_busy
+
+def _busy_setup(eta):
+    cond, fakes = setup(decider=lambda t, o: "decider_unreachable", qwen=by_label("debug", 0.8))
+    fakes["qwen"].local = True                       # the server's own port: its queue is known
+    asked = []
+
+    def hook(texts, max_new):
+        asked.append((tuple(texts), max_new))
+        return eta
+    cond.router.own_eta = hook
+    return cond, fakes, asked
+
+
+def test_qwen_busy_skips_the_stage_at_once_and_the_cascade_goes_on():
+    """SPD-249: a burst of chats queued the router's questions behind slot 0 and each waited out
+    its 8 s timeout; when the server says the answer cannot come in time, the stage is skipped
+    at once (`qwen_busy`, journaled with the estimate) and the cascade goes on: here to the
+    profile's default class, as a timeout ends."""
+    cond, fakes, asked = _busy_setup(20_000.0)
+    plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
+    st = [s for s in plan.row["stages"] if s["stage"] == "qwen"]
+    assert st and st[0]["error"] == "qwen_busy" and st[0]["skipped"], plan.row["stages"]
+    assert st[0]["eta_ms"] == 20_000.0 and st[0]["timeout_ms"] > 0, st[0]
+    assert not fakes["qwen"].calls, "a busy stage is never asked"
+    assert (plan.row["class_id"], plan.row["kept"]) == ("code_edit", "fail_open")
+    assert asked and len(asked[0][0]) == 2 and asked[0][1] == 24, asked
+    assert "KeyError" in asked[0][0][1], "the hook counts the message the stage would send"
+    # not before the slot's turn ends (a client's turn holds slot 0): the same, no estimate
+    cond, fakes, _ = _busy_setup(float("inf"))
+    plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail."}]))
+    st = [s for s in plan.row["stages"] if s["stage"] == "qwen"]
+    assert st[0]["error"] == "qwen_busy" and st[0]["eta_ms"] is None and not fakes["qwen"].calls
+    json.dumps(plan.row["stages"])                   # the journal row stays JSON
+
+
+def test_qwen_free_or_unknown_or_remote_is_asked():
+    """SPD-249: an answer that comes in time, no estimate (no prefill rate yet), or a stage on
+    another endpoint (whose queue the server cannot see): Qwen is asked as before."""
+    for eta in (150.0, None):
+        cond, fakes, asked = _busy_setup(eta)
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
+        assert (plan.row["class_id"], plan.row["source"]) == ("debug", "qwen"), (eta, plan.row)
+        assert len(fakes["qwen"].calls) == 1 and asked
+    cond, fakes, asked = _busy_setup(20_000.0)
+    fakes["qwen"].local = False
+    plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
+    assert plan.row["source"] == "qwen" and not asked, "a remote stage never reads this queue"
+
+
+def test_qwen_busy_is_a_failure_not_a_call():
+    from server.conductor import decisions
+    now = 1_790_000_000_000
+    rows = [{"ts_ms": now, "class_id": "code_edit", "source": "default",
+             "stages": [{"stage": "qwen", "error": "qwen_busy", "ms": 0.0, "skipped": True}]},
+            {"ts_ms": now, "class_id": "debug", "source": "qwen",
+             "stages": [{"stage": "qwen", "label": "debug", "ms": 600.0}]}]
+    st = decisions.stats(rows, now_ms=now)
+    assert st["classifier"]["qwen"]["calls"] == 1, st["classifier"]
+    assert st["failures"] == {"qwen_busy": 1}, st["failures"]
+
+
+def test_the_own_eta_estimator():
+    """SPD-249 (`queue_wait.own_eta_ms`): a free slot is the prefill alone; behind slot 0 the
+    holder's time and the rows ahead come first; a client's turn on slot 0 is never in time;
+    no rate, no estimate."""
+    from server import queue_wait as qw
+    assert qw.own_eta_ms(1000, None, free=True) is None
+    assert qw.own_eta_ms(1000, 500.0, free=True) == 2000.0
+    assert qw.own_eta_ms(1000, 500.0, free=False, ahead_rows=3000, holder_ms=0.0) == 8000.0
+    assert qw.own_eta_ms(1000, 500.0, free=False, ahead_rows=0, holder_ms=1500.0) == 3500.0
+    assert qw.own_eta_ms(1000, 500.0, free=False, holder_ms=-40.0) == 2000.0
+    assert qw.own_eta_ms(1000, 500.0, free=False, holder_ms=None) == float("inf")
+    # the shared GPU turn: before each of its turns every other holder runs one unit
+    assert qw.turn_wait_ms(3, [200.0, 6000.0]) == 18_600.0 and qw.turn_wait_ms(3, []) == 0.0
+    assert qw.own_eta_ms(1000, 500.0, free=True, turn_ms=600.0) == 2600.0
+    assert qw.own_eta_ms(1000, 500.0, free=False, holder_ms=100.0, turn_ms=600.0) == 2700.0
+
+
+def test_the_servers_own_eta_reads_its_queue():
+    """SPD-249 (`app._own_eta_ms`, the router's hook): slot 0 free; slot 0 held with the side
+    lane's jobs pending ahead; held by another own question (its prefill left, the own waiters);
+    held by a client's turn for a question too long for the lane; held by no request."""
+    import time as _t
+    from server import preempt
+    setup()
+    real_rate = app._peek_rate
+    app._peek_rate = lambda: 1000.0                  # one row a ms
+    lane = app.STATE["lane"] = preempt.Lane(lambda job: None, prompt_max=2048, new_max=64)
+    rows = lambda texts: app.OWN_TEMPLATE_ROWS + sum(len(t) for t in texts)   # QTok: a char a token
+    short, long_ = ("pick one", "x" * 100), ("pick one", "y" * 3000)
+    try:
+        assert app._own_eta_ms(short) == float(rows(short))
+        assert app.LOCK.acquire(timeout=5)
+        try:
+            app.HOLDER["who"] = {"own": False, "rank": app.RANK_TURN, "t_hold": 0.0}
+            lane.submit(preempt.Job([1] * 500, 24, set()))
+            lane.submit(preempt.Job([1] * 700, 24, set()))
+            assert app._own_eta_ms(short) == float(1200 + rows(short))
+            assert app._own_eta_ms(long_) == float("inf"), "too long for the lane: the turn's end"
+            app.HOLDER["who"] = {"own": True, "rows": 4000, "t_hold": _t.monotonic() - 1.0}
+            me = {"own": True, "rows": 2500, "rank": app.RANK_TURN, "t": 0.0}
+            with app.QUEUE:
+                app.WAITERS.append(me)
+            try:
+                got = app._own_eta_ms(long_)
+                want = 3000.0 + 2500 + rows(long_)            # 4 s of prefill, 1 s done
+                assert abs(got - want) < 50.0, (got, want)
+            finally:
+                with app.QUEUE:
+                    app.WAITERS.remove(me)
+            app.HOLDER["who"] = None
+            assert app._own_eta_ms(long_) is None, "a lock no request took: no basis"
+        finally:
+            app.HOLDER["who"] = None
+            app.LOCK.release()
+        app._peek_rate = lambda: None
+        assert app._own_eta_ms(short) is None
+    finally:
+        app._peek_rate = real_rate
+        app.STATE["lane"] = None
+
+
+def test_a_free_side_slot_beside_a_background_prefill_is_no_immediate_start():
+    """SPD-249, live 2026-10-29: slot 0 ran a background prepare/memory prefill, a side slot was free,
+    and a 449-token question took 17.9 s against the 8 s timeout: the turn is shared, so each of the
+    question's turns (its prefill chunk, its answer blocks) waits a unit of slot 0's prefill. Now its
+    estimate charges that, and the router skips it as qwen_busy; beside the round runner's lanes alone
+    it charges a round a turn and is asked."""
+    from types import SimpleNamespace as NS
+    from server import preempt
+    from server import round_runner as RR
+    from server import slots as S
+    cond, fakes = setup(decider=lambda t, o: "decider_unreachable", qwen=by_label("debug", 0.8))
+    fakes["qwen"].local = True
+    cond.router.own_eta = app._own_eta_ms
+    real_rate, real_rr = app._peek_rate, RR.RUNNER
+    app._peek_rate = lambda: 600.0
+    app.STATE["prefix_chunk"] = 4096
+    app.STATE["lane"] = preempt.Lane(lambda job: None, prompt_max=2048, new_max=64)
+    pool = S.Pool([S.Slot(0, 65_536), S.Slot(1, 65_536), S.Slot(2, 65_536)])
+    app.STATE["pool"] = pool
+    RR.RUNNER = None
+    assert app.LOCK.acquire(timeout=5)
+    try:
+        app.HOLDER["who"] = {"own": False, "rank": app.RANK_PREP, "t_hold": 0.0}    # slot 0's own job
+        texts = ("Pick one class id.", "x" * 415)
+        eta = app._own_eta_ms(texts)
+        rows = app.OWN_TEMPLATE_ROWS + sum(len(t) for t in texts)
+        chunk_ms = 1e3 * 4096 / 600.0
+        want = 1e3 * rows / 600.0 + (1 + app.OWN_ANSWER_TURNS) * chunk_ms
+        assert abs(eta - want) < 1.0 and eta > 8000, (eta, want)
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
+        st = [x for x in plan.row["stages"] if x["stage"] == "qwen"]
+        assert st and st[0]["error"] == "qwen_busy" and not fakes["qwen"].calls, plan.row["stages"]
+        # the runner's lanes on slots 1 and 2 instead, slot 0 free: a round a turn, asked in time
+        app.HOLDER["who"] = None
+        app.LOCK.release()
+        RR.RUNNER = NS(stats={"rounds": 10}, ms={"round": 1750.0})                 # 175 ms a round
+        for i in (1, 2):
+            pool.slots[i].lock.acquire()
+            pool.slots[i].phase = "runner"
+        eta = app._own_eta_ms(texts)
+        assert abs(eta - (1e3 * rows / 600.0 + (1 + app.OWN_ANSWER_TURNS) * 175.0)) < 1.0, eta
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]),
+                          headers={"x-session-id": "ses-2"})
+        assert plan.row["source"] == "qwen" and len(fakes["qwen"].calls) == 1, plan.row["stages"]
+        for i in (1, 2):
+            pool.slots[i].phase = ""
+            pool.slots[i].lock.release()
+        assert app._own_eta_ms(texts) == 1e3 * rows / 600.0, "nothing else runs: the prefill alone"
+    finally:
+        if app.LOCK.locked():
+            app.HOLDER["who"] = None
+            app.LOCK.release()
+        app._peek_rate, RR.RUNNER = real_rate, real_rr
+        app.STATE["lane"] = None
+        app.STATE.pop("pool", None)
+
+
+def test_a_burst_in_the_router_skips_the_questions_that_cannot_fit():
+    """SPD-249, live 2026-10-29: 8 chats at once, the box idle when each asked, and 16 of 32 router
+    questions ran out their 8 s, because the other chats' questions and prefills came right after.
+    The other requests inside the router and the clients waiting for a slot now count: each shares
+    the turn with the question for at least its rows. A short class question still fits a burst of 8;
+    the long package question does not; alone, both are asked."""
+    from server import preempt
+    from server import slots as S
+    cond, fakes = setup(decider=lambda t, o: "decider_unreachable", qwen=by_label("debug", 0.8))
+    fakes["qwen"].local = True
+    cond.router.own_eta = app._own_eta_ms
+    real_rate = app._peek_rate
+    app._peek_rate = lambda: 600.0
+    app.STATE["prefix_chunk"] = 4096
+    app.STATE["lane"] = preempt.Lane(lambda job: None, prompt_max=2048, new_max=64)
+    app.STATE["pool"] = S.Pool([S.Slot(0, 65_536)] + [S.Slot(i, 65_536) for i in range(1, 8)])
+    short, long_ = ("Pick one class id.", "x" * 415), ("Pick the packages.", "y" * 2330)
+    rows = lambda texts: app.OWN_TEMPLATE_ROWS + sum(len(t) for t in texts)     # QTok: a char a token
+    me = [{"own": False, "rank": app.RANK_TURN, "t": 0.0} for _ in range(2)]
+    try:
+        assert app._burst_others() == 0
+        alone = app._own_eta_ms(long_)
+        assert abs(alone - 1e3 * rows(long_) / 600.0) < 1.0 and alone < 8000, alone
+        with app._planning():
+            with app._planning():
+                assert app.PLANNING["n"] == 2 and app._burst_others() == 1
+        assert app.PLANNING["n"] == 0
+        app.PLANNING["n"] = 8                                      # a burst of 8 chats in the router
+        e_short, e_long = app._own_eta_ms(short), app._own_eta_ms(long_)
+        assert abs(e_short - 8e3 * rows(short) / 600.0) < 1.0 and e_short < 8000, e_short
+        assert abs(e_long - 8e3 * rows(long_) / 600.0) < 1.0 and e_long > 8000, e_long
+        with app.QUEUE:
+            app.WAITERS.extend(me)                                 # two clients waiting for a slot
+        assert app._burst_others() == 9
+        assert abs(app._own_eta_ms(short) - 10e3 * rows(short) / 600.0) < 1.0
+        with app.QUEUE:
+            for w in me:
+                app.WAITERS.remove(w)
+        # through the router, in the same burst: the question as this router asks it (one char a token
+        # here, so its rows are its characters) fits at a fast prefill and is skipped at a slow one
+        app._peek_rate = lambda: 60_000.0
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "The tests fail with a KeyError."}]))
+        st = [x for x in plan.row["stages"] if x["stage"] == "qwen"]
+        assert st[0].get("error") is None and len(fakes["qwen"].calls) == 1, st
+        app._peek_rate = lambda: 600.0
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "The build breaks on a missing import."}]),
+                          headers={"x-session-id": "ses-2"})        # another text: no cached answer
+        st = [x for x in plan.row["stages"] if x["stage"] == "qwen"]
+        assert st[0]["error"] == "qwen_busy" and len(fakes["qwen"].calls) == 1, st
+    finally:
+        app.PLANNING["n"] = 0
+        app._peek_rate = real_rate
+        app.STATE["lane"] = None
+        app.STATE.pop("pool", None)
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

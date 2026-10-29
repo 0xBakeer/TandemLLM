@@ -179,6 +179,9 @@ KNOBS: dict[str, tuple] = {
     # questions, a client's title or tags task) takes an idle side slot first; off: slot 0 as a
     # guest with the stash, as before
     'SIDE_GUESTS': ('on', 'server/app.py'),
+    # SPD-249: the router skips its Qwen stage at once when the server's queue says the answer
+    # cannot come inside the stage's timeout (`qwen_busy`); off: it asks and waits out the timeout
+    'OWN_ETA': ('on', 'server/app.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

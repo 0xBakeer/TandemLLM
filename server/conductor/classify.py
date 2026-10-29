@@ -283,15 +283,20 @@ def distribution(toks: list, ids: list[str], label: str, conf: float) -> dict[st
 class Qwen:
     """The classifier role: the engine itself on the raw model name, thinking off."""
 
-    def __init__(self, endpoint: str, model: str, timeout_ms: int = 8000):
+    #: the answer's token cap (a choice id is a few tokens)
+    max_tokens = 24
+
+    def __init__(self, endpoint: str, model: str, timeout_ms: int = 8000, local: bool = False):
         self.endpoint = endpoint.rstrip("/")
         self.model, self.timeout_ms = model, int(timeout_ms)
+        # SPD-249: the endpoint is this server's own port (`self`), whose queue the router can see
+        self.local = bool(local)
 
     def choice(self, state: str, prompt: str, options: dict[str, str],
                max_chars: int = 2000) -> Answer:
         t0 = time.perf_counter()
         ids = list(options)
-        body = {"model": self.model, "stream": False, "temperature": 0, "max_tokens": 24,
+        body = {"model": self.model, "stream": False, "temperature": 0, "max_tokens": self.max_tokens,
                 "messages": [{"role": "system", "content": prompt},
                              {"role": "user", "content": state[:max_chars]}],
                 "chat_template_kwargs": {"enable_thinking": False},

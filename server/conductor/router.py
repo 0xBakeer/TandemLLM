@@ -696,6 +696,10 @@ class Router:
         self.cache_scope = lambda: None
         # 2026-10-05: the memory notes (server/conductor/memory.py Memory), set by the conductor
         self.memory = None
+        # SPD-249: the server's estimate of when a raw question to its own port is answered,
+        # `own_eta(texts, max_new)` -> ms from now (None: no basis, inf: not before the slot's
+        # turn ends). Set by the server; None asks as before
+        self.own_eta = None
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -710,7 +714,8 @@ class Router:
         if not endpoint:
             return None
         a = (decider_for(endpoint, role.get("model") or "auto", timeout_ms) if kind == "decider"
-             else Qwen(endpoint, role.get("model") or self.raw_model(), timeout_ms))
+             else Qwen(endpoint, role.get("model") or self.raw_model(), timeout_ms,
+                       local=role.get("endpoint") == "self"))
         if a is None:
             return None
         self._adapters[key] = a
@@ -778,9 +783,13 @@ class Router:
                                question or clf["question"], options)
             else:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
-                ans = a.choice(signals.digest(text, chars, line),
-                               _qwen_prompt(router, question, qid, about, listing), options,
-                               max_chars=chars)
+                state = signals.digest(text, chars, line)
+                prompt = _qwen_prompt(router, question, qid, about, listing)
+                busy = self._stage_busy(a, st, prompt, state[:chars])
+                if busy is not None:
+                    stages.append(busy)
+                    continue
+                ans = a.choice(state, prompt, options, max_chars=chars)
             if st["kind"] == "qwen" and question is None:
                 ans = _code_guard(ans, text, options)    # SRV-189
             d = ans.as_dict()
@@ -798,6 +807,26 @@ class Router:
             if accepted is not None:
                 break
         return accepted, stages
+
+    def _stage_busy(self, a, st: dict, prompt: str, state: str) -> dict | None:
+        """SPD-249: the Qwen stage's row when its answer cannot come inside the stage's timeout
+        (`qwen_busy`), else None and the stage is asked. Only for the server's own port, whose
+        queue `own_eta` sees: questions queued behind slot 0 ran out their 8 s timeout one after
+        the other in a burst of chats; skipping at once is the same fall-through without the
+        wait. Never asked here, so never a call (`decisions.stats`)."""
+        if self.own_eta is None or not getattr(a, "local", False):
+            return None
+        try:
+            eta = self.own_eta((prompt, state), int(getattr(a, "max_tokens", 24)))
+        except Exception:                                          # noqa: BLE001
+            return None
+        limit = float(st.get("timeout_ms") or getattr(a, "timeout_ms", 0) or 0)
+        if eta is None or limit <= 0 or eta <= limit:
+            return None
+        d = Answer(st["kind"], error=f"{st['kind']}_busy").as_dict()
+        d.update(eta_ms=round(eta, 1) if eta != float("inf") else None, timeout_ms=limit,
+                 skipped=True)
+        return d
 
     # ---------------------------------------------------------------- sessions
     def replayed_for(self, key: str, ids: list[int], tok) -> list[int]:

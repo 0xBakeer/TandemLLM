@@ -208,3 +208,32 @@ def comment(pos: int, eta: float | None, waited: float) -> bytes:
     """The SSE comment a waiting stream gets: position, estimate, time waited so far."""
     tail = f", about {about(eta)}" if eta is not None else ""
     return f": waiting, position {int(pos)}{tail}, {waited:.0f} s so far\n\n".encode()
+
+
+def own_eta_ms(rows: int, rate: float | None, *, free: bool, ahead_rows: int = 0,
+               holder_ms: float | None = 0.0, turn_ms: float = 0.0) -> float | None:
+    """SPD-249: when a raw internal question of `rows` prompt rows (the router's Qwen stage) has
+    its prefill done, in ms from now, at the measured prefill `rate` (tokens a second). `free`: a
+    slot takes it at once (slot 0, or an idle side slot it may take). Else it starts after
+    `holder_ms` (what slot 0's holder keeps the engine before the question's turn: 0 when the
+    holder serves the side lane at its next safe point; None when it is a client's turn, which
+    may run minutes) and after the questions ahead of it (`ahead_rows`, served one at a time).
+    `turn_ms`: the time the other slots hold the GPU between the question's own turns
+    (`turn_wait_ms`): a free slot is no immediate start while other slots run, the turn is
+    shared. None without a rate: no basis, and the question is asked as before."""
+    if not rate or rate <= 0:
+        return None
+    own = 1e3 * max(0, int(rows)) / float(rate) + max(0.0, float(turn_ms))
+    if free:
+        return own
+    if holder_ms is None:
+        return float("inf")
+    return max(0.0, float(holder_ms)) + 1e3 * max(0, int(ahead_rows)) / float(rate) + own
+
+
+def turn_wait_ms(turns: int, units_ms) -> float:
+    """SPD-249: what a job of `turns` GPU turns (its prefill chunks and decode blocks) waits for the
+    other holders of the shared turn (server/slots.py `Turn`): before each of its turns every other
+    holder runs one unit of its work (`units_ms`: a runner round, a slot loop's block, a prefill
+    chunk), the most it can hold the turn before its next safe point."""
+    return max(0, int(turns)) * sum(max(0.0, float(u)) for u in units_ms)
