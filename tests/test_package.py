@@ -61,6 +61,26 @@ def test_pyproject_matches_the_tree():
     assert os.path.exists(os.path.join(ROOT, "dashboard", "dist", "index.html"))
 
 
+def test_the_dash_image_copies_every_package():
+    """ops/Dockerfile.dash builds the wheel: every source folder of pyproject.toml's packages must
+    be COPYed and allowed by its .dockerignore (2026-10-20: chatd/ and packages/ were missing)."""
+    st = _toml()["tool"]["setuptools"]
+    dirs = st.get("package-dir", {})
+    srcs = {dirs[p] if p in dirs else p.split(".")[0] for p in st["packages"]}
+
+    def under(d, roots):
+        return any(d == r or d.startswith(r + "/") for r in roots)
+
+    with open(os.path.join(ROOT, "ops", "Dockerfile.dash")) as f:
+        copied = [w[1].rstrip("/") for w in (ln.split() for ln in f)
+                  if len(w) == 3 and w[0] == "COPY"]
+    with open(os.path.join(ROOT, "ops", "Dockerfile.dash.dockerignore")) as f:
+        allowed = [ln.strip()[1:].rstrip("/") for ln in f if ln.strip().startswith("!")]
+    for d in sorted(srcs):
+        assert under(d, copied), f"{d} is not COPYed in ops/Dockerfile.dash"
+        assert under(d, allowed), f"{d} is not allowed in ops/Dockerfile.dash.dockerignore"
+
+
 def test_the_shipped_texts_are_in_the_wheel():
     """The standalone proxy runs the conductor (P4), whose schema reads packages/seed.json at
     import: every file under packages/ must be package data of the wheel (2026-10-04 night pass:
