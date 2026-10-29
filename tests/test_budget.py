@@ -210,6 +210,120 @@ def test_a_long_prefill_sheds_store_anchors_stash_park_pin_in_that_order_until_i
     assert m.stats["shed"]["park"] == 1 and [e["level"] for e in m.events if e["kind"] == "shed"]
 
 
+def _partial(fa, asked, gib, margin=0.25, chunk=None, stuck=None):
+    """A store of `gib` that gives back what the gate needs plus `margin` (SPD-249 `StateStore.shed_to`), at most
+    `chunk` GiB a call; `stuck` (a dict) keeps the freed bytes in the reserve (the allocator's cache)."""
+    held = {"b": int(gib * GIB), "heads": []}
+
+    def fn(safe, need, heads=True):
+        asked.append(need)
+        held["heads"].append(heads)
+        b = min(held["b"], need + int(margin * GIB), int(chunk * GIB) if chunk else 1 << 62)
+        held["b"] -= b
+        fa.give(b)
+        if stuck is not None:
+            stuck["b"] += b
+        return {"freed": b, "dropped": 1, "heads_kept": 1 if held["b"] else 0}
+    return fn, held
+
+
+class StoreCacheAlloc(FakeAlloc):
+    """An allocator whose cache keeps what the store frees: `empty` gives back everything else."""
+
+    def __init__(self, allocated_gib):
+        super().__init__(allocated_gib)
+        self.stuck = {"b": 0}
+
+    def empty(self):
+        self.empties += 1
+        self.res = self.alloc + self.stuck["b"]
+
+
+def test_spd249_a_chunk_that_lowers_the_reserve_lets_the_next_chunk_go():
+    """Store chunks of 0.5 GiB, over by 1.2 GiB: each chunk lowers the reserve, so three go; the rest of the store
+    and every other level stay; the first chunk is plain entries only, the later ones may reach the heads."""
+    fa = FakeAlloc(71.2)
+    m = budget(fa)
+    asked, order = [], []
+    fn, held = _partial(fa, asked, 5, chunk=0.5)
+    m.register("store", shedder(fa, order, "store", 5))
+    m.register_partial("store", fn)
+    m.register("anchors", shedder(fa, order, "anchors", 1))
+    m.gate(1000)
+    chunks = [e for e in m.events if e["kind"] == "shed_chunk"]
+    assert len(chunks) == 3 and all(c["decision"] == "continue" for c in chunks), chunks
+    assert held["heads"] == [False, True, True] and order == [] and fa.res <= 70 * GIB, (held, order)
+    assert all(c["reserved_before"] - c["reserved_after"] == c["freed"] for c in chunks), chunks
+    return "3 chunks of 0.5 GiB, each lowering the reserve; heads open from the second; nothing else shed"
+
+
+def test_spd249_a_chunk_the_reserve_keeps_stops_the_store_and_the_next_level_goes():
+    """The store's frees stay in the allocator's cache: the first chunk (plain entries only) leaves the reserve
+    where it was, the store's shed stops there (its heads untouched) and the anchors go."""
+    fa = StoreCacheAlloc(71)
+    m = budget(fa)
+    asked, order = [], []
+    fn, held = _partial(fa, asked, 5, stuck=fa.stuck)
+    m.register("store", shedder(fa, order, "store", 5))
+    m.register_partial("store", fn)
+    m.register("anchors", shedder(fa, order, "anchors", 1.5))
+    g = m.gate(1000)
+    chunks = [e for e in m.events if e["kind"] == "shed_chunk"]
+    assert len(chunks) == 1 and chunks[0]["decision"].startswith("stop"), chunks
+    assert held["heads"] == [False] and held["b"] == int(3.75 * GIB), held
+    assert order == ["anchors"] and g["shed"] == ["store", "anchors"] and fa.res <= 70 * GIB, (order, g, fa.res)
+    return "one chunk the reserve kept: the store stopped (3.75 GiB and its heads kept), the anchors went"
+
+
+def test_spd249_chunks_that_keep_lowering_the_reserve_still_empty_the_store():
+    """Over by more than the store holds, every chunk lowering the reserve: the store empties, then the next level."""
+    fa = FakeAlloc(73)
+    m = budget(fa)
+    asked, order = [], []
+    fn, held = _partial(fa, asked, 2, chunk=0.75)
+    m.register("store", shedder(fa, order, "store", 2))
+    m.register_partial("store", fn)
+    m.register("anchors", shedder(fa, order, "anchors", 1.5))
+    m.gate(1000)
+    chunks = [e for e in m.events if e["kind"] == "shed_chunk"]
+    assert held["b"] == 0 and len(chunks) == 3 and all(c["decision"] == "continue" for c in chunks), (held, chunks)
+    assert order == ["anchors"] and fa.res <= 70 * GIB, order
+    return "three chunks, each lowering the reserve: the store empty, then the anchors"
+
+
+def test_spd249_the_gate_sheds_only_the_store_bytes_it_needs():
+    """Over the ceiling by 1 GiB with a 5 GiB store: the gate asks the store for 1 GiB (its partial shedder adds
+    the margin), the rest of the store stays, no other level is touched; the shed's log line has the need."""
+    fa = FakeAlloc(71)
+    m = budget(fa)
+    asked, order = [], []
+    fn, held = _partial(fa, asked, 5)
+    m.register("store", shedder(fa, order, "store", 5))
+    m.register_partial("store", fn)
+    m.register("anchors", shedder(fa, order, "anchors", 1))
+    g = m.gate(1000)
+    assert asked == [1 * GIB] and held["b"] == int(3.75 * GIB), (asked, held)
+    assert order == [] and g["shed"] == ["store"] and fa.res <= 70 * GIB, (order, g)
+    ev = [e for e in m.events if e["kind"] == "shed"][-1]
+    assert ev["level"] == "store" and ev["need"] == 1 * GIB and ev["freed"] == int(1.25 * GIB), ev
+    return "1 GiB over: 1.25 GiB of a 5 GiB store given back, the other levels kept"
+
+
+def test_spd249_a_store_too_small_for_the_need_empties_and_the_next_level_follows():
+    """Over by 3 GiB with a 2 GiB store: the store goes whole (as before), then the next level."""
+    fa = FakeAlloc(73)
+    m = budget(fa)
+    asked, order = [], []
+    fn, held = _partial(fa, asked, 2)
+    m.register("store", shedder(fa, order, "store", 2))
+    m.register_partial("store", fn)
+    m.register("anchors", shedder(fa, order, "anchors", 1.5))
+    g = m.gate(1000)
+    assert held["b"] == 0 and order == ["anchors"] and g["shed"] == ["store", "anchors"], (held, order, g)
+    assert fa.res <= 70 * GIB
+    return "the store emptied, then the anchors: the order of the levels unchanged"
+
+
 def test_with_nothing_left_to_shed_the_prefill_is_refused_not_run():
     fa = FakeAlloc(75)                # e.g. a decision model in the same allocator, not excluded
     m = budget(fa)

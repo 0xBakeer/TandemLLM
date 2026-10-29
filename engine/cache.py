@@ -437,6 +437,8 @@ class Budget:
         self.ws_cap = int(ws_cap) if ws_cap is not None else None
         self.on_event = on_event
         self.shedders: dict = {}
+        # SPD-249: levels that can give back part of themselves, `fn(safe, need) -> {"freed", ...}`
+        self.partial: dict = {}
         self.ws_now = 0                    # the running prefill's workspace, until it is done
         self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
                       "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
@@ -462,6 +464,13 @@ class Budget:
         if level not in self.LEVELS:
             raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
         self.shedders[level] = fn
+
+    def register_partial(self, level: str, fn) -> None:
+        """SPD-249: `fn(safe, need) -> {"freed": bytes, ...}` gives back about `need` bytes of the level (the
+        gate's room under its limit) instead of all of it; the dict's other keys go into the shed's log line."""
+        if level not in self.LEVELS:
+            raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
+        self.partial[level] = fn
 
     def _excluded(self) -> tuple[int, int]:
         """(allocated, reserved) bytes that are not the engine's: `exclude()` gives one figure for
@@ -494,16 +503,64 @@ class Budget:
                 pass
         return ev
 
-    def shed(self, level: str, why: str, safe: bool = False) -> int:
+    def shed(self, level: str, why: str, safe: bool = False, need: int | None = None, heads: bool = True) -> int:
+        """Give back a level: all of it, or with `need` and a partial shedder about `need` bytes (`heads`: its
+        last entries may go too)."""
+        part = self.partial.get(level) if need is not None else None
         fn = self.shedders.get(level)
-        if fn is None:
+        if part is None and fn is None:
             return 0
-        freed = int(fn(safe) or 0)
+        info: dict = {}
+        if part is not None:
+            info = dict(part(safe, int(need), heads) or {})
+            freed = int(info.pop("freed", 0) or 0)
+            self.last_partial = dict(info)
+        else:
+            freed = int(fn(safe) or 0)
         if freed:
             self.stats["shed"][level] += 1
             self.stats["shed_bytes"][level] += freed
-            self._event("shed", level=level, why=why, freed=freed, safe=safe)
+            self._event("shed", level=level, why=why, freed=freed, safe=safe,
+                        **({"need": int(need)} if part is not None else {}), **info)
         return freed
+
+    #: SPD-249: a chunk under this many bytes says nothing about the reserve (the allocator frees whole segments,
+    #: and a small entry's blocks can share one with live tensors): its stop does not keep the level's heads
+    PROOF_BYTES = 256 << 20
+
+    def _shed_to(self, lv: str, why: str, over) -> bool:
+        """SPD-249: a partial level shed in chunks while `over()` (bytes past the limit) is positive, each chunk
+        about what is over. The limit counts the reserve, what the box feels: a chunk whose bytes stay in the
+        allocator's cache (the reserve fell by less than half of them, after the free blocks went back) relieves
+        nothing and ends the level's shed, and the gate goes on to the next level. A level's last entries (the
+        store's heads) go after a chunk that lowered the reserve, and when nothing else of the level is left or the
+        chunks before them were too small to tell (`PROOF_BYTES`): the next level is dearer than a head. The
+        shedder still keeps a head that cannot close what is needed (`StateStore.shed_to`)."""
+        done, lowered = False, False
+        while True:
+            need = over()
+            if need <= 0:
+                return done
+            before = self.memory()[1]
+            self.last_partial = {}
+            freed = self.shed(lv, why, need=need, heads=lowered)
+            heads_left = int(self.last_partial.get("heads_kept", 0) or 0) > 0
+            if not freed:
+                if not lowered and heads_left:
+                    lowered = True                 # only heads are left: they go before the next level
+                    continue
+                return done
+            done = True
+            self.empty(why)
+            after = self.memory()[1]
+            ok = before - after >= freed // 2
+            small = not ok and not lowered and heads_left and freed < self.PROOF_BYTES
+            self._event("shed_chunk", level=lv, why=why, freed=freed, reserved_before=before, reserved_after=after,
+                        decision="continue" if ok else "continue: too small to tell" if small
+                        else "stop: the reserve kept the bytes")
+            if not ok and not small:
+                return done
+            lowered = True
 
     def empty(self, why: str) -> int:
         """Hand the allocator's free blocks back to the driver. Between requests only: the verify
@@ -538,6 +595,11 @@ class Budget:
             for lv in self.LEVELS:
                 if res <= self.ceiling:
                     break
+                if lv in self.partial:
+                    if self._shed_to(lv, "ceiling", lambda: self.memory()[1] - self.ceiling):
+                        shed.append(lv)
+                        alloc, res = self.memory()
+                    continue
                 if self.shed(lv, "ceiling"):
                     shed.append(lv)
                     self.empty("ceiling")
@@ -549,6 +611,11 @@ class Budget:
             for lv in self.LEVELS:
                 if res + ws <= self.peak:
                     break
+                if lv in self.partial:
+                    if self._shed_to(lv, "peak", lambda: self.memory()[1] + ws - self.peak):
+                        shed.append(lv)
+                        alloc, res = self.memory()
+                    continue
                 if self.shed(lv, "peak"):
                     shed.append(lv)
                     self.empty("peak")
@@ -692,7 +759,7 @@ class Budget:
 
 # --------------------------------------------------------------------------- the state store
 class _Entry:
-    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind", "mark")
+    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind", "mark", "stale")
 
     def __init__(self, tokens, snap, conv_id, kind="prefix", mark=None):
         self.tokens = tokens
@@ -704,6 +771,7 @@ class _Entry:
         # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise.
         self.kind = kind
         self.mark = mark          # SPD-249: the grid mark of the prefill that took it (`Grid`)
+        self.stale = False        # SPD-249: a head a newer head of the same prompt replaced
 
 
 class StateStore:
@@ -767,21 +835,59 @@ class StateStore:
                 self._lengths[n] -= 1
                 if not self._lengths[n]:
                     del self._lengths[n]
-            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id, kind, mark)
+            self._d[key] = new = _Entry(tuple(tokens[:n]), snap, conv_id, kind, mark)
+            if mark is not None and n == mark:
+                self._stale_heads(key, new)
             self._lengths[n] = self._lengths.get(n, 0) + 1
             self.bytes += snap.nbytes
             self.stats["puts"] += 1
             self._evict_locked()
 
+    #: SPD-249: two heads that share at least this many leading rows are one prompt's (the same template
+    #: and class note; the index or a note changed): the older is stale (`put`)
+    same_head_rows = 256
+
+    @staticmethod
+    def _head(key, e) -> bool:
+        """A live head: a snapshot at its prompt's head mark that no newer head of that prompt replaced."""
+        return e.mark is not None and key[0] == e.mark and not e.stale
+
     def _evict_locked(self, room: int = 0) -> None:
+        """The oldest entries go until `room` fits. SPD-249: a snapshot at a prompt head's mark (the
+        head every chat of a user shares, `Grid`) goes last: a burst's eight turn ends would push it
+        out right after the chats it was taken for, and the next burst would read the head again. A
+        store of heads alone evicts the oldest head; a stale head is an entry like any other."""
         while self.bytes + room > self.budget and self._d:
-            key, entry = self._d.popitem(last=False)
-            self.bytes -= entry.snap.nbytes
-            n = key[0]
-            self._lengths[n] -= 1
-            if not self._lengths[n]:
-                del self._lengths[n]
+            self._evict_one_locked()
             self.stats["evictions"] += 1
+
+    def _evict_one_locked(self) -> tuple[int, bool]:
+        """The store's next victim out: the oldest entry that is not a live head, else the oldest head.
+        (bytes, whether it was a head)."""
+        key = next((k for k, e in self._d.items() if not self._head(k, e)), None)
+        head = key is None
+        if head:
+            key = next(iter(self._d))
+            self.stats["evictions_head"] = self.stats.get("evictions_head", 0) + 1
+        entry = self._d.pop(key)
+        self.bytes -= entry.snap.nbytes
+        n = key[0]
+        self._lengths[n] -= 1
+        if not self._lengths[n]:
+            del self._lengths[n]
+        return entry.snap.nbytes, head
+
+    def _stale_heads(self, key, new) -> None:
+        """SPD-249: a new head makes every older head of the same prompt stale (they share at least
+        `same_head_rows` leading rows: the profile's notes changed, its old head is never asked for)."""
+        for k, e in self._d.items():
+            if k == key or not self._head(k, e):
+                continue
+            m = min(len(e.tokens), len(new.tokens))
+            same = next((i for i in range(m) if e.tokens[i] != new.tokens[i]), m)
+            if same >= self.same_head_rows:
+                e.stale = True
+                self.stats["heads_stale"] = self.stats.get("heads_stale", 0) + 1
 
     def reserve(self, nbytes: int) -> bool:
         """Make room for a snapshot of `nbytes` BEFORE it is cloned (OPS-47): evict the oldest
@@ -819,6 +925,33 @@ class StateStore:
             freed = self.bytes
         self.clear()
         return freed
+
+    #: SPD-249: what a partial shed gives back past the gate's need (the allocator's segments round it)
+    shed_margin = 256 << 20
+
+    def shed_to(self, safe: bool, need: int, heads: bool = True) -> dict:
+        """SPD-249, the memory gate's store level in part: entries out in the store's own order (plain ones
+        oldest first, the snapshots at a head's mark last) until `need` + `shed_margin` bytes went. A burst's
+        admission shed the whole store, the heads with it, and every chat of the next burst read its head
+        again. A head goes only when what the store still holds (heads included) can cover what is still
+        needed: otherwise the next level is shed whole anyway, and the head's bytes buy nothing. `heads=False`:
+        plain entries only (the gate's first chunk, before it knows the reserve follows the store's frees)."""
+        need = int(need)
+        target = need + self.shed_margin
+        with self.lock:
+            freed = dropped = hd = 0
+            while freed < target and self._d:
+                if next((k for k, e in self._d.items() if not self._head(k, e)), None) is None:
+                    if not heads or self.bytes < need - freed:
+                        break                      # only heads left, and they cannot close the need: kept
+                b, h = self._evict_one_locked()
+                freed += b
+                dropped += 1
+                hd += h
+            self.stats["shed_entries"] = self.stats.get("shed_entries", 0) + dropped
+            kept = sum(1 for k, e in self._d.items() if self._head(k, e))
+            return {"freed": freed, "dropped": dropped, "heads_dropped": hd, "heads_kept": kept,
+                    "whole": not self._d}
 
     def set_limits(self, budget_bytes: int | None = None, max_entry_bytes: int | None = None):
         """A new budget or entry cap, from the next request on; over the budget goes now."""

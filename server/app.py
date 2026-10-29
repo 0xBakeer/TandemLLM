@@ -5272,7 +5272,7 @@ def _compacting(plan, body: dict, client_kind: str | None = None) -> bool:
 def _memory_event(ev: dict) -> None:
     """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
     kind = ev.get("kind")
-    if kind in ("shed", "refused", "estimate_raised"):
+    if kind in ("shed", "shed_chunk", "refused", "estimate_raised"):
         print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items()
                                              if k not in ("kind", "ts")), flush=True)
         cond = STATE.get("conductor")
@@ -11614,6 +11614,7 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                 if resident_on else None)
     if store is not None:
         mem.register("store", store.shed)
+        mem.register_partial("store", store.shed_to)      # SPD-249: the gate takes what it needs
     if resident is not None:
         resident.glue = glue_ids(tok)
         if resident.end_on:
