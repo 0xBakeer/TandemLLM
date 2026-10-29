@@ -464,14 +464,18 @@ class FlashNextServing:
         ms: the first drafted request in each class paid 3.4-5.1 s of captures (P0, 2026-10-12)
         until the idle captures below took them (`StairCut.turn` weighs it with the backlog). A class
         that lacks graphs here is owed them: the next idle window captures it whatever length the state
-        is left at (a conductor box leaves it at a side question's)."""
+        is left at (a conductor box leaves it at a side question's).
+
+        SPD-249: commit graphs are not charged. The idle window leaves them to their first use
+        (`idle_captures`), where a commit captures the one shape it takes."""
         cls = self.fn.qsa_class(n)
         miss = self._missing(cls)
-        if miss:
+        charged = [m for m in miss if m[0] != "c"]
+        if charged:
             self._owed.setdefault(cls, int(n))
         # what the turn's line names: the class and its missing verify, commit and draft graphs
         self.last_owed = f"{cls}:" + "".join(f"{k}{sum(1 for m in miss if m[0] == k)}" for k in "vcm")
-        return len(miss) * (self.capture_ms if self.capture_ms is not None else CAPTURE_MS)
+        return len(charged) * (self.capture_ms if self.capture_ms is not None else CAPTURE_MS)
 
     def _next_class_len(self, n: int) -> int | None:
         """The shortest context past `n` in another class (`qsa_class` grows with the length), or None
@@ -518,19 +522,34 @@ class FlashNextServing:
         MTP chain's warm-ups are undone (engine.py).
 
         With `ahead`, then the classes of `_capture_lengths` past the state's own, each where `wants(n)`
-        (the drafter's `wants_graphs`) says drafting can pay. A class's graphs fit any length: the rows'
-        positions, the visible keys and the dense flag of each row are the replay's inputs. A capture's
+        (the drafter's `wants_graphs`) says drafting can pay. A class's graphs fit any length up to the class's
+        own: the rows' positions, the visible keys and the dense flag of each row are the replay's inputs (SPD-249:
+        never a class below the state's, whose sparse rows would read `sel` no launch wrote). A capture's
         rows read no position the state has not committed: a dense row (a short state's) reads up to
-        its own, a sparse one only complete blocks (the scores past them are -inf)."""
+        its own, a sparse one only complete blocks (the scores past them are -inf).
+
+        SPD-249: with `ahead` (the server's idle window) no commit graphs: the verify and draft graphs only. Each
+        lane's commit captures there (24 shapes a class, 8 lanes) slowed every later joint round of the process
+        (Flash-Next 3.05, 8 lanes of 189-token prompts after one idle window, and 8 lanes of 2k prompts with the
+        commit graphs of the lanes' own class).
+        A commit captures its own shape at first use (`commit`); the warm-up's call (`precapture`, without
+        `ahead`) still takes class 0's."""
         todo, seen = [], set()
+        # SPD-249: never a class below the state's own (its rows' positions from the length on): an owed turn
+        # that started under it and grew past it keeps its entry for a shorter state (`class_check`)
+        floor = self.fn.qsa_class(int(self.st.length) + CAPTURE_ROWS)
         for i, n in enumerate(self._capture_lengths(ahead)):
             cls = self.fn.qsa_class(n)
             if cls in seen:
                 continue
             seen.add(cls)
+            if cls < floor:
+                continue
             if i and wants is not None and not wants(n):
                 continue
             miss = self._missing(cls)
+            if ahead:
+                miss = [m for m in miss if m[0] != "c"]
             if miss:
                 todo.append((cls, miss))
             else:

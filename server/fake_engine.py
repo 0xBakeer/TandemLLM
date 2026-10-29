@@ -99,6 +99,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import types
 
@@ -591,5 +592,20 @@ def load(app, a) -> None:
         app.STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
                                         int(a.reserve_slack_gib * gib), probe=lambda: (b, b),
                                         empty=lambda: None, peak_probe=lambda reset=False: 0)
+    hold = float(os.environ.get("QSE_FAKE_CAPTURE_HOLD_S") or 0)
+    if hold:
+        # SPD-249: an idle graph capture on the fake: a thread holds engine.capture_lock.LOCK for `hold` s, lets go
+        # for 0.1 s, again (the tests time /health while it holds; QSE_FAKE_CAPTURE_MARK names a file it touches)
+        from engine import capture_lock
+
+        def _captures():
+            mark = os.environ.get("QSE_FAKE_CAPTURE_MARK")
+            while True:
+                with capture_lock.LOCK:
+                    if mark:
+                        open(mark, "a").close()
+                    time.sleep(hold)
+                time.sleep(0.1)
+        threading.Thread(target=_captures, name="fake-captures", daemon=True).start()
     print(f"[server] FAKE ENGINE: no model, a deterministic character writer at {tps:g} tok/s "
           f"(server/fake_engine.py) -- for tests only", flush=True)

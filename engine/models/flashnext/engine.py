@@ -67,6 +67,10 @@ PREFILL = _S.get("FN_PREFILL")
 PREFILL_CHUNK = int(_S.get("FN_PREFILL_CHUNK"))
 
 
+class ClassError(RuntimeError):
+    """SPD-249: an attention launch at a context class below its rows' own (see `class_check`)."""
+
+
 class FlashNextEngine(FlashNextRef):
 
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
@@ -681,6 +685,7 @@ class FlashNextEngine(FlashNextRef):
         rb["copied"].synchronize()             # the image is the previous call's copy source until then
         h, L = rb["h"], st.length
         h["tok"].numpy()[0] = token
+        rb["last"] = L                         # SPD-249: the row's position for `class_check`
         h["pos"].numpy()[0] = L + st.delta
         h["slot"].numpy()[0] = L
         h["anc"].numpy()[0, 0] = L
@@ -736,6 +741,15 @@ class FlashNextEngine(FlashNextRef):
         while nb * c.indexer_compress_ratio < last + 1:
             nb *= 2
         return nb
+
+    def class_check(self, last: int, cls: int, where: str) -> None:
+        """SPD-249: a launch's class may not be below the class of its last row's position. Below it the
+        rows past the dense budget are marked sparse (`_stage_qsa`) while the launch selects no blocks:
+        `sel` keeps what an earlier launch left and the attention reads K/V rows there (an idle capture
+        of class 0 on a 2,268-token state: an illegal memory access in `attn_rows`). A class above it is
+        fine (a dense row reads up to its own position, a sparse one only its complete blocks)."""
+        if self.cfg.has_indexer and cls < self.qsa_class(int(last)):
+            raise ClassError(f"{where}: class {cls} below {self.qsa_class(int(last))}, the class of position {int(last)}")
 
     @staticmethod
     def path_ple_ids(hsh, ctx0: list[int], tokens: list[int], paths: list[list[int]]) -> list[list[int]]:
@@ -817,6 +831,7 @@ class FlashNextEngine(FlashNextRef):
         h, L = rb["h"], st.length
         depth, paths = self._tree_paths(parents)
         d = np.asarray(depth, dtype=np.int64)
+        rb["last"] = L + int(d.max())          # SPD-249: the block's last position for `class_check`
         h["tok"].numpy()[:] = tokens
         h["pos"].numpy()[:] = L + d + st.delta
         h["slot"].numpy()[:] = L + np.arange(M)
@@ -861,6 +876,7 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_kernels as K
         c = self.cfg
         rb = self._rows_buffers(M)
+        self.class_check(rb.get("last", st.length + M - 1), cls, "rows_step")
         self._cur, self._write, self._cls = rb, write, cls
         self.rec = {}
         d = rb["d"]
@@ -1936,6 +1952,7 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_kernels as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
+        self.class_check(st_m.length + n + depth - 1, cls, "mtp_chain_dev")
         b = self._mtp_bufs(depth)
         x, h = self.mtp_rows(st_m, ("mtp", self._mtp_key, 0, n), b["stack"][:n], cls)
         if c.has_indexer:                     # the blocks the feed completed, into the MTP pool
@@ -2153,8 +2170,10 @@ class VerifyGraph:
         self.rec = eng.rec
 
     def replay(self) -> None:
+        eng = self.eng
+        eng.class_check(eng._rows_buffers(self.M).get("last", self.st.length + self.M - 1), self.cls, "verify graph")
         self.graph.replay()
-        self.eng.rec = self.rec
+        eng.rec = self.rec
 
 
 class CommitGraph:

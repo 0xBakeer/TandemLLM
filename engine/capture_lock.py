@@ -19,9 +19,51 @@ holds every capture site to it; `tools/capture_race_check.py` checks it on the G
 
 from __future__ import annotations
 
+import contextlib
+import os
 import threading
 
 LOCK = threading.RLock()
+
+
+# ------------------------------------------------------------------ SPD-249: the guard for CUDA work off the engine's thread
+#
+# An idle graph capture (server/app.py `graphs_once`) runs on the server's idle thread under the engine's lock; a
+# request thread or an HTTP reader that touches CUDA without the engine's lock (a state-store restore into a side
+# slot, a shed, a snapshot, a /health reader, the disk tier's writer) and lands inside that capture breaks it, and a
+# later round meets an illegal memory access. Such a thread enters `off_thread(site)`: it waits while a capture holds
+# LOCK and holds it while it runs. `check(site)` at the top of such a function is the debug assertion
+# (QSE_CAPTURE_GUARD_DEBUG=1; the tests set it): entered without the guard, it raises.
+
+#: the debug assertion on (tests, a debug run on the box); off it costs one attribute read
+DEBUG = os.environ.get("QSE_CAPTURE_GUARD_DEBUG") == "1"
+#: entries a site, for the tests and /health
+SITES: dict = {}
+
+
+class CaptureGuardError(RuntimeError):
+    """CUDA work off the engine's thread entered without `off_thread` (QSE_CAPTURE_GUARD_DEBUG=1)."""
+
+
+@contextlib.contextmanager
+def off_thread(site: str):
+    """CUDA work of a thread that does not run the engine's rounds and captures: no CUDA call of it lands inside a
+    capture (it waits for an open one, and none opens while it runs)."""
+    with LOCK:
+        SITES[site] = SITES.get(site, 0) + 1
+        yield
+
+
+def held() -> bool:
+    """The calling thread holds LOCK (inside `off_thread` or a capture)."""
+    return LOCK._is_owned()
+
+
+def check(site: str) -> None:
+    """The debug assertion at a CUDA site that may run off the engine's thread: it must run under `off_thread` (or a
+    capture's own LOCK). Off the debug switch it does nothing."""
+    if DEBUG and not held():
+        raise CaptureGuardError(f"{site}: CUDA work off the engine's thread outside capture_lock.off_thread")
 
 
 # ------------------------------------------------------------------ SPD-223: a capture stream of one's own

@@ -434,11 +434,11 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     s.st.length = 500
     assert s._top(False) == [2, 3]                                       # width 5: 0.1 % of the rounds
     assert s.capture_cost(50) == 0.0                                      # class 0 has them
-    assert s.capture_cost(500) == 8 * S.CAPTURE_MS                       # 2 widths, 4 commits, 2 feeds
+    assert s.capture_cost(500) == 4 * S.CAPTURE_MS                       # 2 widths, 2 feeds (commits uncharged)
     real, S.VerifyGraph, S.CommitGraph = (S.VerifyGraph, S.CommitGraph), VG, CG
     sync, torch.cuda.synchronize = torch.cuda.synchronize, lambda: None
     try:
-        n = sum(1 for _ in s.idle_captures())
+        n = sum(1 for _ in s.idle_captures(ahead=False))                 # the warm-up's call: commits too
     finally:
         S.VerifyGraph, S.CommitGraph = real
         torch.cuda.synchronize = sync
@@ -745,17 +745,119 @@ def test_idle_captures_take_the_classes_ahead_and_the_owed_ones():
     n = _drain(s, stubs, s.idle_captures(wants=lambda n: asked.append(n) or True))
     assert n > 0 and {m[-1] for m in made[-n:]} == {1024, 2048} and asked == [4784, 2051], (made[-n:], asked)
     assert s.capture_cost(4784) == 0.0 and s.capture_cost(4129) == 0.0 and s._owed == {}, s._owed
-    assert s.last_owed == "2048:v0c0m0" and s.st.length == 0
+    assert s.last_owed.startswith("2048:v0c") and s.last_owed.endswith("m0") and s.st.length == 0, s.last_owed
     # a side question leaves the state short; a turn at 9,000 tokens found class 4096 without graphs
     s.st.length = 300
     assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
     n = _drain(s, stubs, s.idle_captures())
     assert {m[-1] for m in made[-n:]} == {4096} and s.capture_cost(9000) == 0.0 and s.st.length == 300, made[-n:]
     assert s.idle_captures() is None
-    # a state at 4,784 tokens: its own class has them, the next (4,096 from 8,192) is taken ahead
+    # a state at 4,784 tokens: its own class has its verify and draft graphs (its commits come at first use),
+    # the next (4,096 from 8,192) is taken ahead
     s.st.length = 4784
     assert s._capture_lengths(True) == [4784, 8192] and s.idle_captures() is None     # 4096 captured above
     return "classes 1,024 and 2,048 ahead of an empty state, 4,096 owed from a short one; none unwanted"
+
+
+def test_an_idle_window_takes_no_class_below_the_states_own():
+    """SPD-249: a 2,013-token turn starts in class 0 (dense), finds width 9 without graphs and is owed; it decodes
+    past 2,048. The idle window captured class 0's width 9 on the 2,268-token state: its rows past the dense budget
+    are sparse (`_stage_qsa`) while a class-0 launch selects no blocks, so `attn_rows` read K/V at whatever `sel`
+    held (an illegal memory access, 2026-10-30). The window now takes no class below the state's own (the class of
+    its length + CAPTURE_ROWS); the owed entry stays for a shorter state, which takes it."""
+    from engine.models.flashnext import serving as S
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0's prior shapes
+    assert _drain(s, stubs, s.idle_captures()) > 0 and s.idle_captures() is None
+    made.clear()
+    s.uses[9] = 500                                                          # the turn's rounds used width 9
+    s.st.length = 2013
+    assert s.capture_cost(2013) > 0 and s._owed == {0: 2013}, s._owed         # class 0 lacks it: owed
+    s.st.length = 2268                                                       # the turn decoded past 2,048
+    _drain(s, stubs, s.idle_captures())
+    assert not [m for m in made if m[-1] < _qsa_class(2268 + S.CAPTURE_ROWS)], made
+    assert s._owed.get(0) == 2013, s._owed                                   # kept for a shorter state
+    made.clear()
+    s.st.length = 300                                                        # a short state: class 0 is its own
+    _drain(s, stubs, s.idle_captures())
+    assert ("v", 9, 0) in made and 0 not in s._owed, (made, s._owed)
+    return "no class-0 capture on a 2,268-token state; the owed width taken once a state is short again"
+
+
+def test_a_launch_below_its_rows_class_is_refused_on_the_host():
+    """SPD-249, the guard behind the idle window's floor: any attention launch (an eager step or block, a capture's
+    warm-up, a verify graph's replay, an MTP chain) whose class is below the class of its last row's position
+    raises `ClassError` on the host before a kernel runs; the class of the position or any above passes."""
+    from engine.models.flashnext import engine as E
+    eng = object.__new__(E.FlashNextEngine)
+    eng.cfg = types.SimpleNamespace(has_indexer=True, indexer_compress_ratio=4)
+    eng.class_check(2050, 0, "t")                                            # the last dense position
+    eng.class_check(2268, 1024, "t") or eng.class_check(2268, 4096, "t")     # its own class, one above
+    for last, cls in ((2051, 0), (2268, 0), (4096, 1024), (9000, 2048)):
+        try:
+            eng.class_check(last, cls, "t")
+        except E.ClassError as exc:
+            assert f"class {cls} below" in str(exc), exc
+        else:
+            raise AssertionError(f"class {cls} at {last} passed")
+    rb = {"last": 2268}
+    eng._rows_buffers = lambda M, key=None: rb
+    replayed = []
+    vg = object.__new__(E.VerifyGraph)
+    vg.eng, vg.st, vg.M, vg.cls, vg.rec = eng, types.SimpleNamespace(length=2260), 9, 0, {}
+    vg.graph = types.SimpleNamespace(replay=lambda: replayed.append(1))
+    try:
+        vg.replay()
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("a class-0 verify graph replayed at 2,268")
+    vg.cls = 1024
+    vg.replay()
+    try:
+        eng.rows_step(types.SimpleNamespace(length=2260), 9, cls=0)
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("rows_step ran class 0 at 2,268")
+    nodev = types.SimpleNamespace(length=2260)
+    try:
+        eng.mtp_chain_dev(nodev, 4, 5, 0)
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("an MTP chain of class 0 ran at 2,268")
+    assert replayed == [1], replayed
+    return "below its rows' class: refused (step, block, warm-up, replay, MTP chain); its own class or above: run"
+
+
+def test_an_idle_window_takes_no_commit_graphs():
+    """SPD-249: the commit graphs an idle window captured (24 shapes a class, each lane) slowed every later
+    joint round of the process (Flash-Next 3.05, 8 lanes of 189-token prompts after one idle window). The idle
+    window (`ahead`) takes verify and draft graphs only, for the state's own class, the classes ahead and the
+    owed ones; a turn is not charged for commit graphs, which a commit captures at first use; the warm-up's
+    call (without `ahead`) still takes class 0's."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0, all kinds
+    assert {m[0] for m in made} == {"v", "c", "m"} and {m[-1] for m in made} == {0}, made
+    made.clear()
+    n = _drain(s, stubs, s.idle_captures())                                  # an empty state: 1,024 and 2,048 ahead
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {1024, 2048}, made
+    assert s.idle_captures() is None                                         # nothing left for the idle window
+    assert any(m[0] == "c" for m in s._missing(2048)) and s.capture_cost(4784) == 0.0, s._missing(2048)
+    made.clear()
+    s.st.length = 300                                                        # a side question; a turn at 9,000
+    assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
+    n = _drain(s, stubs, s.idle_captures())
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {4096}, made
+    assert s.capture_cost(9000) == 0.0 and s._owed == {}, s._owed
+    made.clear()
+    s.st.length = 9000                                                       # the state in class 4,096: its own
+    n = _drain(s, stubs, s.idle_captures())                                  # 8,192 ahead of it
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {8192}, made
+    assert s.idle_captures() is None and {m[0] for m in s._missing(4096)} == {"c"}, s._missing(4096)
+    assert s.st.length == 9000
+    return "idle: verify and draft graphs only (own, ahead, owed), no charge for commits; the warm-up takes class 0's"
 
 
 def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
@@ -779,7 +881,7 @@ def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
         return d.req["turn"], d.req["turn_in"], tree
 
     t, ti, tree = turn()
-    assert t is False and tree is None and ti["extra_ms"] > 5000, ti  # the bug: graphs owed, a plain turn
+    assert t is False and tree is None and ti["extra_ms"] > 3000, ti  # the bug: graphs owed, a plain turn
     _drain(s, stubs, s.idle_captures())                               # one idle window (state at 0)
     t, ti, tree = turn()
     assert t is True and ti["extra_ms"] == 0.0 and tree is not None and tree.n_draft > 0, (t, ti, tree)
@@ -801,7 +903,7 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
     eng.settle = lambda st: None
     eng.stage_commit = lambda st, path: (3, len(path), False, 0)
     eng._commit_bufs = lambda key: {"stack": torch.zeros(len(key), 3)}
-    eng._rows_buffers = lambda M, key: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
+    eng._rows_buffers = lambda M, key=None: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
     eng.stage_mtp = lambda st_m, nexts, depth: 0
     eng.mtp_chain_dev = lambda st_m, n, depth, cls: eng._mtp_begin(n, ("mtp", "mtp", 0, n), cls)
     read = []
@@ -834,7 +936,7 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
         E.CommitGraph = CG
         # 1. the block's verify graph replays: the records are its intermediates
         vg = object.__new__(E.VerifyGraph)
-        vg.eng, vg.graph = eng, _Graph()
+        vg.eng, vg.graph, vg.st, vg.M, vg.cls = eng, _Graph(), st, 3, 0
         vg.rec = {0: (1, 2, 3, 4), 1: (1, 2, 3, 4), "stack": torch.zeros(3, 3)}
         vg.replay()
         # 2. the next draft's MTP chain graph, captured inline (no graph for its feed at this class)

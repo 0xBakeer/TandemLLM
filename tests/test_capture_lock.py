@@ -46,6 +46,114 @@ from test_disk_cache import CH, Pos, exact, run, tier  # noqa: E402
 TAG = {"client": "opencode", "head_end": 100}
 
 
+
+# ------------------------------------------------------------------ SPD-249: the guard for CUDA work off the engine's thread
+
+def test_off_thread_waits_for_an_open_capture():
+    """A thread entering `off_thread` while another holds LOCK (a capture) runs only after the capture let go."""
+    import threading
+    import time
+    order = []
+    opened = threading.Event()
+
+    def capture():
+        with capture_lock.LOCK:
+            opened.set()
+            time.sleep(0.3)
+            order.append("capture done")
+
+    t = threading.Thread(target=capture)
+    t.start()
+    opened.wait()
+    with capture_lock.off_thread("test.reader"):
+        order.append("reader ran")
+    t.join()
+    assert order == ["capture done", "reader ran"], order
+    assert capture_lock.SITES.get("test.reader", 0) >= 1
+    return "the reader waited for the capture"
+
+
+def test_the_debug_check_fails_off_thread_without_the_guard():
+    """QSE_CAPTURE_GUARD_DEBUG: `check` raises outside `off_thread` and passes inside it or inside a capture's LOCK;
+    off the switch it does nothing."""
+    real = capture_lock.DEBUG
+    capture_lock.DEBUG = True
+    try:
+        try:
+            capture_lock.check("test.site")
+            raise AssertionError("no CaptureGuardError outside the guard")
+        except capture_lock.CaptureGuardError:
+            pass
+        with capture_lock.off_thread("test.site"):
+            capture_lock.check("test.site")
+        with capture_lock.LOCK:
+            capture_lock.check("test.site")
+        assert not capture_lock.held()
+    finally:
+        capture_lock.DEBUG = real
+    capture_lock.DEBUG = False
+    try:
+        capture_lock.check("test.site")
+    finally:
+        capture_lock.DEBUG = real
+    return "raises unguarded (debug), passes under off_thread and under a capture's LOCK; silent off debug"
+
+
+#: SPD-249: CUDA calls that run on a thread that is not the engine's (file, function, site): each holds
+#: `off_thread(site)` around its CUDA call. A spy over the served engine (every CUDA entry point called from another
+#: thread while a capture was open, 561 captures under a 5 Hz /health and 1 Hz /metrics poll) found these.
+OFF_THREAD_SITES = [
+    ("server/metrics.py", "_unified_free", "metrics.unified_free"),
+]
+
+
+def test_every_off_thread_cuda_site_holds_the_guard():
+    """Each listed site's CUDA call sits inside `with capture_lock.off_thread("<site>")`, with `check("<site>")`
+    inside it (the debug run names a site entered without it)."""
+    for path, func, site in OFF_THREAD_SITES:
+        tree = ast.parse(open(os.path.join(ROOT, path)).read())
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func)
+        guarded = [w for w in ast.walk(fn) if isinstance(w, ast.With) and any(
+            isinstance(i.context_expr, ast.Call) and isinstance(i.context_expr.func, ast.Attribute)
+            and i.context_expr.func.attr == "off_thread" and i.context_expr.args
+            and getattr(i.context_expr.args[0], "value", None) == site for i in w.items)]
+        assert guarded, f"{path}:{func} has no off_thread({site!r})"
+        calls = [c for w in guarded for c in ast.walk(w) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Attribute) and c.func.attr == "check"]
+        assert any(getattr(c.args[0], "value", None) == site for c in calls if c.args), f"{path}:{func}: no check"
+        cuda = [c for c in ast.walk(fn) if isinstance(c, ast.Attribute) and isinstance(c.value, ast.Attribute)
+                and c.value.attr == "cuda"]
+        inside = {id(c) for w in guarded for c in ast.walk(w)}
+        assert cuda and all(id(c) in inside for c in cuda), f"{path}:{func}: a CUDA call outside the guard"
+    return f"{len(OFF_THREAD_SITES)} site(s): the CUDA call inside off_thread, checked"
+
+
+def test_a_metrics_scrape_waits_for_an_open_capture():
+    """/metrics' free-memory reading (`_unified_free`, a driver call) runs only after a capture let go."""
+    import threading
+    import time
+    from server import metrics
+    order, opened = [], threading.Event()
+    real = torch.cuda.mem_get_info
+    torch.cuda.mem_get_info = lambda *a: (order.append("driver call"), (7.0, 9.0))[1]
+
+    def capture():
+        with capture_lock.LOCK:
+            opened.set()
+            time.sleep(0.3)
+            order.append("capture done")
+    try:
+        t = threading.Thread(target=capture)
+        t.start()
+        opened.wait()
+        got = metrics._unified_free()
+        t.join()
+    finally:
+        torch.cuda.mem_get_info = real
+    assert got == 7.0 and order == ["capture done", "driver call"], (got, order)
+    return "the scrape's driver call came after the capture"
+
+
 # ------------------------------------------------------------------ 1. every capture holds it
 
 def _is_graph_call(node) -> bool:
