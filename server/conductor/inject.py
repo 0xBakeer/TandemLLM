@@ -55,6 +55,45 @@ def insertion_point(ids: list[int], im_end: int | None) -> int | None:
     return None
 
 
+def _find(ids: list[int], seq: list[int], start: int = 0) -> int:
+    """The first index of the sequence `seq` in `ids` at or after `start`, -1 for none."""
+    n = len(seq)
+    if not n:
+        return -1
+    i = start
+    while True:
+        try:
+            i = ids.index(seq[0], i)
+        except ValueError:
+            return -1
+        if list(ids[i:i + n]) == seq:
+            return i
+        i += 1
+
+
+def head_point(ids: list[int], tok, im_end: int | None) -> tuple | None:
+    """SPD-249 (`QWEN38_NOTES_HEAD`): where the conductor's stable notes go at the prompt's head:
+    `(pos, None)` before the `<|im_end|>` of a first message that is the system's, else
+    `(pos, (opener, closer))` at the first `<|im_start|>`, the notes then in a system message of
+    their own (`opener` + notes + `closer`). None when the prompt has no message marks."""
+    if im_end is None:
+        return None
+    one = special_id(tok, "<|im_start|>")
+    im_s = [one] if one is not None else list(tok("<|im_start|>", add_special_tokens=False).input_ids)
+    role = list(tok("system", add_special_tokens=False).input_ids)
+    nl = list(tok("\n", add_special_tokens=False).input_ids)
+    i0 = _find(ids, im_s)
+    if i0 < 0 or not role:
+        return None
+    body = i0 + len(im_s)
+    if list(ids[body:body + len(role)]) == role:
+        try:
+            return ids.index(im_end, body + len(role)), None
+        except ValueError:
+            return None
+    return i0, (im_s + role + nl, [im_end] + nl)
+
+
 def content_row(at: int | None, notes=()) -> int | None:
     """Where the last message's last token sits in the served prompt: `at - 1` (`at` is the
     client's insertion point) shifted by every note the splice put before it; a note at `at`

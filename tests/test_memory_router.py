@@ -366,6 +366,182 @@ def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
     assert out["usage"]["tandem"]["harness"]["memory"]["why"] == "unset"
 
 
+
+# ------------------------------------------------------------------ SPD-249: the ranked index
+
+def _index_store(n_user=40):
+    """A note store with `n_user` user notes about other things (written first, so the oldest come
+    last in the index's own order) and one project note about the summer scene's checker gate, which
+    is written first of all: in the index's own order it is the last line."""
+    import tempfile
+    import time as _t
+    from server.conductor.notes import NoteStore
+    st = NoteStore(tempfile.mkdtemp(prefix="mem-"), settings=lambda: {"dedupe_threshold": 0.95})
+    clock = [1_790_000_000.0]
+    st.clock = lambda: clock[0]
+    proj = "/home/user/pagoda"
+
+    def add(title, body, scope="user", pinned=False):
+        clock[0] += 60
+        got = st.write("owner", {"op": "add", "scope": scope, "kind": "reference", "title": title,
+                                 "body": body}, writer="human", project=proj, session="c:s1",
+                       request_id="r", from_user=True)
+        if pinned:
+            n = st.get("owner", got["id"])
+            n.pinned = True
+        return got["id"]
+    gate = add("the summer scene checker gate", "Gate (a) wants the summer scene within 1.0 of "
+               "night 1.", scope="project")
+    words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike "
+             "november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee "
+             "zulu amber basil cedar dune ember fjord grove heron iris jade kelp lotus moss nectar").split()
+    others = [add(f"{words[i]} preference number {i}", f"The user likes {words[i]} things.")
+              for i in range(n_user)]
+    _t.sleep(0)
+    return st, proj, gate, others
+
+
+def _cfg(**kw):
+    from server.conductor import schema
+    return dict(schema.notes(None), **kw)
+
+
+def _lines(text):
+    """The index lines (`notes.line_of`), not the pinned rules above them."""
+    return [ln for ln in text.splitlines() if ln.startswith("- [") and " · " in ln]
+
+
+def test_spd249_the_index_default_is_unchanged():
+    """The shipped default stays the index as it was: 1,500 tokens, the scopes in turn, newest first; a
+    message changes nothing in it."""
+    from server.conductor import memory as M
+    from server.conductor import schema
+    assert schema.NOTES["index_tokens"] == 1500 and schema.NOTES["index_order"] == "recent"
+    st, proj, gate, others = _index_store()
+    cfg = _cfg()
+    a = M.index_text(st, "owner", proj, "c:s1", cfg, None, None)
+    b = M.index_text(st, "owner", proj, "c:s1", cfg, None, None, query="summer scene checker gate")
+    assert a == b
+    want = [ln for _, lines in st.index_lines("owner", proj, "c:s1") for ln in lines
+            if ln.startswith("- [")]
+    got = _lines(a[0])
+    assert got == want and a[1] == [ln[3:15] for ln in got] and a[1][-1] == gate, \
+        "the scopes in turn: the project note after the 40 user lines"
+
+
+def test_spd249_the_ranked_index_keeps_the_notes_the_message_is_about():
+    """`index_order: ranked`, 400 tokens: the cap holds, the note the message is about comes first even
+    as the oldest note of another scope, a pinned note before it, the rest said once; without a message the
+    rank is the index's own order."""
+    from server.conductor import memory as M
+    st, proj, gate, others = _index_store()
+    cfg = _cfg(index_order="ranked", index_tokens=400)
+    text, ids = M.index_text(st, "owner", proj, "c:s1", cfg, None, None,
+                             query="How is the summer scene checked by the gate?")
+    lines = _lines(text)
+    assert sum(M._tokens(ln) for ln in lines) <= 400, [M._tokens(ln) for ln in lines]
+    assert 3 <= len(lines) < 41 and gate in ids, (len(lines), ids)
+    assert "This project:\n- [" + gate in text, text
+    assert f"... {41 - len(lines)} more notes; search them" in text, text[-200:]
+    # a recent-order index of the same size never reaches it
+    recent = M.index_text(st, "owner", proj, "c:s1", _cfg(index_tokens=400), None, None)
+    assert gate not in recent[1] and len(_lines(recent[0])) == len(lines)
+    # no message: the index's own order, cut at the cap
+    plain = M.index_text(st, "owner", proj, "c:s1", cfg, None, None, query=None)
+    assert plain[1] == recent[1], (plain[1], recent[1])
+    # a pinned note ranks first: a cap of two lines keeps it and the note the message is about
+    from server.conductor import notes as N
+    pin = others[0]                                   # the oldest user note: last in its scope
+    st.get("owner", pin).pinned = True
+    two = sum(M._tokens(N.line_of(st.get("owner", x))) for x in (pin, gate))
+    text, ids = M.index_text(st, "owner", proj, "c:s1", _cfg(index_order="ranked", index_tokens=two),
+                             None, None, query="summer scene gate")
+    assert _lines(text) == [N.line_of(st.get("owner", x)) for x in (pin, gate)], text
+    st.get("owner", pin).pinned = False
+    # a cap no line fits: the head and the count, as the recent index says it
+    text, ids = M.index_text(st, "owner", proj, "c:s1", _cfg(index_order="ranked", index_tokens=5),
+                             None, None, query="summer")
+    assert ids == [] and "... 41 more notes; search them" in text, text[-120:]
+
+
+def test_spd249_the_ranked_index_through_the_router():
+    """The settings document's `memory.notes`: ranked, 400 tokens; a first turn's prompt carries the
+    note its message is about, fewer index lines than before, and the setting validates."""
+    from server.conductor import schema
+    from server.conductor.store import ConfigError
+    cond, seen = setup()
+    st, proj, gate, _ = _index_store()
+    for n in st.notes("owner"):
+        cond.notes.write("owner", {"op": "add", "scope": n.scope, "kind": n.kind, "title": n.title,
+                                   "body": n.body}, writer="human", project=proj, session="c:s1",
+                         request_id="r", from_user=True)
+    v, doc = cond.store.get("settings")
+    doc = json.loads(json.dumps(doc))
+    doc.setdefault("memory", {})["notes"] = {"index_order": "ranked", "index_tokens": 400}
+    cond.store.put("settings", None, doc, note="test", base=v, author="test")
+    assert schema.notes(cond.store.peek("settings")[1])["index_order"] == "ranked"
+    ask("How is the summer scene checked by the gate?", sid="ses_rank")
+    p = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "the summer scene checker gate" in p and "more notes; search them" in p, p[-2000:]
+    bad = json.loads(json.dumps(doc))
+    bad["memory"]["notes"]["index_order"] = "random"
+    v, _ = cond.store.get("settings")
+    try:
+        cond.store.put("settings", None, bad, note="test", base=v, author="test")
+        raise AssertionError("an unknown index order is refused")
+    except ConfigError:
+        pass
+
+
+# ------------------------------------------------------------------ SPD-249: notes at the head
+
+def _head_ask(q, sid, ranked=False):
+    """`ask` with QWEN38_NOTES_HEAD on: the served prompt's text and the generation's grid mark."""
+    from server.conductor import router as R
+    cond, seen = setup()
+    cond.notes.write("owner", {"op": "add", "scope": "project", "kind": "gotcha",
+                               "title": "the summer scene checker gate",
+                               "body": "Gate (a) wants the summer scene within 1.0 of night 1."},
+                     writer="human", project="/home/user/pagoda")
+    if ranked:
+        v, doc = cond.store.get("settings")
+        doc = json.loads(json.dumps(doc))
+        doc.setdefault("memory", {})["notes"] = {"index_order": "ranked"}
+        cond.store.put("settings", None, doc, note="test", base=v, author="test")
+    marks, real = [], app.generate_stream
+
+    def rec(prompt, *a, **k):
+        marks.append(k.get("grid_mark"))
+        return real(prompt, *a, **k)
+    was, R.NOTES_HEAD = R.NOTES_HEAD, "on"
+    app.generate_stream = rec
+    try:
+        ask(q, sid=sid)
+    finally:
+        R.NOTES_HEAD, app.generate_stream = was, real
+    return app.STATE["tok"].decode(seen[-1], skip_special_tokens=False), marks[-1]
+
+
+def test_spd249_the_card_and_the_index_go_to_the_head_and_the_bodies_stay_at_the_tail():
+    q = "How is the summer scene checked by the gate?"
+    p, mark = _head_ask(q, "ses_head1")
+    user = p.index("<|im_start|>user")
+    head, tail = p[:user], p[user:]
+    assert "<tandem_memory op=" in head and "Read one in full" in head, head[-600:]
+    assert "within 1.0 of night 1" in tail and tail.index(q) < tail.index("within 1.0 of night 1")
+    assert head.index("<tandem_memory op=") < head.index("Read one in full"), "card, then index"
+    assert mark is not None and mark > 0, "the handler hands the head's end to the prefill"
+
+
+def test_spd249_a_ranked_index_is_no_head_note():
+    """`index_order: ranked` depends on the message: the index then goes to the tail with the bodies;
+    the card stays at the head."""
+    q = "How is the summer scene checked by the gate?"
+    p, _ = _head_ask(q, "ses_head2", ranked=True)
+    user = p.index("<|im_start|>user")
+    assert "<tandem_memory op=" in p[:user] and "Read one in full" not in p[:user], p[:user][-400:]
+    assert "Read one in full" in p[user:]
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -692,9 +692,9 @@ class Budget:
 
 # --------------------------------------------------------------------------- the state store
 class _Entry:
-    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind")
+    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind", "mark")
 
-    def __init__(self, tokens, snap, conv_id, kind="prefix"):
+    def __init__(self, tokens, snap, conv_id, kind="prefix", mark=None):
         self.tokens = tokens
         self.snap = snap
         self.conv_id = conv_id
@@ -703,6 +703,7 @@ class _Entry:
         # where the snapshot came from: the end of a turn ("session") or a prefill chunk boundary
         # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise.
         self.kind = kind
+        self.mark = mark          # SPD-249: the grid mark of the prefill that took it (`Grid`)
 
 
 class StateStore:
@@ -741,7 +742,7 @@ class StateStore:
 
     # --- writing ---------------------------------------------------------------------------
     def put(self, tokens, snap: StateSnapshot, conv_id: str | None = None,
-            hashes: list[int] | None = None, kind: str = "prefix") -> None:
+            hashes: list[int] | None = None, kind: str = "prefix", mark: int | None = None) -> None:
         n = snap.length
         if self.max_entry and snap.nbytes > self.max_entry:
             self.stats["declined_big"] = self.stats.get("declined_big", 0) + 1
@@ -766,7 +767,7 @@ class StateStore:
                 self._lengths[n] -= 1
                 if not self._lengths[n]:
                     del self._lengths[n]
-            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id, kind)
+            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id, kind, mark)
             self._lengths[n] = self._lengths.get(n, 0) + 1
             self.bytes += snap.nbytes
             self.stats["puts"] += 1
@@ -828,26 +829,34 @@ class StateStore:
                 self.max_entry = int(max_entry_bytes)
             self._evict_locked()
 
-    def boundaries(self, eng, drafter, start: int, n: int, chunk: int) -> set | None:
+    def boundaries(self, eng, drafter, start: int, n: int, chunk: int,
+                   grid: "Grid | None" = None) -> set | None:
         """The chunk boundaries of a prefill over [start, n) to snapshot, or None for every one
-        (`per_prefill` 0, where `capture` refuses the ones over the cap as it goes)."""
+        (`per_prefill` 0, where `capture` refuses the ones over the cap as it goes). SPD-249: on a
+        marked grid its lines, the mark always among them (the head other prompts share)."""
         if not self.per_prefill:
             return None
-        lines = range((start // chunk + 1) * chunk, n, chunk)
+        lines = (grid.lines(start, n) if grid is not None and grid.mark is not None
+                 else range((start // chunk + 1) * chunk, n, chunk))
         fit = [L for L in lines
                if not self.max_entry or _snapshot_estimate(eng, L, drafter) <= self.max_entry]
         if len(fit) < len(lines):
             self.stats["skipped_big"] = self.stats.get("skipped_big", 0) + 1
-        return set(fit[-self.per_prefill:])
+        keep = set(fit[-self.per_prefill:])
+        if grid is not None and grid.mark is not None and grid.mark in fit:
+            keep.add(grid.mark)
+        return keep
 
     # --- reading ---------------------------------------------------------------------------
-    def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0):
+    def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0,
+             grid: "Grid | None" = None):
         """The longest stored prefix of `tokens` no longer than `max_len`, or None.
 
         `max_len` is normally `len(tokens) - 1`: a request needs at least one token to forward,
         because the logits it answers with are the ones that token's own forward produces and no
         snapshot holds them. `min_len`: only an entry LONGER than this counts -- the resident
         prefix already offers that much without a copy, so a shorter entry is not a hit.
+        `grid` (SPD-249): only a snapshot that resumes this prefill's grid (`Grid.accepts`).
         """
         with self.lock:
             cands = sorted((L for L in self._lengths if min_len < L <= max_len), reverse=True)
@@ -855,6 +864,8 @@ class StateStore:
                 key = (L, hashes[L])
                 entry = self._d.get(key)
                 if entry is None:
+                    continue
+                if grid is not None and not grid.accepts(L, entry.mark, entry.kind):
                     continue
                 if entry.tokens != tuple(tokens[:L]):
                     # a 64-bit collision, or two different token streams at one boundary. Either
@@ -1111,6 +1122,7 @@ class ResidentPrefix:
         self.tokens: list[int] = []        # the prompt the live rows [0, valid) were prefilled from
         self.valid = 0
         self.anchors: dict[int, tuple] = {}
+        self.grid = None              # SPD-249: the running prefill's `Grid` (`best`), else None
         self._free: list[tuple] = []       # an evicted anchor's buffers, for the next one
         self._allocated = 0                # anchor buffers alive, in use or free
         self._anchor_bytes = 0
@@ -1214,9 +1226,11 @@ class ResidentPrefix:
         return lo
 
     def best(self, c: int, max_len: int) -> int:
-        """The largest anchor at or below both `c` and `max_len`; 0 for none."""
+        """The largest anchor at or below both `c` and `max_len`; 0 for none. SPD-249: during a
+        prefill on a grid (`grid`), only its lines."""
         lim = min(c, max_len)
-        return max((b for b in self.anchors if b <= lim), default=0)
+        g = getattr(self, "grid", None)
+        return max((b for b in self.anchors if b <= lim and (g is None or g.is_line(b))), default=0)
 
     # --- the request's start ---------------------------------------------------------------
     def settle_guest(self, eng) -> None:
@@ -2414,7 +2428,55 @@ def _short(session: str | None) -> str | None:
     return None if session is None else (session if len(session) <= 12 else session[:12] + "…")
 
 
-# --------------------------------------------------------------------------- the prefill itself
+# --------------------------------------------------------------------------- the prefill's grid
+class Grid:
+    """The lines a prefill is cut at, and where its anchors and snapshots are taken (SPD-249).
+
+    Without a mark: every `chunk` rows from row 0, as it always was. With a mark (the end of a
+    prompt's stable head, `prefill`'s `grid_mark`): the multiples of `chunk` below it, the mark,
+    then every `chunk` rows from the mark. Every prefill of a prompt with that mark cuts there,
+    cold or warm, so a resume from a snapshot at any of its lines splits the rest exactly as the
+    cold prefill does: the bit identity of the 0-anchored grid, kept for a head off that grid. A
+    mark on the 0-anchored grid is no mark."""
+
+    __slots__ = ("chunk", "mark")
+
+    def __init__(self, chunk: int, mark: int | None = None):
+        self.chunk = int(chunk)
+        m = int(mark) if mark else 0
+        self.mark = m if (self.chunk > 0 and m > 0 and m % self.chunk) else None
+
+    def next(self, i: int) -> int:
+        """The first line after row `i`."""
+        c, m = self.chunk, self.mark
+        if m is not None and i < m:
+            return min(m, (i // c + 1) * c)
+        base = 0 if m is None else m
+        return base + ((i - base) // c + 1) * c
+
+    def is_line(self, i: int) -> bool:
+        c, m = self.chunk, self.mark
+        if m is None:
+            return i % c == 0
+        return i == m or ((i - m) % c == 0 if i > m else i % c == 0)
+
+    def lines(self, start: int, n: int) -> list[int]:
+        """The lines in (start, n)."""
+        out, i = [], self.next(start)
+        while i < n:
+            out.append(i)
+            i = self.next(i)
+        return out
+
+    def accepts(self, L: int, entry_mark, kind: str = "prefix") -> bool:
+        """Whether a store snapshot at `L` (taken on a grid with `entry_mark`) resumes this grid's
+        prefill bit for bit: a line of this grid. A turn's end ("session") is a session resume
+        whatever the grid, and a snapshot of an unmarked grid serves an unmarked one as before."""
+        if kind == "session" or (self.mark is None and entry_mark is None):
+            return True
+        return self.is_line(L)
+
+
 def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     """The chunk a server's prefill runs at.
 
@@ -2480,7 +2542,7 @@ def _layer_marks(live: dict, device):
     return mark
 
 
-def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
+def _window_plan(eng, i: int, n: int, chunk: int, win: int, grid: "Grid | None" = None) -> list | None:
     """The chunks (start, rows) one layer-major window takes from row `i`: the chunk loop's own
     grid, as many chunks as fit in `win` rows; None when fewer than two would (or the engine
     cannot run the window), and the loop forwards one chunk the usual way."""
@@ -2490,7 +2552,7 @@ def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
         return None
     plan, j = [], i
     while j < n:
-        t = min(chunk - (j % chunk), n - j)
+        t = min((grid.next(j) if grid is not None else (j // chunk + 1) * chunk) - j, n - j)
         if plan and (j + t) - i > max(win, chunk):
             break
         plan.append((j, t))
@@ -2499,16 +2561,18 @@ def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
 
 
 def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim, keys,
-                 hashes, conv_id, mem) -> None:
+                 hashes, conv_id, mem, grid: "Grid | None" = None) -> None:
     """What the prefill takes at the line `i` a chunk has just reached: the resident anchor, the
-    disk's anchor and the store's snapshot (the engine stands at `i`)."""
+    disk's anchor and the store's snapshot (the engine stands at `i`). SPD-249: the lines of the
+    prefill's `Grid`; the disk's, those of the 0-anchored grid among them."""
+    line = grid.is_line(i) if grid is not None else (chunk > 0 and i % chunk == 0)
     if res is not None:
         res.advanced(i)
-        if i < n and i % chunk == 0:
+        if i < n and line:
             res.anchor(eng, i)
-    if job is not None and i < lim and i % chunk == 0:
+    if job is not None and i < lim and line and i % chunk == 0:
         _disk(disk, "capture", job, eng, i)
-    if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
+    if (store is not None and checkpoint and i < lim and chunk > 0 and line
             and (ckpt is None or i in ckpt)):
         # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
         est = _snapshot_estimate(eng, i, drafter)
@@ -2520,7 +2584,8 @@ def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i
         else:
             snap = capture(eng, drafter, max_bytes=store.max_entry)
             if snap is not None:
-                store.put(keys, snap, conv_id, hashes)
+                store.put(keys, snap, conv_id, hashes,
+                          mark=grid.mark if grid is not None else None)
             else:
                 store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
 
@@ -2531,7 +2596,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
             compacting: bool = False, checkpoint_upto: int | None = None,
             disk=None, disk_tag: dict | None = None, end_mm: bool = False,
-            scratch: bool = False, reach: int | None = None, stay: bool = False):
+            scratch: bool = False, reach: int | None = None, stay: bool = False,
+            grid_mark: int | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -2583,7 +2649,31 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     (`ResidentPrefix.keep_end`); the caller has set the engine's rotary offset to that end's.
     `scratch`: the rows written are nobody's (`ResidentPrefix.begin`); no prefix snapshot is taken.
     `stay`: the session comes back (an agent's worker, ENG-371): never a guest of the resident.
+
+    `grid_mark` (SPD-249): the end of the prompt's stable head (the conductor's notes at the head):
+    the prefill cuts there and every `chunk` rows after it (`Grid`), takes its anchors and the
+    store's snapshots on those lines, and resumes only from snapshots and anchors on them, so
+    another prompt with the same head resumes at the mark bit for bit. The disk tier keeps the
+    0-anchored grid: it serves and writes only the lines below the mark. None: the grid of old.
     """
+    grid = Grid(chunk, grid_mark) if chunk > 0 else None
+    if resident is not None:
+        resident.grid = grid
+    try:
+        return _prefill(eng, drafter, ids, device, store=store, chunk=chunk, conv_id=conv_id,
+                        checkpoint=checkpoint, resident=resident, on_chunk=on_chunk, info=info,
+                        key_ids=key_ids, mem=mem, compacting=compacting,
+                        checkpoint_upto=checkpoint_upto, disk=disk, disk_tag=disk_tag,
+                        end_mm=end_mm, scratch=scratch, reach=reach, stay=stay, grid=grid)
+    finally:
+        if resident is not None:
+            resident.grid = None
+
+
+def _prefill(eng, drafter, ids, device, *, store, chunk, conv_id, checkpoint, resident, on_chunk,
+             info, key_ids, mem, compacting, checkpoint_upto, disk, disk_tag, end_mm, scratch,
+             reach, stay, grid):
+    """`prefill` on its grid (`Grid`)."""
     n = len(ids)
     if scratch:
         checkpoint = False
@@ -2621,13 +2711,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     bpe = res.pend_offer(c, n - 1) if (res is not None and not end_mm) else 0
     hit, via, dh = None, None, None
     if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be, bpe))
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be, bpe), grid=grid)
     if disk is not None:
         # after every cache in RAM: the disk only where it starts later than all of them, and
         # over the rows a session's state wrote (from `taint`), which are not a cold grid's
         have = c if res is None or res.taint is None else min(c, res.taint)
         dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, be, bpe, hit[0] if hit else 0),
                    have)
+        if dh is not None and grid is not None and not grid.is_line(dh.L):
+            dh = None                         # SPD-249: past the mark the disk's lines are no lines
         if dh is not None:
             hit = None
     if hit is None and dh is None and max(bp, bk) > max(be, bpe):
@@ -2645,7 +2737,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             be = res.end_offer(c, n - 1, mm_ok=end_mm)
             res.stats[f"{via}_tokens_reused"] += max(b, be)
         elif store is not None:
-            hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
+            hit = store.find(keys, hashes, max_len=n - 1, min_len=b, grid=grid)
     if dh is not None:
         start, kind = dh.L, "disk"
     elif hit is not None:
@@ -2722,10 +2814,12 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         checkpoint, kind_disk = False, "session"
     else:
         kind_disk = kind
-    ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
+    ckpt = (store.boundaries(eng, drafter, start, lim, chunk, grid)
             if (store is not None and checkpoint and chunk > 0) else None)
-    job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind_disk, conv_id, disk_tag)
-           if disk is not None and not scratch else None)
+    # SPD-249: the disk writes the 0-anchored grid's lines only, the ones below a mark
+    dlim = lim if grid is None or grid.mark is None else min(lim, grid.mark - grid.mark % chunk)
+    job = (_disk(disk, "plan", keys, hashes, start, n, dlim, kind_disk, conv_id, disk_tag)
+           if disk is not None and not scratch and (dlim == lim or dlim > start) else None)
     if mem is not None:
         mem.mark()
     lines = res is not None or job is not None or (store is not None and checkpoint and chunk > 0)
@@ -2733,7 +2827,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     try:
         while i < n:
             cap = WINDOW_CAP() if WINDOW_CAP is not None else None
-            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)))
+            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)), grid)
             if plan is not None:
                 # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
                 # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The
@@ -2781,7 +2875,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                         drafter.sync(ids[a:a + t], hid[c][0], a)
                     i = a + t
                     _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n,
-                                 lim, keys, hashes, conv_id, mem)
+                                 lim, keys, hashes, conv_id, mem, grid)
                     if on_chunk is not None and i < n:
                         on_chunk(i, n)
                 del bufs, toks, hid, taps
@@ -2797,7 +2891,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 # request resuming from one of those would inherit the misalignment for ever. This
                 # way the only forward that differs from a cold run's is the first one after a
                 # session resume.
-                t = min(chunk - (i % chunk), n - i)
+                # SPD-249: a marked grid (`Grid`) cuts at its head's end first, the same way
+                t = min(grid.next(i) - i, n - i)
             else:
                 t = n - i
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
@@ -2809,7 +2904,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
             i += t
             _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim,
-                         keys, hashes, conv_id, mem)
+                         keys, hashes, conv_id, mem, grid)
             if on_chunk is not None and i < n:
                 on_chunk(i, n)
     finally:

@@ -186,6 +186,10 @@ KNOBS: dict[str, tuple] = {
     # for the side lane instead of the lane when slot 0 is busy, a longer one without waiting
     # SIDE_AFTER_OWN_S behind other own work; off: the lane and the wait, as before
     'OWN_SIDE': ('on', 'server/app.py'),
+    # SPD-249: the conductor's stable notes (class note, memory card, memory index) at the end of the
+    # system message on a conversation's first turn, so chats share that head in the prefix cache;
+    # off: every note at the last message's end, as before
+    'NOTES_HEAD': ('off', 'server/conductor/router.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

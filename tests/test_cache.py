@@ -574,6 +574,110 @@ def test_the_size_cap_forgets_the_oldest():
         assert n == 8 and pos
 
 
+# ------------------------------------------------------------------ SPD-249: a marked grid
+
+def test_spd249_the_marked_grid_cuts_at_the_mark_then_every_chunk_from_it():
+    g = cache.Grid(16, 23)
+    assert g.mark == 23 and g.lines(0, 80) == [16, 23, 39, 55, 71], g.lines(0, 80)
+    assert [g.next(i) for i in (0, 15, 16, 22, 23, 38, 39)] == [16, 16, 23, 23, 39, 39, 55]
+    assert [i for i in range(80) if g.is_line(i)] == [0, 16, 23, 39, 55, 71]
+    assert cache.Grid(16, 32).mark is None and cache.Grid(16, None).lines(0, 50) == [16, 32, 48]
+    assert cache.Grid(16).next(17) == 32 and cache.Grid(16).is_line(48)
+    # what a snapshot serves: its grid's lines, and a turn's end whatever the grid
+    assert g.accepts(23, 23) and g.accepts(16, None) and not g.accepts(32, None)
+    assert g.accepts(50, None, kind="session")
+    plain = cache.Grid(16)
+    assert plain.accepts(32, None) and plain.accepts(50, None) and not plain.accepts(23, 23)
+    assert plain.accepts(32, 23)
+
+
+def _cold_marked(ids, mark, chunk=16):
+    eng = fresh()
+    lg, reused, fwd = cache.prefill(eng, None, ids, DEV, store=None, chunk=chunk, grid_mark=mark)
+    assert (reused, fwd) == (0, len(ids))
+    return eng, lg
+
+
+def test_spd249_a_chat_resumes_at_another_chats_head_bit_for_bit():
+    """Two chats share a head of 23 rows (off the 16-row grid), then part. The first's prefill cuts at
+    23 and snapshots it; the second resumes there and computes what its own cold prefill on the same
+    grid computes, to the bit: logits, recurrent state, every KV row."""
+    chunk, head = 16, tokens(23, seed=40)
+    a, b = head + tokens(30, seed=41), head + tokens(45, seed=42)
+    store = cache.StateStore(1 << 30, chunk=chunk)
+    cache.prefill(fresh(), None, a, DEV, store=store, chunk=chunk, checkpoint=True, grid_mark=23)
+    assert 23 in store.report()["boundaries"], store.report()["boundaries"]
+    eng = fresh()
+    warm, reused, fwd = cache.prefill(eng, None, b, DEV, store=store, chunk=chunk, checkpoint=True,
+                                      grid_mark=23)
+    assert (reused, fwd) == (23, 45), (reused, fwd)
+    ref, cold = _cold_marked(b, 23)
+    assert torch.equal(warm, cold), (warm - cold).abs().max().item()
+    assert torch.equal(eng.state.S, ref.state.S) and torch.equal(eng.state.conv, ref.state.conv)
+    n = len(b)
+    assert torch.equal(eng.kv.k[:, :, :, :n, :], ref.kv.k[:, :, :, :n, :])
+    assert torch.equal(eng.kv.v[:, :, :, :n, :], ref.kv.v[:, :, :, :n, :])
+    # the same prompt again resumes at its last marked line (23 + 16 * 2 = 55), still exact
+    eng2 = fresh()
+    again, reused2, _ = cache.prefill(eng2, None, b, DEV, store=store, chunk=chunk, checkpoint=True,
+                                      grid_mark=23)
+    assert reused2 == 55 and torch.equal(again, cold), reused2
+
+
+def test_spd249_grids_never_resume_from_each_others_lines():
+    """A snapshot at the mark is no line of the 0-anchored grid, and a 0-grid snapshot past the mark
+    is no line of the marked one: neither is taken, and each prefill stays its own cold one's bits.
+    Below the mark both grids are the same lines and share."""
+    chunk, ids = 16, tokens(60, seed=50)
+    store = cache.StateStore(1 << 30, chunk=chunk)
+    cache.prefill(fresh(), None, ids, DEV, store=store, chunk=chunk, checkpoint=True, grid_mark=23)
+    eng = fresh()
+    lg, reused, _ = cache.prefill(eng, None, ids, DEV, store=store, chunk=chunk, checkpoint=True)
+    assert reused == 16, reused                   # not 23, 39 or 55: the 0-grid's own line below
+    _, ref = (lambda e: (e, cache.prefill(e, None, ids, DEV, chunk=chunk)[0]))(fresh())
+    assert torch.equal(lg, ref)
+    # the 0-grid prefill put 32 and 48: the marked one resumes at its own 55 and never at 48 or 32
+    assert {32, 48} <= set(store.report()["boundaries"])
+    eng2 = fresh()
+    lg2, reused2, _ = cache.prefill(eng2, None, ids, DEV, store=store, chunk=chunk, checkpoint=True,
+                                    grid_mark=23)
+    _, cold = _cold_marked(ids, 23)
+    assert reused2 == 55 and torch.equal(lg2, cold), reused2
+    # a fresh store with 0-grid snapshots only: the marked prefill takes 16 (a line of both)
+    s2 = cache.StateStore(1 << 30, chunk=chunk)
+    cache.prefill(fresh(), None, ids, DEV, store=s2, chunk=chunk, checkpoint=True)
+    lg3, reused3, _ = cache.prefill(fresh(), None, ids, DEV, store=s2, chunk=chunk, checkpoint=True,
+                                    grid_mark=23)
+    assert reused3 == 16 and torch.equal(lg3, cold), reused3
+
+
+def test_spd249_the_resident_anchors_follow_the_marked_grid():
+    """The rows in place: a marked prefill anchors at its lines; the next prompt on the 0-grid resumes
+    only from an anchor on its own lines, and its logits are its cold prefill's."""
+    chunk, ids = 16, tokens(60, seed=60)
+    res = cache.ResidentPrefix(1 << 30, chunk, stash_bytes=1 << 30)
+    eng = fresh()
+    cache.prefill(eng, None, ids, DEV, chunk=chunk, resident=res, grid_mark=23)
+    assert sorted(res.anchors) == [16, 23, 39, 55], sorted(res.anchors)
+    assert res.grid is None, "the grid is the running prefill's only"
+    longer = ids + tokens(10, seed=61)
+    lg, reused, _ = cache.prefill(eng, None, longer, DEV, chunk=chunk, resident=res)
+    assert reused == 16, reused
+    ref = cache.prefill(fresh(), None, longer, DEV, chunk=chunk)[0]
+    assert torch.equal(lg, ref)
+
+
+def test_spd249_a_window_plan_cuts_on_the_marked_grid():
+    class Eng:
+        def prefill_window(self):
+            pass
+
+        def window_ok(self, i):
+            return True
+    plan = cache._window_plan(Eng(), 0, 70, 16, 64, cache.Grid(16, 23))
+    assert plan == [(0, 16), (16, 7), (23, 16), (39, 16), (55, 15)][:len(plan)] and len(plan) >= 4, plan
+    assert cache._window_plan(Eng(), 0, 70, 16, 64) == [(0, 16), (16, 16), (32, 16), (48, 16)]
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

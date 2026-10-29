@@ -1049,8 +1049,11 @@ SETTINGS: dict = {"default_profile": "chat",
 # question "does this message ask to remember, forget or recall" attaching the `memory` skill
 # (shadow: journaled only). `provisional`: provisional notes are read back (marked) as well as
 # ratified ones. The settings document's `memory.notes` over these (absent: these)
-NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "bodies": 3,
-               "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
+# SPD-249: `index_order` "recent" (the scopes in turn, each pinned, ratified, newest first) or "ranked"
+# (every note by its BM25 score against the turn's message, pinned first, one cap for all scopes): with a
+# smaller `index_tokens` the lines kept are the ones the message is about
+NOTES: dict = {"index_tokens": 1500, "index_order": "recent", "body_tokens": 600, "pinned_tokens": 300,
+               "bodies": 3, "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
                "provisional": True, "digest_chars": 2000,
                # P-M2: the background writer (server/conductor/memwriter.py)
                "writer": {"mode": "off", "idle_s": 180.0, "due_idle_s": 3.0,
@@ -1627,6 +1630,7 @@ SCHEMAS: dict[str, dict] = {
                           # 2026-10-05: the memory notes' reads and write rules (NOTES)
                           "notes": _obj({
                               "index_tokens": {"type": "integer", "minimum": 0, "maximum": 8000},
+                              "index_order": {"enum": ["recent", "ranked"]},
                               "body_tokens": {"type": "integer", "minimum": 0, "maximum": 4000},
                               "pinned_tokens": {"type": "integer", "minimum": 0, "maximum": 2000},
                               "bodies": {"type": "integer", "minimum": 0, "maximum": 10},

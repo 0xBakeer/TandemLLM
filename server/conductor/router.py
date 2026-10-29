@@ -84,6 +84,12 @@ def _marks(tok):
         except Exception:                                          # noqa: BLE001
             _MARKS[key] = None
     return _MARKS[key]
+#: SPD-249: `on`: on a conversation's first turn the stable notes (the class's note, the memory card,
+#: the memory index) go at the end of the system message (one the conductor adds when the client sent
+#: none), each block as it is and in its order, so chats share that head and the prefix cache serves
+#: it (`Plan.head_end`, engine/cache.py `Grid`); the varying notes stay at the last message's end.
+#: `off`: every note at the last message's end, as before
+NOTES_HEAD = (_S.get("NOTES_HEAD") or "off").strip().lower()
 #: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
 #: `off`: the packages chosen as before, whatever the tools
@@ -203,20 +209,23 @@ class Injection:
     """One note in a session: where it sits in the client's prompt and what it is."""
 
     __slots__ = ("pos", "hash", "ids", "text", "parts", "kinds", "key", "turn", "at", "row",
-                 "shas", "anchor")
+                 "shas", "anchor", "head", "subkeys")
 
-    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None, anchor=None):
+    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None, anchor=None,
+                 head=False, subkeys=()):
         self.pos, self.hash, self.ids, self.text = pos, hsh, ids, text
         self.parts, self.kinds, self.key, self.turn, self.row = parts, kinds, key, turn, row
         self.shas = shas          # each part's text hash, in `parts`' order (`Plan._fresh_block`)
         self.anchor = anchor      # FX17: `inject.message_anchor`, the note's place by its message
+        self.head = bool(head)    # SPD-249: in the prompt's head (`NOTES_HEAD`)
+        self.subkeys = tuple(subkeys)   # SPD-249: the notes a head system message carries
         self.at = time.time()
 
     def moved_to(self, pos: int, hsh: str) -> "Injection":
         """FX17: the same note at a new insertion point (the client changed the prompt before
         its message without touching the message's end)."""
         n = Injection(pos, hsh, self.ids, self.text, self.parts, self.kinds, self.key, self.turn,
-                      self.row, self.shas, self.anchor)
+                      self.row, self.shas, self.anchor, self.head, self.subkeys)
         n.at = self.at
         return n
 
@@ -377,6 +386,12 @@ class Plan:
         self.tool_names: list[str] = []
         # SRV-621: the profile's `prompt` is `client` (nothing of the plan goes in)
         self.prompt_client = False
+        # SPD-249 (`NOTES_HEAD`): the conversation's first turn (its one user message is the last
+        # message), where stable notes may go at the head; the served row where the head's notes
+        # end (the prefill's grid mark) and the served ids up to it
+        self.fresh = False
+        self.head_end: int | None = None
+        self.head_ids: list[int] | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -454,11 +469,19 @@ class Plan:
             at = None
         elif at is None and planned:
             self.row["extra"].setdefault("errors", []).append("no_insertion_point")
+        head = None
+        if (at is not None and NOTES_HEAD == "on" and self.fresh and not self.compaction
+                and self.side is None):
+            head = inject.head_point(ids, tok, im_end)
+            if head is not None and head[0] > at:
+                head = None
         if at is not None:
             with sess.lock:
                 live, hashes = self._live(ids, at, marks=marks, im_end=im_end)
+                if head is not None and head[0] not in hashes:
+                    hashes.update(inject.hashes_at(ids, [head[0]]))
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
-                keys = {n.key for n in live}
+                keys = {n.key for n in live} | {k for n in live for k in n.subkeys}
                 block = self.block
                 if block is not None and block["key"] not in keys:
                     block = self._fresh_block(block, live)
@@ -469,10 +492,13 @@ class Plan:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                     else:
-                        adds.append((Injection(at, hashes[at], nids, text, block["parts"],
+                        hp = head[0] if head is not None else at
+                        adds.append((Injection(hp, hashes[hp], nids, text, block["parts"],
                                                block["kinds"], block["key"], sess.turns,
                                                self.row["id"], shas=block.get("shas"),
-                                               anchor=inject.message_anchor(ids, at, marks)),
+                                               anchor=(None if head is not None
+                                                       else inject.message_anchor(ids, at, marks)),
+                                               head=head is not None),
                                      block["reason"]))
                 # J1: the outcome's note and the cards, after the class's block; a card goes in
                 # only while no live note carries the same card (the first turn, after a
@@ -488,17 +514,27 @@ class Plan:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                         continue
-                    adds.append((Injection(at, hashes[at], nids, text, x["parts"], x["kinds"],
+                    on_head = head is not None and bool(x.get("head"))
+                    hp = head[0] if on_head else at
+                    adds.append((Injection(hp, hashes[hp], nids, text, x["parts"], x["kinds"],
                                            x["key"], sess.turns, self.row["id"],
-                                           anchor=inject.message_anchor(ids, at, marks)),
+                                           anchor=(None if on_head
+                                                   else inject.message_anchor(ids, at, marks)),
+                                           head=on_head),
                                  x["reason"]))
                     parts |= {(p["kind"], p["name"]) for p in x["parts"]}
+                if head is not None and head[1] is not None:
+                    adds = self._head_message(adds, head, hashes)
                 notes = live + [n for n, _ in adds]
                 sess.notes = notes
             self._probe_at = (at, notes)
         if not notes and tail_ids is None:
             return prompt, in_think
         out, starts = inject.splice(ids, [(n.pos, n.ids) for n in notes])
+        ends = [starts[i] + len(n.ids) for i, n in enumerate(notes) if n.head]
+        if ends:
+            self.head_end = max(ends)
+            self.head_ids = out[:self.head_end]
         self.spans = [(starts[i], starts[i] + len(n.ids), sorted(n.kinds),
                        [p["name"] for p in (n.parts or []) if p.get("kind") == "package"])
                       for i, n in enumerate(notes)]
@@ -520,6 +556,26 @@ class Plan:
         self.changed = True
         self.row["changed"] = 1
         return torch.tensor(out, dtype=prompt.dtype, device=prompt.device), in_think
+
+    @staticmethod
+    def _head_message(adds: list, head: tuple, hashes: dict) -> list:
+        """SPD-249: the head's notes in a system message of their own (the client sent none): one
+        note of the opener, each head note's ids in order and the closer, its parts, kinds and
+        keys the notes'; the other notes as they were. Replayed whole, as any note is."""
+        on = [(n, r) for n, r in adds if n.head]
+        if not on:
+            return adds
+        pos, (opener, closer) = head[0], head[1]
+        ids = list(opener) + [t for n, _ in on for t in n.ids] + list(closer)
+        first = on[0][0]
+        joined = Injection(pos, hashes[pos], ids, "".join(n.text for n, _ in on),
+                           [p for n, _ in on for p in (n.parts or [])],
+                           set().union(*(n.kinds for n, _ in on)),
+                           "head:" + "+".join(n.key for n, _ in on), first.turn, first.row,
+                           shas=[h for n, _ in on for h in (n.shas or [None] * len(n.parts or []))],
+                           head=True, subkeys=[n.key for n, _ in on])
+        rest = [(n, r) for n, r in adds if not n.head]
+        return [(joined, "; ".join(r for _, r in on) + " (head)")] + rest
 
     def _fresh_block(self, block: dict, live: list) -> dict | None:
         """The class's note without the parts a live note of the session already holds with the
@@ -985,6 +1041,7 @@ class Router:
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
         sh = signals.shape(body, tuple(packages["packages"]), client_kind=client_kind)
+        plan.fresh = bool(getattr(sh, "fresh", False))          # SPD-249: `NOTES_HEAD`
         plan.tool_caps, plan.tool_names = signals.tool_caps(body)
         side = schema.side_requests(router)
         side_cap = (caps or {}).get("side")

@@ -2136,6 +2136,17 @@ def _sampled_q_free() -> bool:
     return bool(STATE.get("sampled_tree") == "det" and STATE.get("tree"))
 
 
+def _grid_mark(plan, prompt, mm) -> int | None:
+    """SPD-249: the prefill's grid mark, the row where the plan's head notes end (`Plan.head_end`),
+    when the served prompt still begins with the head the plan spliced (no images, which move rows;
+    nothing put before it since)."""
+    end = getattr(plan, "head_end", None) if plan is not None else None
+    head = getattr(plan, "head_ids", None)
+    if not end or head is None or mm is not None or int(prompt.numel()) <= end:
+        return None
+    return int(end) if prompt[:end].tolist() == list(head) else None
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -2155,7 +2166,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
                     disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
-                    scratch: bool = False, stay: bool = False, cold: bool = False):
+                    scratch: bool = False, stay: bool = False, cold: bool = False,
+                    grid_mark: int | None = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -2204,6 +2216,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     `cold` (#98, a request's `cache_prompt: false`): the prompt is read whole and no prompt cache
     is read or written (`COLD_KEY`, `COLD_SESSION`); the handler gives the rows back after it
     (`_cold_release`).
+
+    `grid_mark` (SPD-249): the row where the prompt's stable head ends (the conductor's notes at the
+    head, `Plan.head_end`): the prefill's grid is cut there (engine/cache.py `Grid`).
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -2282,7 +2297,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
             key_ids=keys, mem=STATE.get("mem"),
             compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
-            end_mm=end_mm, scratch=scratch, stay=stay,
+            end_mm=end_mm, scratch=scratch, stay=stay, grid_mark=None if cold else grid_mark,
             # FX5: the highest row this generation can write, for a guest's stash; the monitor's
             # hidden tokens are not in `max_new`
             reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
@@ -9389,6 +9404,9 @@ class Handler(BaseHTTPRequestHandler):
                     kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
                 if stay:
                     kw["stay"] = True                  # ENG-371: never a guest of the resident
+                mark = _grid_mark(plan, prompt, mm)
+                if mark is not None:
+                    kw["grid_mark"] = mark             # SPD-249: the head the chats share
                 if cold:
                     kw["cold"] = True                  # #98
                 if KV_RECOMPUTE and par is not None:

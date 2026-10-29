@@ -329,7 +329,7 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         plan.extras.append({"key": f"memory_card:{_h(card)}", "text": card,
                             "parts": [{"kind": "memory_card", "name": CARD}],
                             "kinds": {"memory"}, "reason": "memory card",
-                            "unless": ("memory_card", CARD)})
+                            "unless": ("memory_card", CARD), "head": True})
     if mode != "on":
         return
     cfg = mem.cfg()
@@ -338,14 +338,19 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
     # the index, once a session (the `unless` keeps it out while a live note carries it)
     shell = "shell" in getattr(plan, "tool_caps", ()) or not getattr(plan, "active", False)
     idx = index_text(mem.store, user, project, sess.key, cfg, statuses,
-                     getattr(router.library._req, "url", None), shell=shell)
+                     getattr(router.library._req, "url", None), shell=shell,
+                     query=(signals.digest(sh.user_text or "", int(cfg["digest_chars"]), None)
+                            if cfg.get("index_order") == "ranked" and not sh.tool_turn else None))
     info["routes"] = shell
     if idx is not None:
         text, ids = idx
+        # SPD-249: the index is the same for every chat of the user (a head note, `NOTES_HEAD`);
+        # ranked against the message (`index_order: ranked`) it is not, and stays at the tail
         plan.extras.append({"key": f"memory_index:{_h(text)}", "text": text,
                             "parts": [{"kind": "memory_index", "name": "index"}],
                             "kinds": {"memory"}, "reason": f"memory index ({len(ids)} notes)",
-                            "unless": ("memory_index", "index")})
+                            "unless": ("memory_index", "index"),
+                            "head": cfg.get("index_order") != "ranked"})
         info["index"] = {"notes": len(ids), "tokens": _tokens(text)}
         plan.memory["index_ids"] = ids
     # the bodies, on a new user message
@@ -410,12 +415,51 @@ def _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info) -> No
         info["skill"] = True
 
 
-def index_text(store, user, project, session, cfg, statuses, url, shell: bool = True
-               ) -> tuple[str, list] | None:
+def ranked_lines(store, user, project, session, query: str | None, room: int, shell: bool = True
+                 ) -> list[tuple[str, list[str]]]:
+    """SPD-249 (`index_order: ranked`): the index lines within `room` tokens, chosen across the scopes
+    by rank: pinned first, then the BM25 score of the note against `query` (the turn's message), then
+    the index's own order (scope, ratified, newest). Shown by scope, each in rank order; a note left out
+    is said once. With no query, or no note that scores, the rank is the index's own order."""
+    by = store.index_notes(user, project, session)
+    order = [n for scope in notes_mod.SCOPES for n in by.get(scope, ())]
+    score: dict = {}
+    if (query or "").strip() and order:
+        score = {n.id: s for n, s in store.search(user, query, project=project, session=session,
+                                                  k=len(order))}
+    pos = {n.id: i for i, n in enumerate(order)}
+    ranked = sorted(order, key=lambda n: (not n.pinned, -round(score.get(n.id, 0.0), 6), pos[n.id]))
+    keep, left = [], 0
+    for n in ranked:
+        ln = notes_mod.line_of(n)
+        if _tokens(ln) > room:
+            left = len(ranked) - len(keep)
+            break
+        room -= _tokens(ln)
+        keep.append(n)
+    groups = []
+    for scope in notes_mod.SCOPES:
+        lines = [notes_mod.line_of(n) for n in keep if n.scope == scope]
+        if lines:
+            groups.append((scope, lines))
+    if left:
+        more = (f"... {left} more notes; search them" if shell else f"... {left} more notes")
+        if groups:
+            groups[-1] = (groups[-1][0], groups[-1][1] + [more])
+        else:
+            groups = [(ranked[0].scope, [more])]
+    return groups
+
+
+def index_text(store, user, project, session, cfg, statuses, url, shell: bool = True,
+               query: str | None = None) -> tuple[str, list] | None:
     """The index note: the pinned ratified rules in full, then the index lines, within their
     token caps. None when the user has no note this request may see. `shell` False (SRV-247): a
-    request that cannot reach the memory's routes gets the head without them."""
-    groups = store.index_lines(user, project, session)
+    request that cannot reach the memory's routes gets the head without them. SPD-249: with
+    `index_order: ranked` the lines are `ranked_lines` against `query`, the turn's message."""
+    ranked = cfg.get("index_order") == "ranked"
+    groups = (ranked_lines(store, user, project, session, query, int(cfg["index_tokens"]), shell)
+              if ranked else store.index_lines(user, project, session))
     if not groups:
         return None
     pinned = [n for n in store.notes(user) if n.pinned and n.status == "ratified" and
@@ -436,7 +480,7 @@ def index_text(store, user, project, session, cfg, statuses, url, shell: bool = 
             ids.append(n.id)
         if len(lines) > 1:
             parts.append("\n".join(lines))
-    room = int(cfg["index_tokens"])
+    room = int(cfg["index_tokens"]) if not ranked else 1 << 30      # ranked: cut in `ranked_lines`
     words = {"user": "About the user", "project": "This project", "session": "This conversation"}
     for scope, lines in groups:
         keep = []

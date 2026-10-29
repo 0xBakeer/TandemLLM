@@ -2316,6 +2316,12 @@
           "minimum": 0,
           "maximum": 8000
          },
+         "index_order": {
+          "enum": [
+           "recent",
+           "ranked"
+          ]
+         },
          "body_tokens": {
           "type": "integer",
           "minimum": 0,

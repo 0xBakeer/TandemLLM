@@ -413,19 +413,27 @@ class NoteStore:
                 f"sessions/{dir_name(n.session or '')}")
 
     # ---------------------------------------------------------------- the index
-    def index_lines(self, user: str, project: str | None, session: str | None,
-                    max_lines: int = CAPS["index_lines"]) -> list[tuple[str, list[str]]]:
-        """(scope heading, lines) for the notes this request may see: pinned first, then ratified,
-        then the newest; at most `max_lines` a scope, the rest counted."""
+    def index_notes(self, user: str, project: str | None, session: str | None
+                    ) -> dict[str, list[Note]]:
+        """The live notes this request may see by scope, each scope pinned first, then ratified,
+        then the newest (the index's order)."""
         today = time.strftime("%Y-%m-%d", time.gmtime(self.clock()))
         by: dict[str, list[Note]] = {s: [] for s in SCOPES}
         for n in self.notes(user):
             if n.status in STATUSES and not n.stale(today) and self.visible(n, project, session):
                 by[n.scope].append(n)
+        return {scope: sorted(ns, key=lambda n: (not n.pinned, n.status != "ratified",
+                                                 -(_ts(n.updated))))
+                for scope, ns in by.items()}
+
+    def index_lines(self, user: str, project: str | None, session: str | None,
+                    max_lines: int = CAPS["index_lines"]) -> list[tuple[str, list[str]]]:
+        """(scope heading, lines) for the notes this request may see: pinned first, then ratified,
+        then the newest; at most `max_lines` a scope, the rest counted."""
+        by = self.index_notes(user, project, session)
         out = []
         for scope in SCOPES:
-            ns = sorted(by[scope], key=lambda n: (not n.pinned, n.status != "ratified",
-                                                  -(_ts(n.updated))))
+            ns = by[scope]
             if not ns:
                 continue
             lines = [line_of(n) for n in ns[:max_lines]]

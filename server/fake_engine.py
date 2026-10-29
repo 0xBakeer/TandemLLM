@@ -362,7 +362,8 @@ def load(app, a) -> None:
 
     def generate_stream(prompt, max_new, eos, think=None, conv_id=None, deadline=None, pen=None,
                         pstop=None, sampler=None, lpr=None, on_prefill=None, sup=None,
-                        compacting=False, cold=False):
+                        compacting=False, cold=False, grid_mark=None):
+        # grid_mark (SPD-249): the real prefill's grid; the fake has no prefill grid
         ctx = [int(t) for t in prompt.tolist()]
         log = os.environ.get("QSE_FAKE_PROMPTS")
         if log:

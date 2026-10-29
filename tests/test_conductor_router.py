@@ -1076,6 +1076,87 @@ def test_a_burst_in_the_router_skips_the_questions_that_cannot_fit():
         app.STATE["lane"] = None
         app.STATE.pop("pool", None)
 
+
+# ------------------------------------------------------------------ SPD-249: notes at the head
+
+class _NotesHead:
+    """`QWEN38_NOTES_HEAD` on for one test."""
+
+    def __enter__(self):
+        from server.conductor import router as R
+        self.R, self.was = R, R.NOTES_HEAD
+        R.NOTES_HEAD = "on"
+
+    def __exit__(self, *exc):
+        self.R.NOTES_HEAD = self.was
+
+
+def test_notes_head_off_leaves_every_note_at_the_tail():
+    from server.conductor import router as R
+    assert R.NOTES_HEAD == "off", "default off until the quality gate passes"
+    cond, _ = setup(decider=by_label("code_edit", 0.91))
+    plan, ids, _ = turn(cond, body([{"role": "system", "content": SYSTEM}, {"role": "user", "content": CODE}]))
+    assert plan.head_end is None and text_of(ids).endswith(plan.injected[0]["text"] + "<|im_end|>\n"
+                                                           "<|im_start|>assistant\n<think>\n")
+
+
+def test_notes_head_puts_the_class_note_at_the_end_of_the_system_message():
+    """With the client's system message: the class's note goes before that message's `<|im_end|>`,
+    its text as it is; the user's message and the generation prompt follow untouched; the grid mark
+    (`head_end`) is where the note ends; the clean prompt is the client's."""
+    with _NotesHead():
+        cond, _ = setup(decider=by_label("code_edit", 0.91))
+        plan, ids, clean = turn(cond, body([{"role": "system", "content": SYSTEM},
+                                            {"role": "user", "content": CODE}]))
+    note = plan.injected[0]["text"]
+    t, c = text_of(ids), text_of(clean)
+    i = c.index(SYSTEM) + len(SYSTEM)
+    assert t == c[:i] + note + c[i:], (t[:400], c[:400])
+    assert text_of(ids[:plan.head_end]).endswith(note) and plan.head_ids == ids[:plan.head_end]
+    assert t.endswith(CODE + "<|im_end|>\n<|im_start|>assistant\n<think>\n")
+
+
+def test_notes_head_without_a_system_message_adds_one_and_chats_share_it():
+    """No system message: the notes go in a system message of their own at the head, and two chats with
+    different first messages share the served prompt through the head's end (the prefix the cache
+    serves); the varying message follows."""
+    with _NotesHead():
+        cond, _ = setup(decider=by_label("code_edit", 0.91))
+        a, ids_a, clean_a = turn(cond, body([{"role": "user", "content": CODE}], tools=False),
+                                 headers={"x-session-id": "head-a"})
+        b, ids_b, _ = turn(cond, body([{"role": "user", "content": "Rename the parser's entry point "
+                                                                     "to parseModule everywhere."}],
+                                      tools=False), headers={"x-session-id": "head-b"})
+    note = a.injected[0]["text"]
+    t = text_of(ids_a)
+    head = "<|im_start|>system\n" + note + "<|im_end|>\n"
+    first = text_of(clean_a).index("<|im_start|>")
+    assert t[first:].startswith(head), t[:300]
+    assert a.head_end == b.head_end and ids_a[:a.head_end] == ids_b[:b.head_end]
+    assert text_of(ids_a[:a.head_end]).endswith(head)
+    assert a.injected[0]["reason"].endswith("(head)")
+
+
+def test_notes_head_keeps_the_head_on_later_turns_and_puts_new_notes_at_the_tail():
+    """Turn 2 replays the head note where it sat; a note this turn adds goes to the last message's
+    end, as before, so the conversation's head never changes under it."""
+    with _NotesHead():
+        cond, _ = setup(decider=by_label("code_edit", 0.91))
+        msgs, turns = _session_turns(cond, CODE, ["ls"])
+        (p1, ids1, _), (p2, ids2, _) = turns
+        assert p1.head_end and ids2[:p1.head_end] == ids1[:p1.head_end]
+        assert p2.head_end == p1.head_end and not p2.fresh
+        msgs += [{"role": "assistant", "content": "done"},
+                 {"role": "user", "content": "Now make the sky blue in the header."}]
+        fakes_label = by_label("design_ui", 0.9)
+        cond.router.factory = lambda kind, role, timeout: Fake(kind, fakes_label if kind == "decider"
+                                                               else (lambda t, o: "qwen_unreachable"))
+        cond.router._adapters.clear()
+        p3, ids3, _ = turn(cond, body(list(msgs)))
+    assert ids3[:p1.head_end] == ids1[:p1.head_end], "the head holds"
+    assert p3.injected and all(x["at"] >= p1.head_end for x in p3.injected), p3.injected
+    assert text_of(ids3).endswith(p3.injected[-1]["text"] + "<|im_end|>\n<|im_start|>assistant\n<think>\n")
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
