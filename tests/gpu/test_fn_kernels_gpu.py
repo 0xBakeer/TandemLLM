@@ -328,6 +328,40 @@ def test_moe_every_k():
     return ", ".join(out)
 
 
+def test_moe_group_grid_rows():
+    """SPD-249: the grouped kernels on fewer grid rows than pairs (a CTA loops over groups), with the
+    gate|up rows staged once a pair and with a lower group cap give today's bits; today's grouped bits
+    are the per-pair kernels'."""
+    bank, _ = _bank(24, (3,), 5)
+    mod = K._module()
+    out = []
+    for M in (2, 8, 24):
+        x = _x(M, H, 70 + M, 0.5)
+        ids, _ = _ids(M, 24, 10, 70 + M)
+        old = K.MOE_GROUP
+        try:
+            K.MOE_GROUP = False
+            pair = K.moe_experts(x, ids, bank).clone()
+            K.MOE_GROUP = True
+            mod.fn_set_moe_gy(0)
+            want = K.moe_experts(x, ids, bank).clone()
+            assert torch.equal(want, pair), M
+            for gr in (8, 4, 3, 1):
+                mod.fn_set_moe_gr(gr)
+                for stage in (False, True):
+                    K.MOE_STAGE = stage
+                    for gy in (0, 1, 3, 16, 4096):
+                        mod.fn_set_moe_gy(gy)
+                        assert torch.equal(K.moe_experts(x, ids, bank), want), (M, gy, stage, gr)
+        finally:
+            mod.fn_set_moe_gy(0)
+            mod.fn_set_moe_gr(8)
+            K.MOE_GROUP = old
+            K.MOE_STAGE = False
+        out.append(str(M))
+    return f"rows {', '.join(out)}: grid rows 1, 3, 16, 4096 x staged or not x cap 8, 4, 3, 1 = today = per-pair, bit for bit"
+
+
 def test_combine_inject_norm_equals_combine_then_inject():
     bank, _ = _bank(24, (3,), 5)
     x = _x(5, H, 61, 0.5)

@@ -284,6 +284,13 @@ class FlashNextServing:
         steps = self.idle_captures(ahead=False)       # the classes ahead are the idle windows' (SRV-713)
         return sum(1 for _ in steps) if steps is not None else 0
 
+    def joint_stats(self) -> dict | None:
+        """SPD-249: the joint passes' measured shape for /health and the runner's line: the distinct routed experts
+        a layer (`union.ExpertUnion`), None when not counted."""
+        un = getattr(self.fn, "union", None)
+        rep = un.report() if un is not None else None
+        return {"experts_union": rep} if rep is not None else None
+
     def draft_heads(self) -> dict:
         """The draft heads this pack carries, by name: its MTP layer ("mtp", made by `add_mtp_head`)."""
         return self.heads

@@ -25,4 +25,23 @@ KNOBS: dict[str, tuple] = {
     # SPD-239: the joint pass's GDN delta rule of a layer for every state in one launch (each state's own
     # arithmetic, its tree's scratch slots its own; served C8 93.2 -> 94.2, GDN 17.4 -> 13.5 ms a pass); 0: a launch a state
     'FN_GDN_MULTI': ('1', 'engine/models/flashnext/engine.py'),
+    # SPD-249: the mixers' down|inject GEMV writes the mix_up's A in its launch (one launch a mixer fewer, the same
+    # bits; int8 mixers on the tensor-core path); 0: mix_a in a launch of its own
+    'FN_MIX_FUSED': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a joint pass's GDN conv and gates (`gdn_pre`) of every state in one launch a layer (each row's own
+    # arithmetic; 36 launches a pass instead of 36 a state); 0: a launch a state
+    'FN_GDN_PRE_MULTI': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a joint pass leaves up to N parked GDN rows parked instead of writing every state back (the write-back
+    # every few rounds; each row's bits the same, an fp32 store and load being exact); 0: written back every call
+    'FN_GDN_DEFER': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: every N-th joint pass counts its distinct routed experts a layer (the pass's expert bytes are that
+    # union times one expert's), in /health (parallel.joint_stats) and the runner's line; 0: off (a diagnosis, set
+    # it only to measure)
+    'FN_UNION_EVERY': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a joint pass's attention layer: every lane's prep in one launch, its rows in one split and one combine
+    # launch from lane entry tables, one gate over every row (each row's own arithmetic); 0: a lane at a time
+    'FN_ATTN_MULTI': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a joint pass's PLE layer: decode, projections, norms and gate once over every lane's rows, the conv a lane
+    # at a time (each row's own arithmetic); 0: the PLE step a lane at a time
+    'FN_PLE_MULTI': ('0', 'engine/models/flashnext/engine.py'),
 }

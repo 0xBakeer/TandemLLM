@@ -569,6 +569,8 @@ def _par_health() -> dict:
     rep = getattr(eng, "joint_graphs_report", None)
     if out["joint_graphs"] is None and callable(rep):
         out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
+    js = getattr(eng, "joint_stats", None)
+    out["joint_stats"] = js() if callable(js) else None              # SPD-249: the family's joint-pass shape
     rr = _round_runner.RUNNER
     out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
     pool = dict.get(STATE, "pool")

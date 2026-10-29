@@ -18,6 +18,8 @@ joint_timing`: staging, PLE/norms/mixers, projections, GDN recurrence, attention
 `--kernels N`: then one more joint pass with its commits under torch.profiler: the wall time, the GPU's
 kernel time (busy) and the top N kernels by summed time. `--lone-kernels N`: the same for the first
 state's lone verify and commit (its graphs, as a slot alone runs them), at every block width 2..`--block`.
+`--dump-moe F` (SPD-249): one more joint pass, every layer's expert rows and ids saved to F (real routing for
+tools/fn_moe_group_check.py --replay).
 `--commit-multi` (SPD-239): the joint states commit in one call (`FlashNextServing.commit_tree_multi`, every
 lane's copies in one launch); their next rounds and end states are then held to the lone twins' own commits.
 """
@@ -64,6 +66,8 @@ def main() -> None:
     ap.add_argument("--lone-kernels", type=int, default=0, help="the first state's lone verify + commit by width: top N")
     ap.add_argument("--commit-multi", action="store_true",
                     help="SPD-239: the joint states commit in one call (FlashNextServing.commit_tree_multi)")
+    ap.add_argument("--dump-moe", help="SPD-249: one more joint pass; every layer's expert input rows and ids to this "
+                    "file (torch.save), for tools/fn_moe_group_check.py --replay")
     ap.add_argument("--json")
     a = ap.parse_args()
     global FlashNextServing, build
@@ -78,7 +82,7 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.pack)
     lens = [int(x) for x in a.tokens.split(",")]
-    L = max(lens) + (a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0)) * (a.block + 1) + 1024
+    L = max(lens) + (a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0) + (1 if a.dump_moe else 0)) * (a.block + 1) + 1024
     eng, _, _ = build(a.pack, L, tok, spec=False, log=lambda s: print(s, flush=True))
     fn = eng.fn
     # one state a length: the kinds in turn (prose, code, chat, prose, ...), so 8 lengths are 8 states
@@ -97,7 +101,7 @@ def main() -> None:
         tmp = FlashNextServing(fn, L)
         x = tmp.forward(ids, 0)
         cont = [int(x.view(-1).argmax())]
-        for i in range((a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0)) * (a.block + 1)):
+        for i in range((a.rounds + a.timing + (3 * a.block if a.lone_kernels else 0) + (1 if a.dump_moe else 0)) * (a.block + 1)):
             x = tmp.forward(torch.tensor([cont[-1]], device="cuda"), ids.numel() + i)
             cont.append(int(x.view(-1).argmax()))
         del tmp
@@ -195,6 +199,31 @@ def main() -> None:
               f"{n_k} kernels", flush=True)
         for k, v in kern["top"]:
             print(f"[joint]   {v:8.3f} ms  {k}", flush=True)
+    if a.dump_moe:
+        # SPD-249: the experts' real routing of a joint pass (each layer's x and ids), to replay in the kernel bench
+        from tools import fn_kernels as FK
+        layer_of = {id(b): li for li, b in fn.banks.items()} if isinstance(fn.banks, dict) else \
+            {id(b): li for li, b in enumerate(fn.banks)}
+        rec, real = [], FK.moe_experts
+
+        def spy(x, ids, bank, order=None):
+            if x.shape[0] > 1:
+                rec.append({"layer": layer_of.get(id(bank)), "x": x.detach().cpu().clone(), "ids": ids.detach().cpu().clone()})
+            return real(x, ids, bank, order)
+        blocks = [block_of(conts[j], at[j], a.block, False) for j in range(len(prompts))]
+        FK.moe_experts = spy
+        try:
+            FlashNextServing.forward_tree_multi(
+                [(s, torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], s.st.length) for j, s in enumerate(joint)])
+        finally:
+            FK.moe_experts = real
+        commit_joint(joint, [list(range(len(blocks[j][0]))) for j in range(len(joint))])
+        for j in range(len(prompts)):
+            at[j] += len(blocks[j][0])
+        torch.save({"rows": len(prompts) * a.block, "records": rec}, a.dump_moe)
+        u = [int(torch.unique(r["ids"][:, :-1]).numel()) for r in rec]
+        print(f"[joint] dumped {len(rec)} expert calls ({rec[0]['x'].shape[0] if rec else 0} rows): distinct routed "
+              f"experts a layer mean {sum(u) / max(1, len(u)):.1f}", flush=True)
     lone_k = None
     if a.lone_kernels:
         from torch.profiler import ProfilerActivity, profile

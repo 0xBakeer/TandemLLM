@@ -209,6 +209,9 @@ class Runner:
 
     # ---- registration (the slot's thread) ---------------------------------------------------
     def add(self, task: Task) -> None:
+        js = getattr(task.eng, "joint_stats", None)
+        if callable(js):
+            self._joint_stats = js                # SPD-249: the family's joint-pass shape, for the report
         with self.cv:
             self.tasks.append(task)
             self.stats["tasks"] += 1
@@ -361,7 +364,15 @@ class Runner:
                     lane_plain=({e: {k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
                                  for e, st in sorted(self._lane.items())} if LANE_PLAIN else None),
                     ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e),
-                    tails_by_slots=self._by_e(self._tails_e))
+                    tails_by_slots=self._by_e(self._tails_e), joint_stats=self._joint_stats_now())
+
+    def _joint_stats_now(self):
+        """SPD-249: the family's joint-pass shape (its engine's `joint_stats`, e.g. the distinct experts a layer)."""
+        js = getattr(self, "_joint_stats", None)
+        try:
+            return js() if js is not None else None
+        except Exception:                                          # noqa: BLE001
+            return None
 
     @staticmethod
     def _by_e(d: dict) -> dict:

@@ -61,6 +61,23 @@ PLE_LATE = _S.get("FN_PLE_LATE") == "1"
 #: SPD-239: a joint pass runs every state's GDN delta rule of a layer in one launch (`_gdn_multi`; 8 lanes: 17.4 -> 13.5 ms
 #: a pass); 0: a state at a time
 GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
+#: SPD-249: the mixers' down GEMV writes the mix_up's A in its own launch (`fn_kernels.gemv_mix`); 0: mix_a apart
+MIX_FUSED = _S.get("FN_MIX_FUSED") == "1"
+#: SPD-249: a joint pass's GDN conv and gates of every state in one launch a layer (`gdn_pre_multi`); 0: a launch a state
+GDN_PRE_MULTI = _S.get("FN_GDN_PRE_MULTI") == "1"
+#: SPD-249: a joint pass leaves up to N parked GDN rows parked (no state write-back that round; the next call walks
+#: them again, bit for bit); 0: every call writes the state back
+GDN_DEFER = min(int(_S.get("FN_GDN_DEFER") or 0), 32)
+#: the parked-row buffers' rows (`_pend_bufs`; GDN_PEND_ROWS in tools/csrc/fn_seq_kernels/seq.cu)
+PEND_ROWS = 33
+#: SPD-249: every N-th joint pass counts its distinct routed experts a layer (`union.ExpertUnion`); 0: off
+UNION_EVERY = int(_S.get("FN_UNION_EVERY") or 0)
+#: SPD-249: a joint pass's attention layer preps and attends every lane's rows in one launch each (`_attn_multi`: lane
+#: entry tables on the device, each row's own arithmetic) and gates them once; 0: a lane at a time
+ATTN_MULTI = _S.get("FN_ATTN_MULTI") == "1"
+#: SPD-249: a joint pass's PLE layer decodes, projects, norms and gates every lane's rows at once (row-wise), only the
+#: dilated conv over each lane's own state a lane at a time; 0: the whole PLE step a lane at a time
+PLE_MULTI = _S.get("FN_PLE_MULTI") == "1"
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -96,6 +113,8 @@ class FlashNextEngine(FlashNextRef):
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
         self._multi = None              # SPD-235: [(rows buffers, MTP state, rows, class)] of a packed MTP step
         self.joint_timing = {} if JOINT_TIMING else None  # a dict: `verify_multi` adds each part's GPU ms (a measurement)
+        from engine.models.flashnext.union import ExpertUnion
+        self.union = ExpertUnion(cfg.num_hidden_layers, cfg.num_experts, UNION_EVERY, device)   # SPD-249
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
         self._wc: dict = {}
@@ -346,10 +365,16 @@ class FlashNextEngine(FlashNextRef):
 
     # ------------------------------------------------------------------------- the trunk
     def _mix(self, n, p):
-        """The mixer from its normed streams: (x [M, H], d [M, R + hc] fp32 = down and inject)."""
+        """The mixer from its normed streams: (x [M, H], d [M, R + hc] fp32 = down and inject). SPD-249
+        (QWEN38_FN_MIX_FUSED): int8 mixers write the mix_up's A in the down GEMV's launch (`gemv_mix`), one launch
+        a mixer fewer, the same bits."""
         from tools import fn_kernels as K
-        di = K.gemv(n, self.W[p + ".down_inject"])
-        return K.mix_up(di, n, self.W[p + ".input_mix_weight_up.weight"], self.cfg.hc_count), di
+        wd, wu = self.W[p + ".down_inject"], self.W[p + ".input_mix_weight_up.weight"]
+        if MIX_FUSED and hasattr(wd, "q") and hasattr(wu, "q") and wd.q.dtype == torch.int8 and wu.q.dtype == torch.int8:
+            di, a = K.gemv_mix(n, wd, wu.q.shape[1], self.cfg.hc_count)
+            return K.mix_up_a(a, n, wu, self.cfg.hc_count), di
+        di = K.gemv(n, wd)
+        return K.mix_up(di, n, wu, self.cfg.hc_count), di
 
     def _site_norm(self, li: int):
         """The norm weight of layer li's first mixer (the final mixer's past the last layer)."""
@@ -1110,6 +1135,8 @@ class FlashNextEngine(FlashNextRef):
         Hs = torch.cat([self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc)
                         for x in cx])
         Ns = None
+        un = getattr(self, "union", None)
+        um = un.begin() if un is not None else None    # SPD-249: a sampled pass's expert mask, else None
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
             mark("mix")
@@ -1117,11 +1144,14 @@ class FlashNextEngine(FlashNextRef):
                 if late is not None:
                     self._ple_late(cx, late.result())
                     late = None
-                parts = []
-                for j, x in enumerate(cx):
-                    use(x)
-                    parts.append(Hs[rows[j]] + self._ple_step(Hs[rows[j]], li, x["st"]))
-                Hs, Ns = torch.cat(parts), None
+                if PLE_MULTI:
+                    Hs, Ns = Hs + self._ple_multi(cx, rows, Hs, li, use), None
+                else:
+                    parts = []
+                    for j, x in enumerate(cx):
+                        use(x)
+                        parts.append(Hs[rows[j]] + self._ple_step(Hs[rows[j]], li, x["st"]))
+                    Hs, Ns = torch.cat(parts), None
             if Ns is None:
                 Ns = K.hc_norm(Hs, self._site_norm(li), H, eps)
             X, DI = self._mix(Ns, p + "attn_hyper_connection")
@@ -1144,13 +1174,16 @@ class FlashNextEngine(FlashNextRef):
                 qkv = self.lin(X, self.W[a + "qkv"])
                 iqk = self.lin(X, self.W[a + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
                 mark("attn")
-                parts = []
-                for j, x in enumerate(cx):
-                    use(x)
-                    parts.append(self._attn1_core(qkv[rows[j]], iqk[rows[j]] if iqk is not None else None, li,
-                                                  x["st"]))
+                y = self._attn_multi(cx, rows, qkv, iqk, li, use) if ATTN_MULTI else None
+                if y is None:
+                    parts = []
+                    for j, x in enumerate(cx):
+                        use(x)
+                        parts.append(self._attn1_core(qkv[rows[j]], iqk[rows[j]] if iqk is not None else None, li,
+                                                      x["st"]))
+                    y = torch.cat(parts)
                 mark("proj")
-                out = self.lin(torch.cat(parts), self.W[a + "o_proj.weight"])
+                out = self.lin(y, self.W[a + "o_proj.weight"])
             mark("mix")
             Hs, Ns = K.inject_norm(Hs, out, DI, self.W[p + "attn_hyper_connection.rank"],
                                    self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
@@ -1163,12 +1196,17 @@ class FlashNextEngine(FlashNextRef):
                 yd, ids, wts = self.moe_parts(XM, li)
             finally:
                 K.MOE_GROUP = grp
+            if um is not None:
+                un.note(um, li, ids)
             mark("mix")
             for j, x in enumerate(cx):
                 x["rec"][("ids", li)] = ids[rows[j]]
             Hs, Ns = K.combine_inject_norm(Hs, yd, ids, wts, DI2, R, nxt, hc, eps)
         mark("head")
         self._gdn_multi_end()
+        self._attn_multi_end()
+        if um is not None:
+            un.end(um, sum(x["M"] for x in cx), len(cx))
         if Ns is None:
             Ns = K.hc_norm(Hs, self._site_norm(c.num_hidden_layers), H, eps)
         dd = K.gemv(Ns, self.W["hyper_connection_mixer.down_inject"])
@@ -1187,7 +1225,10 @@ class FlashNextEngine(FlashNextRef):
             torch.argmax(rb["logits"][:x["M"]], dim=-1, out=rb["next"][:x["M"]])
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], Hs[rows[j]]))
-        self._applied([x["st"] for x in cx])
+        if GDN_DEFER and self.fold and getattr(self, "_gdn_multi_on", False):
+            self._applied_deferred(cx)
+        else:
+            self._applied([x["st"] for x in cx])
         if jt is not None:
             mark("end")
             self._timed(jt, marks, cx)
@@ -1208,6 +1249,8 @@ class FlashNextEngine(FlashNextRef):
             # eagerly (a commit graph reads the lone verify graph's intermediates)
             self._block, self.rec, self._vcls = joint
             graphs = None
+            if GDN_DEFER and self.fold and self.parked(st):
+                self.flush(st)              # SPD-249: rows the pass left parked land first; this path parks at row 0
         tokens = self._block[0]
         self.settle(st)
         t0 = time.perf_counter()
@@ -1257,8 +1300,10 @@ class FlashNextEngine(FlashNextRef):
             for li in c.linear_layers:
                 qkvz, y, gg, beta = rec[li]
                 py, pg, pb = self._pend_bufs(li, st)
-                rows += [SK.rows_entry(y, py, idx, n), SK.rows_entry(gg, pg, idx, n), SK.rows_entry(beta, pb, idx, n),
-                         SK.window_entry(st.conv[li], qkvz, c3)]
+                # SPD-249: with GDN_DEFER the path parks after the rows a deferred pass left (the count on the device)
+                off = self._pend_of(st)[1][self._lin_idx[li]:self._lin_idx[li] + 1] if GDN_DEFER else None
+                rows += [SK.rows_entry(y, py, idx, n, off=off), SK.rows_entry(gg, pg, idx, n, off=off),
+                         SK.rows_entry(beta, pb, idx, n, off=off), SK.window_entry(st.conv[li], qkvz, c3)]
             for li in c.ple_layers:
                 c9 = c9 or self._tail_cols(path, st.ple_conv[li].shape[-1])
                 rows.append(SK.window_entry(st.ple_conv[li], rec[("ple", li)], c9))
@@ -1289,7 +1334,10 @@ class FlashNextEngine(FlashNextRef):
                         continue
                     own = SK.qsa_pool(st.ik[li], slots, posb, kln, self.rope_cos, self.rope_sin, c.rms_norm_eps)
                     st.pool[li].index_copy_(0, cb["dpi"], own)
-            self._pend_of(st)[1].fill_(n)
+            if GDN_DEFER:
+                self._pend_of(st)[1].add_(n)            # SPD-249: after the rows still parked (0 where written back)
+            else:
+                self._pend_of(st)[1].fill_(n)
             self._commit_lane(st, rec, d, n)
             for li in c.ple_layers:
                 hsh = self.hash[li]
@@ -1508,6 +1556,16 @@ class FlashNextEngine(FlashNextRef):
         if self._pending.pop(id(st), None) is not None:
             self._pend_of(st)[1].zero_()
 
+    def _applied_deferred(self, cx) -> None:
+        """SPD-249: after a joint pass whose GDN calls could leave parked rows parked (QWEN38_FN_GDN_DEFER): each
+        state's count is zeroed where the kernel wrote its state back (more than GDN_DEFER rows parked, or no room
+        after them for this block's path) and kept otherwise, the kernel's own rule on the same values. The state
+        stays among the parked ones (`flush` before any other reader; a count of 0 walks nothing)."""
+        for x in cx:
+            cnt = self._pend_of(x["st"])[1]
+            cnt.masked_fill_((cnt > GDN_DEFER) | (cnt + int(x["M"]) > PEND_ROWS), 0)
+            self._pending[id(x["st"])] = x["st"]
+
     def _applied(self, states) -> None:
         """A call on these states walked their parked rows into their state (verify_multi): none left."""
         for st in states:
@@ -1583,6 +1641,34 @@ class FlashNextEngine(FlashNextRef):
             self.rec[("ple", li)] = gvn
         return out
 
+    def _ple_multi(self, cx, rows, h, li, use):
+        """SPD-249: `_ple_step` for every lane's rows of a joint pass: the n-gram rows decoded, the projections, the norms
+        and the gate once over all rows (row-wise), the dilated conv a lane at a time over its own conv state; each
+        lane's normed rows recorded for its commit. Each row's arithmetic is `_ple_step`'s -> [M, hc H]."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        p = self.pre(li) + "ple."
+        H, eps = c.hidden_size, c.rms_norm_eps
+        tab, pd = self.tables[li], self._ple_dev()
+        ds = [x["rb"]["d"] for x in cx]
+        packed = torch.cat([d["packed"] for d in ds])
+        heads = torch.cat([d["heads"] for d in ds])
+        M = h.shape[0]
+        emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(M, -1)
+        key = K.hc_norm(K.gemv_bf16(emb, self.W[p + "key_proj.weight"]), self.W[p + "norm_key.weight"], H, eps)
+        val = K.gemv_bf16(emb, self.W[p + "value_proj.weight"])
+        qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
+        gv = SK.ple_gate(key, qry, val, c.hc_count)
+        gvn = K.hc_norm(gv, self.W[p + "norm_conv.weight"], H, eps)
+        outs = []
+        for j, x in enumerate(cx):
+            use(x)
+            r = rows[j]
+            outs.append(SK.ple_conv(gvn[r], gv[r], x["st"].ple_conv[li], self._wc[("ple", li)], self._cur["d"]["psrc"]))
+            self.rec[("ple", li)] = gvn[r]
+        return torch.cat(outs)
+
     def _gdn_multi(self, cx, rows, qkvz, ab, li, use):
         """SPD-239: a joint pass's GDN layer li past its projections for every state: each state's conv and gates
         (`gdn_pre`, its rows recorded for its commit as `_gdn1_core` records them), the delta rule of every state in
@@ -1594,21 +1680,40 @@ class FlashNextEngine(FlashNextRef):
         c = self.cfg
         stk = self._scratch()
         if sum(x["slots"] for x in cx) > stk.shape[0]:
+            self._gdn_multi_on = False
             return None
+        self._gdn_multi_on = True
         R, H = qkvz.shape[0], c.linear_num_value_heads
         o = torch.empty(R, H, c.linear_value_head_dim, dtype=torch.bfloat16, device=self.device)
         ent = self._gdn_entries(len(cx))
         hrow, slot = ent["h"].numpy()[ent["k"]], 0
+        pre_multi = GDN_PRE_MULTI and not self._write
+        if pre_multi:
+            # SPD-249: every state's conv and gates in one launch (`gdn_pre_multi`), each row's own arithmetic
+            C = self._wc[li].shape[0]
+            Y = torch.empty(R, C, dtype=torch.bfloat16, device=self.device)
+            Gg = torch.empty(R, H, dtype=torch.float32, device=self.device)
+            Bt = torch.empty(R, H, dtype=torch.float32, device=self.device)
+            prow = ent["hp"].numpy()[ent["k"]]
         for j, x in enumerate(cx):
             use(x)
             st, d = x["st"], self._cur["d"]
             q = qkvz[rows[j]]
-            y, gg, beta = SK.gdn_pre(q, st.conv[li], self._wc[li], d["csrc"], ab[rows[j]], self._wc[("alog", li)],
-                                     self._wc[("dtb", li)], shift=self._write)
+            if pre_multi:
+                y, gg, beta = Y[rows[j]], Gg[rows[j]], Bt[rows[j]]
+                prow[j] = SK.gdn_pre_entry(q, st.conv[li], d["csrc"], y, ab[rows[j]], gg, beta)
+            else:
+                y, gg, beta = SK.gdn_pre(q, st.conv[li], self._wc[li], d["csrc"], ab[rows[j]], self._wc[("alog", li)],
+                                         self._wc[("dtb", li)], shift=self._write)
             self.rec[li] = (q, y, gg, beta)
             hrow[j] = SK.gdn_rows_entry(y, gg, beta, st.S[li], stk[slot:slot + max(x["slots"], 1)], d["gctl"],
-                                        o[rows[j]], self._write, pre=self._parked(li, st))
+                                        o[rows[j]], self._write, pre=self._parked(li, st),
+                                        limit=GDN_DEFER if (self.fold and not self._write) else 0)
             slot += x["slots"]
+        if pre_multi:
+            pdev = ent["dp"][ent["k"], :len(cx)]
+            pdev.copy_(ent["hp"][ent["k"], :len(cx)], non_blocking=True)
+            SK.gdn_pre_multi(pdev, self._wc[li], self._wc[("alog", li)], self._wc[("dtb", li)], max(x["M"] for x in cx))
         dev = ent["d"][ent["k"], :len(cx)]
         dev.copy_(ent["h"][ent["k"], :len(cx)], non_blocking=True)
         ent["k"] += 1
@@ -1617,6 +1722,99 @@ class FlashNextEngine(FlashNextRef):
         hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), qkvz[:, c.conv_dim:].reshape(-1, c.linear_value_head_dim),
                           self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
         return hh.view(R, -1)
+
+    def _attn_multi(self, cx, rows, qkv, iqk, li, use):
+        """SPD-249: a joint pass's attention layer li past its projections for every lane at once: one `attn_prep_multi`
+        (each lane's caches, positions and slots from its entry), a sparse lane's indexer selection on its own as
+        `_attn1_core` runs it, one `attn_rows_multi` and one gate over every row. Each row's arithmetic is its lone
+        verify's. None (the lane-at-a-time path) when the lanes' caches differ in layout."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
+        ks = [x["st"].k[li] for x in cx]
+        vs = [x["st"].v[li] for x in cx]
+        strides = (ks[0].stride(0), ks[0].stride(1), vs[0].stride(0), vs[0].stride(1))
+        if any((k.stride(0), k.stride(1), v.stride(0), v.stride(1)) != strides or not k.is_contiguous()
+               or not v.is_contiguous() for k, v in zip(ks, vs)):
+            return None
+        ent = self._attn_entries(len(cx), sum(x["M"] for x in cx), rows)
+        k = ent["k"]
+        ap, ar = ent["ap_h"].numpy()[k], ent["ar_h"].numpy()[k]
+        p = self.pre(li) + "self_attn."
+        ip = p + "indexer."
+        nhi, ihd = 0, (c.indexer_head_dim if c.has_indexer else 0)
+        sparse = []
+        for j, x in enumerate(cx):
+            use(x)
+            st, d = x["st"], self._cur["d"]
+            cls = self._cls if c.has_indexer else 0
+            iq = d["iq"] if cls else None
+            if cls:
+                sparse.append(j)
+                nhi = max(nhi, iq.shape[1])
+            ap[j] = K.attn_prep_entry(rows[j].start, x["M"], st.k[li], st.v[li], st.ik.get(li), d["pos"], d["slot"], iq)
+            ar[j] = SK.attn_rows_entry(rows[j].start, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"])
+        n = len(cx)
+        apd, ard = ent["ap_d"][k, :n], ent["ar_d"][k, :n]
+        apd.copy_(ent["ap_h"][k, :n], non_blocking=True)
+        ard.copy_(ent["ar_h"][k, :n], non_blocking=True)
+        ent["k"] += 1
+        q = K.attn_prep_multi(qkv, iqk, apd, self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"], self.rope_cos,
+                              self.rope_sin, Hq, Hk, c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0,
+                              ihd if any(x["st"].ik.get(li) is not None for x in cx) else 0, nhi, c.rms_norm_eps,
+                              qln=self.W[ip + "q_layernorm.weight"] if nhi else None)
+        for j in sparse:
+            # the lane's own blocks pooled and its blocks selected (`_attn1_core`), after the prep wrote its keys
+            x = cx[j]
+            use(x)
+            st, d, cls = x["st"], self._cur["d"], self._cls
+            M = x["M"]
+            own = SK.qsa_pool(st.ik[li], d["oslot"].view(-1, 4), d["opos"].view(-1), self.W[ip + "k_layernorm.weight"],
+                              self.rope_cos, self.rope_sin, c.rms_norm_eps)
+            sc = self._cur.get(("sc", cls))
+            if sc is None:
+                sc = self._cur[("sc", cls)] = torch.empty(M, cls, dtype=torch.float32, device=qkv.device)
+            SK.qsa_scores(d["iq"], st.pool[li], own.view(M, SK.OWN, -1), d["qctl"], cls, out=sc)
+            SK.qsa_select(sc, d["tail"], d["sel"])
+        o = SK.attn_rows_multi(q, ard, ent["lane_d"], strides, Hk, bufs=ent.setdefault(("attn", q.shape[0]), {}))
+        return K.gate_mul(o, qkv, D)
+
+    def _attn_entries(self, n: int, M: int, rows) -> dict:
+        """`_attn_multi`'s entry tables: pinned host rows and their device copies for every attention layer of a pass
+        (`k` the next), and the joint rows' lanes (int32, written once a pass); rewritten only after the last pass's
+        copies are done (`_attn_multi_end`)."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        ent = getattr(self, "_aent", None)
+        L = sum(1 for li in range(self.cfg.num_hidden_layers) if not self.cfg.is_linear(li))
+        if ent is None or ent["ap_h"].shape[1] < n or ent["lane_h"].numel() < M:
+            m, rmax = max(n, 8), max(M, 32)
+            ent = self._aent = {
+                "ap_h": torch.zeros(L, m, K.APM_FIELDS, dtype=torch.int64, pin_memory=True),
+                "ap_d": torch.zeros(L, m, K.APM_FIELDS, dtype=torch.int64, device=self.device),
+                "ar_h": torch.zeros(L, m, SK.ARM_FIELDS, dtype=torch.int64, pin_memory=True),
+                "ar_d": torch.zeros(L, m, SK.ARM_FIELDS, dtype=torch.int64, device=self.device),
+                "lane_h": torch.zeros(rmax, dtype=torch.int32, pin_memory=True),
+                "lane_dd": torch.zeros(rmax, dtype=torch.int32, device=self.device),
+                "copied": torch.cuda.Event(), "k": L}
+            ent["copied"].record()
+        if ent["k"] >= L:                   # a new pass: its first attention layer; the lanes of its rows
+            ent["copied"].synchronize()
+            ent["k"] = 0
+            lh = ent["lane_h"].numpy()
+            for j, r in enumerate(rows):
+                lh[r.start:r.stop] = j
+            ent["lane_dd"][:M].copy_(ent["lane_h"][:M], non_blocking=True)
+        ent["lane_d"] = ent["lane_dd"][:M]
+        return ent
+
+    def _attn_multi_end(self) -> None:
+        """After a joint pass's last layer: the attention entry tables' copies are recorded, the next pass starts over."""
+        ent = getattr(self, "_aent", None)
+        if ent is not None and ent["k"]:
+            ent["copied"].record()
+            ent["k"] = sum(1 for li in range(self.cfg.num_hidden_layers) if not self.cfg.is_linear(li))
 
     def _gdn_multi_end(self) -> None:
         """After a joint pass's last GDN layer: its entry tables' copies are recorded, the next pass starts over."""
@@ -1635,6 +1833,8 @@ class FlashNextEngine(FlashNextRef):
             m = max(n, 8)
             ent = self._gent = {"h": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
                                 "d": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
+                                "hp": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, pin_memory=True),
+                                "dp": torch.zeros(L, m, SK.COMMIT_FIELDS, dtype=torch.int64, device=self.device),
                                 "copied": torch.cuda.Event(), "k": L}
             ent["copied"].record()
         if ent["k"] >= L:                   # a new pass: its first layer

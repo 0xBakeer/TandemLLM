@@ -370,6 +370,15 @@ KNOBS: dict[str, tuple] = {
     'FN_MOE_ST': ('3', 'tools/fn_kernels.py'),
     # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
     'FN_MOE_WARPS': ('4', 'tools/fn_kernels.py'),
+    # SPD-249: grid rows of the grouped MoE kernels (0: one a pair); a CTA then loops over every
+    # n-th group, each group's arithmetic unchanged (the bits do not depend on it)
+    'FN_MOE_GY': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped gate|up kernel's rows rotated once a pair by a staging kernel, not in
+    # each CTA of a group (the same arithmetic; the bits do not depend on it)
+    'FN_MOE_STAGE': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: a grouped MoE CTA's cap of pairs (1..8): less shared memory a CTA, more CTAs an SM
+    # (a row's bits are its own; the cap only moves rows between groups)
+    'FN_MOE_GR': ('8', 'tools/fn_kernels.py'),
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
     # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
