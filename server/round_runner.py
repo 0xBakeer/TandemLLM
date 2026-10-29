@@ -19,12 +19,26 @@ Every statement of a task's round is the slot loop's (server/app.py `_generate_s
 its order, so the tokens are the ones the slot's own loop would have written: the proof is
 tests/test_round_runner.py (texts equal on the CPU) and the board's seeded byte identity.
 
-Not taken (the slot keeps its own loop, `why_not` names the reason, /health counts it): a supervisor, a
-probe, log-probabilities, a reasoning budget or stall arms (something that can close the block), a request
-without a tree drafter. Slot 0's side lane (server/preempt.py) is served by the runner at each round's start,
-the safe point the slot loop serves it at (no proposal in flight). A passive reasoning block (`ThinkBudget` with neither) is followed
-as the slot loop follows it: `inside` masks the penalties, every block is observed. QSE_ROUND_RUNNER=1
-turns it on.
+Not taken (the slot keeps its own loop, `why_not` names the reason, /health counts it): a probe,
+log-probabilities, a request without a tree drafter. Slot 0's side lane (server/preempt.py) is served by the
+runner at each round's start, the safe point the slot loop serves it at (no proposal in flight). A passive
+reasoning block (`ThinkBudget` with neither budget nor arms) is followed as the slot loop follows it: `inside`
+masks the penalties, every block is observed. QSE_ROUND_RUNNER=1 turns it on.
+
+SPD-249 (QSE_RUNNER_SUPERVISED): a supervised request and a reasoning block that can be closed (a budget,
+stall arms) are taken too. Where the slot loop asks the supervisor or closes the block, the runner hands the
+request back to its slot's thread (`Task.back`), which does what the slot loop does there and gives it to the
+runner again:
+  - SP2, an end token inside the budget: the rows before it are committed, nothing of it is taken (the
+    tokens before it, the end token and the block's room go back; the slot's thread asks `_sp2`);
+  - SP1, a block inside the reasoning that the supervisor watches: the tokens go out with a marker behind
+    them, the slot's thread asks `_sp1` when it reaches the marker, and the task sits out the rounds until
+    the verdict is in (None: it goes on; an action: it goes back);
+  - the budget spent (`think.hit`): back, for the forced close.
+A task that waits for its verdict is never drafted ahead (PIPE). One difference from the slot loop: when
+SP2 decides nothing, the end token's row is not committed (the slot loop commits it when the end token was a
+drafted node). The tokens are the same; the turn then ends as it does on a plain step or a bonus end token,
+with the end token not forwarded, and the next turn reads that one token again.
 """
 
 from __future__ import annotations
@@ -76,6 +90,13 @@ LANE_MODE = os.environ.get("QSE_RUNNER_LANE_PLAIN", "auto")
 LANE_PLAIN = LANE_MODE != "0"
 LANE_PROBE = max(2, int(os.environ.get("QSE_RUNNER_LANE_PROBE", "16") or 16))
 LANE_MARGIN = float(os.environ.get("QSE_RUNNER_LANE_MARGIN", "0.03") or 0.03)
+#: SPD-249: supervised requests and closable reasoning blocks go with the runner, handed back at SP1, SP2
+#: and the budget (the module's header); 0: they keep the slot loop ("supervisor", "think_budget" skips)
+SUPERVISED = os.environ.get("QSE_RUNNER_SUPERVISED", "1") == "1"
+#: SPD-249: how long a round waits for the SP1 verdicts its tasks' slot threads owe (ms) before the tasks
+#: still waiting sit it out: the threads answer once the block's tokens are read, and a lane that misses the
+#: round's joint pass costs it its share of that pass. 0: no wait
+VERDICT_WAIT_MS = float(os.environ.get("QSE_RUNNER_VERDICT_WAIT_MS", "4") or 0)
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
 
@@ -86,9 +107,10 @@ SKIPS: dict = {}
 
 def why_not(*, sup, probe, lpr, think, ahead, drafter, lane, turn) -> str | None:
     """None when the runner may take this slot's decode, else the reason it may not (counted)."""
-    why = ("supervisor" if sup is not None else "probe" if probe is not None
+    keep = not SUPERVISED                   # SPD-249: else handed back at SP1, SP2 and the budget
+    why = ("supervisor" if sup is not None and keep else "probe" if probe is not None
            else "logprobs" if lpr is not None
-           else "think_budget" if think is not None and (think.budget or think.arms_cfg is not None)
+           else "think_budget" if keep and think is not None and (think.budget or think.arms_cfg is not None)
            else "launched" if ahead is not None else "no_drafter" if drafter is None
            else "no_turn" if turn is None else None)
     if why is not None:
@@ -100,8 +122,13 @@ class Task:
     """One slot's decode state, owned by the runner while the request is registered."""
 
     def __init__(self, slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
-                 deadline, device, think=None):
-        self.think = think                  # a passive reasoning block (no budget, no arms) or None
+                 deadline, device, think=None, sup=None):
+        self.think = think                  # the reasoning block's budget (passive, or SPD-249: armed) or None
+        self.sup = sup                      # SPD-249: the request's supervisor, or None
+        self.gate = False                   # SPD-249: SP1's marker is out; the task waits for its verdict
+        self.verdict = None                 # SPD-249: [the slot thread's SP1 action or None], once given
+        self.next = None                    # SPD-249: "budget" or "sp1" after this block's tokens (`_tail_a`)
+        self.back = None                    # SPD-249: the hand-back (`end_back`), for the slot's thread
         self.slot, self.eng, self.drafter, self.sampler, self.pen, self.pstop = slot, eng, drafter, sampler, pen, pstop
         self.ctx, self.pos, self.tok, self.n_out, self.max_new, self.eos = ctx, pos, tok, n_out, max_new, eos
         self.bs, self.k, self.deadline, self.device = bs, k, deadline, device
@@ -120,6 +147,12 @@ class Task:
         self.done = True
         self.q.put(("end", why))
 
+    def end_back(self, back: dict) -> None:
+        """SPD-249: the request goes back to its slot's thread at `back["why"]` (sp2, sp2_plain, sp1,
+        budget), with what that point needs; the slot's thread gives it to the runner again after."""
+        self.back = back
+        self.end("back")
+
 
 class Runner:
     def __init__(self, pool, app):
@@ -130,7 +163,9 @@ class Runner:
         self.thread = None
         self.stats = {"rounds": 0, "tasks": 0, "joint": 0, "plain": 0, "errors": 0, "lane_jobs": 0,
                       # rounds by the slots in their verify pass (the concurrency proof: N rows a round)
-                      "joint_hist": {}}
+                      "joint_hist": {},
+                      # SPD-249: hand-backs by point, and the rounds a task sat out for its SP1 verdict
+                      "back": {}, "sp1_marks": 0, "sat_out": 0, "verdict_wait_ms": 0.0}
         # host ms a round by phase (summed; `report`): the proposals to their drafts, the packed draft's
         # issue, the proposals' rest (it reads the draft back), the verify's issue, the walk (it reads the
         # pass back), the tails
@@ -182,6 +217,63 @@ class Runner:
                 self.thread.start()
             self.cv.notify_all()
 
+    def poke(self) -> None:
+        """SPD-249: a slot's thread gave its SP1 verdict: the loop looks again."""
+        with self.cv:
+            self.cv.notify_all()
+
+    def _ready(self, t: Task) -> bool:
+        """SPD-249 (under `cv`): whether `t` decodes this round. A task whose SP1 verdict is not in sits it
+        out; a verdict of None lets it go on; an action sends it back to its slot's thread."""
+        if not t.gate:
+            return True
+        v = t.verdict
+        if v is None:
+            self.stats["sat_out"] += 1
+            return False
+        t.gate, t.verdict = False, None
+        if v[0] is None:
+            return True
+        self._back(t, {"why": "sp1", "act": v[0]})
+        return False
+
+    def _back(self, t: Task, back: dict) -> None:
+        b = self.stats["back"]
+        b[back["why"]] = b.get(back["why"], 0) + 1
+        t.end_back(back)
+
+    def _sp2_at(self, t: Task, new) -> int | None:
+        """SPD-249: where SP2 asks the supervisor in this block: its first end token, when it is inside the
+        output budget (`app._sp2_block`'s rule); None for a request without a supervisor."""
+        if t.sup is None:
+            return None
+        j = next((i for i, x in enumerate(new) if x in t.eos), None)
+        return None if j is None or t.n_out + j >= t.max_new else j
+
+    @staticmethod
+    def _next_stop(t: Task) -> str | None:
+        """SPD-249, after a block's `think.observe`: "budget" when the budget is spent (the forced close),
+        "sp1" when the supervisor watches this block inside the reasoning (`app._sp1`'s rule), else None."""
+        th = t.think
+        if th is None:
+            return None
+        if th.hit:
+            return "budget"
+        if t.sup is not None and th.inside and getattr(t.sup, "watches_blocks", False):
+            return "sp1"
+        return None
+
+    def _after(self, t: Task) -> None:
+        """SPD-249: a block's tokens are out and the task goes on: back for the budget, or SP1's marker behind
+        the tokens (the slot's thread asks there, with the values the slot loop passes)."""
+        nxt, t.next = t.next, None
+        if nxt == "budget":
+            self._back(t, {"why": "budget"})
+        elif nxt == "sp1":
+            self.stats["sp1_marks"] += 1
+            t.gate = True
+            t.q.put(("sp1", (t.n_out, t.eng.max_len - t.pos, len(t.ctx))))
+
     # ---- the draft hook (dflash2.DRAFT_MEET, from the runner thread) -------------------------
     def meet(self, drafter, anchor, pos0):
         """While the runner drives proposals, a draft call joins the round's packed draft: a list the
@@ -203,6 +295,7 @@ class Runner:
     # ---- the loop ---------------------------------------------------------------------------
     def _loop(self) -> None:
         turn = self.pool.turn
+        owed = None                         # SPD-249: since when the round waits for SP1 verdicts
         while True:
             with self.cv:
                 live = [t for t in self.tasks if not t.done]
@@ -214,7 +307,21 @@ class Runner:
                     self.cv.wait(timeout=0.05)
                     if not self.tasks:
                         continue
-                live = list(self.tasks)
+                if VERDICT_WAIT_MS > 0 and any(t.gate and t.verdict is None for t in self.tasks):
+                    now = time.perf_counter()
+                    owed = now if owed is None else owed
+                    left = VERDICT_WAIT_MS / 1e3 - (now - owed)
+                    if left > 0:
+                        self.cv.wait(timeout=left)
+                        continue
+                if owed is not None:
+                    self.stats["verdict_wait_ms"] += (time.perf_counter() - owed) * 1e3
+                    owed = None
+                live = [t for t in self.tasks if not t.done and self._ready(t)]
+                if not live:
+                    # SPD-249: every task waits for its SP1 verdict (or went back): no round, no turn
+                    self.cv.wait(timeout=0.005)
+                    continue
             if turn is not None:
                 turn.acquire("runner")
             try:
@@ -616,7 +723,7 @@ class Runner:
         if PIPE:
             t0 = time.perf_counter()
             halves = [self._tail_a(t, x, path, new) for t, x, path, new in self._paths(group, trees, outs, walked)]
-            go = [t for t, h in zip(group, halves) if h[2] is None]
+            go = [t for t, h in zip(group, halves) if h[2] is None and t.next is None]
             t1 = time.perf_counter()
             self._propose(go, t1, deadline=False)
             for t in go:
@@ -656,13 +763,22 @@ class Runner:
                 self._round_acc += len(path) - 1
             yield t, x, path, new
 
-    def _tail(self, t: Task, tree, path, new) -> None:
-        from engine.model import h2d
-        app = self.app
-        accepted = len(path) - 1
-        cut = app._end_cut(new, t.eos, t.max_new - t.n_out)
+    def _cut(self, t: Task, path, new) -> tuple:
+        """The block's kept rows and tokens: through its first end token and inside the budget
+        (`app._end_cut`); SPD-249: before the end token where SP2 asks, with the hand-back (else None)."""
+        j = self._sp2_at(t, new)
+        if j is not None:
+            back = {"why": "sp2", "extra": list(new[:j]), "end": int(new[j]), "room": t.eng.max_len - t.pos}
+            return path[:j + 1], new[:j], back
+        cut = self.app._end_cut(new, t.eos, t.max_new - t.n_out)
         if cut < len(new):
             path, new = path[:cut + 1], new[:cut]
+        return path, new, None
+
+    def _tail(self, t: Task, tree, path, new) -> None:
+        from engine.model import h2d
+        accepted = len(path) - 1
+        path, new, back = self._cut(t, path, new)
         t.eng.commit_tree(path)
         d = t.drafter
         if hasattr(d, "sync"):
@@ -680,6 +796,11 @@ class Runner:
                 d.sync(toks, hidden, t.pos)
         t.pos += len(path)
         t.bs.block(max(tree.depths()), accepted)
+        if back is not None:
+            # SPD-249: SP2 is the slot thread's; the tokens before the end token go with the hand-back
+            self._round_tok += len(new)
+            self._back(t, back)
+            return
         d.observe(new)
         if t.pen is not None:
             t.pen.commit(new)
@@ -695,17 +816,16 @@ class Runner:
             t.end("eos" if any(x in t.eos for x in new) else "length")
         elif t.think is not None:
             t.think.observe(new)            # the slot loop looks at a block it goes on after
+            t.next = self._next_stop(t)
+            self._after(t)
 
     def _tail_a(self, t: Task, tree, path, new) -> tuple:
         """PIPE: the part of `_tail` the next draft reads: the cut, the drafter's sync and observation, the position
         and context, and whether the task ends (it ends in `_tail_b`, after its tokens are pushed). Returns
         (path, new, the end reason or None)."""
         from engine.model import h2d
-        app = self.app
         accepted = len(path) - 1
-        cut = app._end_cut(new, t.eos, t.max_new - t.n_out)
-        if cut < len(new):
-            path, new = path[:cut + 1], new[:cut]
+        path, new, back = self._cut(t, path, new)
         d = t.drafter
         if hasattr(d, "sync"):
             from engine import rowcopy
@@ -721,6 +841,13 @@ class Runner:
             else:
                 d.sync(toks, hidden, t.pos)
         t.bs.block(max(tree.depths()), accepted)
+        if back is not None:
+            # SPD-249: SP2 is the slot thread's: the rows before the end token are committed (`_tail_b`), and
+            # the drafter's observation, the penalties, the stop patterns and the context wait for its answer
+            t.pos += len(path)
+            self._round_tok += len(new)
+            t.back = back
+            return path, new, "back"
         d.observe(new)
         end = None
         if any(x in t.eos for x in new) or t.n_out + len(new) >= t.max_new or t.pos + len(path) >= t.eng.max_len - 1:
@@ -732,6 +859,7 @@ class Runner:
         t.tok = t.ctx[-1]
         if end is None and t.think is not None:
             t.think.observe(new)
+            t.next = self._next_stop(t)     # SPD-249: no draft ahead for a block that goes back or waits
         return path, new, end
 
     def _tail_b(self, t: Task, path, new, end, committed: bool = False) -> None:
@@ -739,14 +867,21 @@ class Runner:
         slot at once), the penalties, the stop patterns, the stream, the end."""
         if not committed:
             t.eng.commit_tree(path)
+        if end == "back":
+            back, t.back = t.back, None
+            self._back(t, back)             # SPD-249: SP2's (`_tail_a`)
+            return
         if t.pen is not None:
             t.pen.commit(new)
         stop_now = t.pstop is not None and t.pstop.observe(new)
         t.push(new)
         if stop_now:
+            t.next = None
             t.end("stop")
         elif end is not None:
             t.end(end)
+        else:
+            self._after(t)
 
     def _plain(self, t: Task) -> None:
         """A task with no draft this round: the slot loop's plain step (one row, alone)."""
@@ -767,6 +902,11 @@ class Runner:
                else int(logits[0, -1].argmax()))
         if on_plain is not None:
             on_plain((time.perf_counter() - t_plain) * 1e3)
+        if t.sup is not None and tok in t.eos:
+            # SPD-249: SP2 on the plain step, the slot thread's: the end token was never forwarded, and nothing
+            # has taken it yet
+            self._back(t, {"why": "sp2_plain", "extra": [], "end": int(tok), "room": eng.max_len - t.pos})
+            return
         t.ctx.append(tok)
         t.n_out += 1
         t.tok = tok
@@ -777,11 +917,16 @@ class Runner:
         stop_now = t.pstop is not None and t.pstop.observe([tok])
         if t.think is not None and not stop_now and tok not in t.eos:
             t.think.observe([tok])          # the slot loop's plain step: past a stop or an end token, not
+            t.next = self._next_stop(t)
         t.push([tok])
         if stop_now:
+            t.next = None
             t.end("stop")
         elif tok in t.eos or t.n_out >= t.max_new or t.pos >= eng.max_len - 1:
+            t.next = None
             t.end("eos" if tok in t.eos else "length")
+        else:
+            self._after(t)
 
 
 class _nothing:

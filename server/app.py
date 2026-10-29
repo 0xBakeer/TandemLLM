@@ -1892,13 +1892,15 @@ def _run_draft_round(meet) -> None:
 
 
 def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
-                   deadline, device, think=None):
+                   deadline, device, think=None, sup=None):
     """SPD-201: hand this slot's decode to the round runner and stream what it pushes. The turn is the
-    runner's while it decodes; this thread takes it back before the request's bookkeeping."""
+    runner's while it decodes; this thread takes it back before the request's bookkeeping. Returns None when
+    the runner ended the request; SPD-249: the task when it came back (`Task.back`, `_runner_back`). SP1 is
+    asked here, when the tokens before its marker are out: the runner waits for the verdict."""
     i = _par_index()
     slot = par.slots[i]
     task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
-                              bs, k, deadline, device, think)
+                              bs, k, deadline, device, think, sup=sup)
     slot.phase = "runner"
     owner = slot.owner
     par.wake()
@@ -1908,6 +1910,10 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
     try:
         while True:
             kind, val = task.q.get()
+            if kind == "sp1":
+                task.verdict = [_sp1(sup, think, *val)]
+                runner.poke()
+                continue
             if kind != "tokens":
                 break
             for t in val:
@@ -1921,6 +1927,72 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
             slot.phase = ""
     if task.err is not None:
         raise task.err
+    return task if task.back is not None else None
+
+
+def _runner_back(back: dict, eng, drafter, think, ctx, pos, device, pen, pstop, sampler, sup, eos,
+                 start: int, n_out: int, max_new: int):
+    """SPD-249: the request the runner handed back, at the point where `_generate_stream`'s tree loop
+    asks the supervisor or closes the block, done as that loop does it (this thread holds the turn).
+    Yields the tokens the loop yields there; returns (pos, n_out) to decode on, or None at the end.
+
+    sp2 / sp2_plain: the runner committed the rows before the end token and took nothing of the block
+    (`extra`) or of the end token. SP2 is asked with them as `_sp2_block` / the plain step ask it; then the
+    drafter, the penalties and the stop patterns take what the loop keeps (with the end token when
+    nothing was decided), the tokens go out, and a hidden continue is forwarded. sp1: the verdict the
+    runner read, an action (GIVE_UP ends). budget: the forced close of a spent budget."""
+    why, act = back["why"], back.get("act")
+    if why in ("sp2", "sp2_plain"):
+        extra, end = list(back["extra"]), back["end"]
+        if why == "sp2":
+            act = _sp2(sup, think, ctx, start, n_out + len(extra), back["room"] - len(extra) - 1,
+                       extra=extra, end=end)
+        else:
+            act = _sp2(sup, think, ctx, start, n_out, back["room"], end=end)
+        take = extra if act is not None else extra + [end]
+        stop_now = False
+        if take:
+            if drafter is not None:
+                drafter.observe(take)
+            if pen is not None:
+                pen.commit(take)
+            stop_now = pstop is not None and pstop.observe(take)
+        for t in take:
+            ctx.append(t)
+            n_out += 1
+            yield t
+            if t in eos or n_out >= max_new:
+                return None
+        if stop_now:
+            return None
+        if think is not None and take:
+            think.observe(take)
+    if why == "budget":
+        for t in _force_close(eng, drafter, think, ctx, pos, device, pen=pen, pstop=pstop,
+                              sampler=sampler, sup=sup, eos=eos, start=start, n_out=n_out):
+            n_out += 1
+            yield t
+            if n_out >= max_new:
+                return None
+        if pstop is not None and pstop.hit:
+            return None
+        if sup is not None and ctx[-1] in eos:
+            return None
+        pos += 1 + len(think.close_ids)
+        if sup is not None:
+            pos = len(ctx) - 1
+        return pos, n_out
+    if act is not None and act.kind == GIVE_UP and why == "sp1":
+        return None
+    for t in _force_close(eng, drafter, think, ctx, pos, device, pen=pen, pstop=pstop, sampler=sampler,
+                          act=act, sup=sup, eos=eos, start=start, n_out=n_out):
+        n_out += 1
+        yield t
+        if n_out >= max_new:
+            return None
+    if (pstop is not None and pstop.hit) or ctx[-1] in eos:
+        return None
+    return len(ctx) - 1, n_out
 
 
 def _draft_meet(drafter, anchor: int, pos0: int):
@@ -2278,10 +2350,23 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             # block's bookkeeping goes with it while nothing can close the block (no budget, no arms)
             why = _round_runner.why_not(sup=sup, probe=probe, lpr=lpr, think=think, ahead=ahead,
                                         drafter=drafter, lane=STATE.get("lane"), turn=par.turn)
-            if why is None:
-                yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
-                                          max_new, eos, bs, k, deadline, prompt.device, think)
-                return
+            while why is None:
+                task = yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok,
+                                                 n_out, max_new, eos, bs, k, deadline, prompt.device, think,
+                                                 sup)
+                if task is None:
+                    return
+                # SPD-249: handed back where the loop below asks the supervisor or closes the block
+                got = yield from _runner_back(task.back, eng, drafter, think, ctx, task.pos, prompt.device,
+                                              pen, pstop, sampler, sup, eos, start, task.n_out, max_new)
+                if got is None:
+                    return
+                pos, n_out = got
+                tok = ctx[-1]
+                if n_out >= max_new or (deadline is not None and deadline.expired()):
+                    return
+                if sup is not None and pos >= eng.max_len - 1:
+                    return                 # hidden tokens took rows the output clamp did not count
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return

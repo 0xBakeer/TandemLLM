@@ -59,6 +59,8 @@ One thread runs every decoding lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the
 | `QSE_ROUND_RUNNER` | 1 | one runner thread for every lane's round (0: each slot runs its own loop) |
 | `QSE_RUNNER_MTP_PACK` | 1 | the lanes' MTP drafts in one packed pass (Flash-Next, Ornith; SPD-235) |
 | `QSE_RUNNER_COMMIT_MULTI` | 1 | a joint round's commits in one call where the family has `commit_tree_multi` (SPD-239) |
+| `QSE_RUNNER_SUPERVISED` | 1 | supervised requests and reasoning blocks with a budget or stall arms go with the runner, handed back to the slot's thread at SP1, SP2 and the spent budget (SPD-249; 0: the slot's own loop) |
+| `QSE_RUNNER_VERDICT_WAIT_MS` | 4 | how long a round waits for the SP1 verdicts its lanes owe before those lanes sit the round out |
 | `QWEN38_JOINT_GRAPHS` | 1 | the 27B's joint verify pass from CUDA graphs (0: eager) |
 | `QWEN38_JOINT_GRAPHS_MAX` | 24 | joint graphs kept; a full set is reset whole and captured again into a new pool |
 | `QWEN38_JOINT_GRAPHS_AFTER` | 4 | times a pass shape comes before it is captured (16 before SPD-245) |
