@@ -182,6 +182,10 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the router skips its Qwen stage at once when the server's queue says the answer
     # cannot come inside the stage's timeout (`qwen_busy`); off: it asks and waits out the timeout
     'OWN_ETA': ('on', 'server/app.py'),
+    # SPD-249: TandemLLM's own raw questions (the router's) take an idle side slot: one short enough
+    # for the side lane instead of the lane when slot 0 is busy, a longer one without waiting
+    # SIDE_AFTER_OWN_S behind other own work; off: the lane and the wait, as before
+    'OWN_SIDE': ('on', 'server/app.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

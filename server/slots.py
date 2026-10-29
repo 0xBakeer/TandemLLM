@@ -785,12 +785,7 @@ class Pool:
         is free, else takes the slot after all."""
         now = time.monotonic()
         for s in sorted(self.side(), key=lambda s: s.max_len):
-            c = s.carry
-            # FX16: a record backed by the slot's resident prefix outlives a guest (the stash
-            # puts the rows back), so its freshness is its age alone
-            if (keep_carry_s > 0 and c is not None
-                    and (c.get("gen") == s.gen or c.get("resident"))
-                    and now - float(c.get("t") or 0.0) < keep_carry_s):
+            if self._carry_fresh(s, keep_carry_s, now):
                 continue
             if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
                 s.gen += 1
@@ -801,6 +796,22 @@ class Pool:
                     self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
                 return s
         return None
+
+    @staticmethod
+    def _carry_fresh(s: Slot, keep_carry_s: float, now: float) -> bool:
+        """FX10: the slot's last end is younger than `keep_carry_s`, kept for its conversation's next
+        turn. FX16: a record backed by the slot's resident prefix outlives a guest (the stash puts the
+        rows back), so its freshness is its age alone."""
+        c = s.carry
+        return bool(keep_carry_s > 0 and c is not None
+                    and (c.get("gen") == s.gen or c.get("resident"))
+                    and now - float(c.get("t") or 0.0) < keep_carry_s)
+
+    def side_free(self, need: int, keep_carry_s: float = 0.0) -> bool:
+        """SPD-249: whether `take_side(need, keep_carry_s=...)` would find a slot now (nothing taken)."""
+        now = time.monotonic()
+        return any(need <= s.max_len and not s.busy and not self._carry_fresh(s, keep_carry_s, now)
+                   for s in self.side())
 
     def take_slot(self, index: int, need: int, owner=None) -> Slot | None:
         """FX16: one named side slot, without waiting: the slot whose resident rows the request's

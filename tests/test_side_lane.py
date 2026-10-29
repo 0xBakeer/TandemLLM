@@ -30,6 +30,11 @@ The test matrix:
     7  the router's raw question shape (24 tokens, thinking off) is served in the lane; a raw
        request with thinking on, one over the output cap, and a TandemLLM turn wait in the queue
                                                               test_raw_question_*, test_not_*
+  side slots (SPD-249, QWEN38_OWN_SIDE):
+    8  TandemLLM's own raw question short enough for the lane gets a side window and takes an idle
+       side slot (no carry) while slot 0 is busy, never one whose last end waits for its
+       conversation; a client's raw request keeps the lane; a longer own question does not wait
+       15 s behind other own work; off: the lane and the wait   test_spd249_*
 
 Run: python tests/test_side_lane.py
 """
@@ -400,6 +405,186 @@ def test_a_long_side_request_waits_past_the_queue_timeout_and_is_served():
         (took, long_side["head"][:80])
     assert raw["usage"]["completion_tokens"] > 0
 
+
+
+# ------------------------------------------------------------------ 8. side slots (SPD-249)
+
+def _own_need(n_rows=300, max_new=24, own=True, lane_kind="raw", side_len=8192):
+    """`_par_side_need` for a raw question of `n_rows` rendered tokens beside a busy slot 0."""
+    from server import app as A
+    from server import slots as S
+    pool = S.Pool([S.Slot(0, 65_536), S.Slot(1, side_len), S.Slot(2, side_len)])
+    saved = {k: A.STATE.get(k) for k in ("pool", "resident", "slot0_view")}
+    A.STATE["pool"], A.STATE["resident"] = pool, None
+    A.STATE.pop("slot0_view", None)
+    real = A.build_prompt
+    A.build_prompt = lambda body, client=None, *, count=False, left_out=0: list(range(n_rows))
+    try:
+        why: dict = {}
+        need = A._par_side_need({"messages": []}, None, 0, max_new, None, [], lane_kind, why,
+                                own=own)
+        return need, why, pool
+    finally:
+        A.build_prompt = real
+        for k, v in saved.items():
+            if v is None:
+                A.STATE.pop(k, None)
+            else:
+                A.STATE[k] = v
+
+
+def test_spd249_an_own_lane_question_gets_a_side_window():
+    from server import app as A
+    need, why, _ = _own_need()
+    assert need == 300 + 24 + A.SIDE_MARGIN and why["lane_side"], (need, why)
+    need, why, _ = _own_need(own=False)
+    assert need is None and "lane_side" not in why, "a client's raw request keeps the lane"
+    need, why, _ = _own_need(lane_kind=None)
+    assert "lane_side" not in why, "not a lane job: the usual window rules"
+    need, why, _ = _own_need(side_len=256)
+    assert need is None and why["lane_side"], "no side slot holds it: the lane"
+    was = A.OWN_SIDE
+    A.OWN_SIDE = "off"
+    try:
+        need, why, _ = _own_need()
+        assert need is None and "lane_side" not in why
+    finally:
+        A.OWN_SIDE = was
+
+
+def test_spd249_the_routers_estimate_counts_an_idle_side_slot():
+    """`_own_side_free` (the router's `own_eta`) as admission: a lane-sized own question has an idle
+    side slot whose last end is not kept; a longer one any idle slot; off: the lane, no slot."""
+    import time as _t
+    from server import app as A
+    from server import slots as S
+    pool = S.Pool([S.Slot(0, 65_536), S.Slot(1, 8192)])
+    was_pool, was = A.STATE.get("pool"), A.OWN_SIDE
+    A.STATE["pool"] = pool
+    try:
+        assert A._own_side_free(300, 24, True, None) and A._own_side_free(3000, 24, False, -1)
+        assert not A._own_side_free(9000, 24, False, -1)
+        pool.slots[1].carry = {"gen": pool.slots[1].gen, "t": _t.monotonic()}
+        assert not A._own_side_free(300, 24, True, None) and A._own_side_free(3000, 24, False, -1)
+        pool.slots[1].carry = None
+        A.OWN_SIDE = "off"
+        assert not A._own_side_free(300, 24, True, None) and not A._own_side_free(3000, 24, False, -1)
+    finally:
+        A.OWN_SIDE = was
+        A.STATE["pool"] = was_pool
+
+
+def test_spd249_side_ok_lets_own_work_take_a_side_slot_at_once():
+    from server import app as A
+    assert A._side_ok(0.0, None) and not A._side_ok(0.0, -1)
+    assert A._side_ok(0.0, -1, own=True), "an own question needs no slot 0 caches"
+    assert A._side_ok(A.SIDE_AFTER_OWN_S, -1)
+    was = A.OWN_SIDE
+    A.OWN_SIDE = "off"
+    try:
+        assert not A._side_ok(0.0, -1, own=True)
+    finally:
+        A.OWN_SIDE = was
+
+
+def test_spd249_side_free_reads_busy_slots_and_kept_ends():
+    import time as _t
+    from server import slots as S
+    pool = S.Pool([S.Slot(0, 65_536), S.Slot(1, 8192)])
+    assert pool.side_free(1000) and not pool.side_free(9000)
+    s1 = pool.slots[1]
+    s1.carry = {"gen": s1.gen, "t": _t.monotonic()}
+    assert not pool.side_free(1000, keep_carry_s=600.0) and pool.side_free(1000)
+    assert pool.take_side(1000, keep_carry_s=600.0) is None
+    s1.carry = None
+    got = pool.take_side(1000)
+    assert got is s1 and not pool.side_free(1000)
+    s1.lock.release()
+
+
+def _fake_par():
+    import contextlib
+    import io
+    from server import app as A
+    from server import fake_engine
+    a = A.parser().parse_args(["--fake-engine", "--fake-tps", "2000", "--max-len", "65536",
+                               "--default-max-tokens", "64", "--parallel", "3",
+                               "--side-max-len", "8192"])
+    A.STATE.clear()
+    A.CLOCK = A.qwait.TurnClock()
+    with contextlib.redirect_stdout(io.StringIO()):
+        fake_engine.load(A, a)
+    lane = A.STATE["lane"] = preempt.Lane(A.STATE["lane_run"], prompt_max=2048)
+    lane.gone_exc = A.ClientGone
+    return A.STATE["pool"], lane
+
+
+def _held_then(body, holder, wait=1.5):
+    """Slot 0 held by `holder` (the lock held, no generation in it), then `body` from the router's
+    agent: (the response or None while it still waits, seconds, pool, lane)."""
+    from server import app as A
+    from test_ui_states import Req
+    pool, lane = _fake_par()
+    A.LOCK.acquire()
+    A.LOCK.turn.release(0)
+    with A.QUEUE:
+        A.HOLDER["who"] = dict(holder, t=time.monotonic(), t_hold=time.monotonic())
+    out: dict = {}
+
+    def send():
+        t0 = time.monotonic()
+        head, raw = Req(body, {"User-Agent": "tandem-conductor/1", "X-Tandem": "raw"}).response()
+        out.update(raw=raw, t=time.monotonic() - t0)
+    th = threading.Thread(target=send, daemon=True)
+    try:
+        th.start()
+        th.join(wait)
+        early = dict(out) if not th.is_alive() else None
+    finally:
+        with A.QUEUE:
+            A.HOLDER["who"] = None
+        A.LOCK._lk.release()
+        th.join(30)
+    A.STATE["lane"] = None
+    return early, out, pool, lane
+
+
+def test_spd249_an_own_question_takes_an_idle_side_slot_not_the_lane():
+    """Slot 0 busy with a client's turn: the router's question runs on an idle side slot at once (no
+    carry), not in slot 0's lane behind the questions ahead of it; off: the lane, served only when the
+    lock comes free (here: no generation serves it meanwhile)."""
+    from server import app as A
+    early, out, pool, lane = _held_then(_raw_question(), {"rank": A.RANK_TURN})
+    assert early is not None and '"choices"' in early["raw"], out
+    assert pool.stats.get("lane_side") == 1 and pool.stats["side_grants"] == 1, pool.stats
+    assert [getattr(s, "no_carry", False) for s in pool.side()].count(True) == 1, "nobody carries it"
+    assert lane.stats["jobs"] == 0, lane.report()
+    was = A.OWN_SIDE
+    A.OWN_SIDE = "off"
+    try:
+        early, out, pool, lane = _held_then(_raw_question(), {"rank": A.RANK_TURN}, wait=1.0)
+    finally:
+        A.OWN_SIDE = was
+    assert early is None and '"choices"' in out["raw"], out
+    assert lane.stats["jobs"] == 1 and pool.stats["side_grants"] == 0, (lane.report(), pool.stats)
+
+
+def test_spd249_a_long_own_question_does_not_wait_behind_own_work():
+    """A question too long for the lane (the package question at 2.8k tokens) while slot 0 runs another
+    of the router's questions: an idle side slot at once; off: it waits SIDE_AFTER_OWN_S."""
+    from server import app as A
+    body = _raw_question()
+    body["messages"][1]["content"] = "the user wants a voxel pagoda " * 100     # 3,000 tokens here
+    early, out, pool, _ = _held_then(body, {"rank": A.RANK_TURN, "own": True})
+    assert early is not None and pool.stats["side_grants"] == 1, (out, pool.stats)
+    assert "lane_side" not in pool.stats
+    was = A.OWN_SIDE
+    A.OWN_SIDE = "off"
+    try:
+        early, out, pool, _ = _held_then(body, {"rank": A.RANK_TURN, "own": True}, wait=1.0)
+    finally:
+        A.OWN_SIDE = was
+    assert early is None and '"choices"' in out["raw"] and pool.stats["side_grants"] == 0, pool.stats
 
 if __name__ == "__main__":
     passed = 0

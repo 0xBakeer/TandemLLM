@@ -890,10 +890,18 @@ def _slot0_stale(now: float | None = None) -> str | None:
 SIDE_AFTER_OWN_S = 15.0
 
 
-def _side_ok(waited_s: float, holder) -> bool:
+#: SPD-249: `on`: TandemLLM's own raw questions take an idle side slot (`_par_side_need`'s
+#: `lane_side`, `_side_ok`'s `own`); `off`: the side lane and the SIDE_AFTER_OWN_S wait, as before
+OWN_SIDE = (_S.get("OWN_SIDE") or "on").strip().lower()
+
+
+def _side_ok(waited_s: float, holder, own: bool = False) -> bool:
     """May a request that has waited `waited_s` take a side slot, given slot 0's holder
-    (`_own_holder()`: None for a client request or a free slot, else TandemLLM's own work)?"""
-    return holder is None or waited_s >= SIDE_AFTER_OWN_S
+    (`_own_holder()`: None for a client request or a free slot, else TandemLLM's own work)?
+    SPD-249: TandemLLM's own question (`own`) may at once: the wait keeps a client's conversation
+    for slot 0's caches, and a question has none (`no_carry`). In a burst of chats the router's
+    longer questions waited the 15 s behind each other on slot 0 and ran out their 8 s timeout."""
+    return holder is None or waited_s >= SIDE_AFTER_OWN_S or (own and OWN_SIDE == "on")
 
 
 #: SPD-249: `on`: the router skips its Qwen stage when `_own_eta_ms` says the answer cannot come
@@ -962,13 +970,21 @@ def _turn_units_ms(rate: float) -> list[float]:
 
 def _own_side_free(rows: int, max_new: int, lane_job: bool, holder) -> bool:
     """SPD-249: whether an idle side slot takes a raw internal question of `rows` prompt rows now,
-    as the handler's admission does: a job short enough for the side lane waits for slot 0's lane
-    (`_par_side_need`), a longer one takes a side slot when `_side_ok` lets it."""
+    as the handler's admission does: one short enough for the side lane takes a slot whose last end
+    is not kept for a carry (`lane_side`; OWN_SIDE off: the lane, no slot), a longer one any idle
+    slot when `_side_ok` lets it."""
     pool = dict.get(STATE, "pool")
-    if pool is None or pool.n < 2 or lane_job or not _side_ok(0.0, holder):
+    if pool is None or pool.n < 2:
         return False
     need = int(rows) + int(max_new) + SIDE_MARGIN
-    return any(not s.busy and need <= s.max_len for s in pool.side())
+    if lane_job:
+        return OWN_SIDE == "on" and pool.side_free(need, _carry_keep_s())
+    return _side_ok(0.0, holder, own=True) and pool.side_free(need)
+
+
+def _carry_keep_s() -> float:
+    """FX10: how long a side slot's last end is kept from a short unrelated request."""
+    return CARRY_KEEP_S if SIDE_CARRY != "off" else 0.0
 
 
 def _own_eta_ms(texts, max_new: int = 24) -> float | None:
@@ -1073,7 +1089,8 @@ def _mm_rows(n_text: int, images: list) -> int:
 
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
-                   parent: str | None = None, session: str | None = None) -> int | None:
+                   parent: str | None = None, session: str | None = None,
+                   own: bool = False) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images while SIDE_IMAGES is off (or
     with a tower that builds its own context, `_mm_keys`), or one no side slot is long enough for.
@@ -1095,7 +1112,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     worker's call that continues slot 0's rows (or its park or NVMe entry) does. Live
     2026-10-18 01:00: two parents' returns, their rows on the NVMe, took the side slot after
     `prefer_side` and read 11,119 and 11,010 tokens again: the client's copy, without the
-    router's notes, matched no entry there."""
+    router's notes, matched no entry there.
+
+    SPD-249: TandemLLM's own raw question short enough for the side lane (`own`, `lane_kind` raw) gets
+    a side window (`why["lane_side"]`): it has no conversation of its own, and an idle side slot
+    serves it where the lane would serve it after the questions ahead of it, from row 0 on slot 0."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
@@ -1112,6 +1133,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     except Exception:                                              # noqa: BLE001
         return None                       # the render fails again under the lock, as a 400
     rows = len(ids)
+    if lane and own and lane_kind == "raw" and OWN_SIDE == "on" and not images:
+        why.update(ids=ids, lane_side=True)
+        need = rows + int(max_new) + SIDE_MARGIN
+        why["need"] = need
+        return need if any(need <= s.max_len for s in pool.side()) else None
     if images:
         # SRV-629: the window holds the expanded rows, not one placeholder an image (8
         # screenshots: about 7,700 rows), and every test below runs on the key ids, as the caches
@@ -8622,15 +8648,16 @@ class Handler(BaseHTTPRequestHandler):
         # busy, from its length and whether it continues slot 0's resident conversation
         par = dict.get(STATE, "pool")
         par_why: dict = {}
+        own_q = (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA)
         side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
-                                    par_why, stay=stay, parent=parent, session=conv_id)
+                                    par_why, stay=stay, parent=parent, session=conv_id, own=own_q)
                      if par is not None else None)
         side = None
         me = {"rank": rank, "t": time.monotonic(),
               "side": plan.side if plan is not None and plan.side is not None else None,
               # the conductor's own question to Qwen (server/conductor/classify.py's agent): the
               # waiting line of a turn behind it says so
-              "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA),
+              "own": own_q,
               # SPD-249: its prompt rows, for the router's `own_eta` behind it
               "rows": len(par_why.get("ids") or ()),
               "rec": rec}                 # SRV-249: the holder's live work, for the estimate
@@ -8697,8 +8724,19 @@ class Handler(BaseHTTPRequestHandler):
             slot0_first = bool(par_why.get("slot0_first")) and side_need is not None
             if not got and home is None and not new_wait:
                 got = _take(me, None)
+            lane_side = bool(par_why.get("lane_side")) and side_need is not None
+            if not got and lane_side:
+                # SPD-249: slot 0 busy: an idle side slot before the lane (not one whose last end
+                # waits for its conversation's next turn); none, the lane as before
+                side = par.take_side(side_need, owner=cid, keep_carry_s=_carry_keep_s())
+                got = side is not None
+                if got:
+                    side.no_carry = True
+                    with par._lk:
+                        par.stats["lane_side"] = par.stats.get("lane_side", 0) + 1
             if (not got and home is None and not new_wait and side_need is not None
-                    and not slot0_first and _side_ok(0.0, _own_holder())):
+                    and not slot0_first and not lane_side
+                    and _side_ok(0.0, _own_holder(), own=me["own"])):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
                 if got:
@@ -8775,7 +8813,7 @@ class Handler(BaseHTTPRequestHandler):
                     own_wait[0] += time.monotonic() - t_slice
                     own_rank = holder_own
                 waited = time.monotonic() - t_wait
-                if (not got and side_need is not None and _side_ok(waited, _own_holder())
+                if (not got and side_need is not None and _side_ok(waited, _own_holder(), own=me["own"])
                         and (not slot0_first
                              or waited >= float(par_why.get("slot0_wait_s") or SIDE_SLOT0_WAIT_S))):
                     side = par.take_side(side_need, owner=cid)
