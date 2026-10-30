@@ -163,11 +163,14 @@ def step_text(m: dict, step) -> str:
     if step == "parallelism" and par.get("kv_bytes_per_token"):
         kv, fill = par["kv_bytes_per_token"], par.get("typical_fill_tokens") or 32768
         top = (par.get("window") or {}).get("max") or fill
-        out.append(f"What a slot takes: {kv / 1024:g} KiB of memory a token of its window. With "
-                   f"the shared KV pool a slot takes memory as its conversation grows: "
-                   f"{kv * fill / 2**30:.2f} GiB at {fill:,} tokens, {kv * top / 2**30:.2f} GiB "
-                   f"with its whole window of {top:,} tokens. Each slot after the first also "
-                   f"takes {par.get('side_slot_const_gib', 0):g} GiB.")
+        out.append(f"What a lane takes: {kv / 1024:g} KiB of memory a token of its window; every "
+                   f"lane has the same window (the window field). With the shared KV pool a lane "
+                   f"takes memory as its conversation grows: {kv * fill / 2**30:.2f} GiB at "
+                   f"{fill:,} tokens, {kv * top / 2**30:.2f} GiB with the whole window of {top:,} "
+                   f"tokens. Each lane after the first also takes "
+                   f"{par.get('side_slot_const_gib', 0):g} GiB. The page shows how many lanes can "
+                   f"all hold the full window at once; past that a new request waits for memory and "
+                   f"a lane that runs out of memory stops and is continued once memory is free.")
     meas = m.get("measurements") or {}
     if step in TABLE_STEPS and meas.get("rows"):
         prof = {p["id"]: p for p in m["profiles"]}

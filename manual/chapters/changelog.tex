@@ -46,9 +46,20 @@
 0.14.0 & 10-22 & Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint, drafting with the lookup; a resumed session keeps its end anchor; a re-rendered tool call served as written; prompt attention over the KV heads as they are; a lost CUDA context fails \code{/health}; \code{tools/release.sh} \\
 0.14.1 & 10-22 & a call's argument names matched to the offered tool's schema; a call to a tool not offered mapped to one that is; Flint answers directly with thinking off; Flint's e4m3 KV cache, off by default; model families behind adapters \\
 0.14.2 & 10-23 & with thinking off, reasoning written into the answer goes to its field; Ornith answers up to its card's 131,072 tokens and decodes plain at long context; \code{cache_prompt: false} as a cold read; a lookup corpus for each tokenizer; no conductor notes on a model without a place for them; \code{tandem-dash serve} without the engine \\
+0.15.0 & 10-27 & 8 lanes by default, every lane the full window; a lane short of memory gives way and goes on; one round runner with a packed draft and a joint verify pass, from CUDA graphs on the 27B; Flash-Next and Ornith in joint passes; a burst prefill; the 27B's faster GDN prefill; the card's sampling filters for a request that names none; a speed row on every weight card \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.15.0, eight lanes}\label{sec:changelog-0150}
+
+0.15.0 runs 8 lanes by default on the KV pool, every lane with the window the setup names, and the Setup Guide counts how many lanes can all hold it at once. A lane whose next pages the pool refuses while others run gives its pages back, waits at the head of the line and goes on in the same answer; alone it stops with \code{memory_full}. Ornith builds side slots, and the 27B, Flash-Next, Ornith and Flint cards default to 8 lanes (\measured).
+
+One thread runs every lane's round: the proposals, one packed draft, one joint verify pass and the walks. The 27B's joint pass takes 64 rows on EXL3 weights and runs from CUDA graphs once its shape has come four times, every lane's rows bit for bit its own verify; each graph owner captures on a stream of its own, so no graph's reset frees the cuBLAS workspace another graph reads. Flash-Next and Ornith run their row-wise parts once over every lane's rows and pack their MTP drafts. NemotronH packs its lanes' LiLiCorr drafts and takes the joint plain step where drafts do not pay: Nemotron 3.5 Bolt at 8 requests at once runs at 92.2~tok/s in total on its card (\measured).
+
+Requests that arrive on an idle engine prefill before any of them decodes, and on the 27B's EXL3 packs their prompts of up to 512 tokens run in one forward, each row its own prefill's bits. The 27B's GDN prefill runs at a 64-row chunk; with the prep kernel's scan at 16 by 4 this moves the summation order once, held by a gate (top-1 64 or 65 of 65), and Flash-Next's tensor-core mixers move theirs (Chapter~\ref{ch:exactness}). A sampled request that names no filter takes the card's top\_k and top\_p, and one without a seed draws its own and takes the keyed walk. Every family's fingerprint moves once. Every weight card carries a speed row of this build: decode alone, the first token of a cold 2K, 8K and 32K prompt, and 1, 2, 4 and 8 requests at once (\measured). A raw request that offers no tools gets its answer streamed as text, and Flash-Next captures the context classes ahead of a conversation and keeps a verify block's records across a draft step.
+
+On one DGX Spark the 27B ThinkingCap EXL3 4.0 pack decodes 1, 2, 4 and 8 requests of 512 tokens at 42.5, 73.5, 108.9 and 155.9~tok/s in total greedy and 36.5, 62.9, 99.2 and 146.2 sampled at temperature 1.0; one prompt of 2,048, 8,192 and 32,768 tokens reads in 1.90, 6.76 and 29.4~s (\measured, 2026-10-26, 8 lanes, suffix store off).
 
 \section{0.14.2, an Ornith test report}\label{sec:changelog-0142}
 

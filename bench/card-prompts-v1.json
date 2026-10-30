@@ -1,0 +1,11 @@
+{
+ "version": "card-v1",
+ "doc": "The weight cards' speed prompts (SPD-245, tools/parallel_card.py): a system prompt, two decode workloads (code, prose; the parallel levels send prose) and the prefill filler (bench/heldout_prose.txt, repeated to the depth). Each request starts with the nonce line, so no two requests share a prefix. The text is versioned: any change to it is a new file with a new version.",
+ "system": "You are a careful senior engineer. Answer in full and follow the brief exactly. Do not mention the request nonce.",
+ "nonce_line": "Request nonce: {nonce}\n\n",
+ "workloads": {
+  "code": "Write a Python module named intervals.py that keeps a set of closed integer intervals. It needs a class IntervalSet with add(lo, hi), remove(lo, hi), contains(x), and an iterator over the merged intervals in order. Adjacent and overlapping intervals merge on add; remove may split one interval into two. Keep the intervals in a sorted list and use the bisect module, so that add and remove cost O(log n) to find their place. Validate the arguments and raise ValueError when lo is greater than hi. Give every method a docstring and type hints. Then write a unittest module test_intervals.py with at least ten tests: merging, splitting, empty removes, single points, and large random cases checked against a plain Python set. Return the two files as two code blocks, each headed by its file name, and nothing else.",
+  "prose": "Write a long essay of about 900 words on how a small town's public library changed over fifty years, from card catalogues and a reading room to a place where people print forms, learn to code and borrow tools. Follow one librarian across her whole career, and let the changes come through what she sees at the desk, the questions people ask her and the arguments at the council meetings about money. Keep it in flowing paragraphs with no headings and no lists. End with what she thinks the library is for, in her own words, on the day she retires."
+ },
+ "filler": "bench/heldout_prose.txt"
+}

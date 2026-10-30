@@ -10,8 +10,8 @@
 \texttt{-{}-presence-\allowbreak{}penalty} & \texttt{0} & flat subtraction from tokens already in the history (0 = off). \\
 \texttt{-{}-frequency-\allowbreak{}penalty} & \texttt{0} & subtraction per occurrence, on tokens already in the history (0 = off). \\
 \texttt{-{}-temperature} & \texttt{0} & server default sampling temperature (0 = greedy, the exact path). \\
-\texttt{-{}-top-\allowbreak{}p} & \texttt{1} & server default for top\_p. \\
-\texttt{-{}-top-\allowbreak{}k} & \texttt{0} & server default for top\_k (0 is off). \\
+\texttt{-{}-top-\allowbreak{}p} & \texttt{none} & server default for top\_p. \\
+\texttt{-{}-top-\allowbreak{}k} & \texttt{none} & server default for top\_k (0 is off). \\
 \texttt{-{}-no-\allowbreak{}repeat-\allowbreak{}ngram} & \texttt{0} & forbid the token that would complete an n-gram already seen (HF's no\_repeat\_ngram\_size; 0 = off, must be \textgreater{}= 2). \\
 \texttt{-{}-pattern-\allowbreak{}stop} & \texttt{none} & end a generation that repeats one short pattern forever, as MAX:MIN:COUNT (e.g. 64:1:8, a block of 1..64 tokens repeated 8 times ends the generation with finish\_reason stop). \\
 \texttt{-{}-argloop} & \texttt{on} & the tool-argument loop guard (server/argloop.py): \texttt{on} stops a held tool call whose arguments loop and tells the model on its next turn. One of: on, log, off. \\
@@ -104,13 +104,14 @@
 \texttt{-{}-side-\allowbreak{}lane-\allowbreak{}prompt-\allowbreak{}max} & \texttt{2048} & the longest prompt the side lane serves, in tokens. \\
 \texttt{-{}-side-\allowbreak{}lane-\allowbreak{}new-\allowbreak{}max} & \texttt{64} & the most output tokens the side lane serves. \\
 \texttt{-{}-parallel} & \texttt{1 (QSE\_\allowbreak{}PARALLEL)} & sequence slots: 1 (the default) is one sequence, as always. \\
-\texttt{-{}-side-\allowbreak{}max-\allowbreak{}len} & \texttt{65536 (QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN)} & a side slot's window in tokens; slot 0 keeps -\kern0pt-max-len (262,144). \\
+\texttt{-{}-side-\allowbreak{}max-\allowbreak{}len} & \texttt{0 (QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN)} & a side slot's window in tokens; 0: -\kern0pt-max-len, every slot the same window. \\
 \texttt{-{}-parallel-\allowbreak{}floor-\allowbreak{}gb} & \texttt{15 (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}FLOOR\_\allowbreak{}GB)} & admission: MemAvailable less the caches' growth, the requests in flight and this request's worst case must stay at or above this; a side slot is built only if it does with the slot's bytes added. \\
 \texttt{-{}-parallel-\allowbreak{}batch} & \texttt{on (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}BATCH)} & on: decoding slots verify their trees in one joint pass (lockstep rounds); off: they take turns, one verify each. One of: on, off. \\
 \texttt{-{}-parallel-\allowbreak{}draft} & \texttt{on (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}DRAFT)} & with the joint verify on: the decoding slots' draft calls in one packed pass over the drafter (on), or one after the other (off). One of: on, off. \\
 \texttt{-{}-parallel-\allowbreak{}switch-\allowbreak{}ms} & \texttt{0 (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}SWITCH\_\allowbreak{}MS)} & with side slots: the interpreter's thread switch interval in ms (0 keeps Python's 5 ms); a woken slot waits up to this long for the GIL. \\
-\texttt{-{}-parallel-\allowbreak{}cut} & \texttt{share (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}CUT)} & how a joint pass's rows are shared: share (each slot cuts its tree to a fixed share before it submits: 16 at two slots, 10 at three, 8 at four) or joint (the round cuts every slot's whole tree together, best nodes first). One of: share, joint. \\
-\texttt{-{}-parallel-\allowbreak{}max-\allowbreak{}rows} & \texttt{32} & rows of a joint pass at most (32: the row-invariant kernels' range). \\
+\texttt{-{}-parallel-\allowbreak{}cut} & \texttt{none (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}CUT)} & how a joint pass's rows are shared: share (each slot cuts its tree to a fixed share before it submits: 16 at two slots, 10 at three, 8 at four), joint (the round cuts every slot's whole tree together, best nodes first), or auto ... One of: share, joint, auto. \\
+\texttt{-{}-parallel-\allowbreak{}max-\allowbreak{}rows} & \texttt{0 (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}MAX\_\allowbreak{}ROWS)} & rows of a joint pass at most; 0 (the default): the model family's (\texttt{joint\_\allowbreak{}policy}, else 32, the row-invariant kernels' range).: the 27B on EXL3 weights takes 64, each engine's joint rows bit for bit its own verify. \\
+\texttt{-{}-parallel-\allowbreak{}draft-\allowbreak{}rows} & \texttt{128 (QSE\_\allowbreak{}PARALLEL\_\allowbreak{}DRAFT\_\allowbreak{}ROWS)} & rows of a packed draft pass at most: drafting decides speed only, so the drafter's pass is not held to the verify's row-invariant range; at 128, eight slots' 16-row blocks draft in one pass (32 packed two). \\
 \texttt{-{}-batch-\allowbreak{}timeout-\allowbreak{}ms} & \texttt{2} & a joint round runs without a missing slot once the GPU turn has been idle this long. \\
 \texttt{-{}-turn-\allowbreak{}quantum-\allowbreak{}ms} & \texttt{50} & the GPU turn goes to a waiting slot this far behind in GPU time. \\
 \texttt{-{}-parallel-\allowbreak{}settle} & \texttt{on} & synchronize the device before the turn changes hands (the routers' timings then hold only their own slot's work). One of: on, off. \\
@@ -120,7 +121,7 @@
 \texttt{-{}-kv-\allowbreak{}pool} & \texttt{off (QSE\_\allowbreak{}KV\_\allowbreak{}POOL)} & on: every slot's KV window (engine attention KV and the drafters' context KV) is reserved as virtual addresses and its pages are committed as a conversation's rows are written and given back when it ends, from one pool for every ... One of: on, off. \\
 \texttt{-{}-kv-\allowbreak{}hard-\allowbreak{}floor-\allowbreak{}gb} & \texttt{10 (QSE\_\allowbreak{}KV\_\allowbreak{}HARD\_\allowbreak{}FLOOR\_\allowbreak{}GB)} & with -\kern0pt-kv-pool on: a commit never takes MemAvailable under this (GiB); the pool gives back caches and idle conversations first, else the request is not run (admission keeps requests out at -\kern0pt-parallel-floor-gb). \\
 \texttt{-{}-kv-\allowbreak{}margin-\allowbreak{}rows} & \texttt{256 (QSE\_\allowbreak{}KV\_\allowbreak{}MARGIN\_\allowbreak{}ROWS)} & with -\kern0pt-kv-pool on: rows committed past every write (a masked tile's over-read stays on mapped pages). \\
-\texttt{-{}-vision} & \texttt{on} & load the checkpoint's vision tower (0.92 GB bf16) and accept image\_url parts in chat requests; off refuses them with a 400. One of: on, off. \\
+\texttt{-{}-vision} & \texttt{on; served:\allowbreak{} off} & load the checkpoint's vision tower (0.92 GB bf16) and accept image\_url parts in chat requests; off refuses them with a 400. One of: on, off. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}mb} & \texttt{20} & largest image a request may send or link, after base64 decoding. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}decode-\allowbreak{}pixels} & \texttt{64000000} & largest canvas an image may declare, checked before its pixels are decoded; the processor then resizes to its own limits. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}pixels} & \texttt{0} & the processor's resize target cap in pixels (0: the checkpoint's preprocessor\_config.json, e.g. 16,777,216 = 16,384 rows an image). \\

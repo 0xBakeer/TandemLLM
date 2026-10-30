@@ -9,6 +9,7 @@ Run: python -m pytest -q tests/test_chatd.py   (or python tests/test_chatd.py)
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import random
@@ -623,6 +624,26 @@ def test_a_stream_that_drops_is_continued_not_repeated():
         c.close()
 
 
+def test_a_full_memory_pauses_the_answer_and_continues_it():
+    """SRV-709: our engine stops an answer at its memory floor (`memory_full`): the run keeps the
+    text, says it waits for memory, and sends the call again as its continuation."""
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "FAKE_MEMORY_FULL_ONCE hello")
+        seen = []
+        c.wait(lambda: seen.append((c.snap(cid)["run"] or {}).get("now") or "") or
+               any("Memory is full" in x for x in seen) or c.snap(cid)["status"] != "running", 10)
+        s = c.wait_idle(cid, 20)
+        a = s["messages"][-1]
+        assert a["status"] == "done", a
+        assert text_of(a).startswith("w0 w1 w2 ") and "closed0" in text_of(a), text_of(a)
+        assert c.last_body().get("continue_final_message") is True
+        assert any("Memory is full" in x for x in seen), seen
+    finally:
+        c.close()
+
+
 def test_an_error_frame_fails_the_run_with_its_message():
     c = Chat()
     try:
@@ -896,6 +917,41 @@ def test_two_runs_at_most_the_third_waits():
         assert c.fake.max_streams == 2
     finally:
         c.close()
+
+
+def test_run_slots_follow_the_engines_lanes():
+    """SRV-707: without QSE_CHAT_MAX_RUNS chatd lets as many runs talk to the engine as it has
+    lanes (/health parallel.n), FALLBACK_RUNS before it knows; a fixed count stays fixed."""
+    from chatd.service import FALLBACK_RUNS, Slots, engine_lanes
+    assert engine_lanes({}) is None and engine_lanes({"engine": {"max_len": 262144}}) == 1
+    assert engine_lanes({"engine": {"max_len": 1, "parallel": {"n": 8}}}) == 8
+    assert engine_lanes({"queue": {"parallel": {"n": 3, "max_running": 1}}, "engine": {}}) == 3
+    s = Slots(None)
+    assert s.n == FALLBACK_RUNS == 8 and s.report()["source"] == "fallback"
+    assert s.follow(3) and s.n == 3 and not s.follow(3) and not s.follow(None) and s.n == 3
+    fixed = Slots(2)
+    assert not fixed.follow(16) and fixed.n == 2 and fixed.report()["source"] == "QSE_CHAT_MAX_RUNS"
+    srv, port = fake_backend.start(models=["fake-a"])
+    srv.fake.health = {"max_len": 32768, "parallel": {"n": 3}}
+    c = Chat(max_runs=None, fake=(srv, port))
+    try:
+        c.svc.facts()
+        c.wait(lambda: c.svc.slots.n == 3, 5)
+        ids = [c.new() for _ in range(4)]
+        for cid in ids:
+            c.send(cid, "FAKE_SLOW FAKE_LONG 20 x")
+        c.wait(lambda: "free run slot" in (c.snap(ids[3])["run"] or {}).get("now", ""), 10)
+        for cid in ids:
+            c.wait_idle(cid, 30)
+        assert c.fake.max_streams == 3, c.fake.max_streams
+        conn = http.client.HTTPConnection("127.0.0.1", c.port, timeout=10)
+        conn.request("GET", "/health")
+        h = json.loads(conn.getresponse().read())
+        conn.close()
+        assert h["runs"] == {"max": 3, "source": "engine", "held": 0}, h
+    finally:
+        c.close()
+        srv.shutdown()
 
 
 def test_a_cloud_models_run_takes_no_run_slot():

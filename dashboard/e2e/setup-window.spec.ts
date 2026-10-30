@@ -1,16 +1,15 @@
-// VIS-199 (QA VIS-200): the window steppers of the memory step against the mock (Super VL: its card
-// holds 1,048,576 tokens on a 4,096 step; three chats of 262,144 by default, the pool off). − and +
+// VIS-199 (QA VIS-200), SRV-707: the window stepper of the memory step against the mock (Super VL: its
+// card holds 1,048,576 tokens on a 4,096 step; three chats here, every one the window, the pool off). − and +
 // walk 8k ... 1M, the field takes any number of tokens, and a value the model does not take stays as
 // typed with the model's real limit while Next refuses it. The bar follows every change.
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
-import { open, setupMock, setWindow } from './setup-helpers';
+import { open, setSlots, setupMock, setWindow } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'drives the mock (POST /__mock/setup)');
 
 const VL = 'nemotron-3.5-super-vl-120b-a12b';
 const win = (page: Page) => page.locator('#pf-win-in');
-const side = (page: Page) => page.locator('#pf-side-in');
 const field = (page: Page, key: string) => page.locator(`[data-field="parallelism.${key}"]`);
 const total = async (page: Page) => Number(await page.locator('.membar').getAttribute('data-total'));
 
@@ -18,6 +17,7 @@ test.beforeEach(async ({ page, request }) => {
   await setupMock(request);
   await page.addInitScript(() => localStorage.removeItem('tandem.setup.v1'));
   await open(page, `#/setup/${VL}/parallelism`);
+  await setSlots(page, 3);
   await expect(win(page)).toHaveValue('262,144');
 });
 
@@ -95,16 +95,11 @@ test('above the model, below it, off its step: kept as typed with the reason; Ne
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'methods');
 });
 
-test('the extra chats hold at most the first chat\'s window, and the cost line follows theirs', async ({ page }) => {
-  await setWindow(page, 'window', '128k');
+test('one window for every chat: no field of the extra chats\' own, and the cost line follows the window', async ({ page }) => {
+  await expect(field(page, 'side_window')).toHaveCount(0);
+  await setWindow(page, 'window', '64k');
   await win(page).blur();
-  await expect(side(page)).toHaveValue('131,072');
-  const f = field(page, 'side_window');
-  await expect(f.getByRole('button', { name: 'Longest conversation in the extra chats: one step longer' })).toBeDisabled();
-  await expect(f.locator('[data-win-max]')).toHaveText("The extra chats hold at most the first chat's 131,072 tokens.");
-  await setWindow(page, 'side_window', '262144');
-  await expect(f.locator('[data-win-error]')).toHaveText("The extra chats hold at most the first chat's 131,072 tokens.");
-  await setWindow(page, 'side_window', '64k');
-  await expect(f.locator('[data-win-error]')).toHaveCount(0);
-  await expect(page.locator('[data-slots-cost]')).toHaveText('Each extra chat takes about 0.5 GiB at a 65,536-token window.');
+  await expect(page.locator('[data-slots-cost]')).toHaveText(/^Each extra chat takes about \d+\.\d GiB at a 65,536-token window\.$/);
+  await expect(page.locator('.spar-slot-n')).toHaveText('1–3');
+  await expect(page.locator('[data-lanes-full]')).toHaveText(/^All 3 chats can be 65,536 tokens long at the same time/);
 });

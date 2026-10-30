@@ -29,9 +29,9 @@ Third-party code and models in the decision-model runtime (engine/decision/, sta
 Weight-format code in tools/ (the EXL3 and GGUF readers):
 
 - exllamav3 (https://github.com/turboderp-org/exllamav3), MIT License, Copyright (c) 2025
-  Turboderp: the EXL3 bit extraction and mul1 codebook decode in tools/exl3_linear.py,
-  tools/fn_kernels.py and tools/fn_prefill_kernels.py were ported from it; the license text is
-  kept with the ported code in tools/exl3_linear.py.
+  Turboderp: the EXL3 bit extraction and mul1 codebook decode in tools/csrc/exl3_linear/exl3.cu
+  (built by tools/exl3_linear.py, and in part by tools/fn_kernels.py and tools/fn_prefill_kernels.py)
+  were ported from it; the license text is kept with the ported code in tools/csrc/exl3_linear/exl3.cu.
 - The IQ2_XXS grid and sign tables in tools/iq2_linear.py are the GGUF format's constants as
   published in ggml (https://github.com/ggml-org/ggml), MIT License, Copyright (c) 2023-2024 The
   ggml authors.

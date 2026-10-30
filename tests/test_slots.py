@@ -245,6 +245,16 @@ def test_shares_keep_a_joint_pass_under_32_rows():
     assert slots.share(2) == 16 and slots.share(4) == 8
 
 
+def test_spd163_a_familys_policy_sets_its_shares_and_auto_n():
+    assert slots.share(2, 64, {2: 32}) == 32 and slots.share(4, 64, {2: 32}) == 8
+    assert slots.share(2, 32, {2: 32}) == 16, "never past the row cap"
+    m = slots.Meeting(64, 0.002, cut="auto", auto_n=2, shares={2: 32})
+    if not slots.AUTO_JOINT_N_SET:
+        assert m.auto_n == 2 and m.joint_for(2) and not m.joint_for(1)
+    assert slots.Meeting(64, 0.002, cut="auto").auto_n == slots.AUTO_JOINT_N, "no policy: as before"
+    assert m.shares == {2: 32} and slots.Meeting(32).shares == {}
+
+
 def test_batches_cut_at_max_rows_and_keep_unbatchable_blocks_alone():
     meet = slots.Meeting(32, 0.002)
     meet.pending = {0: slots.VerifyReq(0, None, None, list(range(16)), 0),
@@ -254,6 +264,32 @@ def test_batches_cut_at_max_rows_and_keep_unbatchable_blocks_alone():
     groups = sorted([r.slot for r in g] for g in meet.batches())
     assert groups == [[0, 1], [2], [3]], groups
     assert all(sum(len(meet.pending[i].parents) for i in g) <= 32 for g in groups)
+
+
+def test_more_lanes_than_one_pass_holds_verify_in_more_passes():
+    """SRV-707: past 16 decoding lanes a share is 2 rows and the round runs in passes of at most
+    32 rows; a joint cut groups at most 16 trees a pass (anchor and one node each)."""
+    for n in (16, 17, 24, 32, 48, 64):
+        s = slots.share(n)
+        assert s == 2, (n, s)
+        meet = slots.Meeting(32, 0.002)
+        meet.pending = {i: slots.VerifyReq(i, None, None, list(range(s)), 0) for i in range(n)}
+        groups = meet.batches()
+        assert sorted(r.slot for g in groups for r in g) == list(range(n))
+        assert all(sum(r.rows for r in g) <= 32 for g in groups), n
+        assert len(groups) == -(-n // 16), (n, len(groups))
+        jm = slots.Meeting(32, 0.002, cut="joint")
+        # a joint cut takes the blocks that came with their tree (SPD-155)
+        jm.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0, tree=object())
+                      for i in range(n)}
+        jm.pending[n] = slots.VerifyReq(n, None, None, list(range(4)), 0, batchable=False)
+        jg = jm.batches()
+        assert all(len(g) <= jm.per_pass() for g in jg) and jm.per_pass() == 16
+        assert sorted(r.slot for g in jg for r in g) == list(range(n + 1))
+        assert [r.slot for r in jg[-1]] == [n], "an unbatchable block keeps a pass of its own"
+    one = slots.Meeting(32, 0.002, cut="joint")
+    one.pending = {i: slots.VerifyReq(i, None, None, list(range(10)), 0) for i in range(3)}
+    assert [len(g) for g in one.batches()] == [3], "up to 16 trees stay one joint pass"
 
 
 # ------------------------------------------------------------------ admission
@@ -335,6 +371,17 @@ def test_the_overlay_covers_what_the_generation_publishes():
               "hidden_spans", "blocks", "last_prefill", "lane", "disk_cache", "spill"):
         assert k in slots.OVERLAY, k
 
+
+
+def test_a_joint_pass_never_gets_a_tree_deeper_than_its_kernels():
+    """SPD-223: a 32-deep chain (the lookup's deep chain) is cut to the family's joint depth (16 levels,
+    the anchor included); a shallow tree and a missing cap leave the tree as it is."""
+    from engine.tree import DraftTree
+    chain = DraftTree(list(range(32)), [-1] + list(range(31)), [1.0] * 32)
+    cut = slots.depth_cut(chain, 16)
+    assert len(cut.tokens) == 16 and max(cut.depths()) == 15 and cut.tokens == list(range(16))
+    wide = DraftTree([5, 6, 7, 8], [-1, 0, 0, 1], [1.0, .5, .4, .3])
+    assert slots.depth_cut(wide, 16) is wide and slots.depth_cut(chain, None) is chain
 
 if __name__ == "__main__":
     n = 0

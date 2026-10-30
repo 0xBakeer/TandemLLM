@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import gdn  # noqa: E402
+from engine import rowcopy  # noqa: E402
 from engine.config import TextConfig  # noqa: E402
 from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
@@ -168,6 +169,48 @@ FUSED_ATTN_PREP = _S.get("FUSED_ATTN_PREP") == "1"
 # library GEMMs whose algorithm can differ inside a graph capture: the same bits in the eager
 # verify, the graphed verify and the decode step.
 GDN_AB = _S.get("GDN_AB") == "1"
+#: SPD-163: a joint verify pass runs the row-wise steps between the projections -- the add-norms and the
+#: GDN gated norm before its output projection -- once for every engine's rows; each is one program a row,
+#: so a row's bits are its own (0: once per engine)
+JOINT_ROWWISE = _S.get("JOINT_ROWWISE") != "0"
+#: SPD-163: a joint verify pass runs the GDN recurrence of every engine's tree block (the fused WY path at
+#: a 16-row tile) as one launch pair, each engine's program the lone kernels' statements on its own
+#: tensors (tools/gdn_wy_kernels.py `wy_recurrence_grouped`); blocks it does not take run alone (0: every
+#: engine its own launches, as before)
+JOINT_GDN = _S.get("JOINT_GDN") == "1"
+#: SPD-E5: a joint pass joins a request's parts as a view when they are the consecutive slices of one tensor
+#: (a joined answer split and handed straight on): the same values without a copy (0: always `torch.cat`)
+JOIN_VIEWS = _S.get("JOIN_VIEWS") != "0"
+#: SPD-169: a layer-major prefill window runs its chunks' MLPs as one call. Off by default: a window's
+#: partial chunk alone (<= EXL3_CHUNK_UNTIL rows) takes the skinny kernel and inside the joined call the
+#: slab, and NVFP4's 1,024-row chunks take the v2 tile alone and dequant + cuBLAS joined, so a row's bits
+#: would depend on the window it was read in (a cold prompt against the same prompt resumed at an anchor)
+WINDOW_MLP = _S.get("WINDOW_MLP") == "1"
+#: SPD-169 again, same-path joining only: a window's chunks that each take the EXL3 slab path alone run
+#: their input projection, output projection and MLP as one call (`Qwen38Engine._rowwise_run`); the
+#: partial chunk keeps its own call and kernels. Bit-identical to the chunk-major prefill (prefill_window_check).
+WINDOW_ROWWISE = _S.get("WINDOW_ROWWISE") == "1"
+#: SPD-175: a prefill chunk's GDN preparation (conv, SiLU, l2 norm of q and k) as one kernel,
+#: tools/gdn_prep_kernels.py. Its rounding order is its own: on after the fp64-reference gate (SPD-191).
+GDN_PREP = _S.get("GDN_PREP") == "1"
+#: SPD-175: with WINDOW_ROWWISE, the joined rows' norms also write the next projection's rotated input
+#: (tools/exl3_slab_gemm.py `add_norm_rot`: add_rms_norm + rot_in, the same bits): no rot_in launch for
+#: the MLP's and the next mixer's input. 0 = add_rms_norm, then the projection rotates.
+WINDOW_NORM_ROT = _S.get("WINDOW_NORM_ROT") == "1"
+#: SPD-189: prefill calls on the EXL3 slab path run the product and rot_out as one Triton kernel
+#: (tools/exl3_slab_gemm.py, the 27B's module; the shared EXL3 path is untouched), the same bits.
+SLAB_TRITON = _S.get("SLAB_TRITON") == "1"
+#: SPD-191, SPD-245: the scan launch the GDN_PREP path takes (value block, warps): 16 / 4. Against the shared
+#: 32 / 8 it keeps the state's bits and rounds a few chunk outputs one bf16 ulp the other way: a one-time order
+#: move, top-1 as often as the GDN_PREP move itself and of that move's KL (tools/gdn_tile_gate.py: prose, code
+#: and repeated text at 2K / 8K / 32K); prefill -6 % at 2K, -7 % at 8K and 32K
+GDN_PREP_BV = int(_S.get("GDN_PREP_BV"))
+GDN_PREP_WARPS = int(_S.get("GDN_PREP_WARPS"))
+#: SPD-245: the GDN_PREP path's recurrence rescheduled (tools/gdn_chunked_kernels.py): the UT transform in fewer
+#: registers (same bits), the walk's programs value-block fastest (the state's bits kept, a few outputs one bf16
+#: ulp the other way: an order move, top-1 64-65/65 in tools/gdn_tile_gate.py); prefill 8K -0.3 s, 32K -1.3 s.
+#: 0: chunk_prefill_normed
+GDN_CHUNKED = _S.get("GDN_CHUNKED") == "1"
 
 # A chain-shaped tree is a chain, and the chain is 12.5 ms cheaper because it has a kernel the tree
 # cannot use. So `forward_tree` hands one to `forward_block` and a drafter takes the cheaper price
@@ -282,11 +325,30 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return (out * (1.0 + weight.float())).type_as(x)
 
 
+def gate2d(z: torch.Tensor) -> torch.Tensor:
+    """A GDN gate `z` ([.., T, H, dv] or [.., T, H * dv]) as its [tokens, H * dv] rows: a view wherever
+    its layout allows (a column slice of the fused qkvz output is one), which the fused gated norm reads
+    in place (tools/norm_kernels.py `gate_rows`, SPD-245); the same values either way."""
+    if z.dim() >= 3 and z.stride(-2) == z.shape[-1] * z.stride(-1):
+        z = z.flatten(-2) if z.dim() == 4 else z
+    return z.reshape(-1, z.shape[-1])
+
+
 def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor,
-                   eps: float) -> torch.Tensor:
+                   eps: float, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`weight * normalise(x) * silu(gate)` over x's [rows, n]; the gate as x's rows, or as the
+    [tokens, heads * n] rows of `gate2d`."""
+    if gate.shape[-1] != x.shape[-1] and not (FUSED["norm"] and x.is_cuda):
+        gate = gate.reshape(x.shape)
     if FUSED["norm"]:
         from tools.norm_kernels import rms_norm_gated as fused
+        if out is not None:
+            from tools.exl3_slab_gemm import rms_norm_gated_out
+            return rms_norm_gated_out(x, gate, weight, eps, out)
         return fused(x, gate, weight, eps)
+    if out is not None:
+        out.view_as(x).copy_(rms_norm_gated(x, gate, weight, eps))
+        return out
     dt = x.dtype
     h = x.float()
     h = h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)
@@ -322,6 +384,9 @@ def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
     if isinstance(g, FP8Group):
         return fp8_matmul(x, g)
     if isinstance(g, EXL3Block):
+        if SLAB_TRITON and x.shape[0] > _x3.CHUNK_UNTIL and g.kb < 10 and x.is_cuda:
+            from tools.exl3_slab_gemm import slab_matmul
+            return slab_matmul(x, g)
         return g.matmul(x)
     return nvfp4_matmul_group(x, g)
 
@@ -332,6 +397,11 @@ def linear(x: torch.Tensor, w) -> torch.Tensor:
     so a new format is a class and not another branch here (engine/linear.py)."""
     if isinstance(w, torch.Tensor):
         return F.linear(x, w)
+    if (SLAB_TRITON and isinstance(w, EXL3Block) and x.numel() // x.shape[-1] > _x3.CHUNK_UNTIL
+            and w.kb < 10 and x.is_cuda):
+        # SPD-189: a prefill call on the slab path, the product and rot_out in one kernel (same bits)
+        from tools.exl3_slab_gemm import slab_matmul
+        return slab_matmul(x.reshape(-1, x.shape[-1]), w).view(*x.shape[:-1], w.N)
     return w.matmul(x)
 
 
@@ -568,6 +638,8 @@ class Qwen38Engine:
         self._tree_start = 0
         self._tree_is_chain = False
         self._gv = None               # set while a graph-safe verify body is being run/captured
+        self._jg = None               # SPD-163: this engine's static buffers in a joint graph's body
+        self._rowwise_all = None       # SPD-169: whether every projection is EXL3 (asked once)
         self._graphs = None           # engine.verify_graph.VerifyGraphs, built on first use
         self.graphs_off = False       # True: every verify eager, no graph pool (a side slot's choice)
         self.picks = None             # the last tree verify's argmax, when a graph took it
@@ -657,7 +729,11 @@ class Qwen38Engine:
                 x2 = h.reshape(-1, h.shape[-1])
                 if x2.stride(1) != 1 or x2.stride(0) % 4 or x2.data_ptr() % 8:
                     x2 = x2.contiguous()
-                out = _x3.exl3_mlp_slab(x2, g, wd)
+                if SLAB_TRITON:
+                    from tools.exl3_slab_gemm import mlp_slab
+                    out = mlp_slab(x2, g, wd)
+                else:
+                    out = _x3.exl3_mlp_slab(x2, g, wd)
                 if out is not None:
                     return out.view(*h.shape[:-1], -1)
             y = matmul_group(h.reshape(-1, h.shape[-1]), g)
@@ -698,14 +774,17 @@ class Qwen38Engine:
         return m
 
     def attention(self, h: torch.Tensor, p: str, layer: int, start: int,
-                  positions: torch.Tensor) -> torch.Tensor:
+                  positions: torch.Tensor, pre: torch.Tensor | None = None,
+                  out: torch.Tensor | None = None) -> torch.Tensor | None:
+        """`pre`: the qkv group's product of these rows, made by the caller (SPD-169, a window's
+        rows in one call); `out`: the gated attention output goes there, o_proj is the caller's."""
         cfg = self.cfg
         B, T, _ = h.shape
         grp = self.w.group(f"{p}.self_attn.qkv")
         if grp is not None:
             # q is twelve times the size of k or v, and k and v were each putting sixteen programs
             # on the board -- a launch that cannot fill it at any tiling. Together they are one.
-            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = pre if pre is not None else matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qy, ky, vy = y.split(grp.sizes, dim=-1)
             # a column slice is not contiguous, and `reshape` is where the copy is paid: 459 kB a
             # layer at the block's row count, which is 0.04 ms a step across all sixteen
@@ -815,11 +894,17 @@ class Qwen38Engine:
             vv = vv.repeat_interleave(rep, dim=1)
             o = F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask, is_causal=causal)
         o = o.transpose(1, 2).reshape(B, T, -1)
+        if out is not None:
+            torch.mul(o, torch.sigmoid(gate), out=out.view(B, T, -1))
+            return None
         o = o * torch.sigmoid(gate)
         return linear(o, self.w.proj(f"{p}.self_attn.o_proj"))
 
     def linear_attention(self, h: torch.Tensor, p: str, layer: int,
-                         use_state: bool) -> torch.Tensor:
+                         use_state: bool, pre: torch.Tensor | None = None,
+                         out: torch.Tensor | None = None) -> torch.Tensor | None:
+        """`pre`/`out` as in `attention`: the qkvz product made by the caller, the gated norm's
+        output written to `out` and out_proj left to the caller."""
         cfg = self.cfg
         B, T, _ = h.shape
         i = self.state.slot[layer]
@@ -833,7 +918,7 @@ class Qwen38Engine:
         grp = self.w.group(f"{p}.linear_attn.qkvz")
         z_pre = None
         if grp is not None:
-            y = matmul_group(h.reshape(-1, h.shape[-1]), grp)
+            y = pre if pre is not None else matmul_group(h.reshape(-1, h.shape[-1]), grp)
             qkv_y, z_y = y.split(grp.sizes, dim=-1)
             mixed = qkv_y.reshape(B, T, -1).transpose(1, 2)
             z_pre = z_y.reshape(B, T, -1)
@@ -849,8 +934,11 @@ class Qwen38Engine:
                 z_pre = z_y
             else:
                 mixed = linear(h, self.w.proj(f"{p}.linear_attn.in_proj_qkv")).transpose(1, 2)
-        raw = mixed if self.trace is not None else None
         cw = self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1)
+        if (GDN_PREP and z_pre is not None and FUSED_GDNPREFILL and self.tree is None
+                and self.trace is None and T >= GDN_PREFILL_CHUNK and B == 1 and qkv_y.is_cuda):
+            return self._linear_attention_prep(h, p, layer, i, use_state, qkv_y, z_pre, cw, out)
+        raw = mixed if self.trace is not None else None
         if self.tree is not None:
             # A tree has no single successor convolution state, so this does NOT advance the one in
             # `self.state`; `commit_tree` writes the accepted path's tail instead.
@@ -963,11 +1051,52 @@ class Qwen38Engine:
                 q, k, v, g, beta, self.state.S[i] if use_state else None,
                 chunk_size=GDN_PREFILL_CHUNK if T > GDN_PREFILL_CHUNK else max(2, T))
             self.state.S[i].copy_(S)
+        if out is not None:
+            rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps,
+                           out=out)
+            return None
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         o = o.view(B, T, -1)
         return linear(o, self.w.proj(f"{p}.linear_attn.out_proj"))
+
+    def _linear_attention_prep(self, h, p, layer, i, use_state, qkv_y, z_pre, cw, out):
+        """SPD-175: a prefill chunk's GDN mixer with its preparation in one kernel
+        (tools/gdn_prep_kernels.py): conv + SiLU + the l2 norm of q and k straight from the
+        projection's rows, q and k at the key heads; then the gates, the fused scan and the norm."""
+        from tools.gdn_prep_kernels import chunk_prefill_normed, gdn_prep
+        cfg = self.cfg
+        B, T, _ = h.shape
+        q, k, v, new_conv = gdn_prep(qkv_y.reshape(T, -1), self.state.conv[i] if use_state else None,
+                                     cw, cfg.linear_num_key_heads, cfg.linear_num_value_heads,
+                                     cfg.linear_key_head_dim)
+        self.state.conv[i].copy_(new_conv.view_as(self.state.conv[i]))
+        b = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_b.weight"))
+        a = linear(h, self.w.norm(f"{p}.linear_attn.in_proj_a.weight"))
+        beta = b.sigmoid()
+        A_log = self.w.norm(f"{p}.linear_attn.A_log")
+        dt_bias = self.w.norm(f"{p}.linear_attn.dt_bias")
+        g = -A_log.float().exp() * F.softplus(a.float() + dt_bias.float())
+        if GDN_CHUNKED:
+            from tools.gdn_chunked_kernels import chunked_prefill_normed
+            o, S = chunked_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None)
+        else:
+            o, S = chunk_prefill_normed(q, k, v, g, beta, self.state.S[i] if use_state else None,
+                                        chunk_size=GDN_PREFILL_CHUNK, bv=GDN_PREP_BV, warps=GDN_PREP_WARPS)
+        self.state.S[i].copy_(S)
+        z = z_pre.reshape(B, T, cfg.linear_num_value_heads, cfg.linear_value_head_dim)
+        if out is not None:
+            rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps, out=out)
+            return None
+        o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
+                           self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
     def _linear_attention_verify(self, h: torch.Tensor, p: str, layer: int,
                                  i: int) -> torch.Tensor:
@@ -982,7 +1111,12 @@ class Qwen38Engine:
         B, T, _ = h.shape
         flat = h.reshape(-1, h.shape[-1])
         grp = self.w.group(f"{p}.linear_attn.qkvz")
-        if grp is not None:
+        sv = self._gv.share_view if self._gv is not None else None
+        if grp is not None and sv is not None and isinstance(grp, EXL3Block) and not grp.out_fp32:
+            # SPD-179: a sharing capture's projections into the shared set (the trace keeps a view)
+            y = _x3.exl3_matmul(flat, grp, out=sv(f"y{layer}", (flat.shape[0], grp.N), torch.bfloat16))
+            mixed, z = y.split(grp.sizes, dim=-1)
+        elif grp is not None:
             mixed, z = matmul_group(flat, grp).split(grp.sizes, dim=-1)
         else:
             mixed = linear(flat, self.w.proj(f"{p}.linear_attn.in_proj_qkv"))
@@ -1025,21 +1159,25 @@ class Qwen38Engine:
         # the pre-convolution projections, [C, T] as the commit reads them; a view, never written
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(B, T, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
+
+    def _ab_weight(self, p: str) -> torch.Tensor:
+        """`[in_proj_a; in_proj_b]` of layer `p`, concatenated once (QWEN38_GDN_AB)."""
+        w = self._ab_cat.get(p)
+        if w is None:
+            w = self._ab_cat[p] = torch.cat(
+                [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
+                 self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
+        return w
 
     def _gate_inputs(self, flat: torch.Tensor, p: str) -> tuple[torch.Tensor, torch.Tensor]:
         """The two 48-wide gate projections, `a` and `b`, of `flat` [T, H]."""
         if GDN_AB:
             from tools.small_linear import small_linear
-            w = self._ab_cat.get(p)
-            if w is None:
-                w = self._ab_cat[p] = torch.cat(
-                    [self.w.norm(f"{p}.linear_attn.in_proj_a.weight"),
-                     self.w.norm(f"{p}.linear_attn.in_proj_b.weight")]).contiguous()
-            ab = small_linear(flat, w)
-            n = w.shape[0] // 2
+            ab = small_linear(flat, self._ab_weight(p))
+            n = ab.shape[1] // 2
             return ab[:, :n], ab[:, n:]
         return (linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_a.weight")),
                 linear(flat, self.w.norm(f"{p}.linear_attn.in_proj_b.weight")))
@@ -1085,7 +1223,7 @@ class Qwen38Engine:
                                          cfg.linear_value_head_dim)
         o = fused_decode_step(q, k, v, g, beta, self.state.S[i], rep=cfg.num_v_per_k)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         return linear(o.view(1, 1, -1), self.w.proj(f"{p}.linear_attn.out_proj"))
 
@@ -1178,7 +1316,16 @@ class Qwen38Engine:
             m = self.mlp(x, p)
             nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                    else "norm.weight")
-            h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+            sv = self._gv.share_view if self._gv is not None else None
+            if sv is not None and self.tap is not None:
+                # SPD-179: a sharing capture's residual rows, the taps, go to the shared set
+                from tools.exl3_slab_gemm import add_rms_norm_out
+                hb = sv(f"h{layer + 1}", tuple(h.shape), h.dtype)
+                xb = (sv("x_last", tuple(h.shape), h.dtype) if layer + 1 == n else torch.empty_like(h))
+                add_rms_norm_out(h, m, self.w.norm(nxt), cfg.rms_norm_eps, (hb, xb))
+                h, x = hb, xb
+            else:
+                h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
             if self.tap is not None:
                 self.tap(h[0].detach())
         self.state.primed = True
@@ -1187,7 +1334,14 @@ class Qwen38Engine:
         self.hidden_post_norm = x
         if last_only:
             x = x[:, -1:]
-        return head_logits(x, self.w.norm("lm_head.weight"))
+        hw = self.w.norm("lm_head.weight")
+        out = getattr(self._gv, "logits_out", None) if self._gv is not None else None
+        if out is not None and isinstance(hw, EXL3Block) and hw.out_fp32 and x.shape[-2] > 1:
+            # SPD-179: a captured verify's head writes its parity's shared logits (the same kernel)
+            n = x.shape[-2] * hw.N
+            return _x3.exl3_matmul(x.reshape(-1, x.shape[-1]), hw, out=out(n).view(-1, hw.N)).view(
+                *x.shape[:-1], hw.N)
+        return head_logits(x, hw)
 
     def window_ok(self, start: int) -> bool:
         """Can `prefill_window` run prompt rows from `start` on: a plain text prefill with the
@@ -1199,6 +1353,30 @@ class Qwen38Engine:
         if self.mm is not None and start < self.mm.n:
             return False
         return self.tap is None or self.tap_indices() is not None
+
+    def _rowwise_run(self, toks: list, x3) -> tuple | None:
+        """SPD-169: the window's chunks whose rows go through the projections as one call: the run
+        of chunks that each take the EXL3 slab path alone (more than EXL3_CHUNK_UNTIL rows), at least
+        two, on a model whose every projection is EXL3; None when there is no such run."""
+        if x3 is None or self.trace is not None or self.tree is not None or self._gv is not None:
+            return None
+        big = [c for c in range(len(toks))
+               if toks[c].numel() > x3.CHUNK_UNTIL and toks[c].numel() >= GQA_FROM]
+        if len(big) < 2 or big[-1] - big[0] + 1 != len(big):
+            return None
+        if getattr(self, "_rowwise_all", None) is None:
+            cfg, E = self.cfg, x3.EXL3Block
+            ok = True
+            for layer in range(cfg.num_hidden_layers):
+                p = f"layers.{layer}"
+                lin = cfg.is_linear(layer)
+                g = self.w.group(f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv")
+                wo = self.w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+                gu = self.w.group(f"{p}.mlp.gate_up")
+                wd = self.w.proj(f"{p}.mlp.down_proj")
+                ok = ok and all(isinstance(t, E) for t in (g, wo, gu, wd))
+            self._rowwise_all = ok
+        return (big[0], big[-1] + 1) if self._rowwise_all else None
 
     def tap_indices(self):
         """The tap invocations (0 = the embedding, l + 1 = layer l's output) the tap's owner keeps,
@@ -1219,6 +1397,7 @@ class Qwen38Engine:
         Returns (the last row's logits of the last chunk, each chunk's post-norm hidden, each
         chunk's kept tap rows as {invocation: rows})."""
         from tools.norm_kernels import add_rms_norm
+        from tools.exl3_slab_gemm import add_rms_norm_out
         try:
             from tools import exl3_linear as _x3
         except Exception:                                          # noqa: BLE001
@@ -1244,7 +1423,25 @@ class Qwen38Engine:
             pos.append(torch.arange(s0, s0 + T, device=self.device))
             hs.append(h)
             xs.append(rms_norm(h, w0, cfg.rms_norm_eps))
-        if _x3 is not None:
+        J = self._rowwise_run(toks, _x3) if WINDOW_ROWWISE else None
+        XHJ = None                     # the joined rows' rotated input to the next mixer projection
+        if J is not None:
+            # SPD-169: the joined chunks' rows live in one window buffer, each chunk a view of it
+            j0, j1 = J
+            rows = [toks[c].numel() for c in range(j0, j1)]
+            RJ = sum(rows)
+            HJ = torch.cat([hs[c] for c in range(j0, j1)], dim=1)
+            XJ = torch.cat([xs[c] for c in range(j0, j1)], dim=1)
+            offs = [0]
+            for r in rows:
+                offs.append(offs[-1] + r)
+            for k, c in enumerate(range(j0, j1)):
+                hs[c] = HJ[:, offs[k]:offs[k + 1]]
+                xs[c] = XJ[:, offs[k]:offs[k + 1]]
+        if _x3 is not None and J is None:
+            # with the window's slab-path chunks joined (J) each projection runs once a window and no
+            # other call reads a slab: a decoded slab lives for its own GEMM only, not for the layer
+            # (the slab cache held about 0.8 GB at the peak of a long prefill)
             _x3.slab_cache_on()
         try:
             for layer in range(n):
@@ -1254,19 +1451,90 @@ class Qwen38Engine:
                 wpost = self.w.norm(f"{p}.post_attention_layernorm.weight")
                 wnext = self.w.norm(f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                                     else "norm.weight")
+                mids = []
+                rw = J is not None
+                if rw:
+                    # SPD-169: the mixer's input projection, its output projection and the MLP of
+                    # every joined chunk as one call each. Only chunks that alone take the EXL3 slab
+                    # path (more than EXL3_CHUNK_UNTIL rows) are joined, and the slab's library GEMM
+                    # gives a row the same bits at any row count (tools/m6_gemm.py), so a row's
+                    # bits do not depend on the window it was read in; the recurrence, the
+                    # convolution and the attention core stay one chunk at a time.
+                    gname = f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv"
+                    if XHJ is not None:
+                        from tools.exl3_slab_gemm import slab_matmul
+                        YJ = slab_matmul(None, self.w.group(gname), xh=XHJ, M=RJ, triton_path=SLAB_TRITON)
+                    else:
+                        YJ = matmul_group(XJ.view(RJ, -1), self.w.group(gname))
+                    XHJ = None
+                    OJ = torch.empty(1, RJ, cfg.value_dim if lin else
+                                     cfg.num_attention_heads * cfg.head_dim,
+                                     dtype=XJ.dtype, device=XJ.device)
                 for c in range(C):
+                    inj = rw and j0 <= c < j1
+                    pre = YJ[offs[c - j0]:offs[c - j0 + 1]] if inj else None
+                    out = OJ[:, offs[c - j0]:offs[c - j0 + 1]] if inj else None
                     if lin:
-                        a = self.linear_attention(xs[c], p, layer, primed0 or c > 0)
+                        a = self.linear_attention(xs[c], p, layer, primed0 or c > 0, pre=pre, out=out)
                         if bufs is not None and c < C - 1:
                             bufs[c][0][si].copy_(self.state.S[si])
                             bufs[c][1][si].copy_(self.state.conv[si])
                     else:
-                        a = self.attention(xs[c], p, layer, starts[c], pos[c])
+                        a = self.attention(xs[c], p, layer, starts[c], pos[c], pre=pre, out=out)
+                    if inj:
+                        continue
                     h, x = add_rms_norm(hs[c], a, wpost, cfg.rms_norm_eps)
+                    if WINDOW_MLP and C > 1 and J is None:
+                        hs[c] = h
+                        mids.append(x)
+                        continue
                     m = self.mlp(x, p)
                     hs[c], xs[c] = add_rms_norm(h, m, wnext, cfg.rms_norm_eps)
                     if layer + 1 in keep:
                         taps[c][layer + 1] = hs[c][0].detach()
+                if rw:
+                    wo = self.w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+                    aj = linear(OJ.view(RJ, -1), wo).view(1, RJ, -1)
+                    del YJ, OJ
+                    mj = None
+                    if WINDOW_NORM_ROT and _x3.MLP_BRIDGE:
+                        from tools.exl3_slab_gemm import add_norm_rot, mlp_slab, mlp_slab_pairs
+                        gu = self.w.group(f"{p}.mlp.gate_up")
+                        wd = self.w.proj(f"{p}.mlp.down_proj")
+                        # SPD-245: the slab MLP reads the rotated rows alone, so the normed rows are
+                        # not stored for it (`self.mlp` below, the other path, reads them)
+                        slab = mlp_slab_pairs(RJ, gu, wd)
+                        xg = add_norm_rot(HJ, aj, wpost, cfg.rms_norm_eps, gu.suh,
+                                          out=(HJ, None if slab else XJ))
+                        mj = mlp_slab(XJ.view(RJ, -1), gu, wd, xh=xg, triton_path=SLAB_TRITON) if slab else None
+                        del xg
+                    else:
+                        add_rms_norm_out(HJ, aj, wpost, cfg.rms_norm_eps, (HJ, XJ))
+                    del aj
+                    mj = self.mlp(XJ, p) if mj is None else mj.view(1, RJ, -1)
+                    if WINDOW_NORM_ROT and layer + 1 < n:
+                        from tools.exl3_slab_gemm import add_norm_rot
+                        nl = layer + 1
+                        nxt = self.w.group(f"layers.{nl}.linear_attn.qkvz" if cfg.is_linear(nl)
+                                           else f"layers.{nl}.self_attn.qkv")
+                        XHJ = add_norm_rot(HJ, mj, wnext, cfg.rms_norm_eps, nxt.suh, out=(HJ, XJ))
+                    else:
+                        add_rms_norm_out(HJ, mj, wnext, cfg.rms_norm_eps, (HJ, XJ))
+                    del mj
+                    if layer + 1 in keep:
+                        for c in range(j0, j1):
+                            taps[c][layer + 1] = hs[c][0].detach().clone()
+                if mids:
+                    # SPD-169: the MLP of every chunk of the window in one call. A row's MLP depends on
+                    # its own row alone, and the library GEMM gives a row the same bits at 8,192 rows
+                    # as at 1,024 (tools/m6_gemm.py on GB10: equal on every prefill shape), so each
+                    # chunk's rows are what its own call gives; at M = 8,192 cuBLAS takes its sm121
+                    # kernel where at 1,024 it took an sm80 one (gate+up 69 -> 86 TFLOPS)
+                    ms = self.mlp(torch.cat(mids, dim=1), p).split([x.shape[1] for x in mids], dim=1)
+                    for c in range(C):
+                        hs[c], xs[c] = add_rms_norm(hs[c], ms[c], wnext, cfg.rms_norm_eps)
+                        if layer + 1 in keep:
+                            taps[c][layer + 1] = hs[c][0].detach()
                 if _x3 is not None:
                     _x3.slab_cache_clear()
                 if WINDOW_YIELD is not None and layer + 1 < n:
@@ -1275,7 +1543,7 @@ class Qwen38Engine:
                     if _x3 is not None:
                         _x3.slab_cache_off()
                     WINDOW_YIELD()
-                    if _x3 is not None:
+                    if _x3 is not None and J is None:
                         _x3.slab_cache_on()
         finally:
             if _x3 is not None:
@@ -1450,6 +1718,10 @@ class Qwen38Engine:
             kk = torch.stack([f[0][0] for f in per])
             u = torch.stack([f[1][0] for f in per])
             gc = torch.stack([f[2][0] for f in per])
+        from tools import gdn_seq_kernels as Q
+        if Q.ON:
+            Q.seq_commit(S, kk, u, gc, rows)        # SPD-201: the walk's own steps, replayed
+            return
         fused_commit(S, S, kk, u, gc, rows)
 
     def forward_tree(self, tokens: torch.Tensor, parents, start: int) -> torch.Tensor:
@@ -1615,7 +1887,14 @@ class Qwen38Engine:
         else:
             mixed = yield "lin", f"{p}.linear_attn.in_proj_qkv", flat
             z = yield "lin", f"{p}.linear_attn.in_proj_z", flat
-        a, b = self._gate_inputs(flat, p)
+        if GDN_AB:
+            # SPD-163: the gate inputs in one call for every engine's rows (the kernel's rows are
+            # independent, so a row's `a | b` is its bits alone); the split is `_gate_inputs`'
+            ab = yield "gate", p, flat
+            n = ab.shape[1] // 2
+            a, b = ab[:, :n], ab[:, n:]
+        else:
+            a, b = self._gate_inputs(flat, p)
         tree = self.tree
         pend, store, fac_out = None, True, None
         fp = self.trace.fold_par
@@ -1624,19 +1903,31 @@ class Qwen38Engine:
             fac_out = (fac[0][i], fac[1][i], fac[2][i])
             pend = (other[0][i], other[1][i], other[2][i], self._prows, self._pn)
         s_in, s_out = self.state.S[i], None
-        o, fac, _ = verify_mixer(
-            mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
-            a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
-            s_in,
-            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
-            value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
-            head_v=cfg.linear_value_head_dim,
-            window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
-            out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
+        if JOINT_GDN:
+            # SPD-163: the recurrence of every engine's block in one launch pair where they fit
+            # (`_run_gdn`), else this engine's own `verify_mixer` call, the statement below
+            o, fac = yield "gdn", p, dict(
+                mixed=mixed, conv_state=self.state.conv[i], a_raw=a, b_raw=b, state=s_in,
+                window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
+                anc=tree.anc_incl, pend=pend, fac_out=fac_out, store=store, eng=self, slot=i)
+        else:
+            o, fac, _ = verify_mixer(
+                mixed, self.state.conv[i], self.w.norm(f"{p}.linear_attn.conv1d.weight").squeeze(1),
+                a, b, self.w.norm(f"{p}.linear_attn.A_log"), self.w.norm(f"{p}.linear_attn.dt_bias"),
+                s_in,
+                key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads,
+                value_heads=cfg.linear_num_value_heads, head_k=cfg.linear_key_head_dim,
+                head_v=cfg.linear_value_head_dim,
+                window=tree.conv_idx, depths=tree.depths, max_depth=max(tree.depth_list),
+                out_state=s_out, pend=pend, store_state=store, fac_out=fac_out, anc=tree.anc_incl)
         self.trace.factors[layer] = fac
         self.trace.layers[layer] = (mixed.t(), None, None, None, None, None)
+        if JOINT_ROWWISE:
+            out = yield "gated", p, (o.reshape(-1, cfg.linear_value_head_dim),
+                                     gate2d(z))
+            return out.view(B, T, -1)
         o = rms_norm_gated(o.reshape(-1, cfg.linear_value_head_dim),
-                           z.reshape(-1, cfg.linear_value_head_dim),
+                           gate2d(z),
                            self.w.norm(f"{p}.linear_attn.norm.weight"), cfg.rms_norm_eps)
         out = yield "lin", f"{p}.linear_attn.out_proj", o.view(B * T, -1)
         return out.view(B, T, -1)
@@ -1681,11 +1972,18 @@ class Qwen38Engine:
             rr = self._rope_rows
             cos, sin = self.rope(positions) if rr is None else rr
             q, k = self.apply_rope(q, k, cos, sin)
-        kk, vv = self.kv.append(layer, k, v, start)
-        from tools.attn_kernels import decode_attention
-        bm = self.tree.anc_incl
-        ks, vs = self.kv.scales(layer, start + T)
-        o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
+        if self._jg is not None:
+            # SPD-163, a joint graph: `attention`'s graph-safe statements (the scatter at the static
+            # slots, the whole cache, the start and the length from the device); SPD-245: handed out as
+            # an `attn` request, so the lanes' blocks run in one launch a layer where the family groups
+            # them (engine/models/qwen3_5/attn_group.py), else here one lane at a time
+            o = yield "attn", str(layer), (self, q, k, v)
+        else:
+            kk, vv = self.kv.append(layer, k, v, start)
+            from tools.attn_kernels import decode_attention
+            bm = self.tree.anc_incl
+            ks, vs = self.kv.scales(layer, start + T)
+            o = decode_attention(q, kk, vv, start, bm, ks=ks, vs=vs)
         o = o.transpose(1, 2).reshape(B, T, -1)
         o = o * torch.sigmoid(gate)
         out = yield "lin", f"{p}.self_attn.o_proj", o.reshape(B * T, -1)
@@ -1712,12 +2010,15 @@ class Qwen38Engine:
         returns the logits."""
         cfg = self.cfg
         T = tokens.numel()
-        self.kv.ensure(start + T)                # SRV-307
+        jg = self._jg
+        if jg is None:
+            self.kv.ensure(start + T)            # SRV-307 (a joint graph's rows are ensured before its replay)
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())
         s0 = start + self.pos_delta
-        positions = s0 + self.tree.depths
+        # SPD-163: in a joint graph the positions are a static buffer, filled before each replay
+        positions = jg.pos if jg is not None else s0 + self.tree.depths
         use_state = self.state.primed
         n = cfg.num_hidden_layers
         if FUSED_ADDNORM and FUSED["norm"]:
@@ -1726,12 +2027,17 @@ class Qwen38Engine:
             for layer in range(n):
                 p = f"layers.{layer}"
                 a = yield from self._mixer_steps(x, p, layer, start, positions, use_state, T)
-                h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
-                                    cfg.rms_norm_eps)
-                m = yield "mlp", p, x
                 nxt = (f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
                        else "norm.weight")
-                h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
+                if JOINT_ROWWISE:
+                    h, x = yield "addnorm", f"{p}.post_attention_layernorm.weight", (h, a)
+                    m = yield "mlp", p, x
+                    h, x = yield "addnorm", nxt, (h, m)
+                else:
+                    h, x = add_rms_norm(h, a, self.w.norm(f"{p}.post_attention_layernorm.weight"),
+                                        cfg.rms_norm_eps)
+                    m = yield "mlp", p, x
+                    h, x = add_rms_norm(h, m, self.w.norm(nxt), cfg.rms_norm_eps)
                 if self.tap is not None:
                     self.tap(h[0].detach())
             self.state.primed = True
@@ -1788,7 +2094,10 @@ class Qwen38Engine:
         start, width, L = self._tree_start, self.cfg.linear_conv_kernel_dim, len(path)
         if FUSED_COMMIT and len(trace.factors) == len(self.cfg.linear_layers):
             self._fused_commit(trace, path)
-            if path != list(range(L)):
+            if path != list(range(L)) and not self.kv.fp8 and rowcopy.compact(self.kv.k, start, path):
+                # SPD-201: the round's row copies in one launch (engine/rowcopy.py)
+                rowcopy.compact(self.kv.v, start, path)
+            elif path != list(range(L)):
                 sel = start + h2d(path, torch.long, self.device)
                 self.kv.k[..., start:start + L, :] = self.kv.k[..., sel, :]
                 self.kv.v[..., start:start + L, :] = self.kv.v[..., sel, :]
@@ -1922,7 +2231,14 @@ class Qwen38Engine:
         kk = torch.stack([f[0][0] for f in facs])
         u = torch.stack([f[1][0] for f in facs])
         gc = torch.stack([f[2][0] for f in facs])
-        fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
+        from tools import gdn_seq_kernels as Q
+        if Q.ON:
+            # SPD-201: the walk's own steps replayed from the entry state
+            if trace.S_entry is not self.state.S:
+                self.state.S.copy_(trace.S_entry)
+            Q.seq_commit(self.state.S, kk, u, gc, rows)
+        else:
+            fused_commit(trace.S_entry, self.state.S, kk, u, gc, rows)
         raw = torch.stack([trace.layers[layer][0] for layer in self.cfg.linear_layers])
         conv_commit(trace.conv_entry, self.state.conv, raw, rows)
 
@@ -1976,7 +2292,67 @@ def _run_request(eng, kind: str, name: str, x: torch.Tensor) -> torch.Tensor:
         return head_logits(x, eng.w.norm(name))
     if kind == "grp":
         return matmul_group(x, eng.w.group(name))
+    if kind == "addnorm":
+        # SPD-163: `h + a` and its norm, one launch for every engine's rows (one program a row)
+        from tools.norm_kernels import add_rms_norm
+        return add_rms_norm(x[0], x[1], eng.w.norm(name), eng.cfg.rms_norm_eps)
+    if kind == "gate":
+        # SPD-163: the GDN gate inputs `a | b` of every engine's rows (QWEN38_GDN_AB's kernel)
+        from tools.small_linear import small_linear
+        return small_linear(x, eng._ab_weight(name))
+    if kind == "gated":
+        # SPD-163: the GDN gated norm (one program a row) and the output projection of its rows
+        cfg = eng.cfg
+        o = rms_norm_gated(x[0], x[1], eng.w.norm(f"{name}.linear_attn.norm.weight"), cfg.rms_norm_eps)
+        return linear(o.view(-1, cfg.linear_num_value_heads * cfg.linear_value_head_dim),
+                      eng.w.proj(f"{name}.linear_attn.out_proj"))
     return linear(x, eng.w.proj(name))
+
+
+def _run_gdn(eng, name: str, xs: list, reuse: dict | None = None) -> list:
+    """SPD-163: the `gdn` requests of a joint pass (`_gdn_verify_steps`, QWEN38_JOINT_GDN): one grouped
+    WY launch pair when every block fits it (tools/gdn_wy_kernels.py `grouped_ok`), else each engine's
+    own `verify_mixer` call, the lone statement. Returns per request (o, factors)."""
+    from tools.gdn_verify_kernels import WY, WY_FUSED, WY_FUSED_MAXT, WY_MAXT, verify_mixer
+    cfg = eng.cfg
+    conv_w = eng.w.norm(f"{name}.linear_attn.conv1d.weight").squeeze(1)
+    a_log, dt_bias = eng.w.norm(f"{name}.linear_attn.A_log"), eng.w.norm(f"{name}.linear_attn.dt_bias")
+    H, dk, dv = cfg.linear_num_value_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim
+    # SPD-201 (QSE_RUNNER_JOINT1): one block through the grouped launch too, so a one-block pass is graphed
+    # (the grouped launch of one engine is the lone kernel's bits: gdn_wy_kernels `check_grouped`)
+    one = os.environ.get("QSE_RUNNER_JOINT1", "0") == "1"
+    from tools import gdn_seq_kernels as Q
+    if Q.ON and all(x["anc"] is not None and x["mixed"].shape[0] <= 32 for x in xs):
+        # SPD-201: the recurrence one node at a time along its path, every block in one launch pair
+        items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
+                      state=x["state"].reshape(H, dk, dv)) for x in xs]
+        return Q.seq_recurrence_grouped(items, key_heads=cfg.linear_num_key_heads, value_heads=H, head_k=dk,
+                                        head_v=dv, conv_w=conv_w, a_log=a_log, dt_bias=dt_bias,
+                                        key_dim=cfg.key_dim, reuse=reuse)
+    if (len(xs) > 1 or one) and WY and WY_FUSED and min(WY_MAXT, WY_FUSED_MAXT) >= 16:
+        from tools import gdn_wy_kernels as G
+        items = [dict(x, conv_state=x["conv_state"].reshape(x["conv_state"].shape[-2], -1),
+                      state=x["state"].reshape(H, dk, dv)) for x in xs]
+        # one joint pass's layers are laid out alike: the check is made once (`reuse`, the pass's)
+        ok = reuse.get("ok") if reuse is not None else None
+        if ok is None:
+            ok = G.grouped_ok(items)
+            if reuse is not None:
+                reuse["ok"] = ok
+        if ok:
+            return G.wy_recurrence_grouped(items, key_heads=cfg.linear_num_key_heads, value_heads=H,
+                                           head_k=dk, head_v=dv, conv_w=conv_w, a_log=a_log,
+                                           dt_bias=dt_bias, key_dim=cfg.key_dim, reuse=reuse)
+    out = []
+    for x in xs:
+        o, fac, _ = verify_mixer(
+            x["mixed"], x["conv_state"], conv_w, x["a_raw"], x["b_raw"], a_log, dt_bias, x["state"],
+            key_dim=cfg.key_dim, key_heads=cfg.linear_num_key_heads, value_heads=H, head_k=dk,
+            head_v=dv, window=x["window"], depths=x["depths"], max_depth=x["max_depth"],
+            out_state=None, pend=x["pend"], store_state=x["store"], fac_out=x["fac_out"],
+            anc=x["anc"])
+        out.append((o, fac))
+    return out
 
 
 def forward_tree_multi(items: list) -> list:
@@ -1990,8 +2366,11 @@ def forward_tree_multi(items: list) -> list:
     engines' rows and are split back. The convolutions, recurrences, attention over each engine's
     own KV, the norms and the commits stay each engine's own, at its own row count. Returns each
     engine's logits, as `forward_tree` would. Every matrix-product kernel fixes its reduction order
-    by the weight's shape, never by the row count, up to 32 rows (docs/kernels.md), so a row's
-    projection is the bits it is alone; the caller keeps the joint pass at or under 32 rows."""
+    by the weight's shape, never by the row count, up to the family's row cap (32, or 64 for EXL3
+    weights: `joint_policy`, docs/kernels.md), so a row's projection is the bits it is alone; the
+    caller keeps the joint pass at or under that cap. The row-wise steps (`addnorm`, `gated`) are one
+    program a row and run once for all engines too (SPD-163), and so are the GDN gate inputs under
+    QWEN38_GDN_AB (`gate`: tools/small_linear.py, whose rows are independent)."""
     if not items:
         return []
     sts, gens = [], []
@@ -1999,39 +2378,224 @@ def forward_tree_multi(items: list) -> list:
         for eng, tokens, parents, start in items:
             sts.append(eng._tree_begin(tokens, parents, start))
             gens.append(eng._forward_steps(tokens, start))
-        reqs = [next(g) for g in gens]
-        eng0 = items[0][0]
-        done: list = [None] * len(gens)
-        live = list(range(len(gens)))
-        while live:
-            groups: dict = {}
-            for j in live:
-                kind, name, _ = reqs[j]
-                groups.setdefault((kind, name), []).append(j)
-            answers: dict = {}
-            for (kind, name), js in groups.items():
-                xs = [reqs[j][2] for j in js]
-                if len(xs) == 1:
-                    answers[js[0]] = _run_request(eng0, kind, name, xs[0])
-                    continue
-                # the MLP and the head take [1, T, H] (their row axis is 1), the projections [T, H]
-                dim = 1 if kind in ("mlp", "head") else 0
-                out = _run_request(eng0, kind, name, torch.cat(xs, dim=dim))
-                for j, part in zip(js, out.split([x.shape[dim] for x in xs], dim=dim)):
-                    answers[j] = part
-            nxt = []
-            for j in live:
-                try:
-                    reqs[j] = gens[j].send(answers[j])
-                    nxt.append(j)
-                except StopIteration as fin:
-                    done[j] = fin.value
-            live = nxt
+        done = joint_steps(items[0][0], gens)
         return [eng._tree_end(st, lg) for (eng, *_), st, lg in zip(items, sts, done)]
     except BaseException:
         for eng, *_ in items:
             eng._tree_abort()
         raise
+
+
+def prefill_joint_ok(eng, T: int, start: int) -> bool:
+    """SPD-245: whether `prefill_joint` can take a prompt of `T` rows from `start` on `eng`: a plain text
+    forward with the fused add-norm loop, rows the skinny EXL3 kernel takes alone (33..EXL3_CHUNK_UNTIL),
+    every projection EXL3 with the fused qkv(z) and gate|up groups and the silu-fused down."""
+    if not (isinstance(eng, Qwen38Engine) and _x3.SILU_FUSED and _x3.SKINNY_MAX < T <= _x3.CHUNK_UNTIL
+            and eng.window_ok(start)):
+        return False
+    ok = getattr(eng, "_joint_all", None)
+    if ok is None:
+        cfg, w, E = eng.cfg, eng.w, EXL3Block
+        ok = True
+        for layer in range(cfg.num_hidden_layers):
+            p = f"layers.{layer}"
+            lin = cfg.is_linear(layer)
+            g = w.group(f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv")
+            wo = w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+            gu = w.group(f"{p}.mlp.gate_up")
+            wd = w.proj(f"{p}.mlp.down_proj")
+            ok = ok and all(isinstance(t, E) and t.kb < 10 for t in (g, wo, gu, wd)) and \
+                bool(gu.sizes) and gu.sizes[0] == gu.sizes[1] == wd.K and wd.suh.shape[0] == 1
+        eng._joint_all = ok
+    return ok
+
+
+def prefill_joint(items: list) -> list:
+    """SPD-245: the prompts of several sequences in ONE layer-major forward. `items`: (engine, tokens [T],
+    start) of engines over the same weights, each `prefill_joint_ok`. Returns each one's last-row logits,
+    the engines left as their own `forward(tokens, start, last_only=True)` leaves them.
+
+    Bit for bit each engine's own forward: every operation of a row's own forward in the same order;
+    the rows of all prompts go through each EXL3 projection as one call on a slab decoded once a layer,
+    summed in the skinny kernel's order (`tools.exl3_slab_gemm.skinny_matmul`: a row gets what its own
+    <= EXL3_CHUNK_UNTIL-row call gives), and through the row-local kernels (add + norm, the input
+    rotation with silu) as one launch; the mixers (the convolution, the recurrence, the attention with
+    its cache) run one sequence at a time on its own engine with the joined product's rows (`pre`) and
+    write into the joined buffer (`out`). The head reads each prompt's last row alone."""
+    from tools.norm_kernels import add_rms_norm
+    from tools.exl3_slab_gemm import skinny_matmul
+    eng0 = items[0][0]
+    cfg, w = eng0.cfg, eng0.w
+    assert all(e.w is w for e, _, _ in items)
+    n = cfg.num_hidden_layers
+    rows = [int(t.numel()) for _, t, _ in items]
+    offs = [0]
+    for r in rows:
+        offs.append(offs[-1] + r)
+    R = offs[-1]
+    emb = w.norm("embed_tokens.weight")
+    hs, pos, use = [], [], []
+    for eng, toks, start in items:
+        T = toks.numel()
+        eng.kv.ensure(start + T)
+        eng._settle()
+        h = F.embedding(toks.view(1, T), emb)
+        if eng.tap is not None:
+            eng.tap(h[0].detach())
+        s0 = start + eng.pos_delta
+        pos.append(torch.arange(s0, s0 + T, device=eng.device))
+        use.append(eng.state.primed)
+        hs.append(h)
+    H = torch.cat(hs, dim=1)
+    del hs
+    X = rms_norm(H, w.norm("layers.0.input_layernorm.weight"), cfg.rms_norm_eps)
+    mod = _x3._module()
+    for layer in range(n):
+        p = f"layers.{layer}"
+        lin = cfg.is_linear(layer)
+        g = w.group(f"{p}.linear_attn.qkvz" if lin else f"{p}.self_attn.qkv")
+        Y = skinny_matmul(X.view(R, -1), g)
+        O = torch.empty(1, R, cfg.value_dim if lin else cfg.num_attention_heads * cfg.head_dim,
+                        dtype=X.dtype, device=X.device)
+        for k, (eng, toks, start) in enumerate(items):
+            a, b = offs[k], offs[k + 1]
+            if lin:
+                eng.linear_attention(X[:, a:b], p, layer, use[k], pre=Y[a:b], out=O[:, a:b])
+            else:
+                eng.attention(X[:, a:b], p, layer, start, pos[k], pre=Y[a:b], out=O[:, a:b])
+        del Y
+        wo = w.proj(f"{p}.linear_attn.out_proj" if lin else f"{p}.self_attn.o_proj")
+        A = skinny_matmul(O.view(R, -1), wo).view(1, R, -1)
+        del O
+        H, X = add_rms_norm(H, A, w.norm(f"{p}.post_attention_layernorm.weight"), cfg.rms_norm_eps)
+        del A
+        gu = w.group(f"{p}.mlp.gate_up")
+        wd = w.proj(f"{p}.mlp.down_proj")
+        yg = skinny_matmul(X.view(R, -1), gu)
+        xd = torch.empty(1, R, wd.K, dtype=torch.float16, device=X.device)
+        mod.exl3_rot_in_silu(yg, wd.suh, xd)
+        del yg
+        Mo = skinny_matmul(None, wd, xh=xd, M=R).view(1, R, -1)
+        del xd
+        nxt = f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n else "norm.weight"
+        H, X = add_rms_norm(H, Mo, w.norm(nxt), cfg.rms_norm_eps)
+        del Mo
+        for k, (eng, _, _) in enumerate(items):
+            if eng.tap is not None:
+                eng.tap(H[0, offs[k]:offs[k + 1]].detach())
+    hw = w.norm("lm_head.weight")
+    out = []
+    for k, (eng, toks, start) in enumerate(items):
+        a, b = offs[k], offs[k + 1]
+        eng.state.primed = True
+        eng.kv.length = start + rows[k]
+        eng.hidden_pre_norm = H[:, a:b]
+        eng.hidden_post_norm = X[:, a:b]
+        out.append(head_logits(X[:, b - 1:b], hw))
+    return out
+
+
+def _join(xs: list, dim: int) -> torch.Tensor:
+    """`torch.cat(xs, dim)`, or -- when the parts are the consecutive slices of one tensor along `dim`, as
+    a joined request's answer comes back split and is often handed straight to the next request -- that
+    tensor itself as a view (the same values, no copy and no launch)."""
+    x0 = xs[0]
+    st, sh = x0.stride(), x0.shape
+    ptr = x0.data_ptr()
+    step = x0.element_size()
+    for x in xs[1:]:
+        if (x.dtype != x0.dtype or x.device != x0.device or x.stride() != st or x.dim() != x0.dim()
+                or any(a != b for k, (a, b) in enumerate(zip(x.shape, sh)) if k != dim)
+                or x.untyped_storage().data_ptr() != x0.untyped_storage().data_ptr()):
+            return torch.cat(xs, dim=dim)
+    for a, b in zip(xs, xs[1:]):
+        if b.data_ptr() != a.data_ptr() + a.shape[dim] * st[dim] * step:
+            return torch.cat(xs, dim=dim)
+    if JOIN_VIEWS:
+        shape = list(sh)
+        shape[dim] = sum(x.shape[dim] for x in xs)
+        return x0.as_strided(shape, st, x0.storage_offset())
+    return torch.cat(xs, dim=dim)
+
+
+def joint_attn_lone(name: str, payloads: list) -> list:
+    """The `"attn"` requests of a joint pass one lane at a time: the scatter at the lane's static slots, the
+    whole cache, the start and the length from the device (`_attention_steps`). A family's adapter may
+    install a grouped launch as `joint_attn` (SPD-245); this is the shared default."""
+    from tools.attn_kernels import decode_attention_dev
+    layer = int(name)
+    out = []
+    for eng, q, k, v in payloads:
+        jg = eng._jg
+        i = eng.kv.slot[layer]
+        eng.kv.k[i].index_copy_(2, jg.slots, k.to(eng.kv.k.dtype))
+        eng.kv.v[i].index_copy_(2, jg.slots, v.to(eng.kv.v.dtype))
+        out.append(decode_attention_dev(q, eng.kv.k[i], eng.kv.v[i], jg.lenp, eng.tree.anc_incl, jg.max_lc))
+    return out
+
+
+Qwen38Engine.joint_attn = staticmethod(joint_attn_lone)
+
+
+def joint_steps(eng0, gens: list) -> list:
+    """`forward_tree_multi`'s loop: run the engines' step generators, each request for the same weight as
+    one call over every engine's rows; returns each generator's value (its logits). The joint graphs
+    (engine/models/qwen3_5/joint_graphs.py) capture the same loop."""
+    reqs = [next(g) for g in gens]
+    gdn_pass: dict = {}          # SPD-163: the grouped GDN launch's table and check, per engine set
+    done: list = [None] * len(gens)
+    live = list(range(len(gens)))
+    while live:
+        groups: dict = {}
+        for j in live:
+            kind, name, _ = reqs[j]
+            groups.setdefault((kind, name), []).append(j)
+        answers: dict = {}
+        for (kind, name), js in groups.items():
+            xs = [reqs[j][2] for j in js]
+            if kind == "gdn":
+                # SPD-163: per-engine payloads, not rows to join (`_run_gdn`), one table a pass
+                for j, r in zip(js, _run_gdn(eng0, name, xs, gdn_pass.setdefault(tuple(js), {}))):
+                    answers[j] = r
+                continue
+            if kind == "attn":
+                # SPD-245: the graphed lanes' attention of a layer, one launch for every lane where the
+                # family installs `joint_attn` (its adapter), else each lane's own launch
+                for j, r in zip(js, eng0.joint_attn(name, xs)):
+                    answers[j] = r
+                continue
+            if len(xs) == 1:
+                answers[js[0]] = _run_request(eng0, kind, name, xs[0])
+                continue
+            # the MLP, the head and the add-norms take [1, T, H] (their row axis is 1), the
+            # projections [T, H]; a tuple payload (SPD-163: the row-wise steps) is joined part by part
+            dim = 1 if kind in ("mlp", "head", "addnorm") else 0
+            if isinstance(xs[0], tuple):
+                joined = tuple(_join([x[k] for x in xs], dim) for k in range(len(xs[0])))
+                sizes = [x[0].shape[dim] for x in xs]
+            else:
+                joined = _join(xs, dim)
+                sizes = [x.shape[dim] for x in xs]
+            if kind == "gated":
+                # the gated norm's rows are a head's; its output projection's rows are a token's
+                heads = eng0.cfg.linear_num_value_heads
+                sizes = [n // heads for n in sizes]
+            out = _run_request(eng0, kind, name, joined)
+            if isinstance(out, tuple):
+                parts = list(zip(*(o.split(sizes, dim=dim) for o in out)))
+            else:
+                parts = out.split(sizes, dim=dim)
+            for j, part in zip(js, parts):
+                answers[j] = part
+        nxt = []
+        for j in live:
+            try:
+                reqs[j] = gens[j].send(answers[j])
+                nxt.append(j)
+            except StopIteration as fin:
+                done[j] = fin.value
+        live = nxt
+    return done
 
 
 # the family's engine under a family-neutral name; `Qwen38Engine` stays for every caller.

@@ -1,0 +1,48 @@
+"""The 27B family's own knobs (ENG-405): the same shape as engine/settings.py's `KNOBS`, joined to it at
+import. Only knobs owned by this package's files go here; the 27B's older knobs stay in the shared table."""
+
+KNOBS: dict[str, tuple] = {
+    # SPD-153: a chain-shaped tree block shares the joint verify pass of a parallel round (0: it takes a pass
+    # of its own, its chain kernel, while the other slots wait)
+    'JOINT_CHAINS': ('1', 'engine/models/qwen3_5/adapter.py'),
+    # SPD-163: the joint verify pass from CUDA graphs (engine/models/qwen3_5/joint_graphs.py); 0: eager.
+    # SPD-223: off from 80b324f6 (the suffix store on, 8 lanes: an illegal memory access in a DFlash2 draft graph's
+    # replay, CUDA_LAUNCH_BLOCKING=1, 2026-10-25). On again since the draft graphs map the window pages they gather
+    # and are rebuilt when a tensor they baked moved (cfe48a3e): 6 of 6 fresh servers of C8 x3 with the store on
+    # ran clean (before: 2 of 3 faulted), C8 139-162 tok/s against ~137 without the graphs. Neither guard has
+    # logged firing yet, so the exact cause is not proven; their lines say when one acts
+    'JOINT_GRAPHS': ('1', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-163: joint graphs kept, the least recently replayed dropped first
+    'JOINT_GRAPHS_MAX': ('24', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-245: a graphed joint pass runs every lane's attention of a layer in one scatter, one split and one
+    # combine launch (engine/models/qwen3_5/attn_group.py; every row the lone launch's bits); 0: a lane at a time
+    'JOINT_ATTN_GROUP': ('1', 'engine/models/qwen3_5/attn_group.py'),
+    # SPD-163: a joint pass shape is captured once it has come this many times (before that it runs eager).
+    # SPD-245: 4 (was 16): an 8-lane round at 16 ran a third of its passes eager while shapes warmed; C4 99-101
+    # vs 96, C8 152 vs 150 tok/s served
+    'JOINT_GRAPHS_AFTER': ('4', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-199: the joint pass's row cap, at most the proven one (64 on EXL3, 32 else); empty: the proven one.
+    # The EXL3 4-bit projections cost ~1.6x more from 33 rows on (tools/exl3_tall.py), so 32 is the other arm
+    'JOINT_MAX_ROWS': ('', 'engine/models/qwen3_5/adapter.py'),
+    # SPD-199: rows a block keeps in a joint pass whatever E (0: max_rows // E); 8 -> 32 rows at 4 slots, 64 at 8
+    'JOINT_ROWS_A_SLOT': ('0', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-245: rows a block keeps at exactly this many lanes, "lanes:rows" pairs (empty: none). 4:8: a 4-lane
+    # pass of 4 x 8 rows (the 32-row byte-bound GEMM) instead of 4 x 16: round 106 -> 91 ms for one token less,
+    # C4 steady 112 -> 117 (t1) and 124 -> 131 (t0) tok/s, served x3 on two servers each; 8 rows at 2 lanes
+    # lose 3-4 % and 4 or 6 rows at 8 lanes lose up to 7 %, so no other lane count is in the table
+    'JOINT_ROWS_AT_LANES': ('4:8', 'engine/models/qwen3_5/joint_graphs.py'),
+    # SPD-199: the 27B's EXL3 projections at 33+ rows through the decode-once tile: '' off, '64' or '128' rows
+    'EXL3_TALL': ('', 'engine/models/qwen3_5/tall.py'),
+    # SPD-201: the 27B's EXL3 projections at 33..64 rows read fragment-major activations (the same bits)
+    'EXL3_FRAG': ('1', 'engine/models/qwen3_5/frag.py'),
+    # SPD-187: the round planner: off, shadow (computed and logged, the fixed cut acts) or on
+    'ROUND_PLAN': ('off', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: the planner's price file (kinds joint{E}); empty: ops/prices/qwen3.8-27b/joint.dgx-spark.json
+    'ROUND_PLAN_PRICES': ('', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: the rows a block may take in a planned round
+    'ROUND_PLAN_BUCKETS': ('4,8,16', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: the planner's learned state file ('' : ~/.tandemllm/roundplan/<pack>.<host>.json)
+    'ROUND_PLAN_STATE': ('', 'engine/models/qwen3_5/roundplan.py'),
+    # SPD-187: rounds between two saves of the planner's learned state
+    'ROUND_PLAN_SAVE_EVERY': ('512', 'engine/models/qwen3_5/roundplan.py'),
+}

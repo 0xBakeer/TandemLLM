@@ -7,7 +7,7 @@ The dashboard's `#/setup` page walks through an install in eight steps, from pic
 A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.14.2/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh
 bash install.sh --setup --yes
 ```
 
@@ -46,7 +46,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.14.2`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.14.2'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.15.0`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.15.0'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 
@@ -57,6 +57,8 @@ Each model the guide offers is a folder under `models/` with a `model.yaml` ([mo
 - The measured table is the 0.6.2 run itself; `models/qwen3.8-27b/measurements/0.6.2-summary.json` is its summary file, and a test holds the two equal. The NVFP4 row is from build 0.4.8 and is marked not comparable.
 
 Memory is in GiB (2^30 bytes) and disk in GB (10^9 bytes) everywhere in the registry and the API. `python -m server.setup.registry --check` checks a file.
+
+The Model step also shows the weight cards' speed rows of the current build (`parallel` in model.yaml, SPD-245): decode alone, the first token of a cold 2k, 8k and 32k prompt, and 1, 2, 4 and 8 requests at once, each row with its build, commit, date and setup. Each weight card, our own and a community pack's, shows its row's rate alone and with the most requests at once. [measurement.md](measurement.md#the-weight-cards-speed-rows) says how a row is measured.
 
 Every weight profile names who made it (`made_by`): TandemLLM's own packs (0xBakeer), the vendor's release (NVIDIA, LiquidAI), or a community author with a GitHub login (turboderp for Qwen3.8-Flash-Next). Each weight card shows the pack's Hugging Face repository as owner/name, linked, and its maker.
 

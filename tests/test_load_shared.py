@@ -129,7 +129,7 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     assert KEYS_27B <= written, sorted(KEYS_27B - written)
     # SRV-475: the checkpoint's sampling (generation_config.json), read for every model
     extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem",
-                                  "card_sampling"}
+                                  "card_sampling", "sampling_flags"}
     assert not extra, sorted(extra)
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
 

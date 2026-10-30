@@ -1,0 +1,2 @@
+void skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t pf, int64_t minb, int64_t il, int64_t pdl_, int64_t kr, int64_t spw);
+void skinny_ser(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor s2v, double s2, torch::Tensor y, int64_t nt, int64_t wk, int64_t wn, int64_t nb, int64_t g);

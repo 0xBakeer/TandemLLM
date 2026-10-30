@@ -33,7 +33,9 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
+# The engine release. v0.15.0 runs 8 lanes by default, each with the full window, one round runner
+# with joint verify passes (CUDA graphs on the 27B), the burst prefill and the card's sampling filters;
+# v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
 # card's answer limit and the plain step at long context, and builds the lookup corpus for each tokenizer;
 # v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
 # answer directly with thinking off and puts the model families behind adapters;
@@ -61,7 +63,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.14.2}"
+TANDEM_REF="${TANDEM_REF:-v0.15.0}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace

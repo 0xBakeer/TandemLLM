@@ -58,7 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data", default=os.environ.get("QSE_CHAT_DATA") or "~/.tandemllm/chat")
     ap.add_argument("--engine", default=os.environ.get("QSE_CHAT_ENGINE") or
                     "http://127.0.0.1:8000")
-    ap.add_argument("--max-runs", type=int, default=int(os.environ.get("QSE_CHAT_MAX_RUNS") or 2))
+    # SRV-707: 0 (the default) follows the engine's lanes (/health parallel.n); a number fixes it
+    ap.add_argument("--max-runs", type=int, default=int(os.environ.get("QSE_CHAT_MAX_RUNS") or 0))
     ap.add_argument("--retry-s", type=float, default=float(os.environ.get("QSE_CHAT_RETRY_S")
                                                            or 600))
     ap.add_argument("--no-titles", action="store_true", help="keep the first line as the title "
@@ -70,12 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     os.makedirs(data, mode=0o700, exist_ok=True)
     key = load_key(data)
     svc = Service(data, a.engine, engine_key=os.environ.get("QSE_CHAT_ENGINE_KEY") or None,
-                  max_runs=a.max_runs, retry_window_s=a.retry_s, titles=not a.no_titles, log=log)
+                  max_runs=a.max_runs or None, retry_window_s=a.retry_s, titles=not a.no_titles, log=log)
     srv = make_server(svc, a.host, a.port, key)
     svc.start()
     serve_in_thread(srv)
     log(f"[chatd] {__version__} on {a.host}:{a.port}, data {data}, engine {a.engine}, "
-        f"max runs {a.max_runs}")
+        f"max runs {a.max_runs or 'as the engine has lanes'}")
     front = None
     if a.front:
         from http.server import ThreadingHTTPServer

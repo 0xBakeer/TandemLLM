@@ -422,11 +422,6 @@ parallelism:
     max: 1048576
     default: 262144
     step: 4096
-  side_window:
-    min: 8192
-    max: 1048576
-    default: 262144
-    step: 4096
   kv_pool:
     default: false
   floor_gb:

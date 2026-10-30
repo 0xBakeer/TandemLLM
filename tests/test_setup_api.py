@@ -11,7 +11,7 @@ The test matrix:
   3  GET /v1/setup/device with a fake memory source (119.7 GiB, 61 GiB available) and a fake GPU:
      every block filled, the password a boolean; without a GPU and without /proc/meminfo the
      blocks are null and the answer still 200            test_device
-  4  POST /v1/setup/estimate: the default fits; an unknown profile is 400; slots 17 and window 512
+  4  POST /v1/setup/estimate: the default fits; an unknown profile is 400; slots 65 and window 512
      are 422 out_of_range; the narrator without the conductor is 422 invalid_combination naming
      both; a body with a command in it is 422 unknown_field   test_estimate_route
   5  the admin guard: with an admin token set, every /v1/setup route through the proxy is 401
@@ -142,18 +142,18 @@ def test_device():
 def test_estimate_route():
     _setup(mem={"MemTotal": 121.63, "MemAvailable": 61.0})
     # the reference box's tools: the narrator on (off by default since 0.11.3, SRV-534)
-    ref = {"model": "qwen3.8-27b", "components": {"narrator": True}}
+    ref = {"model": "qwen3.8-27b", "components": {"narrator": True}, "slots": 4}
     code, e = call("POST", "/v1/setup/estimate", ref)
     assert code == 200 and e["fits"] is True and e["fits_worst"] is False, e
     assert e["total_gb"] == 67.35 and e["available_gb"] == 61.0
     code, e2 = call("POST", "/v1/setup/estimate", {"selection": ref})
     assert code == 200 and e2["total_gb"] == e["total_gb"]
-    code, e3 = call("POST", "/v1/setup/estimate", {"model": "qwen3.8-27b"})
+    code, e3 = call("POST", "/v1/setup/estimate", {"model": "qwen3.8-27b", "slots": 4})
     assert code == 200 and e3["total_gb"] == round(67.35 - 3.6, 2), e3["total_gb"]
     for body, status, kind in (
             ({"model": "qwen3.8-27b", "profile": "exl3-9.9"}, 400, "unknown_profile"),
             ({"model": "nope"}, 400, "unknown_model"),
-            ({"model": "qwen3.8-27b", "slots": 17}, 422, "out_of_range"),
+            ({"model": "qwen3.8-27b", "slots": 65}, 422, "out_of_range"),
             ({"model": "qwen3.8-27b", "window": 512}, 422, "out_of_range"),
             ({"model": "qwen3.8-27b", "cmd": "reboot"}, 422, "unknown_field")):
         code, err = call("POST", "/v1/setup/estimate", body)

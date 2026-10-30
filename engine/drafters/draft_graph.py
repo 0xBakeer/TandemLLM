@@ -27,11 +27,28 @@ block and the target's head only; anything else takes the eager call.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn.functional as F
 
 from engine import capture_lock
+from engine.settings import SETTINGS as _S
 
+
+
+def cover_window(d, pos0: int, span: int, win: int) -> int:
+    """SPD-223: the window rows a draft's gather reads ([pos0 - win + 1, + span)) mapped before it runs: a page
+    left unmapped by a floor move or a trim faulted a draft graph's replay (`WindowBuffer.cover` maps it and the
+    line says so). The pages it mapped; 0 without a window buffer or on the path that is right."""
+    if getattr(d, "_ckb", None) is None:
+        return 0
+    lo = max(0, int(pos0) - int(win) + 1)
+    fixed = sum(b.cover(lo, lo + int(span)) for b in (d._ckb, d._cvb) if b is not None and hasattr(b, "cover"))
+    if fixed:
+        print(f"[dflash2] draft window: {fixed} unmapped page(s) of rows {lo}..{lo + int(span)} mapped before the "
+              f"draft (floor {d._ckb.floor}, rows {d._ckb.rows})", flush=True)
+    return fixed
 
 
 def dflash2_head(eng):
@@ -55,9 +72,26 @@ class DraftGraph:
         self.graphs: dict = {}                                        # class -> (graph, out)
         # the cache the graph gathers from; a drafter that reallocates it gets a new graph
         self.ck_ptr = drafter._ck.data_ptr()
-        self.stream = torch.cuda.Stream()
+        self.ptrs = DraftGraph.pointers(drafter)            # SPD-223: every tensor the body bakes
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
+        self._leased = True
         self.out = None
         self.stats = {"captured": 0, "replayed": 0}
+
+    def __del__(self):
+        if getattr(self, "_leased", False):
+            _release(self.graphs, self.stream)
+
+    @staticmethod
+    def pointers(drafter) -> tuple:
+        """What a captured body points at: the window K/V, the row flags, the embedding, the head, the length
+        (graph_run recaptures when any of them moved)."""
+        def ptr(t):
+            return t.data_ptr() if isinstance(t, torch.Tensor) else id(t)
+        eng = drafter.eng
+        cs = getattr(drafter, "_cs", None)
+        return (ptr(drafter._ck), ptr(drafter._cv), ptr(cs) if cs is not None else 0,
+                ptr(eng.w.norm("embed_tokens.weight")), ptr(dflash2_head(eng)), int(drafter.max_len))
 
     @staticmethod
     def eligible(drafter) -> bool:  # noqa: D401
@@ -91,6 +125,8 @@ class DraftGraph:
         idx = lo + torch.arange(span, device=dev)
         valid = idx < ctx_len
         idx = torch.clamp(idx, max=d.max_len - 1)
+        if getattr(d, "_cs", None) is not None:
+            valid = valid & (d._cs.index_select(0, idx) > 0)      # SPD-177: rows that are real
         ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
                   for i in range(cfg.num_hidden_layers)]
         allpos = torch.cat([idx, positions])
@@ -114,6 +150,8 @@ class DraftGraph:
         self.host[0], self.host[1], self.host[2] = anchor, pos0, self.d.ctx_len
         self.scal.copy_(self.host, non_blocking=True)
         span = self.span(pos0)
+        if cover_window(self.d, pos0, span, self.win):
+            self.stats["covered"] = self.stats.get("covered", 0) + 1
         temp = float(self.d.tree_temp) if M.HOST_ASYNC else None
         # the kernel flags too, as the verify graphs key on them (an in-process A/B flips
         # them; a served process never does, so this is one key a span)
@@ -136,16 +174,24 @@ class DraftGraph:
         return got[1]
 
 
+#: SPD-201: the draft window's gathered span in steps of this many rows (0: a power of two from 512); a block attends
+#: over the rows it would at any span (the rows past its context are masked)
+SPAN_STEP = int(_S.get("DF2_SPAN_STEP") or 0)
+
+
 def _span(pos0: int, win: int) -> int:
+    if SPAN_STEP > 0:
+        return min(win, max(SPAN_STEP, -(-(pos0 + 1) // SPAN_STEP) * SPAN_STEP))
     c = 512
     while c < min(pos0 + 1, win):
         c *= 2
     return min(c, win)
 
 
-def _packed_body(ds: list, scals: list, spans: list, temp):
+def _packed_body(ds: list, scals: list, spans: list, temp, projs: list | None = None):
     """`DraftGraph._body` for several drafters over one module, each block's inputs from its own
-    device scalars (anchor, pos0, ctx_len), the projections and the head once for all rows."""
+    device scalars (anchor, pos0, ctx_len), the projections and the head once for all rows. `projs`
+    (QWEN38_ROUND_LOG_LATTICE): each block's selector-projected hidden [L, r] is appended to it."""
     from engine.drafters.dflash2 import forward_block_multi
     from engine.model import head_logits
     d0 = ds[0]
@@ -163,8 +209,18 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         idx = lo + torch.arange(span, device=dev)
         valid = idx < ctx_len
         idx = torch.clamp(idx, max=d.max_len - 1)
-        ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
-                  for i in range(cfg.num_hidden_layers)]
+        if getattr(d, "_cs", None) is not None:
+            valid = valid & (d._cs.index_select(0, idx) > 0)      # SPD-177: rows that are real
+        from engine.drafters.dflash2 import PACK_TAIL
+        if PACK_TAIL:
+            # SPD-203: the window gathered with bs rows to spare at its tail, where the block's own keys
+            # and values are written (`_forward_block_steps`): one copy of the window a layer, not two
+            idx_t = torch.cat([idx, torch.zeros(bs, dtype=idx.dtype, device=dev)])
+            ctx_kv = [(d._ck[i].index_select(1, idx_t), d._cv[i].index_select(1, idx_t), span)
+                      for i in range(cfg.num_hidden_layers)]
+        else:
+            ctx_kv = [(d._ck[i].index_select(1, idx), d._cv[i].index_select(1, idx))
+                      for i in range(cfg.num_hidden_layers)]
         allpos = torch.cat([idx, positions])
         seen = torch.cat([valid, torch.ones(bs, dtype=torch.bool, device=dev)])
         mask = ((positions[:, None] - allpos[None, :]) < W) & seen[None, :]
@@ -172,13 +228,75 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         anchors.append(anchor)
     hidden = forward_block_multi(m, items)
     preds = [h[1:] for h in hidden]
+    if projs is not None:
+        wp = m.w["candidate_selector.hidden_projection.weight"]
+        projs.extend(F.linear(p, wp) for p in preds)
     logits = head_logits(torch.cat(preds, dim=0), dflash2_head(eng))
     out = []
-    for a_t, lg, pred in zip(anchors, logits.split([p.shape[0] for p in preds], dim=0), preds):
-        cand, unary = m.unary_candidates(lg)
+    sizes = [p.shape[0] for p in preds]
+    from engine.drafters.dflash2 import PACK_TOPK
+    if PACK_TOPK:
+        # SPD-161: the head's top-k once over every block's rows (a row's top-k is its own)
+        c_all, u_all = m.unary_candidates(logits, exact=False)
+        cu = list(zip(c_all.split(sizes, dim=0), u_all.split(sizes, dim=0)))
+    for j, (a_t, lg, pred) in enumerate(zip(anchors, logits.split(sizes, dim=0), preds)):
+        cand, unary = cu[j] if PACK_TOPK else m.unary_candidates(lg)
         scores = m.lattice(pred, cand, unary, a_t)
         out.append((cand, scores) if temp is None
                    else (cand, scores, torch.log_softmax(scores.float() / temp, dim=-1)))
+    return out
+
+
+def _packed_body_batched(ds: list, scals: list, L: int, temp, projs: list | None = None):
+    """`_packed_body` as one batched block pass (dflash2 PACK_BATCH): every block's window gathered
+    to the longest span `L` (rows past a block's own context masked, so each block attends over the
+    rows it attends alone), the inputs, masks and top-k built once for all blocks."""
+    from engine.drafters.dflash2 import forward_block_batched
+    from engine.model import head_logits
+    d0 = ds[0]
+    m, cfg, eng = d0.module, d0.cfg, d0.eng
+    dev = eng.device
+    bs, W, E = cfg.block_size, int(cfg.sliding_window), len(ds)
+    sc = torch.stack(scals)                                               # [E, 3]
+    pos0, ctx_len = sc[:, 1:2], sc[:, 2:3]
+    ids = torch.cat([sc[:, 0:1], torch.full((E, bs - 1), cfg.mask_token_id, dtype=torch.long,
+                                            device=dev)], dim=1)
+    noise = F.embedding(ids.reshape(-1), eng.w.norm("embed_tokens.weight")).to(m.dtype)
+    positions = pos0 + torch.arange(bs, device=dev)                       # [E, bs]
+    idx = torch.clamp(pos0 - W + 1, min=0) + torch.arange(L, device=dev)  # [E, L]
+    valid = idx < ctx_len
+    idx = torch.clamp(idx, max=min(d.max_len for d in ds) - 1)
+    if getattr(d0, "_cs", None) is not None:
+        valid = valid & torch.stack([d._cs.index_select(0, idx[e]) > 0 for e, d in enumerate(ds)])
+    # each window gathered straight into its block's row of one buffer, bs rows to spare at the tail
+    # for the block's own keys and values (no stacked or concatenated copy of the windows)
+    idx_t = torch.cat([idx, torch.zeros(E, bs, dtype=idx.dtype, device=dev)], dim=1)
+    ctx_k, ctx_v = [], []
+    for i in range(cfg.num_hidden_layers):
+        ck0 = d0._ck[i]
+        kb = torch.empty((E, ck0.shape[0], L + bs, ck0.shape[2]), dtype=ck0.dtype, device=dev)
+        vb = torch.empty_like(kb)
+        for e, d in enumerate(ds):
+            torch.index_select(d._ck[i], 1, idx_t[e], out=kb[e])
+            torch.index_select(d._cv[i], 1, idx_t[e], out=vb[e])
+        ctx_k.append(kb)
+        ctx_v.append(vb)
+    allpos = torch.cat([idx, positions], dim=1)                           # [E, L + bs]
+    seen = torch.cat([valid, torch.ones(E, bs, dtype=torch.bool, device=dev)], dim=1)
+    mask = ((positions[:, :, None] - allpos[:, None, :]) < W) & seen[:, None, :]
+    hidden = forward_block_batched(m, noise, positions.reshape(-1), ctx_k, ctx_v, mask)
+    preds = hidden.view(E, bs, -1)[:, 1:]                                 # [E, bs - 1, H]
+    if projs is not None:
+        wp = m.w["candidate_selector.hidden_projection.weight"]
+        projs.extend(F.linear(preds[e], wp) for e in range(E))
+    logits = head_logits(preds.reshape(E * (bs - 1), -1), dflash2_head(eng))
+    c_all, u_all = m.unary_candidates(logits)
+    out = []
+    for e in range(E):
+        r = slice(e * (bs - 1), (e + 1) * (bs - 1))
+        scores = m.lattice(preds[e], c_all[r], u_all[r], scals[e][0:1])
+        out.append((c_all[r], scores) if temp is None
+                   else (c_all[r], scores, torch.log_softmax(scores.float() / temp, dim=-1)))
     return out
 
 
@@ -191,13 +309,18 @@ class PackedDraftGraph:
         dev = ds[0].eng.device
         self.scal = [torch.zeros(3, dtype=torch.long, device=dev) for _ in ds]
         self.host = torch.zeros(len(ds), 3, dtype=torch.long).pin_memory()
-        self.ptrs = tuple(d._ck.data_ptr() for d in ds)
+        self.ptrs = tuple(DraftGraph.pointers(d) for d in ds)          # SPD-223: every tensor each body bakes
         self.graphs: dict = {}
-        self.stream = torch.cuda.Stream()
+        self.stream = capture_lock.lease_stream()          # SPD-223: no other graph owner captures on it
+        self._leased = True
         # one memory pool for this set's graphs (one per span combination): they never run at once,
         # and each replay's outputs are read before the set's next packed call
         self.pool = torch.cuda.graph_pool_handle()
         self.stats = {"captured": 0, "replayed": 0}
+
+    def __del__(self):
+        if getattr(self, "_leased", False):
+            _release(self.graphs, self.stream)
 
     def run(self, reqs: list, temp):
         from engine.verify_graph import VerifyGraphs
@@ -207,31 +330,116 @@ class PackedDraftGraph:
         for j in range(len(reqs)):
             self.scal[j].copy_(self.host[j], non_blocking=True)
         spans = tuple(_span(pos0, W) for _, _, pos0 in reqs)
+        from engine.drafters.dflash2 import PACK_BATCH
+        if PACK_BATCH:
+            spans = (max(spans),)                   # one padded width for every block
+            if HOST_ONE and temp is None:
+                # the tree's log-probabilities in the graph too (what each block's tree computes alone
+                # after its walk: the same op on the same tensor), so the host's one copy carries them
+                temp = float(self.ds[0].tree_temp)
         key = (spans, temp, VerifyGraphs.signature())
         got = self.graphs.get(key)
         if got is None:
             if len(self.graphs) > 32:
                 self.graphs.clear()
+                self.pool = torch.cuda.graph_pool_handle()      # SPD-223: as JointGraphs._flush
             self.stream.wait_stream(torch.cuda.current_stream())
+            projs = [] if LOG_PROJ else None
+            inner = ((lambda pj: _packed_body_batched(list(self.ds), self.scal, spans[0], temp, pj))
+                     if PACK_BATCH else
+                     (lambda pj: _packed_body(list(self.ds), self.scal, list(spans), temp, pj)))
+            one = PACK_BATCH and temp is not None and HOST_ONE
+
+            def body(pj):
+                res = inner(pj)
+                if not one:
+                    return res, None
+                # every block's walk blob and log-probabilities in two tensors, for one copy a round
+                from engine.drafters.dflash2 import DFlash2Module
+                return res, (torch.stack([DFlash2Module._blob(c, sc) for c, sc, _ in res]),
+                             torch.stack([lp for _, _, lp in res]))
             with torch.cuda.stream(self.stream):
-                _packed_body(list(self.ds), self.scal, list(spans), temp)
+                body([] if LOG_PROJ else None)
             torch.cuda.current_stream().wait_stream(self.stream)
             g = torch.cuda.CUDAGraph()
             # no other thread's CUDA call may run inside a capture (engine/capture_lock.py)
             with capture_lock.LOCK, torch.cuda.graph(g, pool=self.pool, stream=self.stream):
-                out = _packed_body(list(self.ds), self.scal, list(spans), temp)
-            got = self.graphs[key] = (g, out)
+                out, both = body(projs)
+            got = self.graphs[key] = (g, out, projs, _HostBlobs(*both) if both is not None else None)
             self.stats["captured"] += 1
         got[0].replay()
         self.stats["replayed"] += 1
-        return got[1]
+        if got[2]:
+            for d, pj in zip(self.ds, got[2]):
+                d._pred_proj = pj               # this replay's buffers (the round logger reads them)
+        hb = got[3]
+        if hb is None:
+            return got[1]
+        hb.fetch()
+        return [r + ((hb, e),) for e, r in enumerate(got[1])]
+
+
+def _release(graphs: dict, stream) -> None:
+    """A graph owner going away: its graphs reset (torch drops its stream's cuBLAS workspace with them), then
+    its capture stream back to the lease (engine/capture_lock.py, SPD-223)."""
+    try:
+        for got in graphs.values():
+            got[0].reset()
+        graphs.clear()
+        capture_lock.give_back(stream)
+    except Exception:                                                # noqa: BLE001
+        pass
+
+
+class _HostBlobs:
+    """SPD-201: a packed draft's walk blobs and log-probabilities brought to the host in one copy behind
+    the replay; the first block that reads waits once, the others read what is there. The values are the
+    ones each block's own `walk_host_logp` copies."""
+
+    def __init__(self, blob: torch.Tensor, logp: torch.Tensor):
+        self.blob, self.logp = blob, logp
+        self.hb = torch.empty(blob.shape, dtype=blob.dtype, pin_memory=True)
+        self.hl = torch.empty(logp.shape, dtype=logp.dtype, pin_memory=True)
+        self.ev = torch.cuda.Event()
+        self.lists = None
+
+    def fetch(self) -> None:
+        self.hb.copy_(self.blob, non_blocking=True)
+        self.hl.copy_(self.logp, non_blocking=True)
+        self.ev.record()
+        self.lists = None
+        self._waited = False
+
+    def get_raw(self, e: int) -> tuple:
+        """Block `e`'s blob and log-probabilities as the pinned host tensors (engine/native_tree.py reads
+        them in place), after the one wait."""
+        if not getattr(self, "_waited", False):
+            self.ev.synchronize()
+            self._waited = True
+        return self.hb[e], self.hl[e]
+
+    def get(self, e: int) -> tuple[list, list]:
+        if self.lists is None:
+            self.ev.synchronize()
+            self.lists = (self.hb.tolist(), self.hl.tolist())
+        return self.lists[0][e], self.lists[1][e]
 
 
 _PACKED: dict = {}
+#: SPD-157: packed-draft graph sets kept at most (one per ordered set of drafters); the least recently used
+#: goes first. With slots packed in slot order a box sees few sets, but subsets of 8 slots are 247
+_PACKED_MAX = 24
 
 
 #: the packed draft from CUDA graphs (False: eager, for the board check's comparison)
 PACKED_GRAPH = True
+#: SPD-201 (QWEN38_ROUND_LOG_LATTICE): each packed block's selector-projected hidden kept on its drafter
+#: (`_pred_proj`, [L, r]) for the round logger
+from engine.settings import SETTINGS as _S  # noqa: E402
+LOG_PROJ = _S.get("ROUND_LOG_LATTICE") == "1"
+#: SPD-201: the batched packed draft's walk blobs and log-probabilities for every block in one copy and one
+#: wait (`_HostBlobs`), not a copy, a sync and two launches a block. 0: each block's own
+HOST_ONE = _S.get("DF2_PACK_HOST1") == "1"
 
 
 def packed_draft(reqs: list, graph: bool | None = None) -> list:
@@ -241,20 +449,35 @@ def packed_draft(reqs: list, graph: bool | None = None) -> list:
     `reqs` = [(drafter, anchor, pos0)]; returns each one's `(cand, scores[, logp])` -- static
     graph buffers with `graph` (read them before the same set's next packed call)."""
     from engine import model as M
+    from engine.drafters.dflash2 import flush_syncs
     ds = [r[0] for r in reqs]
+    flush_syncs(ds)                    # SPD-161: every slot's pending sync in one call, before the read
     # each drafter builds its own module object over the one cached weight dict (dflash2
     # `load_weights`); a module holds nothing but those weights, so one set of weights is one module
     if any(d.module.w is not ds[0].module.w for d in ds):
         raise ValueError("a packed draft runs one drafter checkpoint")
     temp = float(ds[0].tree_temp) if M.HOST_ASYNC else None
+    win = int(ds[0].cfg.sliding_window)
+    span = max(_span(p, win) for _, _, p in reqs)
+    for d, _, p in reqs:
+        cover_window(d, p, span, win)                       # SPD-223
     graph = PACKED_GRAPH if graph is None else graph
     if graph and torch.cuda.is_available():
         key = tuple(id(d) for d in ds)
-        pg = _PACKED.get(key)
-        if pg is None or pg.ptrs != tuple(d._ck.data_ptr() for d in ds):
-            pg = _PACKED[key] = PackedDraftGraph(tuple(ds))
+        pg = _PACKED.pop(key, None)
+        if pg is None or pg.ptrs != tuple(DraftGraph.pointers(d) for d in ds):
+            pg = PackedDraftGraph(tuple(ds))
+        _PACKED[key] = pg                          # most recently used last
+        while len(_PACKED) > _PACKED_MAX:
+            _PACKED.pop(next(iter(_PACKED)))
         return pg.run(reqs, temp)
     dev = ds[0].eng.device
     scals = [torch.tensor([a, p, d.ctx_len], dtype=torch.long, device=dev) for d, a, p in reqs]
     spans = [_span(p, int(ds[0].cfg.sliding_window)) for _, _, p in reqs]
-    return _packed_body(ds, scals, spans, temp)
+    projs = [] if LOG_PROJ else None
+    from engine.drafters.dflash2 import PACK_BATCH
+    out = (_packed_body_batched(ds, scals, max(spans), temp, projs) if PACK_BATCH
+           else _packed_body(ds, scals, spans, temp, projs))
+    for d, pj in zip(ds, projs or []):
+        d._pred_proj = pj
+    return out

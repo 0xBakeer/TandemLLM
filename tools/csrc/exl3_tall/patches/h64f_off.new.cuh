@@ -1,0 +1,1 @@
+const __half* xh = XH + (size_t)member * ((Mtot + 15) / 16 * 16) * Kin + (size_t)chunk * 64 * Kin;

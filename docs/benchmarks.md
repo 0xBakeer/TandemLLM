@@ -12,7 +12,7 @@ The numbers below are from bench 2.8.1.
 
 ## Two paths
 
-A benchmark of the model runs the plain engine. The `X-Tandem: raw` header serves it: no turn class, no notes, no effort change, the session monitor off ([server.md](server.md#tandemllm-and-the-conductor)). Run the default path, without the header, only when the conductor itself is under test. The two runs then differ in the conductor alone, and the decision journal shows what it added to each turn.
+A benchmark of the model runs the plain engine. The `X-Tandem: raw` header serves it: no turn class, no notes, no effort change, the session monitor off ([server.md](server.md#tandemllm-and-the-conductor)). A request with the header reads the persistent suffix store and never writes into it (SPD-151, [caches.md](caches.md#persistent-suffix-store)), so repeating the bench does not teach the engine its answers. Run the default path, without the header, only when the conductor itself is under test. The two runs then differ in the conductor alone, and the decision journal shows what it added to each turn.
 
 Without a header the bench, a client kind no profile maps that offers tools, gets the `tools` profile (SRV-621): the raw path's prompt ids, with the loop guards and the tool-call checks acting (D1, D1b, D2, E1, C3, C4). An answer that differs from the raw run's comes from a journaled monitor act or the secret echo mask (SRV-625: a key from a tool result repeated in the answer, `extra.secret_mask`). `--header X-Tandem-Profile=tools` names the profile; `--header X-Tandem-Profile=general` runs the profile the default path served before.
 

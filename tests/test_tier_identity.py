@@ -333,7 +333,7 @@ def test_nemotron_hs_manifest_is_pinned_and_a_left_out_module_moves_no_fingerpri
     with tempfile.TemporaryDirectory() as d:
         for sub in ("engine", "tools"):
             shutil.copytree(os.path.join(ROOT, sub), os.path.join(d, sub),
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so", "*.cu",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so",
                                                           "*.safetensors", "*.bin"))
         fp = mf.fingerprint(d, m, {})
         for rel in serving.LEFT_OUT:

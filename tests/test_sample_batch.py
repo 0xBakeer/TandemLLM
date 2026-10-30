@@ -176,6 +176,129 @@ def test_tree_walk_logits_falls_back():
     return "keyed / min_p / q requests fall back; an unseeded det walk takes the nucleus"
 
 
+def test_spd163_the_keyed_walk_batched_is_the_one_at_a_time_walk():
+    """A seeded request's tree walk with every keyed draw up front (`_tree_walk_keyed`): the same path,
+    the same tokens and the generator left in the same state as the one-draw-a-node walk, on random
+    trees whose rows put mass on the drafted tokens (so the walks go deep)."""
+    import random
+    rng = random.Random(5)
+    V, deep = 64, 0
+    for trial in range(200):
+        n = rng.randint(2, 16)
+        parents, path = [-1], [0]
+        for i in range(1, n):
+            path = path[:rng.randint(1, len(path))]
+            parents.append(path[-1])
+            path.append(i)
+        tokens = [rng.randrange(V) for _ in range(n)]
+        logits = torch.randn(n, V, generator=torch.Generator().manual_seed(trial))
+        for c in range(1, n):
+            logits[parents[c], tokens[c]] += rng.choice((0.0, 3.0, 6.0))
+        dists = torch.softmax(logits, -1)
+        start = rng.randint(0, 5000)
+        outs = []
+        for batch in (False, True):
+            sm = S.Sampler(temperature=1.0, seed=17 + trial)
+            old, S.BATCH = S.BATCH, batch
+            try:
+                pth, new = sm.tree_walk(dists, tokens, parents, start=start)
+            finally:
+                S.BATCH = old
+            outs.append((pth, new, sm.generator.get_state()))
+        (p0, n0, g0), (p1, n1, g1) = outs
+        assert p0 == p1 and n0 == n1, (trial, p0, p1)
+        assert torch.equal(g0, g1), f"trial {trial}: the generator's state differs"
+        deep += len(p0) > 2
+    assert deep > 20, deep
+    return f"200 random trees: paths, tokens and generator state equal ({deep} walks past depth 1)"
+
+
+def test_spd161_a_rounds_walks_in_one_batch_are_each_slots_own():
+    """`round_walks`: a joint round's slots walked together (greedy, seeded keyed, unseeded batched and
+    nucleus draws, two sampling profiles in one round) give each slot the path, the tokens and the generator
+    state of its own walk (`tree_walk_logits`, greedy: the argmax)."""
+    import copy
+    import random
+    rng = random.Random(9)
+    V = 80
+    keep = (S.BATCH, S.NUCLEUS, S.TOPP_K)
+    S.BATCH, S.NUCLEUS, S.TOPP_K = True, True, 16
+    try:
+        for trial in range(40):
+            specs, refs = [], []
+            for slot in range(rng.randint(2, 6)):
+                n = rng.randint(2, 12)
+                parents, path = [-1], [0]
+                for i in range(1, n):
+                    path = path[:rng.randint(1, len(path))]
+                    parents.append(path[-1])
+                    path.append(i)
+                tokens = [rng.randrange(V) for _ in range(n)]
+                rows = torch.randn(n, V, generator=torch.Generator().manual_seed(100 * trial + slot)) * 2
+                for c in range(1, n):
+                    rows[parents[c], tokens[c]] += rng.choice((0.0, 4.0))
+                kind = rng.choice(("greedy", "keyed", "batched", "nucleus"))
+                start = rng.randint(0, 900)
+                if kind == "greedy":
+                    sm = None
+                elif kind == "keyed":
+                    sm = S.Sampler(temperature=rng.choice((0.7, 1.0)), top_p=0.95, top_k=20, seed=trial * 7 + slot)
+                elif kind == "batched":
+                    sm = S.Sampler(temperature=1.0, top_p=0.95, top_k=20)
+                else:
+                    sm = S.Sampler(temperature=1.0, top_p=0.9)
+                if sm is not None:
+                    sm.generator = torch.Generator().manual_seed(trial * 31 + slot)
+                twin = copy.deepcopy(sm) if sm is not None else None
+                if twin is not None:
+                    twin.generator = torch.Generator()
+                    twin.generator.set_state(sm.generator.get_state())
+                specs.append(dict(sampler=sm, rows=rows, tokens=tokens, parents=parents, start=start, q=None,
+                                  picks=None))
+                if sm is None:
+                    refs.append(("picks", rows.argmax(-1).tolist()))
+                else:
+                    refs.append(("walk", twin.tree_walk_logits(rows, tokens, parents, start=start), twin))
+            got = S.round_walks(specs)
+            for sp, g, r in zip(specs, got, refs):
+                assert g is not None and g[0] == r[0], (g, r[0])
+                assert g[1] == r[1], (trial, sp["sampler"] and sp["sampler"].coupled, g[1], r[1])
+                if sp["sampler"] is not None:
+                    assert torch.equal(sp["sampler"].generator.get_state(), r[2].generator.get_state()), trial
+    finally:
+        S.BATCH, S.NUCLEUS, S.TOPP_K = keep
+    return "40 rounds of 2-6 slots of mixed kinds: every slot's path, tokens and generator state its own"
+
+
+def test_spd161_a_top_k_row_is_never_wide_so_the_sync_is_skipped():
+    """`_top_p_fast` after a top-k of at most TOPP_K: every finite logit is in the k0 taken, so no row is
+    wider than k0 and the skipped `wide.any()` would have been False; the filter equals the path that asks."""
+    keep = S.TOPP_K
+    S.TOPP_K = 64
+    try:
+        g = torch.Generator().manual_seed(3)
+        for trial in range(300):
+            k = int(torch.randint(1, 65, (1,), generator=g))
+            tp = float(torch.empty(1).uniform_(0.3, 0.999, generator=g))
+            sm = S.Sampler(temperature=float(torch.empty(1).uniform_(0.3, 1.5, generator=g)), top_p=tp, top_k=k)
+            rows = torch.randn(6, 500, generator=g) * float(torch.empty(1).uniform_(0.5, 8.0, generator=g))
+            got = sm._filter(rows)
+            x = rows / sm.temperature
+            cut = torch.topk(x, k, dim=-1).values[..., -1, None]
+            x = torch.where(x < cut, torch.full_like(x, float("-inf")), x)
+            vals = torch.topk(x, 64, dim=-1, sorted=True).values
+            cum = torch.cumsum(torch.exp(vals - torch.logsumexp(x, -1, keepdim=True)), -1)
+            assert not bool((cum[:, -1] <= tp).any()), (trial, k, tp)
+            # the asked path: k0 past the vocabulary's top-k bound forces the check (and it finds nothing)
+            sm2 = S.Sampler(temperature=sm.temperature, top_p=tp, top_k=k)
+            S.TOPP_K = 64
+            ref = sm2._top_p_fast(x, 64)
+            assert torch.equal(got, torch.softmax(ref, dim=-1)), trial
+    finally:
+        S.TOPP_K = keep
+    return "300 profiles: no top-k row is wide; the filter with the skip equals the asked path"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

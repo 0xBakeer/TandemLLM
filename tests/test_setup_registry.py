@@ -16,14 +16,15 @@ The test matrix:
      profiles, an unknown dependency, a cycle, a default whose dependency is off, a conflict on by
      default, YAML's on/off booleans as knob keys, an unknown asset, a docs file that is not there,
      a default out of range, a row of another build marked comparable, a non-comparable row without
-     its reason, a quality value without date, an unknown key   test_the_validator_rules
+     its reason, a quality value without date, an unknown key, a lanes default past the card's
+     measured max (SPD-245)                                  test_the_validator_rules
   6  a second folder lists with no code change; a broken file is reported while the others still
      list; a folder without model.yaml is skipped; a folder named after another id is refused
                                                             test_more_models
   7  models/schema/model.schema.json is the schema the code checks   test_the_schema_file
   8  the CLI: exit 0 on the seed, 1 and the YAML path on a bad file  test_the_cli
   9  the step schema: the eight steps in order, a field per tool, the profile and enum options, slots
-     up to the engine's 16 (a joint pass of 32 rows, 2 a chat at least)   test_wizard_fields, test_engine_max_slots
+     up to the setup's 64 (16 lanes a joint pass of 32 rows, 2 a lane; more lanes, more passes)   test_wizard_fields, test_engine_max_slots
                                                             test_wizard_fields
  10  a string a client sends is a plain value or nothing: newlines, $(...), quotes and spaces are
      refused, and numbers keep their range                  test_field_values
@@ -400,8 +401,11 @@ def test_the_validator_rules():
     x["profiles"][0]["made_by"]["repo"] = "not a repo"
     _refused(x, "made_by.repo")
     x = copy.deepcopy(d)
-    x["parallelism"]["slots"]["default"] = 9
-    _refused(x, "$.parallelism.slots: the default is outside min..max")
+    x["parallelism"]["slots"]["default"] = 65             # SRV-707: never past the engine's lanes
+    _refused(x, "$.parallelism.slots: the default is outside min..64")
+    x = copy.deepcopy(d)
+    x["parallelism"]["slots"]["max"] = 3                  # SPD-245: nor past the lanes the card measured
+    _refused(x, "$.parallelism.slots: the default 8 is past the max 3")
     x = copy.deepcopy(d)
     x["parallelism"]["fixed"]["QSE_X"] = "a b"
     _refused(x, "$.parallelism.fixed.QSE_X")
@@ -413,8 +417,11 @@ def test_more_models():
         shutil.copytree(os.path.join(ROOT, "docs"), os.path.join(root, "docs"))
         os.makedirs(os.path.join(md, "qwen3.8-27b"))
         shutil.copy(SEED, os.path.join(md, "qwen3.8-27b", "model.yaml"))
+        for sub in ("measurements", "community"):          # SPD-245: a speed row's raw file and its pack
+            shutil.copytree(os.path.join(ROOT, "models", "qwen3.8-27b", sub), os.path.join(md, "qwen3.8-27b", sub))
         d = _seed()
         d["id"], d["name"] = "other-9b", "Other-9B"
+        d.pop("parallel", None)                               # its rows name the 27B's files
         os.makedirs(os.path.join(md, "other-9b"))
         with open(os.path.join(md, "other-9b", "model.yaml"), "w") as fh:
             yaml.safe_dump(d, fh)
@@ -474,20 +481,24 @@ def test_wizard_fields():
     assert steps[2]["fields"][0]["options"] == [p["id"] for p in m["profiles"]]
     assert {f["field"] for f in steps[3]["fields"]} == {c["id"] for c in m["components"]}
     assert registry.step_field(m, "parallelism", "slots") == \
-        {"field": "slots", "label": "Parallel requests", "type": "int", "min": 1, "max": 16}
+        {"field": "slots", "label": "Parallel lanes", "type": "int", "min": 1, "max": 64}
     assert registry.step_field(m, 5, "reasoning_effort")["options"] == ["low", "medium", "xhigh"]
     assert registry.step_field(m, "methods", "nope") is None
     assert registry.step_field(m, "review", "slots") is None
 
 
 def test_engine_max_slots():
-    """The guide's cap on parallel chats is the engine's: a joint pass of 32 rows, 2 a chat at least."""
+    """SRV-707: a joint pass of 32 rows verifies 16 lanes at 2 rows each (JOINT_PASS_LANES); past it a
+    round runs more passes, so the guide's cap (64) is a sane typed count, not the engine's."""
     from server import slots
     meet = slots.Meeting()
-    assert registry.ENGINE_MAX_SLOTS == meet.max_rows // 2 == 16
-    n = registry.ENGINE_MAX_SLOTS
+    assert registry.JOINT_PASS_LANES == meet.max_rows // 2 == meet.per_pass() == 16
+    n = registry.JOINT_PASS_LANES
     assert slots.share(n, meet.max_rows) * n <= meet.max_rows
     assert slots.share(n + 1, meet.max_rows) * (n + 1) > meet.max_rows
+    assert registry.ENGINE_MAX_SLOTS == 64 > n
+    meet.pending = {i: slots.VerifyReq(i, None, None, [0, 0], 0) for i in range(registry.ENGINE_MAX_SLOTS)}
+    assert all(sum(r.rows for r in g) <= meet.max_rows for g in meet.batches())
 
 
 def test_slots_follow_the_engine_family():
@@ -505,15 +516,18 @@ def test_slots_follow_the_engine_family():
         assert s["engine_max"] == (registry.ENGINE_MAX_SLOTS if side else 1), (mid, s)
         assert (s["engine_max_reason"] is None) == side, (mid, s)
         assert registry.step_field(m, "parallelism", "slots")["max"] == s["engine_max"], mid
+    # SPD-217: Ornith's engine has side slots now (`Qwen35MoeEngine.verify_multi`)
     orn = models["ornith-1.5-122b"]
-    assert "one chat at a time" in orn["parallelism"]["slots"]["engine_max_reason"]
-    assert estimate.check(orn, {"model": orn["id"], "slots": 1})["slots"] == 1
-    try:
-        estimate.check(orn, {"model": orn["id"], "slots": 2})
-    except estimate.SelectionError as exc:
-        assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
-    else:
-        raise AssertionError("two chats on a model whose engine has no side slots")
+    assert orn["parallelism"]["slots"]["engine_max_reason"] is None
+    assert estimate.check(orn, {"model": orn["id"], "slots": 2})["slots"] == 2
+    one = [m for m in models.values() if not REGISTRY[m["engine"]].spec.side_slots]
+    for m in one:
+        try:
+            estimate.check(m, {"model": m["id"], "slots": 2})
+        except estimate.SelectionError as exc:
+            assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
+        else:
+            raise AssertionError(f"two chats on {m['id']}, whose engine has no side slots")
     fl = models["flint"]
     assert estimate.check(fl, {"model": fl["id"], "slots": 4})["slots"] == 4
     # a file that names no family is refused by name, not read as the 27B's

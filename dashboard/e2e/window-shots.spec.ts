@@ -1,6 +1,6 @@
 // VIS-199: pictures of the window steppers against the mock (Super VL, 1,048,576 tokens), phone
 // 390 px and desktop 1440 px, dark and light: the default (256k), the top rung (1M), a typed value
-// above the model with Next refused, and the extra chats held to the first chat's window. Into
+// above the model with Next refused, and how many chats can all hold the window (SRV-707). Into
 // screenshots/window-*.png (PW_SHOTS_DIR overrides it); the phone has no sideways scroll.
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, login, noHorizontalOverflow } from './helpers';
@@ -37,7 +37,7 @@ for (const size of ['390', 'desktop'] as const) {
   for (const theme of ['dark', 'light'] as const) {
     const tag = `${size}-${theme}`;
     const phone = size !== 'desktop';
-    test(`${tag}: default, 1M, above the model, the extra chats held`, async ({ page, request }) => {
+    test(`${tag}: default, 1M, above the model, the guarantee`, async ({ page, request }) => {
       await page.setViewportSize(SIZES[size]);
       await setupMock(request);
       await open(page, theme);
@@ -54,8 +54,8 @@ for (const size of ['390', 'desktop'] as const) {
       await shot(page, `3-above-model-${tag}`, phone);
       await setWindow(page, 'window', '128k');
       await page.locator('#pf-win-in').blur();
-      await expect(page.locator('[data-field="parallelism.side_window"] [data-win-max]')).toBeVisible();
-      await shot(page, `4-extra-held-${tag}`, phone, 'side_window');
+      await expect(page.locator('[data-lanes-full]')).toBeVisible();
+      await shot(page, `4-lanes-full-${tag}`, phone, 'slots');
       if (phone) expect(await noHorizontalOverflow(page)).toBe(true);
     });
   }

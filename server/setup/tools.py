@@ -26,7 +26,7 @@ import re
 from server.setup import registry
 
 NAMES = ("set_field", "toggle", "select_profile", "go_to_step", "next", "previous", "explain")
-PARALLEL = ("slots", "window", "side_window", "kv_pool", "floor_gb")
+PARALLEL = ("slots", "window", "kv_pool", "floor_gb")
 
 
 def explain_ids(m: dict) -> list[str]:

@@ -16,6 +16,10 @@ It refuses the production ledger (it is a test run).
 Words in the last user message steer it, for the e2e's error and edge states:
 
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
+    FAKE_POOL_FULL  the KV pool's gate refuses after five tokens (engine/kvpool.py `PoolFull`,
+                  SRV-709): the answer ends with the `memory_full` error
+    FAKE_POOL_FULL_ONCE  the same, the first time per message only (SRV-709: with another lane
+                  running, the lane gives way and goes on)
     FAKE_CALL_NOTOOLS  the answer calls a tool named `tool`, offered or not (SRV-247)
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
@@ -62,6 +66,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`
                   (SRV-425; the server reads it when `STATE["tool_format"]` is "pythonic", as the
                   LFM2.5 adapter sets it); FAKE_PYTHONIC_BAD the block's list never closes
+    FAKE_NATIVE_NOTOOLS  with or without `tools`: the answer opens with LFM2's Pythonic block, a
+                  `write_file` call with a long content, then a sentence (SRV-723)
     FAKE_ARGKEY     with `tools`: a sentence, then Flint's arg-key call to the first tool, a path and a
                   three-line content (`tool_format` "argkey", as the Flint adapter sets it);
                   FAKE_ARGKEY_BAD a block whose argument has no <arg_value>
@@ -294,6 +300,11 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     if tools and "FAKE_PYTHONIC" in user:
         inner = f"[{tools[0]}(city='Berlin', days=3" + ("" if "FAKE_PYTHONIC_BAD" in user else ")]")
         answer = "Let me look that up.<|tool_call_start|>" + inner + "<|tool_call_end|>"
+    if "FAKE_NATIVE_NOTOOLS" in user:
+        # SRV-723: the model's own call markup opening an answer to a request that offered no tools
+        # (LFM2.5's code answer to the card prompt), a sentence after the block
+        answer = ("<|tool_call_start|>[write_file(path='intervals.py', content='" + " ".join(words)
+                  + "')]<|tool_call_end|>\nBoth files are above.")
     if "FAKE_CALL_NOTOOLS" in user:
         # SRV-247: a call the request did not offer a tool for (the memory search as `tool`)
         answer = "Let me check my memory for that.\n\n" + _call("tool", user)
@@ -336,6 +347,9 @@ def fake_load(seconds: float, sleep=time.sleep) -> None:
         sleep(max(0.0, seconds) * share)
         print(line, flush=True)
 
+
+#: FAKE_POOL_FULL_ONCE: the messages that already met the full pool
+_POOL_FULL_SEEN: set = set()
 
 def load(app, a) -> None:
     """Put the fake in `app.STATE` and replace `app.generate_stream`. Called from `main()`."""
@@ -456,6 +470,15 @@ def load(app, a) -> None:
             for t in block:
                 if "FAKE_ERROR" in user and n == 5:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
+                if "FAKE_POOL_FULL_ONCE" in user and n == 5 and user not in _POOL_FULL_SEEN:
+                    _POOL_FULL_SEEN.add(user)
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot1 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL_ONCE)")
+                if "FAKE_POOL_FULL" in user and "FAKE_POOL_FULL_ONCE" not in user and n == 5:
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot0 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL)")
                 if n == 0:
                     bs.first()
                 if lpr is not None:
@@ -542,7 +565,9 @@ def load(app, a) -> None:
         answer_reserve=app.thinking_mod.parse_reserve(a.answer_reserve),
         pen_spec=app.PenaltySpec(a.rep_penalty, a.presence_penalty, a.frequency_penalty,
                                  a.no_repeat_ngram),
-        temperature=a.temperature, top_p=a.top_p, top_k=a.top_k, pattern_stop=None,
+        temperature=a.temperature, top_p=1.0 if a.top_p is None else a.top_p,
+        top_k=0 if a.top_k is None else a.top_k, sampling_flags={"top_p": a.top_p, "top_k": a.top_k},
+        pattern_stop=None,
         state_store=None, session_cache=False, prefix_cache=False, prefix_chunk=0,
         response_cache=None, suffix_store=None, suffix_scope="all",
         usage_default=(a.usage_default == "on"),

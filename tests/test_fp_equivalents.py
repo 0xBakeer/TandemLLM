@@ -36,7 +36,7 @@ def _tree(d):
     """A copy of the repository's `engine/` and `tools/` modules under `d`."""
     for sub in ("engine", "tools"):
         shutil.copytree(os.path.join(ROOT, sub), os.path.join(d, sub),
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so", "*.cu",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so",
                                                       "*.safetensors", "*.bin"))
     return d
 

@@ -45,6 +45,8 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
 
+from engine.settings import SETTINGS as _S
+
 _MASK64 = (1 << 64) - 1
 _GAMMA = 0x9E3779B97F4A7C15
 _M1 = 0xBF58476D1CE4E5B9
@@ -272,9 +274,11 @@ class DirectRows:
     False, said once by the caller)."""
 
     WAYS = 4
+    #: the reads in flight a miss batch (QWEN38_FN_PLE_THREADS; SPD-239: a joint pass's ~90 misses took ~8 ms at 16)
     THREADS = 16
 
     def __init__(self, path: str, offset: int, row_bytes: int, rows: int, cache_bytes: int):
+        self.THREADS = int(_S.get("FN_PLE_THREADS") or type(self).THREADS)
         self.path, self.offset, self.row_bytes, self.rows = path, int(offset), int(row_bytes), int(rows)
         self.words = self.row_bytes // 2
         try:

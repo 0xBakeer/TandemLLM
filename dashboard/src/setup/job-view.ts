@@ -105,9 +105,11 @@ export function finishedLines(job: SetupJob, tok: (n: number) => string): { titl
   if (s?.tools?.length) lines.push(`Tools: ${s.tools.join(', ')}`);
   if (s?.slots != null && s.window != null)
     lines.push(
-      s.slots > 1 && s.side_window != null
+      s.slots > 1 && s.side_window != null && s.side_window !== s.window
         ? `${s.slots} parallel chats: ${tok(s.window)} tokens for the first, ${tok(s.side_window)} for each of the other ${s.slots - 1}`
-        : `${s.slots} chat at a time, ${tok(s.window)} tokens`,
+        : s.slots > 1
+          ? `${s.slots} parallel chats, ${tok(s.window)} tokens each`
+          : `${s.slots} chat at a time, ${tok(s.window)} tokens`,
     );
   if (job.ended_at && job.created_at) lines.push(`Took ${durationText(job.ended_at - job.created_at)}`);
   if (job.removed?.removed.length) lines.push(`The old weights were removed: ${job.removed.freed_gb.toFixed(1)} GB freed`);

@@ -145,7 +145,9 @@ def overlay_values(m: dict, sel: dict) -> dict:
     k = p["knobs"]
     out[k["slots"]] = str(sel["slots"])
     out[k["window"]] = str(sel["window"])
-    out[k["side_window"]] = str(sel["side_window"])
+    # SRV-707: every lane the window; written so a profile's or an old serve.env's shorter side
+    # window does not stand
+    out[k["side_window"]] = str(sel["window"])
     out[k["kv_pool"]] = "on" if sel["kv_pool"] else "off"
     out[k["floor_gb"]] = f"{sel['floor_gb']:g}"
     out.update(p.get("fixed") or {})
@@ -293,8 +295,8 @@ def current_selection(m: dict) -> dict:
     par = m["parallelism"]
     for name, key in par["knobs"].items():
         v = env.get(key)
-        if v is None:
-            continue
+        if v is None or name == "side_window":
+            continue                     # SRV-707: the side window is the window, never chosen
         if name == "kv_pool":
             if v in ("on", "off"):
                 body[name] = v == "on"
@@ -720,14 +722,13 @@ def events_from(jid: str, offset: int = 0, after: int = 0) -> tuple[list[dict], 
 
 def job_summary(m: dict, sel: dict) -> dict:
     """VIS-211: what the install sets up, in the words of the page's finished screen: the model,
-    the weights, the tools that are on, the parallel chats and their windows."""
+    the weights, the tools that are on, the parallel lanes and their window (one for all, SRV-707)."""
     prof = registry.profile(m, sel["profile"]) or {}
     return {"model": m.get("name") or m["id"], "profile": sel["profile"],
             "profile_label": prof.get("label") or sel["profile"],
             "tools": [c["label"] for c in m["components"]
                       if sel["components"].get(c["id"]) and not c.get("required")],
-            "slots": sel.get("slots"), "window": sel.get("window"),
-            "side_window": sel.get("side_window")}
+            "slots": sel.get("slots"), "window": sel.get("window")}
 
 
 def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
@@ -813,8 +814,8 @@ def diagnostics(jid: str, n_lines: int = 200) -> str | None:
     except Exception as exc:                                      # noqa: BLE001
         out.append(f"tandem doctor now: did not run ({type(exc).__name__})")
     sel = spec.get("selection") or {}
-    out += ["", "selection: " + json.dumps({k: sel.get(k) for k in ("profile", "slots", "window", "side_window",
-                                                                    "kv_pool", "components")}, sort_keys=True)]
+    out += ["", "selection: " + json.dumps({k: sel.get(k) for k in ("profile", "slots", "window", "kv_pool",
+                                                                    "components")}, sort_keys=True)]
     logs = [e["event"].get("line", "") for e in events(jid) if e["event"].get("type") == "log"]
     out += ["", f"log (the last {min(n_lines, len(logs))} of {len(logs)} lines):"] + logs[-n_lines:]
     text, _ = redact("\n".join(out) + "\n")

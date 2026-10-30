@@ -34,6 +34,8 @@ def env(m: dict, c: dict, d: str) -> str:
              'QSE_ENGINE_FLAGS="--model ${QSE_WEIGHTS_DIR} --drafter mtp ${QSE_NH_HEAD:+--draft-head $QSE_NH_HEAD --depth 3}"',
              'QSE_PAGE_CACHE_DROP="${QSE_WEIGHTS_DIR}"',
              f"VISION={'on' if c['modalities']['image'] else 'off'}",
+             # SPD-167: a text-only pack's limit, which setup.env cannot turn back on (ops/serve.env)
+             *([] if c["modalities"]["image"] else ["QSE_PACK_VISION=off"]),
              f'QSE_DISK_CACHE="${{HOME}}/.qwen38-spark-engine/cache/disk-community-{c["id"]}"']
     return "\n".join(lines) + "\n"
 

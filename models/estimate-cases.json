@@ -230,18 +230,12 @@
   "parallelism": {
    "slots": {
     "min": 1,
-    "max": 4,
-    "default": 4,
-    "engine_max": 16,
+    "max": 8,
+    "default": 8,
+    "engine_max": 64,
     "engine_max_reason": null
    },
    "window": {
-    "min": 8192,
-    "max": 262144,
-    "default": 262144,
-    "step": 8192
-   },
-   "side_window": {
     "min": 8192,
     "max": 262144,
     "default": 262144,
@@ -510,9 +504,9 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 1,
-     "default": 1,
-     "engine_max": 16,
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
      "engine_max_reason": null
     },
     "window": {
@@ -521,14 +515,8 @@
      "default": 262144,
      "step": 4096
     },
-    "side_window": {
-     "min": 8192,
-     "max": 262144,
-     "default": 262144,
-     "step": 4096
-    },
     "kv_pool": {
-     "default": false
+     "default": true
     },
     "floor_gb": {
      "min": 10,
@@ -700,21 +688,15 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 1,
-     "default": 1,
-     "engine_max": 16,
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
      "engine_max_reason": null
     },
     "window": {
      "min": 8192,
      "max": 262144,
      "default": 262144,
-     "step": 4096
-    },
-    "side_window": {
-     "min": 8192,
-     "max": 262144,
-     "default": 65536,
      "step": 4096
     },
     "kv_pool": {
@@ -873,21 +855,15 @@
    "parallelism": {
     "slots": {
      "min": 1,
-     "max": 1,
-     "default": 1,
-     "engine_max": 1,
-     "engine_max_reason": "Ornith-1.5-122B serves one chat at a time for now: its engine has no side slots yet."
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
+     "engine_max_reason": null
     },
     "window": {
      "min": 8192,
      "max": 262144,
      "default": 262144,
-     "step": 4096
-    },
-    "side_window": {
-     "min": 8192,
-     "max": 262144,
-     "default": 65536,
      "step": 4096
     },
     "kv_pool": {
@@ -922,7 +898,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 57.76,
+    "total_gb": 75.55,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -960,8 +936,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1013,21 +989,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 622607,
+    "context_tokens_fit": 574730,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 61.9,
+    "kv_worst_gb": 208.5,
+    "room_gb": 57.14,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 42.35 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 622,607 tokens of conversation fit in all, 155,651 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 151.36 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 574,730 tokens of conversation fit in all, 71,841 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1039,7 +1017,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 59.19,
+    "total_gb": 76.98,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1077,8 +1055,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1130,21 +1108,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 608224,
+    "context_tokens_fit": 560346,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 60.47,
+    "kv_worst_gb": 208.5,
+    "room_gb": 55.71,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 43.78 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 608,224 tokens of conversation fit in all, 152,056 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.79 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 560,346 tokens of conversation fit in all, 70,043 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1156,7 +1136,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 60.78,
+    "total_gb": 78.57,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1194,8 +1174,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1247,21 +1227,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 592231,
+    "context_tokens_fit": 544354,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 58.88,
+    "kv_worst_gb": 208.5,
+    "room_gb": 54.12,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 45.37 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 592,231 tokens of conversation fit in all, 148,057 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.38 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 544,354 tokens of conversation fit in all, 68,044 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1273,7 +1255,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 62.37,
+    "total_gb": 80.16,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1311,8 +1293,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1364,21 +1346,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 576239,
+    "context_tokens_fit": 528361,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 57.29,
+    "kv_worst_gb": 208.5,
+    "room_gb": 52.53,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 46.96 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 576,239 tokens of conversation fit in all, 144,059 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.97 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 528,361 tokens of conversation fit in all, 66,045 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1390,7 +1374,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1428,8 +1412,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1481,21 +1465,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1507,7 +1493,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 68.26,
+    "total_gb": 86.05,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1545,8 +1531,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1598,21 +1584,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 516995,
+    "context_tokens_fit": 469118,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 51.4,
+    "kv_worst_gb": 208.5,
+    "room_gb": 46.64,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 52.85 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 516,995 tokens of conversation fit in all, 129,248 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 161.86 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 469,118 tokens of conversation fit in all, 58,639 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1624,7 +1612,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 64.53,
+    "total_gb": 82.32,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1662,8 +1650,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1715,21 +1703,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 554513,
+    "context_tokens_fit": 506635,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.13,
+    "kv_worst_gb": 208.5,
+    "room_gb": 50.37,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 49.12 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 554,513 tokens of conversation fit in all, 138,628 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 158.13 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 506,635 tokens of conversation fit in all, 63,329 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1743,7 +1733,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.56,
+    "total_gb": 81.35,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1781,8 +1771,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1828,21 +1818,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 564269,
+    "context_tokens_fit": 516392,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 56.1,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.34,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.15 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 564,269 tokens of conversation fit in all, 141,067 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.16 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 516,392 tokens of conversation fit in all, 64,549 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1859,7 +1851,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 60.63,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1897,8 +1889,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -1937,21 +1929,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 593740,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 59.03,
+    "kv_worst_gb": 208.5,
+    "room_gb": 54.27,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 45.22 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 593,740 tokens of conversation fit in all, 148,435 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1965,7 +1959,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 67.35,
+    "total_gb": 85.14,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2003,8 +1997,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2062,21 +2056,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 526148,
+    "context_tokens_fit": 478271,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 52.31,
+    "kv_worst_gb": 208.5,
+    "room_gb": 47.55,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 160.95 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 478,271 tokens of conversation fit in all, 59,783 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2090,7 +2086,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 62.15,
+    "total_gb": 79.94,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2128,8 +2124,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2175,21 +2171,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 578451,
+    "context_tokens_fit": 530574,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 57.51,
+    "kv_worst_gb": 208.5,
+    "room_gb": 52.75,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 46.74 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 578,451 tokens of conversation fit in all, 144,612 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.75 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 530,574 tokens of conversation fit in all, 66,321 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2203,7 +2201,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 62.23,
+    "total_gb": 80.02,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2241,8 +2239,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2287,21 +2285,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 577647,
+    "context_tokens_fit": 529769,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 57.43,
+    "kv_worst_gb": 208.5,
+    "room_gb": 52.67,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 46.82 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 577,647 tokens of conversation fit in all, 144,411 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 529,769 tokens of conversation fit in all, 66,221 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2315,7 +2315,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 62.89,
+    "total_gb": 80.68,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2353,8 +2353,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2399,21 +2399,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 571008,
+    "context_tokens_fit": 523131,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 56.77,
+    "kv_worst_gb": 208.5,
+    "room_gb": 52.01,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 47.48 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 571,008 tokens of conversation fit in all, 142,752 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.49 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 523,131 tokens of conversation fit in all, 65,391 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2427,7 +2429,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.32,
+    "total_gb": 81.11,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2465,8 +2467,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2511,21 +2513,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 566683,
+    "context_tokens_fit": 518806,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 56.34,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.58,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 47.91 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 566,683 tokens of conversation fit in all, 141,670 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.92 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 518,806 tokens of conversation fit in all, 64,850 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2539,7 +2543,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.26,
+    "total_gb": 81.05,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2577,8 +2581,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2623,21 +2627,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 567287,
+    "context_tokens_fit": 519409,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 56.4,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.64,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 47.85 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 567,287 tokens of conversation fit in all, 141,821 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.86 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 519,409 tokens of conversation fit in all, 64,926 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2651,7 +2657,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 64.0,
+    "total_gb": 81.79,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2689,8 +2695,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2748,21 +2754,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 559844,
+    "context_tokens_fit": 511966,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.66,
+    "kv_worst_gb": 208.5,
+    "room_gb": 50.9,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.59 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 559,844 tokens of conversation fit in all, 139,961 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.60 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 511,966 tokens of conversation fit in all, 63,995 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2777,7 +2785,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2815,8 +2823,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2868,21 +2876,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2896,7 +2906,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2934,8 +2944,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -2987,21 +2997,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -3015,7 +3027,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3053,8 +3065,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -3106,26 +3118,28 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "1 slot(s)",
+   "name": "1 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
     "slots": 1
@@ -3229,13 +3243,15 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
     "room_gb": 59.48,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "About 598,266 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "About 598,266 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "2 slot(s)",
+   "name": "2 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
     "slots": 2
@@ -3345,13 +3361,16 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 52.12,
     "room_gb": 58.29,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "About 586,297 tokens of conversation fit in all, 262,144 a slot when all 2 are full (the window is 262,144)."
+     "All 2 lanes can hold the full 262,144-token window at once (26.06 GiB each).",
+     "About 586,297 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "3 slot(s)",
+   "name": "3 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
     "slots": 3
@@ -3461,14 +3480,16 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 78.19,
     "room_gb": 57.1,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 21.09 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 574,327 tokens of conversation fit in all, 191,442 a slot when all 3 are full (the window is 262,144)."
+     "2 of 3 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 21.09 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 574,327 tokens of conversation fit in all, 191,442 a lane when all 3 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "4 slot(s)",
+   "name": "4 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
     "slots": 4
@@ -3578,21 +3599,142 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 104.25,
     "room_gb": 55.91,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "2 of 4 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 48.34 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 562,358 tokens of conversation fit in all, 140,589 a lane when all 4 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "window 8,192 on every slot",
+   "name": "8 lanes, the default",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 8
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 81.54,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 208.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 514481,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
+    "notes": [
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "window 8,192 on every lane",
    "selection": {
     "model": "qwen3.8-27b",
     "window": 8192
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 53.98,
+    "total_gb": 62.0,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3630,8 +3772,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -3683,32 +3825,35 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 3.26,
+      "gb": 6.52,
       "kind": "kv",
-      "worst_gb": 3.26
+      "worst_gb": 6.52
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.26,
-    "room_gb": 55.91,
+    "kv_worst_gb": 6.52,
+    "room_gb": 51.15,
+    "lane_full_gb": 0.81,
+    "lanes_full": 8,
     "notes": [
-     "About 562,358 tokens of conversation fit in all, 8,192 a slot when all 4 are full (the window is 8,192)."
+     "All 8 lanes can hold the full 8,192-token window at once (0.81 GiB each).",
+     "About 514,481 tokens of conversation fit in all, 8,192 a lane when all 8 are full (the window is 8,192)."
     ]
    }
   },
   {
-   "name": "window 32,768 on every slot",
+   "name": "window 32,768 on every lane",
    "selection": {
     "model": "qwen3.8-27b",
     "window": 32768
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3746,8 +3891,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -3799,27 +3944,508 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 13.03
+      "worst_gb": 26.06
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 13.03,
-    "room_gb": 55.91,
+    "kv_worst_gb": 26.06,
+    "room_gb": 51.15,
+    "lane_full_gb": 3.26,
+    "lanes_full": 8,
     "notes": [
-     "About 562,358 tokens of conversation fit in all, 32,768 a slot when all 4 are full (the window is 32,768)."
+     "All 8 lanes can hold the full 32,768-token window at once (3.26 GiB each).",
+     "About 514,481 tokens of conversation fit in all, 32,768 a lane when all 8 are full (the window is 32,768)."
     ]
    }
   },
   {
-   "name": "window 65,536 on every slot",
+   "name": "window 65,536 on every lane",
    "selection": {
     "model": "qwen3.8-27b",
+    "window": 65536
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 81.54,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 52.12
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 514481,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 52.12,
+    "room_gb": 51.15,
+    "lane_full_gb": 6.52,
+    "lanes_full": 7,
+    "notes": [
+     "7 of 8 lanes can hold the full 65,536-token window at once (6.52 GiB each); every lane at it would need 0.98 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 65,536)."
+    ]
+   }
+  },
+  {
+   "name": "window 131,072 on every lane",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 81.54,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 514481,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 51.15,
+    "lane_full_gb": 13.03,
+    "lanes_full": 3,
+    "notes": [
+     "3 of 8 lanes can hold the full 131,072-token window at once (13.03 GiB each); every lane at it would need 53.10 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "window 262,144 on every lane",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 81.54,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 208.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 514481,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
+    "notes": [
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "an older page's side window is read as nothing",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 262144,
+    "side_window": 32768
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 81.54,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 208.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 514481,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
+    "notes": [
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "4 lanes of 65,536: every lane can hold the full window",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 4,
     "window": 65536
    },
    "expect": {
@@ -3927,358 +4553,11 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
     "room_gb": 55.91,
+    "lane_full_gb": 6.52,
+    "lanes_full": 4,
     "notes": [
-     "About 562,358 tokens of conversation fit in all, 65,536 a slot when all 4 are full (the window is 65,536)."
-    ]
-   }
-  },
-  {
-   "name": "window 131,072 on every slot",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 131072
-   },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 63.75,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 4.5 bpw)",
-      "gb": 16.14,
-      "kind": "fixed"
-     },
-     {
-      "id": "graphs",
-      "label": "CUDA graphs (the verify step)",
-      "gb": 6.63,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state and warm-up workspace",
-      "gb": 1.28,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.6,
-      "kind": "reserve"
-     },
-     {
-      "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
-      "kind": "fixed"
-     },
-     {
-      "id": "drafters",
-      "label": "Draft models",
-      "gb": 5.41,
-      "kind": "fixed"
-     },
-     {
-      "id": "lookup",
-      "label": "Lookup store",
-      "gb": 0.19,
-      "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
-      "id": "vision",
-      "label": "Vision",
-      "gb": 0.86,
-      "kind": "reserve",
-      "worst_gb": 1.36
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
-      "kind": "kv",
-      "worst_gb": 52.12
-     }
-    ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 562358,
-    "kv_bytes_per_token": 106752,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 52.12,
-    "room_gb": 55.91,
-    "notes": [
-     "About 562,358 tokens of conversation fit in all, 131,072 a slot when all 4 are full (the window is 131,072)."
-    ]
-   }
-  },
-  {
-   "name": "window 262,144 on every slot",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 262144
-   },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 63.75,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 4.5 bpw)",
-      "gb": 16.14,
-      "kind": "fixed"
-     },
-     {
-      "id": "graphs",
-      "label": "CUDA graphs (the verify step)",
-      "gb": 6.63,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state and warm-up workspace",
-      "gb": 1.28,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.6,
-      "kind": "reserve"
-     },
-     {
-      "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
-      "kind": "fixed"
-     },
-     {
-      "id": "drafters",
-      "label": "Draft models",
-      "gb": 5.41,
-      "kind": "fixed"
-     },
-     {
-      "id": "lookup",
-      "label": "Lookup store",
-      "gb": 0.19,
-      "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
-      "id": "vision",
-      "label": "Vision",
-      "gb": 0.86,
-      "kind": "reserve",
-      "worst_gb": 1.36
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
-      "kind": "kv",
-      "worst_gb": 104.25
-     }
-    ],
-    "fits": true,
-    "fits_worst": false,
-    "context_tokens_fit": 562358,
-    "kv_bytes_per_token": 106752,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
-    "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
-    ]
-   }
-  },
-  {
-   "name": "one long window, three short ones",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 262144,
-    "side_window": 32768
-   },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 63.75,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 4.5 bpw)",
-      "gb": 16.14,
-      "kind": "fixed"
-     },
-     {
-      "id": "graphs",
-      "label": "CUDA graphs (the verify step)",
-      "gb": 6.63,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state and warm-up workspace",
-      "gb": 1.28,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.6,
-      "kind": "reserve"
-     },
-     {
-      "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
-      "kind": "fixed"
-     },
-     {
-      "id": "drafters",
-      "label": "Draft models",
-      "gb": 5.41,
-      "kind": "fixed"
-     },
-     {
-      "id": "lookup",
-      "label": "Lookup store",
-      "gb": 0.19,
-      "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
-      "id": "vision",
-      "label": "Vision",
-      "gb": 0.86,
-      "kind": "reserve",
-      "worst_gb": 1.36
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
-      "kind": "kv",
-      "worst_gb": 35.84
-     }
-    ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 562358,
-    "kv_bytes_per_token": 106752,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 35.84,
-    "room_gb": 55.91,
-    "notes": [
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "All 4 lanes can hold the full 65,536-token window at once (6.52 GiB each).",
+     "About 562,358 tokens of conversation fit in all, 65,536 a lane when all 4 are full (the window is 65,536)."
     ]
    }
   },
@@ -4286,7 +4565,8 @@
    "name": "pool off, 4 x 262,144: over the budget",
    "selection": {
     "model": "qwen3.8-27b",
-    "kv_pool": false
+    "kv_pool": false,
+    "slots": 4
    },
    "expect": {
     "contract_version": "1.0",
@@ -4393,11 +4673,13 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 104.25,
     "room_gb": 55.91,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
      "Over the budget by 48.34 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "About 562,358 tokens of conversation fit in all, 140,589 a lane when all 4 are full (the window is 262,144)."
     ]
    }
   },
@@ -4514,8 +4796,11 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 13.03,
     "room_gb": 58.29,
+    "lane_full_gb": 6.52,
+    "lanes_full": 2,
     "notes": [
-     "About 586,297 tokens of conversation fit in all, 65,536 a slot when all 2 are full (the window is 65,536)."
+     "All 2 lanes can hold the full 65,536-token window at once (6.52 GiB each).",
+     "About 586,297 tokens of conversation fit in all, 65,536 a lane when all 2 are full (the window is 65,536)."
     ]
    }
   },
@@ -4626,8 +4911,10 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
     "room_gb": 65.47,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "About 658,515 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "About 658,515 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
     ]
    }
   },
@@ -4639,7 +4926,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 10.0,
@@ -4677,8 +4964,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -4730,21 +5017,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 612650,
+    "context_tokens_fit": 564772,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 60.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 56.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
     "notes": [
-     "With every slot at its full window the conversations would need 43.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 612,650 tokens of conversation fit in all, 153,162 a slot when all 4 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 564,772 tokens of conversation fit in all, 70,596 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -4756,7 +5045,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 40.0,
@@ -4794,8 +5083,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -4847,21 +5136,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 310901,
+    "context_tokens_fit": 263024,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 30.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 26.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 73.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 310,901 tokens of conversation fit in all, 77,725 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 182.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 263,024 tokens of conversation fit in all, 32,878 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -4878,7 +5169,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 159.73,
+    "total_gb": 268.74,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4916,8 +5207,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -4975,23 +5266,25 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 104.25,
+      "gb": 208.5,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 466603,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 51.15,
+    "kv_worst_gb": 208.5,
+    "room_gb": 46.39,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "Over the budget by 53.10 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 6.0 bpw) 20.65 GiB, The OS and other programs 10.00 GiB.",
+     "Over the budget by 162.11 GiB. The largest parts: Conversations (KV), every window at load 208.50 GiB, Weights (EXL3 6.0 bpw) 20.65 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 514,481 tokens of conversation fit in all, 128,620 a slot when all 4 are full (the window is 262,144)."
+     "About 466,603 tokens of conversation fit in all, 58,325 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5077,8 +5370,10 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 0.81,
     "room_gb": 70.56,
+    "lane_full_gb": 0.81,
+    "lanes_full": 1,
     "notes": [
-     "About 709,712 tokens of conversation fit in all, 8,192 a slot when all 1 are full (the window is 8,192)."
+     "About 709,712 tokens of conversation fit in all, 8,192 a lane when all 1 are full (the window is 8,192)."
     ]
    }
   },
@@ -5089,8 +5384,7 @@
     "floor_gb": 34.2,
     "kv_pool": false,
     "slots": 2,
-    "window": 262144,
-    "side_window": 131072
+    "window": 196608
    },
    "expect": {
     "contract_version": "1.0",
@@ -5197,8 +5491,11 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 39.09,
     "room_gb": 39.09,
+    "lane_full_gb": 19.55,
+    "lanes_full": 1,
     "notes": [
-     "About 393,178 tokens of conversation fit in all, 196,589 a slot when all 2 are full (the window is 262,144)."
+     "All 2 lanes can hold the full 196,608-token window at once (19.55 GiB each).",
+     "About 393,178 tokens of conversation fit in all, 196,589 a lane when all 2 are full (the window is 196,608)."
     ]
    }
   },
@@ -5209,8 +5506,7 @@
     "floor_gb": 34.21,
     "kv_pool": false,
     "slots": 2,
-    "window": 262144,
-    "side_window": 131072
+    "window": 196608
    },
    "expect": {
     "contract_version": "1.0",
@@ -5317,11 +5613,13 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 39.09,
     "room_gb": 39.08,
+    "lane_full_gb": 19.55,
+    "lanes_full": 1,
     "notes": [
      "Over the budget by 0.01 GiB. The largest parts: Conversations (KV), every window at load 39.09 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 393,077 tokens of conversation fit in all, 196,538 a slot when all 2 are full (the window is 262,144)."
+     "About 393,077 tokens of conversation fit in all, 196,538 a lane when all 2 are full (the window is 196,608)."
     ]
    }
   },
@@ -5338,7 +5636,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 81.54,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5376,8 +5674,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
       "kind": "fixed"
      },
      {
@@ -5429,21 +5727,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 104.25
+      "worst_gb": 208.5
      }
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 514481,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "kv_worst_gb": 208.5,
+    "room_gb": 51.15,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
-     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5559,13 +5859,16 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 16.29,
     "room_gb": 54.72,
+    "lane_full_gb": 3.26,
+    "lanes_full": 5,
     "notes": [
-     "About 550,389 tokens of conversation fit in all, 32,768 a slot when all 5 are full (the window is 32,768)."
+     "All 5 lanes can hold the full 32,768-token window at once (3.26 GiB each).",
+     "About 550,389 tokens of conversation fit in all, 32,768 a lane when all 5 are full (the window is 32,768)."
     ]
    }
   },
   {
-   "name": "16 slots, the engine's limit, pool off: over the budget",
+   "name": "16 slots, pool off: over the budget",
    "selection": {
     "model": "qwen3.8-27b",
     "slots": 16,
@@ -5676,68 +5979,26 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 417.0,
     "room_gb": 41.63,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
     "notes": [
      "Over the budget by 375.37 GiB. The largest parts: Conversations (KV), every window at load 417.00 GiB, 15 more slot(s), beyond their KV 17.85 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 418,726 tokens of conversation fit in all, 26,170 a slot when all 16 are full (the window is 262,144)."
+     "About 418,726 tokens of conversation fit in all, 26,170 a lane when all 16 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "refused: slots 17, above the engine's limit",
+   "name": "24 lanes of 32,768: past one joint pass, memory decides",
    "selection": {
     "model": "qwen3.8-27b",
-    "slots": 17
-   },
-   "error": {
-    "status": 422,
-    "code": "out_of_range"
-   }
-  },
-  {
-   "name": "refused: window 512",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 512
-   },
-   "error": {
-    "status": 422,
-    "code": "out_of_range"
-   }
-  },
-  {
-   "name": "refused: a window off the 8,192 step",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 100000
-   },
-   "error": {
-    "status": 422,
-    "code": "off_step"
-   }
-  },
-  {
-   "name": "refused: a side window off the step",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "side_window": 20000
-   },
-   "error": {
-    "status": 422,
-    "code": "off_step"
-   }
-  },
-  {
-   "name": "a side window longer than the window is the window",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "window": 32768,
-    "side_window": 262144
+    "slots": 24,
+    "window": 32768
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 152.71,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5775,8 +6036,8 @@
      },
      {
       "id": "side_slots",
-      "label": "3 more slot(s), beyond their KV",
-      "gb": 3.57,
+      "label": "23 more slot(s), beyond their KV",
+      "gb": 27.37,
       "kind": "fixed"
      },
      {
@@ -5828,21 +6089,58 @@
      {
       "id": "kv",
       "label": "Conversations (KV), committed as they grow",
-      "gb": 13.03,
+      "gb": 78.19,
       "kind": "kv",
-      "worst_gb": 13.03
+      "worst_gb": 78.19
      }
     ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 562358,
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 322971,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 13.03,
-    "room_gb": 55.91,
+    "kv_worst_gb": 78.19,
+    "room_gb": 32.11,
+    "lane_full_gb": 3.26,
+    "lanes_full": 9,
     "notes": [
-     "About 562,358 tokens of conversation fit in all, 32,768 a slot when all 4 are full (the window is 32,768)."
+     "Over the budget by 46.08 GiB. The largest parts: Conversations (KV), committed as they grow 78.19 GiB, 23 more slot(s), beyond their KV 27.37 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 322,971 tokens of conversation fit in all, 13,457 a lane when all 24 are full (the window is 32,768)."
     ]
+   }
+  },
+  {
+   "name": "refused: slots 65, above the setup's limit",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 65
+   },
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
+   }
+  },
+  {
+   "name": "refused: window 512",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 512
+   },
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
+   }
+  },
+  {
+   "name": "refused: a window off the 8,192 step",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 100000
+   },
+   "error": {
+    "status": 422,
+    "code": "off_step"
    }
   },
   {
@@ -5889,7 +6187,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 93.55,
+    "total_gb": 97.34,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5938,6 +6236,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -5960,21 +6264,24 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 3.79,
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 3.79
+      "worst_gb": 30.31
      }
     ],
     "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits_worst": false,
+    "context_tokens_fit": 583591,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.79,
+    "kv_worst_gb": 30.31,
     "room_gb": 16.87,
+    "lane_full_gb": 3.79,
+    "lanes_full": 4,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+     "4 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 13.44 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 583,591 tokens of conversation fit in all, 72,948 a lane when all 8 are full (the window is 131,072)."
     ]
    }
   },
@@ -6036,6 +6343,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6058,21 +6371,24 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
+      "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 7.58
+      "worst_gb": 60.62
      }
     ],
     "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits_worst": false,
+    "context_tokens_fit": 406504,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.58,
+    "kv_worst_gb": 60.62,
     "room_gb": 11.75,
+    "lane_full_gb": 7.58,
+    "lanes_full": 1,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 48.87 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 406,504 tokens of conversation fit in all, 50,813 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6085,7 +6401,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 86.13,
+    "total_gb": 89.92,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6134,6 +6450,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6156,21 +6478,24 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 3.79,
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 3.79
+      "worst_gb": 30.31
      }
     ],
     "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits_worst": false,
+    "context_tokens_fit": 840265,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.79,
+    "kv_worst_gb": 30.31,
     "room_gb": 24.29,
+    "lane_full_gb": 3.79,
+    "lanes_full": 6,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+     "6 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 6.02 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 840,265 tokens of conversation fit in all, 105,033 a lane when all 8 are full (the window is 131,072)."
     ]
    }
   },
@@ -6232,6 +6557,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6254,21 +6585,24 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
+      "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 7.58
+      "worst_gb": 60.62
      }
     ],
     "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits_worst": false,
+    "context_tokens_fit": 663179,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.58,
+    "kv_worst_gb": 60.62,
     "room_gb": 19.17,
+    "lane_full_gb": 7.58,
+    "lanes_full": 2,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6281,7 +6615,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 100.73,
+    "total_gb": 104.52,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6330,6 +6664,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6352,21 +6692,24 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 3.79,
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 3.79
+      "worst_gb": 30.31
      }
     ],
     "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 208896,
+    "fits_worst": false,
+    "context_tokens_fit": 335219,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.79,
+    "kv_worst_gb": 30.31,
     "room_gb": 9.69,
+    "lane_full_gb": 3.79,
+    "lanes_full": 2,
     "notes": [
-     "About 208,896 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+     "2 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 20.62 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 335,219 tokens of conversation fit in all, 41,902 a lane when all 8 are full (the window is 131,072)."
     ]
    }
   },
@@ -6415,7 +6758,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 130.13,
+    "total_gb": 133.92,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6464,6 +6807,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6486,10 +6835,10 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 3.79,
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 3.79
+      "worst_gb": 30.31
      }
     ],
     "fits": false,
@@ -6497,12 +6846,13 @@
     "context_tokens_fit": 0,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.79,
+    "kv_worst_gb": 30.31,
     "room_gb": -19.71,
+    "lane_full_gb": 3.79,
+    "lanes_full": 0,
     "notes": [
      "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.71 GiB over the budget before any context.",
-     "Over the budget by 23.50 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
-     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Over the budget by 27.29 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
    }
@@ -6565,6 +6915,12 @@
       "kind": "fixed"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.31,
@@ -6587,10 +6943,10 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
+      "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 7.58
+      "worst_gb": 60.62
      }
     ],
     "fits": false,
@@ -6598,25 +6954,26 @@
     "context_tokens_fit": 0,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.58,
+    "kv_worst_gb": 60.62,
     "room_gb": -24.83,
+    "lane_full_gb": 7.58,
+    "lanes_full": 0,
     "notes": [
      "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.83 GiB over the budget before any context.",
      "Over the budget by 32.41 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
-     "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
    }
   },
   {
-   "name": "Flash-Next, two slots (measured up to one)",
+   "name": "Flash-Next, two lanes",
    "selection": {
     "model": "qwen3.8-flash-next",
     "slots": 2
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 102.61,
+    "total_gb": 89.35,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6693,8 +7050,8 @@
      },
      {
       "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 15.16,
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 1.89,
       "kind": "kv",
       "worst_gb": 15.16
      }
@@ -6706,8 +7063,117 @@
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 15.16,
     "room_gb": 19.17,
+    "lane_full_gb": 7.58,
+    "lanes_full": 2,
     "notes": [
-     "About 524,288 tokens of conversation fit in all, 262,144 a slot when all 2 are full (the window is 262,144)."
+     "All 2 lanes can hold the full 262,144-token window at once (7.58 GiB each).",
+     "About 524,288 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next, 8 lanes on the pool (measured up to three)",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "slots": 8
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 95.04,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 5.69,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+      "gb": 10.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 60.62
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 663179,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 60.62,
+    "room_gb": 19.17,
+    "lane_full_gb": 7.58,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6721,7 +7187,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 45.0,
+    "total_gb": 94.0,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6758,6 +7224,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -6780,20 +7252,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 7.0,
+      "gb": 56.0,
       "kind": "kv",
-      "worst_gb": 7.0
+      "worst_gb": 56.0
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "context_tokens_fit": 2097152,
     "kv_bytes_per_token": 28672,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.0,
+    "kv_worst_gb": 56.0,
     "room_gb": 68.63,
+    "lane_full_gb": 7.0,
+    "lanes_full": 8,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "All 8 lanes can hold the full 262,144-token window at once (7.00 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6807,7 +7282,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 41.61,
+    "total_gb": 66.88,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6844,6 +7319,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -6866,20 +7347,23 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 3.61,
+      "gb": 28.88,
       "kind": "kv",
-      "worst_gb": 3.61
+      "worst_gb": 28.88
      }
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "context_tokens_fit": 2097152,
     "kv_bytes_per_token": 14784,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.61,
+    "kv_worst_gb": 28.88,
     "room_gb": 68.63,
+    "lane_full_gb": 3.61,
+    "lanes_full": 8,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "All 8 lanes can hold the full 262,144-token window at once (3.61 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6890,7 +7374,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 85.65,
+    "total_gb": 127.65,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6927,6 +7411,12 @@
       "kind": "reserve"
      },
      {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
@@ -6956,20 +7446,25 @@
      {
       "id": "kv",
       "label": "Conversations (KV), every window at load",
-      "gb": 6.0,
+      "gb": 48.0,
       "kind": "kv",
-      "worst_gb": 6.0
+      "worst_gb": 48.0
      }
     ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 1178774,
     "kv_bytes_per_token": 24576,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 6.0,
+    "kv_worst_gb": 48.0,
     "room_gb": 26.98,
+    "lane_full_gb": 6.0,
+    "lanes_full": 4,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+     "Over the budget by 21.02 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 1,178,774 tokens of conversation fit in all, 147,346 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -6979,9 +7474,98 @@
     "model": "ornith-1.5-122b",
     "slots": 2
    },
-   "error": {
-    "status": 422,
-    "code": "out_of_range"
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 91.65,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 12.0,
+      "kind": "kv",
+      "worst_gb": 12.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 524288,
+    "kv_bytes_per_token": 24576,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 12.0,
+    "room_gb": 26.98,
+    "lane_full_gb": 6.0,
+    "lanes_full": 2,
+    "notes": [
+     "All 2 lanes can hold the full 262,144-token window at once (6.00 GiB each).",
+     "About 524,288 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
+    ]
    }
   }
  ]

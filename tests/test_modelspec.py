@@ -41,8 +41,8 @@ def test_every_family_has_a_spec():
         assert a.spec.tool_format and a.spec.tool_format == a.spec.tool_format.strip(), name
     own = {n: (a.spec.tool_format, a.spec.reasoning.opens_itself, a.spec.prompt.system_first, a.spec.side_slots)
            for n, a in REGISTRY.items() if a.spec != ServeSpec()}
-    assert own == {"flint": ("argkey", True, False, True), "lfm2_moe": ("pythonic", False, True, True),
-                   "qwen3_5_moe": ("xml", False, True, False)}, own
+    # SPD-217: Ornith (qwen3_5_moe) builds side slots now, so its spec is the default one
+    assert own == {"flint": ("argkey", True, False, True), "lfm2_moe": ("pythonic", False, True, True)}, own
     return f"{len(REGISTRY)} families, {len(own)} with their own spec"
 
 
@@ -64,7 +64,7 @@ def test_the_spec_says_what_the_engine_builds():
         assert caps, (name, "no engine class with Capabilities")
         assert all(c.side_slots == a.spec.side_slots for c in caps), (name, a.spec.side_slots, caps)
         seen[name] = a.spec.side_slots
-    assert seen["qwen3_5_moe"] is False and sum(seen.values()) == len(seen) - 1, seen
+    assert all(seen.values()), seen                # SPD-217: Ornith too (its joint verify pass)
     return seen
 
 

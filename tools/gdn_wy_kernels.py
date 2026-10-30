@@ -58,7 +58,13 @@ try:
 except ImportError:                                            # pragma: no cover
     HAVE_TRITON = False
 
+#: SPD-163: the columns of a grouped launch's offset table (`grouped_offsets`): T, then element offsets
+#: of gc, anc, kk, mixed, conv state, window, a, b, the state, delta, out, the pending commit's five, and
+#: the ancestor mask's row stride (a block's own T)
+NOFF = 18
+
 if HAVE_TRITON:
+    NOFF_ = tl.constexpr(NOFF)
     from tools.gdn_prefill_kernels import _mm
     from tools.gdn_verify_kernels import _pending
 
@@ -157,12 +163,35 @@ if HAVE_TRITON:
                  TP: tl.constexpr, DK: tl.constexpr, REP: tl.constexpr, EPS: tl.constexpr,
                  SCALE: tl.constexpr, TREE: tl.constexpr, B: tl.constexpr, PREC: tl.constexpr,
                  STORE: tl.constexpr, FUSED: tl.constexpr, WIDTH: tl.constexpr,
-                 KC: tl.constexpr, DBG: tl.constexpr = 0):
+                 KC: tl.constexpr, DBG: tl.constexpr = 0, OFF=None, GROUPED: tl.constexpr = 0):
         """Per value head, what does not read the state: the normalised keys (the commit's factor)
         and queries, the path gate, (I + A)^-1, and QKD. FUSED: the convolution of the q
         and k channels and the gates from the raw projections here, no kernels of their own.
-        KC < DK (a 32-row tile): q and k in slices of KC key channels, see below."""
-        h = tl.program_id(0)
+        KC < DK (a 32-row tile): q and k in slices of KC key channels, see below.
+
+        GROUPED (SPD-163, a joint verify pass): program e * H + h is head h of engine e, whose
+        tensors are the arguments shifted by its row of OFF (`grouped_offsets`); every statement
+        after the shift is the lone kernel's, on that engine's tensors."""
+        if GROUPED:
+            e = tl.program_id(0) // H
+            h = tl.program_id(0) % H
+            ob = OFF + e * NOFF_
+            T = tl.load(ob + 0).to(tl.int32)
+            GC += tl.multiple_of(tl.load(ob + 1), 16)
+            ANC += tl.multiple_of(tl.load(ob + 2), 16)
+            s_anc = tl.load(ob + 17)
+            KK += tl.multiple_of(tl.load(ob + 3), 16)
+            X += tl.multiple_of(tl.load(ob + 4), 16)
+            CST += tl.multiple_of(tl.load(ob + 5), 16)
+            WIN += tl.multiple_of(tl.load(ob + 6), 16)
+            A += tl.multiple_of(tl.load(ob + 7), 16)
+            B_ += tl.multiple_of(tl.load(ob + 8), 16)
+            # the scratch rows are indexed by e * H + h (`hs`), not reached through moved pointers: a
+            # moved pointer lives in registers where an argument does not (255 + spills against 157)
+            hs = e * H + h
+        else:
+            h = tl.program_id(0)
+            hs = h
         hk = h // REP
         tt = tl.arange(0, TP)
         mt = tt < T
@@ -213,7 +242,7 @@ if HAVE_TRITON:
             sp = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(x)))
             g = tl.where(mt, -tl.exp(tl.load(ALOG + h).to(tl.float32)) * sp, 0.0)
             beta = tl.where(mt, 1.0 / (1.0 + tl.exp(-b)), 0.0)
-            tl.store(BETA_S + h * TP + tt, beta)
+            tl.store(BETA_S + hs * TP + tt, beta)
         else:
             beta = tl.load(BETA + tt * H + h, mask=mt, other=0.0)
             g = tl.load(G + tt * H + h, mask=mt, other=0.0)
@@ -230,7 +259,7 @@ if HAVE_TRITON:
             else:
                 gc = tl.load(GC + h * gc_h + tt, mask=mt, other=0.0)
         eg = tl.exp(gc)
-        base = h * TP
+        base = hs * TP
         if STORE:
             # a chain that stores its walk: S_T = exp(G_T) S0 + sum_j exp(G_T - G_j) k_j d_j^T
             gT = tl.sum(tl.where(tt == T - 1, gc, 0.0))
@@ -271,15 +300,42 @@ if HAVE_TRITON:
                   TP: tl.constexpr, DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
                   PEND: tl.constexpr, STORE: tl.constexpr, PREC: tl.constexpr,
                   FUSED: tl.constexpr, TREE: tl.constexpr, REP: tl.constexpr,
-                  WIDTH: tl.constexpr, NQ: tl.constexpr, KC: tl.constexpr):
+                  WIDTH: tl.constexpr, NQ: tl.constexpr, KC: tl.constexpr,
+                  OFF=None, NH=0, GROUPED: tl.constexpr = 0):
         """Per (value head, value block): d = (I + A)^-1 beta (v - exp(G) K S0), o = Qe S0 + QKD d,
         and a stored chain's S_T -- the state tile read once, no loop over rows. FUSED: v's
         convolution here, and a chain's convolution state advanced (the v channels by every program,
         q and k by the programs of each key head's first value head, a slice a value block -- after
         `_wy_prep` has read them). KC < DK (a 32-row tile): the state tile in KC-row slices."""
-        h = tl.program_id(0)
+        if GROUPED:
+            # SPD-163: engine e's head h (`_wy_prep`'s GROUPED); its scratch rows follow the prep's
+            H = NH
+            e = tl.program_id(0) // H
+            h = tl.program_id(0) % H
+            ob = OFF + e * NOFF_
+            T = tl.load(ob + 0).to(tl.int32)
+            GC += tl.multiple_of(tl.load(ob + 1), 16)
+            KK += tl.multiple_of(tl.load(ob + 3), 16)
+            X += tl.multiple_of(tl.load(ob + 4), 16)
+            CST += tl.multiple_of(tl.load(ob + 5), 16)
+            WIN += tl.multiple_of(tl.load(ob + 6), 16)
+            S += tl.multiple_of(tl.load(ob + 9), 16)
+            S_OUT += tl.multiple_of(tl.load(ob + 9), 16)
+            DELTA += tl.multiple_of(tl.load(ob + 10), 16)
+            OUT += tl.multiple_of(tl.load(ob + 11), 16)
+            PK += tl.multiple_of(tl.load(ob + 12), 16)
+            PU += tl.multiple_of(tl.load(ob + 13), 16)
+            PG += tl.multiple_of(tl.load(ob + 14), 16)
+            PROWS += tl.multiple_of(tl.load(ob + 15), 16)
+            PN += tl.multiple_of(tl.load(ob + 16), 16)
+            # the scratch rows are indexed by e * H + h (`hs`), not reached through moved pointers: a
+            # moved pointer lives in registers where an argument does not (255 + spills against 157)
+            hs = e * H + h
+        else:
+            h = tl.program_id(0)
+            H = tl.num_programs(0)
+            hs = h
         vb = tl.program_id(1)
-        H = tl.num_programs(0)
         tt = tl.arange(0, TP)
         mt = tt < T
         ok = tl.arange(0, DK)
@@ -289,7 +345,7 @@ if HAVE_TRITON:
             # K S0 and Qe S0 summed over KC-row slices of the state tile, each slice's
             # pending commit applied and written back as `_pending` does it element for element (the
             # same bits), so no [DK, BV] tile and no [TP, DK] operand is live at once
-            base = h * TP
+            base = hs * TP
             oc = tl.arange(0, KC)
             ks = tl.zeros([TP, BV], dtype=tl.float32)
             qs = tl.zeros([TP, BV], dtype=tl.float32)
@@ -312,13 +368,13 @@ if HAVE_TRITON:
                               ov)
             else:
                 s0 = tl.load(S + tile)
-            base = h * TP
+            base = hs * TP
             k = tl.load(KK + h * kk_h + tt[:, None] * DK + ok[None, :], mask=mt[:, None],
                         other=0.0)
         if FUSED:
             vch = 2 * KEY_DIM + h * DV + ov
             v = _conv_rows(X, s_xt, CST, s_cs, CW, WIN, vch, tt, mt, TREE, WIDTH)
-            beta = tl.load(BETA_S + h * TP + tt)
+            beta = tl.load(BETA_S + hs * TP + tt)
             if not TREE:
                 # every thread's window loads are in before any thread overwrites the state
                 tl.debug_barrier()
@@ -453,6 +509,264 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
                              PEND=pend is not None, STORE=chain_store, PREC=prec,
                              FUSED=fused is not None, TREE=tree, REP=H // key_heads, WIDTH=width,
                              NQ=dk * bv // dv, KC=kc, num_warps=warps or WARPS)
+
+
+def _elem_off(t: torch.Tensor, base: torch.Tensor) -> int:
+    """`t`'s first element as an offset in elements from `base`'s (same dtype, same allocation space)."""
+    if t.dtype != base.dtype:
+        raise ValueError(f"grouped launch: {t.dtype} beside {base.dtype}")
+    d = t.data_ptr() - base.data_ptr()
+    if d % t.element_size():
+        raise ValueError("grouped launch: a tensor is not element-aligned to the first engine's")
+    return d // t.element_size()
+
+
+def grouped_ok(items: list) -> bool:
+    """Whether `wy_recurrence_grouped` takes these engines' verify blocks (one or more) in one launch pair: each a
+    tree on the fused WY path at a 16-row tile (the lone kernels' constexprs for every one of them),
+    all with or all without a pending commit, and their tensors laid out alike (same strides)."""
+    if not items:
+        return False
+    a0 = items[0]
+    for it in items:
+        T = it["mixed"].shape[0]
+        if it["window"] is None or it["anc"] is None or not 2 <= T <= 16:
+            return False
+        if (it["pend"] is None) != (a0["pend"] is None):
+            return False
+        for key in ("mixed", "conv_state", "a_raw", "b_raw", "state", "window"):
+            if it[key].stride() != a0[key].stride():
+                return False
+        if it["anc"].stride(1) != 1:                # its row stride is the block's, in the table
+            return False
+        if it["pend"] is not None and any(x.stride() != y.stride()
+                                          for x, y in zip(it["pend"][:3], a0["pend"][:3])):
+            return False
+        fo, f0 = it.get("fac_out"), a0.get("fac_out")
+        if (fo is None) != (f0 is None) or (fo is not None and any(
+                x.stride() != y.stride() for x, y in zip(fo, f0))):
+            return False
+    return True
+
+
+def grouped_offsets(items: list, facs: list, rows: list, out_row: int) -> list:
+    """The offset table of a grouped launch, flattened [E, NOFF]: per engine its row count T and the
+    element offsets of its tensors from the first engine's (column order: NOFF's comment); `facs` the
+    engines' (kk, delta, gc), `rows` the row starts in the joined output, `out_row` its elements a row."""
+    i0, (kk0, de0, gc0) = items[0], facs[0]
+    p0 = i0["pend"]
+    off = []
+    for e, it in enumerate(items):
+        kk, de, gc = facs[e]
+        pe = it["pend"]
+        po = [_elem_off(x, y) for x, y in zip(pe, p0)] if pe is not None else [0] * 5
+        off.extend([it["mixed"].shape[0], _elem_off(gc, gc0), _elem_off(it["anc"], i0["anc"]),
+                    _elem_off(kk, kk0), _elem_off(it["mixed"], i0["mixed"]),
+                    _elem_off(it["conv_state"], i0["conv_state"]),
+                    _elem_off(it["window"], i0["window"]), _elem_off(it["a_raw"], i0["a_raw"]),
+                    _elem_off(it["b_raw"], i0["b_raw"]), _elem_off(it["state"], i0["state"]),
+                    _elem_off(de, de0), rows[e] * out_row] + po + [it["anc"].stride(0)])
+    assert len(off) == NOFF * len(items)
+    # the kernels are told every tensor offset is a multiple of 16 elements (`tl.multiple_of`): the
+    # alignment the lone launch's pointers had, so the loads keep their width
+    for e in range(len(items)):
+        row = off[e * NOFF:(e + 1) * NOFF]
+        if any(v % 16 for v in row[1:17]):
+            raise ValueError(f"grouped launch: engine {e}'s tensors are not 16-element aligned: {row}")
+    return off
+
+
+_ONE_TABLES: dict = {}
+#: SPD-163: set while a joint graph is captured: `record(offsets, items, facs)` returns the device row the
+#: launch reads (the graph's static table) and keeps what a replay patches (the row counts, the parities)
+TABLE_REC = None
+
+
+def wy_recurrence_grouped(items: list, *, key_heads: int, value_heads: int, head_k: int,
+                          head_v: int, conv_w, a_log, dt_bias, key_dim: int, reuse: dict | None = None) -> list:
+    """SPD-163: the fused WY recurrence of several engines' tree blocks (a joint verify pass) in one
+    `_wy_prep` and one `_wy_apply` launch: grid (E * H,) and (E * H, Dv / BV), engine e's tensors
+    reached through its row of an offset table. Every program runs the lone kernels' statements with
+    the lone launch's constexprs (TP = 16, the served block, KC = DK, PEND as the lone pass), so each
+    engine's rows are the bits its own `wy_recurrence(fused=...)` gives them; `check_grouped()` proves
+    it on the board. `items` (`grouped_ok`): dicts of mixed [T, C], conv_state [C, W-1], window [T, W],
+    a_raw / b_raw [T, H], state [H, Dk, Dv], anc [T, T], pend (or None), fac_out (kk, delta, gc) or
+    None. Returns per engine (out [1, T, H, Dv], (kk, delta, gc) as `verify_mixer` returns them).
+
+    `reuse`: a dict the caller keeps for one joint pass. Every offset is the same in each of its layers
+    (the engines' state buffers are alike, and each layer's rows come from one joined projection), so
+    the table is built and uploaded at the first layer and read again by the others, after a check of
+    the two offsets that would move first (the last engine's rows and state)."""
+    H, dk, dv = value_heads, head_k, head_v
+    E = len(items)
+    tp, blk = 16, min(BLOCK, 16)
+    i0 = items[0]
+    dev = i0["state"].device
+    f32 = torch.float32
+    Ts = [it["mixed"].shape[0] for it in items]
+    rows = [0]
+    for t in Ts:
+        rows.append(rows[-1] + t)
+    qe = torch.empty(E * H, tp, dk, dtype=f32, device=dev)
+    inv = torch.empty(E * H, tp, tp, dtype=f32, device=dev)
+    qkd = torch.empty(E * H, tp, tp, dtype=f32, device=dev)
+    beta_s = torch.empty(E * H, tp, dtype=f32, device=dev)
+    # a joint graph pads its blocks (rows past an engine's T are never written): zeros keep the pad rows finite
+    out = (torch.zeros if TABLE_REC is not None else torch.empty)(rows[-1], H, dv, dtype=i0["mixed"].dtype,
+                                                                  device=dev)
+    if i0.get("fac_out") is not None:
+        facs = [it["fac_out"] for it in items]
+    else:
+        kk_all = torch.empty(E, H, tp, dk, dtype=f32, device=dev)
+        de_all = torch.empty(E, H, tp, dv, dtype=f32, device=dev)
+        gc_all = torch.empty(E, H, tp, dtype=f32, device=dev)
+        facs = [(kk_all[e], de_all[e], gc_all[e]) for e in range(E)]
+    kk0, de0, gc0 = facs[0]
+    p0 = i0["pend"]
+    rec = TABLE_REC
+    if rec is not None:
+        # a joint graph's capture (engine/models/qwen3_5/joint_graphs.py): this layer's row of the
+        # graph's own table, which the graph copies from pinned memory as its first node
+        table = rec.record(grouped_offsets(items, facs, rows, H * dv), items, facs)
+        reuse = None
+    prev = reuse.get("table") if reuse is not None else None
+    guard = (tuple(Ts), _elem_off(items[-1]["mixed"], i0["mixed"]), _elem_off(items[-1]["state"], i0["state"]),
+             _elem_off(facs[-1][0], kk0)) if reuse is not None else None
+    hit = prev is not None and prev[0] == guard
+    if rec is not None:
+        pass
+    elif hit:
+        table = prev[1]
+        reuse["hits"] = reuse.get("hits", 0) + 1
+    elif E == 1:
+        off = grouped_offsets(items, facs, rows, H * dv)
+        # one engine: every offset 0 but T and the mask's stride, so the table is a constant per pair,
+        # kept on the device (a captured verify graph reads it at the address it was captured with)
+        key = (dev, off[0], off[-1])
+        table = _ONE_TABLES.get(key)
+        if table is None:
+            table = _ONE_TABLES[key] = torch.tensor(off, dtype=torch.int64).to(dev)
+    else:
+        from engine.model import h2d
+        table = h2d(grouped_offsets(items, facs, rows, H * dv), torch.int64, dev)
+    if reuse is not None and not hit:
+        reuse["table"] = (guard, table)
+        reuse["builds"] = reuse.get("builds", 0) + 1
+    x, cst = i0["mixed"], i0["conv_state"]
+    win, a8 = i0["window"], i0["anc"].view(torch.uint8)
+    fz = (x, x.stride(0), cst, cst.stride(0), conv_w, win)
+    a_raw, b_raw = i0["a_raw"], i0["b_raw"]
+    width = conv_w.shape[-1]
+    _wy_prep[(E * H,)](gc0, gc0, 0, gc0, gc0, gc0, a8, i0["anc"].stride(0), tp, H,
+                       kk0, kk0.stride(0), gc0.stride(0), qe, inv, qkd, qe, gc0, *fz,
+                       a_raw, b_raw, a_raw.stride(0), b_raw.stride(0), a_log, dt_bias, beta_s,
+                       key_dim, TP=tp, DK=dk, REP=H // key_heads, EPS=1e-6, SCALE=dk ** -0.5,
+                       TREE=True, B=blk, PREC=PREC, STORE=False, FUSED=True, WIDTH=width, KC=dk,
+                       DBG=DBG, OFF=table, GROUPED=1, num_warps=WARPS_PREP)
+    if p0 is not None:
+        pk, pu, pg, prows, pn = p0
+        pargs = (pk, pu, pg, prows, pn, pk.stride(0), pk.stride(1), pu.stride(0), pu.stride(1),
+                 pg.stride(0))
+    else:
+        pargs = (gc0, gc0, gc0, gc0, gc0, 0, 0, 0, 0, 0)       # never read
+    S = i0["state"]
+    _wy_apply[(E * H, dv // BV)](gc0, 0, gc0, gc0, gc0.stride(0), S, S, out, de0, kk0,
+                                 kk0.stride(0), qe, inv, qkd, qe, gc0, tp, S.stride(0),
+                                 S.stride(1), S.stride(2), de0.stride(0), *pargs, *fz, beta_s,
+                                 key_dim, TP=tp, DK=dk, DV=dv, BV=BV, PEND=p0 is not None,
+                                 STORE=False, PREC=PREC, FUSED=True, TREE=True, REP=H // key_heads,
+                                 WIDTH=width, NQ=dk * BV // dv, KC=dk, OFF=table, NH=H, GROUPED=1,
+                                 num_warps=WARPS)
+    res = []
+    for e, T in enumerate(Ts):
+        kk, de, gc = facs[e]
+        res.append((out[rows[e]:rows[e + 1]].view(1, T, H, dv),
+                    (kk[None, :, :T], de[None, :, :T], gc[None, :, :T])))
+    return res
+
+
+def check_grouped(E: int = 8, seed: int = 0, pend: bool = True) -> list[str]:
+    """SPD-163 on the board: `wy_recurrence_grouped` over E engines' tree blocks (row counts 2..16,
+    random trees, a pending commit or none), their rows one tensor as the joint pass hands them out,
+    against each engine alone through the same launch: out, kk, u (delta), gc and the state after the
+    pending commit, bit for bit; and each engine alone against the lone kernel (`verify_mixer`)."""
+    import random
+    from engine.tree import DraftTree
+    from tools.gdn_verify_kernels import verify_mixer
+    rng = random.Random(seed)
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    out = []
+    H, dk, dv, kh = KW["value_heads"], KW["head_k"], KW["head_v"], KW["key_heads"]
+    gk = dict(key_heads=kh, value_heads=H, head_k=dk, head_v=dv)
+
+    def rand_tree(n):
+        parents, path = [-1], [0]
+        for i in range(1, n):
+            path = path[:rng.randint(1, len(path))]
+            parents.append(path[-1])
+            path.append(i)
+        return DraftTree(tokens=[0] * n, parents=parents)
+
+    def fac0():
+        return (torch.zeros(H, 32, dk, device="cuda"), torch.zeros(H, 32, dv, device="cuda"),
+                torch.zeros(H, 32, device="cuda"))
+
+    worst = 0.0
+    for trial, sizes in enumerate(([16] * E, [rng.randint(2, 16) for _ in range(E)],
+                                   [2, 16] * max(1, E // 2), [rng.randint(2, 8) for _ in range(E)])):
+        shared = _inputs(16, gen)
+        sw = dict(conv_w=shared["conv_w"], a_log=shared["a_log"], dt_bias=shared["dt_bias"],
+                  key_dim=KW["key_dim"])
+        engs = []
+        for T in sizes:
+            x = _inputs(T, gen)
+            ta = _tree_args(rand_tree(T))
+            pd = None
+            if pend:
+                P = 8
+                pd = (torch.randn(H, P, dk, device="cuda", generator=gen) * 0.1,
+                      torch.randn(H, P, dv, device="cuda", generator=gen) * 0.1,
+                      -torch.rand(H, P, device="cuda", generator=gen).cumsum(-1) * 0.05,
+                      torch.arange(P, dtype=torch.int32, device="cuda"),
+                      torch.tensor([rng.randint(0, P)], dtype=torch.int32, device="cuda"))
+            engs.append((x, ta, pd))
+
+        def item(x, ta, pd, mixed, a, b):
+            return dict(mixed=mixed, conv_state=x["conv_state"].clone().reshape(x["conv_state"].shape[1], -1),
+                        window=ta["window"], anc=ta["anc"], a_raw=a, b_raw=b,
+                        state=x["state"].clone().reshape(H, dk, dv), pend=pd, fac_out=fac0())
+        alone = []
+        for x, ta, pd in engs:
+            it = item(x, ta, pd, x["mixed"].clone(), x["a_raw"].clone(), x["b_raw"].clone())
+            (o, fac), = wy_recurrence_grouped([it], **gk, **sw)
+            alone.append((o, fac, it["state"]))
+            y = {k: v.clone() for k, v in x.items()}
+            y.update(conv_w=shared["conv_w"], a_log=shared["a_log"], dt_bias=shared["dt_bias"])
+            o_old, _, _ = verify_mixer(**y, **KW, **ta, wy=True, fused=True, store_state=False,
+                                       pend=pd, fac_out=fac0())
+            worst = max(worst, ((o_old.float() - o.float()).abs().max() /
+                                o_old.float().abs().max().clamp_min(1e-30)).item())
+            # the offsets are hinted 16-element aligned, as the lone launch's pointers are: the same
+            # register layouts, the same sums (without the hint the reductions moved by ~1e-7)
+            assert torch.equal(o_old, o), f"trial {trial}: one engine through the table is not the lone kernel"
+        mixed = torch.cat([x["mixed"] for x, *_ in engs])
+        ab = torch.cat([torch.cat([x["a_raw"], x["b_raw"]], -1) for x, *_ in engs])
+        r0, items = 0, []
+        for (x, ta, pd), T in zip(engs, sizes):
+            items.append(item(x, ta, pd, mixed[r0:r0 + T], ab[r0:r0 + T, :H], ab[r0:r0 + T, H:]))
+            r0 += T
+        assert grouped_ok(items), "grouped_ok refused the battery"
+        got = wy_recurrence_grouped(items, **gk, **sw)
+        for e, ((o, fac, st), (og, facg), it) in enumerate(zip(alone, got, items)):
+            assert torch.equal(o, og), f"trial {trial} engine {e} (T={sizes[e]}): out"
+            for name, a, b in zip(("kk", "u", "gc"), fac, facg):
+                assert torch.equal(a, b), f"trial {trial} engine {e}: {name}"
+            assert torch.equal(st, it["state"]), f"trial {trial} engine {e}: state"
+        out.append(f"grouped WY, {len(sizes)} engines, rows {sizes}, pending {'on' if pend else 'off'}: "
+                   f"out, kk, u, gc and the state bit-identical to each engine alone")
+    out.append(f"each engine alone through the table against the lone kernel (`verify_mixer`): out "
+               f"bit-identical (max relative {worst:.1e})")
+    return out
 
 
 def conv_rows(mixed, conv_state, conv_w, window=None) -> torch.Tensor:
@@ -806,6 +1120,11 @@ def bench(layers: int = 48, reps: int = 10, sizes=(16, 24, 32), grid: str = GRID
 
 
 if __name__ == "__main__":
+    if "--grouped" in sys.argv:
+        # SPD-163: the grouped launch against each engine's own, with and without a pending commit
+        for line in check_grouped(pend=True) + check_grouped(pend=False, seed=1) + check_grouped(E=2, seed=2):
+            print(line, flush=True)
+        sys.exit(0)
     for line in (bench(grid=os.environ.get("QWEN38_WY_GRID", GRID),
                        sizes=tuple(int(x) for x in os.environ.get("QWEN38_WY_SIZES",
                                                                   "16,24,32").split(",")))

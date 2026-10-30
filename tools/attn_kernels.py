@@ -125,6 +125,171 @@ if HAVE_TRITON:
             tl.store(PACC + base[:, None] * D + od[None, :], acc, mask=rmask[:, None])
 
     @triton.jit
+    def _attn_inv(Q, K, V, ANC, s_anc, PM, PL, PACC, T, R, NKV, START, CHUNK,
+                  s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, LENP, SPLIT_AT,
+                  SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
+                  TP: tl.constexpr, DEVLEN: tl.constexpr):
+        """SPD-201 (ATTN_INV): one token's query heads (BM rows, REP real) over the columns of its own positions
+        0 .. its position, in blocks and splits cut by position: column j < START is the cache's row j, column
+        START + d the token's ancestor at depth d (the tree's row, from the ancestor mask: a depth is a node's
+        ancestor count less one). So a row's statements are the same wherever the last commit fell and whatever
+        else the tree holds. The partial (m, l, acc) of each split goes to `_attn_combine`, as `_attn_split`'s."""
+        if DEVLEN:
+            START = tl.load(LENP)
+        t = tl.program_id(0)
+        kvh = tl.program_id(1)
+        sp = tl.program_id(2)
+        g = tl.arange(0, BM)
+        gmask = g < REP
+        qh = kvh * REP + g
+        od = tl.arange(0, D)
+        jj = tl.arange(0, TP)
+        jm = jj < T
+        anc = tl.load(ANC + jj[:, None] * s_anc + jj[None, :], mask=jm[:, None] & jm[None, :], other=0) != 0
+        dep = tl.sum(anc.to(tl.int32), axis=1) - 1                       # [TP] each node's depth
+        arow = tl.load(ANC + t * s_anc + jj, mask=jm, other=0) != 0       # the token's ancestors
+        dt = tl.sum(arow.to(tl.int32), axis=0) - 1
+        lcv = START + dt + 1                                              # the columns the token sees
+        if lcv - 1 >= SPLIT_AT:
+            return                                                        # `_attn_inv2`'s token
+        # the chunk of the token's own length class (512 to 32,768 columns, then a 64th of the class), not of
+        # the launch's: the same token is cut at the same columns whatever the block around it
+        cls = 1024
+        while cls < lcv:
+            cls *= 2
+        CHUNK = tl.maximum(512, cls // 64)
+        q = tl.load(Q + qh[:, None] * s_qh + t * s_qt + od[None, :], mask=gmask[:, None], other=0.0)
+        c0 = sp * CHUNK
+        c1 = tl.minimum(c0 + CHUNK, lcv)
+        m_i = tl.full([BM], -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros([BM], dtype=tl.float32)
+        acc = tl.zeros([BM, D], dtype=tl.float32)
+        for n0 in range(c0, c1, BN):
+            cols = n0 + tl.arange(0, BN)
+            cmask = cols < c1
+            dcol = cols - START
+            hit = arow[None, :] & (dep[None, :] == dcol[:, None])         # [BN, TP]
+            node = tl.sum(tl.where(hit, jj[None, :], 0), axis=1)
+            phys = tl.where(cols < START, cols, START + node)
+            k = tl.load(K + kvh * s_kh + phys[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
+            sc = tl.dot(q, tl.trans(k.to(tl.bfloat16))) * SCALE
+            sc = tl.where(cmask[None, :] & gmask[:, None], sc, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(sc, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            pr = tl.exp(sc - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(pr, 1)
+            v = tl.load(V + kvh * s_vh + phys[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
+            acc = acc * alpha[:, None] + tl.dot(pr.to(tl.bfloat16), v.to(tl.bfloat16))
+            m_i = m_new
+        r = g * T + t
+        base = sp * (NKV * R) + kvh * R + r
+        tl.store(PM + base, m_i, mask=gmask)
+        tl.store(PL + base, l_i, mask=gmask)
+        tl.store(PACC + base[:, None] * D + od[None, :], acc, mask=gmask[:, None])
+
+    @triton.jit
+    def _attn_inv2(Q, K, V, ANC, s_anc, PM, PL, PACC, T, R, NKV, START,
+                   s_qh, s_qt, s_kh, s_kn, s_vh, s_vn, LENP, SPLIT_AT,
+                   SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, BN: tl.constexpr,
+                   TP: tl.constexpr, NT: tl.constexpr, DEVLEN: tl.constexpr):
+        """`_attn_inv` with NT tokens a program (8 rows each, REP real): a block wholly below START is the cache's
+        rows for every token, one K/V load and one product for all; a block at or past START gathers each token's
+        own columns (the cache below START, its ancestor at depth d at START + d), one product a token, each row
+        keeping its own token's. A row's statements are the same either way: the product of its query with the
+        block's keys, the same online softmax, and its values accumulated into the MMA accumulator (another
+        token's rows add exact zeros). So a token's bits depend on its positions alone, not on the block
+        around it, the commit point, or which tokens share its program."""
+        if DEVLEN:
+            START = tl.load(LENP)
+        BM: tl.constexpr = NT * 8
+        pg = tl.program_id(0)
+        kvh = tl.program_id(1)
+        sp = tl.program_id(2)
+        rr = tl.arange(0, BM)
+        lt = rr // 8
+        g = rr % 8
+        t = pg * NT + lt
+        rvalid = (g < REP) & (t < T)
+        qh = kvh * REP + g
+        od = tl.arange(0, D)
+        jj = tl.arange(0, TP)
+        jm = jj < T
+        anc = tl.load(ANC + jj[:, None] * s_anc + jj[None, :], mask=jm[:, None] & jm[None, :], other=0) != 0
+        dep = tl.sum(anc.to(tl.int32), axis=1) - 1                       # [TP]
+        # each row's token's depth: its ancestor count less one
+        arows = tl.load(ANC + t[:, None] * s_anc + jj[None, :], mask=(t < T)[:, None] & jm[None, :], other=0) != 0
+        dt = tl.sum(arows.to(tl.int32), axis=1) - 1                       # [BM]
+        lcv = START + dt + 1
+        rvalid = rvalid & (lcv - 1 >= SPLIT_AT)                          # `_attn_inv`'s tokens are its own
+        cls = tl.full([BM], 1024, dtype=tl.int32)
+        for _ in range(17):
+            cls = tl.where(cls < lcv, cls * 2, cls)
+        chunk = tl.maximum(512, cls // 64)
+        c0 = sp * chunk
+        c1 = tl.minimum(c0 + chunk, lcv)
+        lo = tl.min(tl.where(rvalid, c0, 2147483647), axis=0)
+        hi = tl.max(tl.where(rvalid, c1, 0), axis=0)
+        lo = lo // BN * BN
+        q = tl.load(Q + qh[:, None] * s_qh + t[:, None] * s_qt + od[None, :], mask=rvalid[:, None], other=0.0)
+        m_i = tl.full([BM], -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros([BM], dtype=tl.float32)
+        acc = tl.zeros([BM, D], dtype=tl.float32)
+        # the blocks wholly below START (the cache's rows for every token), then the rest (each token's own
+        # columns): two loops without a branch, so the loads of each are pipelined
+        mid = tl.maximum(lo, tl.minimum(hi, START // BN * BN))
+        for n0 in range(lo, mid, BN):
+            cols = n0 + tl.arange(0, BN)
+            vis = rvalid[:, None] & (cols[None, :] >= c0[:, None]) & (cols[None, :] < c1[:, None])
+            k = tl.load(K + kvh * s_kh + cols[:, None] * s_kn + od[None, :])
+            sc = tl.dot(q, tl.trans(k.to(tl.bfloat16))) * SCALE
+            sc = tl.where(vis, sc, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(sc, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            pr = tl.exp(sc - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(pr, 1)
+            v = tl.load(V + kvh * s_vh + cols[:, None] * s_vn + od[None, :])
+            acc = tl.dot(pr.to(tl.bfloat16), v.to(tl.bfloat16), acc * alpha[:, None])
+            m_i = m_new
+        for n0 in range(mid, hi, BN):
+            cols = n0 + tl.arange(0, BN)
+            vis = rvalid[:, None] & (cols[None, :] >= c0[:, None]) & (cols[None, :] < c1[:, None])
+            dcol = cols - START
+            sc = tl.full([BM, BN], -float("inf"), dtype=tl.float32)
+            for j in tl.static_range(NT):
+                tj = pg * NT + j
+                aj = tl.load(ANC + tj * s_anc + jj, mask=jm & (tj < T), other=0) != 0
+                hit = aj[None, :] & (dep[None, :] == dcol[:, None])
+                node = tl.sum(tl.where(hit, jj[None, :], 0), axis=1)
+                phys = tl.where(cols < START, cols, START + node)
+                kj = tl.load(K + kvh * s_kh + phys[:, None] * s_kn + od[None, :])
+                scj = tl.dot(q, tl.trans(kj.to(tl.bfloat16))) * SCALE
+                sc = tl.where((lt == j)[:, None], scj, sc)
+            sc = tl.where(vis, sc, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(sc, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            pr = tl.exp(sc - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(pr, 1)
+            acc = acc * alpha[:, None]
+            for j in tl.static_range(NT):
+                tj = pg * NT + j
+                aj = tl.load(ANC + tj * s_anc + jj, mask=jm & (tj < T), other=0) != 0
+                hit = aj[None, :] & (dep[None, :] == dcol[:, None])
+                node = tl.sum(tl.where(hit, jj[None, :], 0), axis=1)
+                phys = tl.where(cols < START, cols, START + node)
+                vj = tl.load(V + kvh * s_vh + phys[:, None] * s_vn + od[None, :])
+                prj = tl.where((lt == j)[:, None], pr, 0.0)
+                acc = tl.dot(prj.to(tl.bfloat16), vj.to(tl.bfloat16), acc)
+            m_i = m_new
+        r = g * T + t
+        base = sp * (NKV * R) + kvh * R + r
+        tl.store(PM + base, m_i, mask=rvalid)
+        tl.store(PL + base, l_i, mask=rvalid)
+        tl.store(PACC + base[:, None] * D + od[None, :], acc, mask=rvalid[:, None])
+
+    @triton.jit
     def _attn_combine(PM, PL, PACC, OUT, T, R, NKV, NS, s_oh, s_ot,
                       REP: tl.constexpr, D: tl.constexpr, NSP: tl.constexpr):
         kvh = tl.program_id(0)
@@ -147,6 +312,60 @@ if HAVE_TRITON:
         den = tl.sum(l * w, 0)
         o = num / tl.where(den == 0.0, 1.0, den)
         tl.store(OUT + t * s_ot + qh * s_oh + od, o.to(tl.bfloat16))
+
+
+#: SPD-201: a verify's attention row by row over its own positions (`_attn_inv`): a token's bits do not depend
+#: on the tree around it or on where the last commit fell
+INV = _S.get("ATTN_INV") == "1"
+INV_BM = 16
+#: tokens a program of `_attn_inv2`, one K/V read of the cache blocks for all of them (0: `_attn_inv`, a program a
+#: token). 4 at 4 warps measured best on this board: a layer at 16,000 columns and 16 rows 993 -> 464 us (the shared
+#: kernel 365), at 4,000 and 8 rows 125 -> 56 (56)
+INV_NT = int(_S.get("ATTN_INV_NT"))
+#: the position from which a token takes `_attn_inv2` (below: `_attn_inv`)
+INV_SPLIT = int(_S.get("ATTN_INV_SPLIT"))
+
+
+def attention_inv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start, block_mask: torch.Tensor,
+                  chunk: int, ns: int, *, lenp: torch.Tensor | None = None, scale: float | None = None,
+                  bn: int = 32, num_warps: int = 4, num_stages: int | None = None) -> torch.Tensor:
+    """`decode_attention`'s contract through `_attn_inv` and `_attn_combine` (`lenp`: the start from the device,
+    `decode_attention_dev`'s). bf16 cache."""
+    _, hq, T, D = q.shape
+    _, hkv, _, _ = k.shape
+    rep = hq // hkv
+    scale = 1.0 / math.sqrt(D) if scale is None else scale
+    num_stages = (3 if STAGES3 else 2) if num_stages is None else num_stages
+    # splits enough for every token's own chunk: a 512-column chunk to 32,768 columns, past it 64 of them
+    lc_max = ns * chunk
+    ns = max(2, -(-lc_max // 512) if lc_max <= 32768 else 64)
+    R = rep * T
+    out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
+    anc = block_mask.to(torch.int8).contiguous()
+    q0, k0, v0 = q[0], k[0], v[0]
+    pm = torch.empty(ns * R * hkv, dtype=torch.float32, device=q.device)
+    pl = torch.empty_like(pm)
+    pacc = torch.empty(ns * R * hkv, D, dtype=torch.float32, device=q.device)
+    # a token below INV_SPLIT columns through `_attn_inv` (a program a token: the most programs where the context
+    # is short), one at or past it through `_attn_inv2` (the cache blocks read once for INV_NT tokens): the
+    # choice is the token's own position, so it is the same whatever the traffic
+    st = 0 if lenp is not None else int(start)
+    lp = lenp if lenp is not None else q0
+    tp = max(16, triton.next_power_of_2(T))
+    split = INV_SPLIT if INV_NT > 0 else 1 << 30
+    _attn_inv[(T, hkv, ns)](q0, k0, v0, anc, anc.stride(0), pm, pl, pacc, T, R, hkv, st, chunk,
+                            q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
+                            lp, split, SCALE=scale, REP=rep, D=D, BM=INV_BM, BN=bn, TP=tp,
+                            DEVLEN=lenp is not None, num_warps=num_warps, num_stages=num_stages)
+    if INV_NT > 0 and (lenp is not None or int(start) + T > INV_SPLIT):
+        _attn_inv2[(-(-T // INV_NT), hkv, ns)](
+            q0, k0, v0, anc, anc.stride(0), pm, pl, pacc, T, R, hkv, st,
+            q0.stride(0), q0.stride(1), k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1),
+            lp, split, SCALE=scale, REP=rep, D=D, BN=bn, TP=tp, NT=INV_NT,
+            DEVLEN=lenp is not None, num_warps=num_warps, num_stages=num_stages)
+    _attn_combine[(hkv, R)](pm, pl, pacc, out, T, R, hkv, ns, out.stride(1), out.stride(0),
+                            REP=rep, D=D, NSP=triton.next_power_of_2(ns), num_warps=4)
+    return out.unsqueeze(0).transpose(1, 2)
 
 
 def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: int = 64,
@@ -185,6 +404,10 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
     rep = hq // hkv
     assert hq == 24 or hq == rep * hkv, (hq, hkv)
     fp8 = ks is not None
+    if INV and not fp8 and rep <= 16:
+        _, _, ns_, chunk_ = pick_launch(T, rep, lc, bm=bm, max_splits=max_splits)
+        return attention_inv(q, k, v, start, block_mask, chunk_, ns_, scale=scale, bn=bn, num_warps=num_warps,
+                             num_stages=num_stages)
     scale = 1.0 / math.sqrt(D) if scale is None else scale
     num_stages = (3 if STAGES3 else 2) if num_stages is None else num_stages
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
@@ -248,6 +471,9 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     num_stages = (3 if STAGES3 else 2) if num_stages is None else num_stages
     bm, groups, ns, chunk = pick_launch(T, rep, max_lc)
     dev_chunk(T, rep, max_lc)
+    if INV and rep <= 16:
+        return attention_inv(q, k, v, None, block_mask, chunk, ns, lenp=lenp, scale=scale, bn=bn,
+                             num_warps=num_warps, num_stages=num_stages)
     ns = max(ns, 2)
     R = rep * T
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
@@ -452,4 +678,70 @@ def sweep(ctx=(32768, 131072), Ts=(1, 16), configs=None, *, layers: int = 16, re
                 out.append(row)
             del ks_, vs_
             torch.cuda.empty_cache()
+    return out
+
+
+def check_inv(seed: int = 0) -> list[str]:
+    """SPD-201 on the board: six tokens' attention as (A) a 6-row chain verified at S, (B) three committed and a
+    3-row chain at S + 3, (C) the six on a path of an 8-node tree beside two siblings -- every token's output bit
+    for bit the same; the device-length launch equals the eager one; and against float32 torch."""
+    global INV
+    from engine.tree import DraftTree
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    hq, hkv, D = 24, 4, 256
+    out = []
+    keep = INV
+    INV = True
+    try:
+        for S in (37, 500, 511, 1020, 1200, 3000, 32765, 40000):
+            L = S + 16 + 64
+            kc = (torch.randn(1, hkv, L, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
+            vc = (torch.randn(1, hkv, L, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
+            tk = (torch.randn(8, hkv, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)   # the six + 2 siblings
+            tv = (torch.randn(8, hkv, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
+            tq = (torch.randn(8, hq, D, device="cuda", generator=g) * 0.5).to(torch.bfloat16)
+
+            def run(start, rows, parents, dev=False):
+                k, v = kc.clone(), vc.clone()
+                n = len(rows)
+                k[0, :, start:start + n] = tk[rows].transpose(0, 1)
+                v[0, :, start:start + n] = tv[rows].transpose(0, 1)
+                anc = torch.tensor(DraftTree(tokens=[0] * n, parents=parents).ancestor_mask(), dtype=torch.bool,
+                                   device="cuda")
+                q = tq[rows].transpose(0, 1)[None]
+                if dev:
+                    lenp = torch.tensor([start, start + n], dtype=torch.int32, device="cuda")
+                    lc = 1024
+                    while lc < start + n:
+                        lc *= 2
+                    return decode_attention_dev(q, k, v, lenp, anc, lc)[0].transpose(0, 1), k, v
+                return decode_attention(q, k[..., :start + n, :], v[..., :start + n, :], start, anc)[0].transpose(0, 1), k, v
+            oA, kA, vA = run(S, [0, 1, 2, 3, 4, 5], [-1, 0, 1, 2, 3, 4])
+            # B: the first three committed at S .. S+2, then three verified at S + 3
+            kc2, vc2 = kc.clone(), vc.clone()
+            kc2[0, :, S:S + 3] = tk[:3].transpose(0, 1)
+            vc2[0, :, S:S + 3] = tv[:3].transpose(0, 1)
+            kcs, vcs = kc, vc
+            kc, vc = kc2, vc2
+            oB, _, _ = run(S + 3, [3, 4, 5], [-1, 0, 1])
+            oBd, _, _ = run(S + 3, [3, 4, 5], [-1, 0, 1], dev=True)
+            kc, vc = kcs, vcs
+            oC, _, _ = run(S, [0, 1, 6, 2, 3, 7, 4, 5], [-1, 0, 1, 1, 3, 4, 4, 6])
+            oAd, _, _ = run(S, [0, 1, 2, 3, 4, 5], [-1, 0, 1, 2, 3, 4], dev=True)
+            assert torch.equal(oA[3:], oB), f"S={S}: chain vs committed + chain"
+            assert torch.equal(oB, oBd) and torch.equal(oA, oAd), f"S={S}: eager vs device length"
+            assert torch.equal(oA, oC[[0, 1, 3, 4, 6, 7]]), f"S={S}: chain vs tree path"
+            # float32 reference for the chain
+            kf = kA[0, :, :S + 6].float().repeat_interleave(hq // hkv, 0)
+            vf = vA[0, :, :S + 6].float().repeat_interleave(hq // hkv, 0)
+            qf = tq[:6].transpose(0, 1).float()
+            sc = torch.einsum("htd,hnd->htn", qf, kf) / math.sqrt(D)
+            pos = torch.arange(S + 6, device="cuda")
+            sc = sc.masked_fill(pos[None, None, :] > (S + torch.arange(6, device="cuda"))[None, :, None], float("-inf"))
+            ref = torch.einsum("htn,hnd->htd", sc.softmax(-1), vf).transpose(0, 1)
+            err = ((oA.float() - ref).abs().max() / ref.abs().max()).item()
+            out.append(f"context {S}: chain = committed + chain = tree path, eager = device length, bit for bit; "
+                       f"max relative vs fp32 {err:.1e}")
+    finally:
+        INV = keep
     return out

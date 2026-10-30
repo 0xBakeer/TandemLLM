@@ -208,6 +208,13 @@ class Admission:
             t = self.waiting[key]
             return 1 + sum(1 for v in self.waiting.values() if v < t)
 
+    def first(self, key) -> None:
+        """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
+        mid-answer resumes before any request that has not started); among such lanes, the one
+        that gave way first."""
+        with self.lock:
+            self.waiting[key] = min([0.0] + list(self.waiting.values())) - 1.0
+
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
@@ -408,18 +415,34 @@ class Slot:
                 "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
 
 
+def depth_cut(tree, max_depth: int | None):
+    """SPD-223: `tree` with no node deeper than `max_depth` levels (the anchor is level 1), or `tree`
+    itself when it fits: a joint pass's kernels carry a fixed depth. A prefix of every path is kept,
+    so the cut costs acceptance only."""
+    if tree is None or not max_depth:
+        return tree
+    d = tree.depths()
+    if max(d) < max_depth:
+        return tree
+    return tree.subset({i for i, x in enumerate(d) if x < max_depth})
+
+
 class VerifyReq:
     """One slot's tree block, submitted to the round. The slot that runs the round fills `out`
     and `ms`; the submitter reads them when it holds the turn again."""
 
     __slots__ = ("slot", "eng", "tokens", "parents", "start", "rows", "batchable", "out", "ms",
-                 "error", "joint", "tree", "tree_cut")
+                 "error", "joint", "tree", "tree_cut", "rid", "q", "walk_spec", "walked")
 
     def __init__(self, slot: int, eng, tokens, parents, start: int, batchable: bool = True,
                  tree=None):
         self.slot, self.eng, self.tokens, self.parents, self.start = slot, eng, tokens, parents, start
         self.tree = tree                   # the slot's whole tree, for a joint cut (`joint_cut`)
         self.tree_cut = None               # the tree the round verified, when it cut it
+        self.rid = None                    # SPD-187: the round logger's id of the pass that verified it
+        self.q = None                      # SPD-187: the tree's per-node calibrated q (the round planner)
+        self.walk_spec = None              # SPD-161: what the round runner needs to walk this block
+        self.walked = None                 # SPD-161: its walk ("picks" / "walk"), or None
         self.rows = len(parents)
         self.batchable = bool(batchable)
         self.out = None
@@ -445,20 +468,23 @@ class DraftReq:
         self.joint = 1
 
 
-#: Tree nodes a slot may verify in a joint round, by how many slots decode: the joint pass stays at
-#: or under the 32 rows where every projection kernel is row-invariant (docs/kernels.md). A slot
-#: alone keeps the router's own budget.
+#: Tree nodes a slot may verify in a joint round under the share cut, by how many slots decode: the
+#: joint pass stays at or under the family's row cap (`joint_policy`, 32 unless the family proved more),
+#: where every projection kernel is row-invariant (docs/kernels.md). A slot alone keeps the router's own
+#: budget.
 SHARES = {2: 16, 3: 10, 4: 8}
 
 
-def joint_cut(trees: list, max_rows: int) -> list[set]:
+def joint_cut(trees: list, max_rows: int, cap: int | None = None) -> list[set]:
     """One cut over several slots' trees: each slot keeps its anchor and its best node, then nodes
     are admitted best-first by score across all the trees (each with its ancestors, so a kept set
     stays ancestor-closed) while the total stays at or under `max_rows`. A slot whose text the
-    drafters read well (a copy) keeps more of its tree than one whose candidates are weak. Returns
+    drafters read well (a copy) keeps more of its tree than one whose candidates are weak. `cap`
+    (SPD-163, a family's `joint_policy` "tree_cap"): no tree keeps more than `cap` nodes. Returns
     each tree's kept node indices."""
     keep = [{0} for _ in trees]
     used = len(trees)
+    big = cap if cap is not None else max_rows
 
     def path(g, i):
         out, j = [], i
@@ -471,7 +497,7 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
         if len(t.tokens) > 1 and used < max_rows:
             best = max(range(1, len(t.tokens)), key=lambda i: t.scores[i])
             p = path(g, best)
-            if used + len(p) <= max_rows:
+            if used + len(p) <= max_rows and len(keep[g]) + len(p) <= big:
                 keep[g].update(p)
                 used += len(p)
     order = sorted(((-t.scores[i], g, i) for g, t in enumerate(trees) for i in range(1, len(t.tokens))),
@@ -482,16 +508,153 @@ def joint_cut(trees: list, max_rows: int) -> list[set]:
         if i in keep[g]:
             continue
         p = path(g, i)
-        if used + len(p) <= max_rows:
+        if used + len(p) <= max_rows and len(keep[g]) + len(p) <= big:
             keep[g].update(p)
             used += len(p)
     return keep
 
 
-def share(n_decoding: int, max_rows: int = 32) -> int | None:
+class RowPrices:
+    """SPD-225: what a joint pass costs by its lanes and rows, and what the rest of a round costs by its
+    lanes, learned from the rounds the runner times on the GPU (exponential averages, `note`). A MoE
+    family's pass grows with its rows (the experts a pass reads are the union of its rows' picks); a dense
+    family's barely does. `cal`: the drafts accepted over the kept nodes' scores (path probabilities)."""
+
+    def __init__(self, alpha: float = 0.1):
+        self.alpha = float(alpha)
+        self.pass_ms: dict = {}            # lanes -> {rows -> ms of the joint pass}
+        self.rest_ms: dict = {}            # lanes -> ms of the round besides its pass
+        self.cal = 1.0
+        self.n = 0
+        self.priced = 0
+        self.explored = 0
+        self.rows_kept = 0
+        self.rows_offered = 0
+
+    def _avg(self, d: dict, k: int, v: float) -> None:
+        d[k] = v if k not in d else d[k] + self.alpha * (v - d[k])
+
+    def note(self, lanes: int, rows: int, pass_ms: float, period_ms: float) -> None:
+        self._avg(self.pass_ms.setdefault(int(lanes), {}), int(rows), float(pass_ms))
+        self._avg(self.rest_ms, int(lanes), max(0.0, float(period_ms) - float(pass_ms)))
+        self.n += 1
+
+    def note_accept(self, accepted: float, expected: float) -> None:
+        if expected > 0:
+            self.cal += self.alpha * (min(2.0, accepted / expected) - self.cal)
+
+    def cost(self, lanes: int, rows: int) -> float | None:
+        """The pass's ms at `rows` with `lanes` lanes: the average there, else a line through the rows
+        measured nearest below and above; past the largest measured, the line of the two largest; below the
+        smallest measured, the smallest's own ms (never a guess of a cheaper pass). None under two rows
+        measured at these lanes."""
+        d = self.pass_ms.get(int(lanes)) or {}
+        if rows in d:
+            return d[rows]
+        ks = sorted(d)
+        if len(ks) < 2:
+            return None
+        if rows < ks[0]:
+            return d[ks[0]]
+        lo = [k for k in ks if k < rows]
+        hi = [k for k in ks if k > rows]
+        a, b = (lo[-1], hi[0]) if hi else (lo[-2], lo[-1])
+        return max(0.0, d[a] + (d[b] - d[a]) * (rows - a) / (b - a))
+
+    def rest(self, lanes: int) -> float:
+        return self.rest_ms.get(int(lanes), 0.0)
+
+    def report(self) -> dict:
+        return {"rounds": self.n, "priced": self.priced, "explored": self.explored, "cal": round(self.cal, 3),
+                "rows_kept": round(self.rows_kept / max(1, self.priced), 1),
+                "rows_offered": round(self.rows_offered / max(1, self.priced), 1),
+                "pass_ms": {e: {r: round(v, 1) for r, v in sorted(d.items())}
+                            for e, d in sorted(self.pass_ms.items())},
+                "rest_ms": {k: round(v, 1) for k, v in sorted(self.rest_ms.items())}}
+
+
+def priced_cut(trees: list, prices: RowPrices, max_rows: int, cap: int | None = None,
+               budget: int | None = None, anchor_alone: bool = True) -> tuple | None:
+    """SPD-225: the round's rows where its expected tokens a ms are the most. Every lane keeps its anchor (one
+    token each); the trees' other nodes are admitted best-first by score (path probabilities, scaled by the
+    measured calibration), each with its ancestors, at most `max_rows` in all and `cap` a tree, as
+    `joint_cut`; the prefix of that order kept is the one whose (lanes + expected drafts) / (rest of the
+    round + the pass at its rows) is the largest. `budget` (an exploring round): the longest prefix within
+    that many rows instead. `anchor_alone` False (a family whose joint pass takes no block of its anchor
+    alone, `caps.joint_plain`): a tree with drafts keeps its best one whatever the prices. Returns (kept node
+    indices a tree, expected tokens, rows offered), or None while the pass at these lanes is not priced."""
+    E = len(trees)
+    big = cap if cap is not None else max_rows
+    rest = prices.rest(E)
+    if budget is None and prices.cost(E, max_rows) is None:
+        return None
+    def path(g, i):
+        p, j = [], i
+        while j not in keep[g]:
+            p.append(j)
+            j = trees[g].parents[j]
+        return p
+
+    keep = [{0} for _ in trees]
+    used, exp = E, float(E)
+    if not anchor_alone:
+        for g, t in enumerate(trees):
+            if len(t.tokens) > 1:
+                p = path(g, max(range(1, len(t.tokens)), key=lambda i: t.scores[i]))
+                keep[g].update(p)
+                used += len(p)
+                exp += prices.cal * sum(t.scores[n] for n in p)
+    base = [set(k) for k in keep]
+    exp0 = exp
+    order = sorted(((-t.scores[i], g, i) for g, t in enumerate(trees) for i in range(1, len(t.tokens))),
+                   key=lambda x: (x[0], x[1], x[2]))
+    c = prices.cost(E, used) if budget is None else None
+    best, best_at, steps = (exp / (rest + c) if c else 0.0), 0, []
+    for _, g, i in order:
+        if used >= max_rows:
+            break
+        if i in keep[g]:
+            continue
+        p = path(g, i)
+        if used + len(p) > max_rows or len(keep[g]) + len(p) > big:
+            continue
+        keep[g].update(p)
+        used += len(p)
+        exp += prices.cal * sum(trees[g].scores[n] for n in p)
+        steps.append((g, p, used))
+        if budget is not None:
+            if used <= budget:
+                best_at = len(steps)
+            continue
+        c = prices.cost(E, used)
+        if c is not None and rest + c > 0 and exp / (rest + c) > best:
+            best, best_at = exp / (rest + c), len(steps)
+    offered = used
+    keep, exp = base, exp0
+    for g, p, _ in steps[:best_at]:
+        keep[g].update(p)
+        exp += prices.cal * sum(trees[g].scores[n] for n in p)
+    return keep, exp, offered
+
+
+#: SPD-161: how long a barrier waiter sleeps while a decoding slot holds the GPU turn; it is woken before
+#: that by the round's end or a slot leaving decode (`Pool.wake`). A submit wakes nobody: the slot whose
+#: submit completes the set runs the round itself (`QSE_PARALLEL_BUSY_WAIT_MS`)
+BUSY_WAIT_S = float(os.environ.get("QSE_PARALLEL_BUSY_WAIT_MS", "20") or 20) / 1e3
+
+#: SPD-155: with `--parallel-cut auto`, the decoding slots from which a round cuts all trees together
+#: in one pass (`QSE_PARALLEL_AUTO_N`): below it each slot cuts its own share
+AUTO_JOINT_N = int(os.environ.get("QSE_PARALLEL_AUTO_N", "3") or 3)
+#: SPD-163 step 6: the environment named it (it then wins over a family's `joint_policy` "auto_n")
+AUTO_JOINT_N_SET = bool(os.environ.get("QSE_PARALLEL_AUTO_N"))
+
+
+def share(n_decoding: int, max_rows: int = 32, shares: dict | None = None) -> int | None:
+    """A slot's node budget under the share cut; `shares` a family's own table (`joint_policy`
+    "shares"), in place of SHARES for the slot counts it names."""
     if n_decoding <= 1:
         return None
-    s = SHARES.get(n_decoding, max(2, max_rows // n_decoding))
+    s = (shares or {}).get(n_decoding) or SHARES.get(n_decoding, max(2, max_rows // n_decoding))
     return max(2, min(s, max_rows // n_decoding))
 
 
@@ -503,12 +666,21 @@ class Meeting:
     slots run in lockstep, because they all get their logits from the same pass. `cv` guards
     `pending` and the results."""
 
-    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002, cut: str = "share"):
+    def __init__(self, max_rows: int = 32, timeout_s: float = 0.002, cut: str = "share",
+                 auto_n: int | None = None, shares: dict | None = None):
         self.max_rows = int(max_rows)
         self.timeout = float(timeout_s)
         # "share": each slot cuts its own tree to its share before it submits; "joint": the slots
-        # submit their whole trees and the round cuts them together (`joint_cut`)
+        # submit their whole trees and the round cuts them together (`joint_cut`); "auto" (SPD-155):
+        # joint from `auto_n` decoding slots on, share below
         self.cut = cut
+        # SPD-163: a family's own `auto_n` / `shares` (`joint_policy`), unless QSE_PARALLEL_AUTO_N is set
+        self.auto_n = AUTO_JOINT_N if auto_n is None or AUTO_JOINT_N_SET else int(auto_n)
+        self.shares = dict(shares or {})
+        # SPD-163: a family's per-tree cap for an E-block joint cut (`joint_policy` "tree_cap"), or None
+        self.tree_cap = None
+        # SPD-223: a family's deepest tree in a joint pass (`joint_policy` "max_depth"), or None
+        self.max_depth = None
         self.cv = threading.Condition()
         self.pending: dict[int, VerifyReq] = {}
         # slots whose round ran and which have not taken the turn back yet: on their way (a woken
@@ -524,16 +696,26 @@ class Meeting:
         self.timing = False
         self._last_submit: dict = {}
 
+    def joint_for(self, n_decoding: int) -> bool:
+        """Whether a round of `n_decoding` slots cuts its trees together (`cut`)."""
+        return self.cut == "joint" or (self.cut == "auto" and n_decoding >= self.auto_n)
+
     def batches(self) -> list:
         """The pending blocks cut into passes: the batchable ones together while they fit in
-        `max_rows` rows, every other block in a pass of its own, in arrival order."""
+        `max_rows` rows, every other block in a pass of its own, in arrival order. With the joint
+        cut, every batchable block that came with its tree goes in one pass (the round cuts them
+        together to `max_rows`); one without a tree is packed as under the share cut."""
         out, cur, rows = [], [], 0
-        if self.cut == "joint":
-            # whole trees: one pass for every batchable block, cut together to `max_rows`
-            joint = [r for r in self.pending.values() if r.batchable]
-            alone = [[r] for r in self.pending.values() if not r.batchable]
-            return ([joint] if joint else []) + alone
-        for r in self.pending.values():
+        pend = list(self.pending.values())
+        if self.joint_for(len(pend)):
+            joint = [r for r in pend if r.batchable and r.tree is not None]
+            if len(joint) > 1:
+                # SRV-707: past `per_pass()` trees (more lanes than one pass holds at two rows each)
+                # the trees go in passes of that many, in arrival order, so no pass exceeds `max_rows`
+                k = self.per_pass()
+                out += [joint[i:i + k] for i in range(0, len(joint), k)]
+                pend = [r for r in pend if r not in joint]
+        for r in pend:
             if not r.batchable:
                 out.append([r])
                 continue
@@ -545,6 +727,12 @@ class Meeting:
         if cur:
             out.append(cur)
         return out
+
+    def per_pass(self) -> int:
+        """SRV-707: the most trees one joint pass verifies: each keeps its anchor and one node at
+        least, so `max_rows // 2` (16 at 32 rows). More decoding lanes verify in more passes a
+        round, each pass reading the weights once."""
+        return max(1, self.max_rows // 2)
 
     def report(self) -> dict:
         with self.cv:
@@ -567,11 +755,14 @@ class Pool:
         self.meeting = meeting
         self.draft_meeting = draft_meeting
         self.admission = admission
+        self.burst = None                  # SPD-245: server/prefill_burst.py `Burst`, when on
         self._lk = threading.Lock()
         # `peak_running`: the most slots busy at once so far. /health showed it as `max_running`
         # until 0.8.2, where it read as a limit ("max_running 2" on three slots, 2026-10-13)
         self.stats = {"side_grants": 0, "slot0_grants": 0, "peak_running": 0}
         self.last_joint: dict = {}             # slot -> blocks in its last joint pass
+        self.last_rid: dict = {}           # SPD-187: slot -> its last joint round's logger id
+        self.last_walk: dict = {}          # SPD-161: slot -> the round runner's walk of its last block
         # 0.8.2: the slots `--parallel` asked for, and why fewer were built (the memory floor at
         # load, `_build_side_slots`); None when all of them were
         self.requested = len(self.slots)
@@ -653,6 +844,13 @@ class Pool:
                           else ""))
         return n, why
 
+    def wake(self) -> None:
+        """SPD-161: the barriers' waiters look again (a slot left decode: their set may be complete)."""
+        for m in (self.meeting, self.draft_meeting):
+            if m is not None:
+                with m.cv:
+                    m.cv.notify_all()
+
     def release_side(self, slot: Slot) -> None:
         slot.owner = None
         slot.served += 1
@@ -668,14 +866,17 @@ class Pool:
 
     def report(self) -> dict:
         limit, why = self.limit()
-        return {"n": self.n, "running": self.running(), "decoding": self.decoding(),
+        # SPD-201: a slot the round runner decodes (phase "runner") is decoding too
+        dec = [s.index for s in self.slots if s.phase in ("decode", "runner")]
+        return {"n": self.n, "running": self.running(), "decoding": dec,
                 "requested": self.requested, "max_running": limit, "max_running_reason": why,
                 "slots": [s.report() for s in self.slots], **self.stats,
                 "turn": self.turn.report() if self.turn is not None else None,
                 "meeting": self.meeting.report() if self.meeting is not None else None,
                 "draft_meeting": (self.draft_meeting.report() if self.draft_meeting is not None
                                   else None),
-                "admission": self.admission.report() if self.admission is not None else None}
+                "admission": self.admission.report() if self.admission is not None else None,
+                "prefill_burst": self.burst.report() if self.burst is not None else None}
 
 
 # ------------------------------------------------------------------ the barrier
@@ -704,7 +905,14 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
         try:
             with meet.cv:
                 while req.out is None and req.error is None:
-                    meet.cv.wait(meet.timeout / 2)
+                    # SPD-161: a waiter polls at half the barrier's timeout only while the turn could
+                    # be idle; while a decoding slot holds it (the round's runner, or a slot on its
+                    # way to submit) it sleeps until notified, up to BUSY_WAIT_S. Seven waiters that
+                    # woke every millisecond took the GIL from the thread issuing the joint pass:
+                    # an 8-block pass ran 210 ms in the server against 110-130 ms alone.
+                    own = turn.owner
+                    busy = own is not None and own in pool.decoding() and own != slot_index
+                    meet.cv.wait(BUSY_WAIT_S if busy else meet.timeout / 2)
                     if req.out is not None or req.error is not None:
                         break
                     if all(i in meet.pending for i in pool.decoding()):

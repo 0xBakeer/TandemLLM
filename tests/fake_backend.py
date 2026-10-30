@@ -37,6 +37,8 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
     FAKE_FINISH_ERROR    reasoning, then a finish chunk with `finish_reason: "error"` (our engine's
                          failure mid-stream; FAKE_FINISH_ERROR_ONCE: only the first time per text)
+    FAKE_MEMORY_FULL_ONCE  three answer tokens, then our engine's finish chunk with the
+                         `memory_full` error (SRV-709), the first time per text; then the answer
 
 For the harness (P4):
 
@@ -178,6 +180,8 @@ class Fake:
         # fn() -> the rows of GET /v1/dashboard/live?follow=0 (None: 404, a server without the
         # route); the stream itself answers 429, so a reader polls
         self.live = None
+        # SRV-707: what /health adds (our engine's: max_len, parallel); None: {"status": "ok"} alone
+        self.health: dict | None = None
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -249,7 +253,7 @@ def make_handler(fake: Fake):
                     return self._json(429, {"error": {"message": "too many live streams"}})
                 return self._json(200, {"requests": fake.live(), "engine": {}})
             if p in ("/health", "/v1/health"):
-                return self._json(200, {"status": "ok"})
+                return self._json(200, {"status": "ok", **(fake.health or {})})
             if p == "/version" and fake.dialect == "vllm":
                 return self._json(200, {"version": "0.30.0"})
             if p == "/server_info" and (fake.dialect or "").startswith("sglang"):
@@ -586,6 +590,13 @@ def make_handler(fake: Fake):
                 fake.once.add(k)
             return first
 
+        def _memory_full_now(self, text: str) -> bool:
+            with fake.lock:
+                k = ("FAKE_MEMORY_FULL", text)
+                first = k not in fake.once
+                fake.once.add(k)
+            return first
+
         def _drop_now(self, text: str) -> bool:
             if "FAKE_DROP_ONCE" not in text:
                 return True
@@ -647,6 +658,14 @@ def make_handler(fake: Fake):
                 k += 1
                 if k == 3 and stall:
                     time.sleep(stall)
+                if k == 3 and "FAKE_MEMORY_FULL_ONCE" in text and self._memory_full_now(text):
+                    ch = chunk({}, finish="error")
+                    ch["error"] = {"message": "memory is full: this request stopped after 3 tokens",
+                                   "type": "server_busy", "code": "memory_full", "retry_after": 30}
+                    self._event(ch)
+                    self._send_chunk(b"data: [DONE]\n\n")
+                    self._send_chunk(b"")
+                    return
                 if k == 3 and "FAKE_ERROR_FRAME" in text:
                     self._event({"error": {"message": "fake upstream failure",
                                            "type": "server_error"}})

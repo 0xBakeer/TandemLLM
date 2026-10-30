@@ -281,7 +281,7 @@ def test_invalid_calls_are_repaired_once():
     assert len(model.prompts) == 2
     assert "there is no tool 'finish'" in model.prompts[1], model.prompts[1][-400:]
     assert w.stats["tool_invalid"] == 1
-    bad = call_xml("set_field", step="parallelism", field="slots", value=17)
+    bad = call_xml("set_field", step="parallelism", field="slots", value=65)
     w, model = _wren(Scripted(replies=[bad, bad, bad, bad]))
     _loaded(w)
     ev = _events(w)
@@ -320,7 +320,7 @@ def test_explain_takes_only_what_the_page_can_point_at():
                ["function"]["parameters"]["properties"]["field"]["enum"])
     want = ({c["id"] for c in M["components"]} | {f["id"] for f in M["methods"] + M["advanced"]}
             | {p["id"] for p in M["profiles"]}
-            | {"slots", "window", "side_window", "kv_pool", "floor_gb"})
+            | {"slots", "window", "kv_pool", "floor_gb"})
     assert enum == want, (enum ^ want)
     for name in sorted(want):
         assert tools.check(M, "explain", {"field": name})[1] is None, name
@@ -330,8 +330,8 @@ def test_one_repair_then_words_with_the_tools_off():
     """VIS-91: an invalid call gets one repair; when that is invalid too the model answers in
     words with no tools in the prompt, and the turn says nothing changed."""
     _on_disk()
-    bad = call_xml("set_field", step="parallelism", field="slots", value=17)
-    w, model = _wren(Scripted(replies=[bad, bad, "Sixteen is the most the engine runs."]))
+    bad = call_xml("set_field", step="parallelism", field="slots", value=65)
+    w, model = _wren(Scripted(replies=[bad, bad, "Sixty-four is the most the setup takes."]))
     _loaded(w)
     ev = _events(w)
     assert not [e for e in ev if e["type"] == "tool_call"], ev
@@ -339,7 +339,7 @@ def test_one_repair_then_words_with_the_tools_off():
     assert model.prompts[1].endswith(json.dumps(tools.definitions(M))), "the repair has the tools"
     assert model.prompts[2].endswith("[]"), model.prompts[2][-200:]   # the words: no tools at all
     text = "".join(e.get("delta", "") for e in ev)
-    assert text == "Sixteen is the most the engine runs.", repr(text)
+    assert text == "Sixty-four is the most the setup takes.", repr(text)
     assert ev[-1] == {"type": "done", "finish": "stop", "sources": ev[-1]["sources"],
                       "unchanged": True}, ev[-1]
     assert w.stats["tool_invalid"] == 2 and w.stats["forced_words"] == 1
@@ -388,7 +388,7 @@ def test_the_step_and_its_ids_are_in_the_prompt():
     model.prompts.pop()
     _events(w, "Use two slots", page={"model": "qwen3.8-27b", "step": "parallelism",
                                       "step_index": 4, "selection": {}})
-    assert "slots, window, side_window, kv_pool, floor_gb" in model.prompts[1]
+    assert "slots, window, kv_pool, floor_gb" in model.prompts[1]
     assert "104.25 KiB" in model.prompts[1] and "3.26 GiB at 32,768 tokens" in model.prompts[1]
     assert "The measured table:" not in model.prompts[1]
     _events(w, "What is on this step?", page={"model": "qwen3.8-27b", "step": "components",
@@ -454,9 +454,9 @@ def test_the_tool_checks():
         assert why is None, (name, args, why)
     assert tools.check(M, "set_field", {"step": "parallelism", "field": "window",
                                         "value": "65536"})[0]["value"] == 65536
-    # VIS-199: the engine's 16 is the cap, not the card's measured 4
-    assert tools.check(M, "set_field", {"step": "parallelism", "field": "slots", "value": 9})[1] is None
-    bad = [("set_field", {"step": "parallelism", "field": "slots", "value": 17}),
+    # VIS-199, SRV-707: the setup's 64 is the cap, not the card's measured 4
+    assert tools.check(M, "set_field", {"step": "parallelism", "field": "slots", "value": 17})[1] is None
+    bad = [("set_field", {"step": "parallelism", "field": "slots", "value": 65}),
            ("set_field", {"step": "parallelism", "field": "nope", "value": 1}),
            ("set_field", {"step": "review", "field": "slots", "value": 1}),
            ("set_field", {"step": "methods", "field": "served_model", "value": "a; reboot"}),

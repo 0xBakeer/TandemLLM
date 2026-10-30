@@ -117,8 +117,9 @@ A live tab that loses chatd shows one banner, "The chat service stopped", and re
 `?chat=mock` (and the Vite dev server) loads the in-browser mock, with a "mock data" badge; it is
 for dashboard development only.
 
-At most 2 runs talk to the
-engine at once (`QSE_CHAT_MAX_RUNS`); the others wait as `queued`. A run that waits for a
+As many runs talk to the engine at once as it has lanes (its `/health` `parallel.n`; 8 until
+chatd has read it, SRV-707); `QSE_CHAT_MAX_RUNS` fixes the number instead. The others wait as
+`queued`. chatd's own `/health` says how many (`runs`). A run that waits for a
 permission prompt gives its slot back until the answer comes, and takes one again for its next call. A run on a
 cloud model takes no slot: its calls run at the provider, not on the box.
 
@@ -310,7 +311,7 @@ The Chat tab is in beta in this release, and a Beta pill beside it says so. We k
 - A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
 - When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
 - Images only: there is no video input (VIS-97).
-- The 5.05 Flash-Next pack does not load yet.
+- The 5.05 Flash-Next pack’s full-pack load and generation are not yet verified.
 - Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
 - The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
 

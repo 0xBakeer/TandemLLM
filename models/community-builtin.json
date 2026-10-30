@@ -62,7 +62,7 @@
    "model": "qwen3.8-flash-next",
    "id": "turboderp-flashnext-3.05",
    "path": "models/qwen3.8-flash-next/community/turboderp-flashnext-3.05.json",
-   "sha256": "b8b31fa83b54cd44bdb17d1e82c75fcc8259a5b191115fe4a3bb9157cc9b1342",
+   "sha256": "3386d24f223b1ca58ff2f379d11d10e19f94ffec14b2c4fad67e07780bff6659",
    "entry": {
     "schema": 1,
     "id": "turboderp-flashnext-3.05",
@@ -107,20 +107,20 @@
     "profile": "flashnext-3.05",
     "status": "verified",
     "verified": {
-     "build": "0.7.2",
+     "build": "0.14.2",
      "device": "dgx-spark",
-     "date": "2026-10-12",
+     "date": "2026-10-26",
      "tok_s": {
-      "prose": 51.07,
-      "code": 82.69,
-      "chat": 64.0
+      "prose": 56.4,
+      "code": 60.2,
+      "chat": 55.8
      },
      "tokens_per_round": {
-      "prose": 2.15,
-      "code": 3.48,
-      "chat": 2.49
+      "prose": 2.45,
+      "code": 2.63,
+      "chat": 2.56
      },
-     "notes": "one greedy request a kind of up to 512 tokens, thinking off, the draft layer and the lookup (ENG-229)"
+     "notes": "tools/q35m_ab.py, one greedy request a kind of up to 512 tokens, thinking off, through the conductor, the draft layer and the lookup, 8 lanes, suffix store and response cache off; raw file models/qwen3.8-flash-next/measurements/verified-2026-10-26-turboderp-flashnext-3.05.json"
     }
    }
   },
@@ -184,7 +184,7 @@
    "model": "qwen3.8-flash-next",
    "id": "turboderp-flashnext-5.05",
    "path": "models/qwen3.8-flash-next/community/turboderp-flashnext-5.05.json",
-   "sha256": "9bdc51c96fcdccf221ee6749011c0c7f94e5b2db32f21cb8e452409e467ca2f1",
+   "sha256": "11d88ea9aa47ef20e46e208d4d2bf0007c0d29f6d8d03706eee56e04f05db676",
    "entry": {
     "schema": 1,
     "id": "turboderp-flashnext-5.05",
@@ -219,7 +219,7 @@
     "drafters": "in-pack",
     "license": "qwen-community-1.0",
     "license_url": "https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/blob/7cef615f7fd3681295b68848018876dfabc336c7/LICENSE",
-    "description": "turboderp's EXL3 quantisation of Qwen3.8-Flash-Next at 5.05 bits a weight, the branch 5.05bpw_h6_ng6: the weights, the vision tower, the multi-token-prediction draft layer and the n-gram table. It does not load on TandemLLM yet: its experts are coded at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8 (ENG-223).",
+    "description": "turboderp's EXL3 quantisation of Qwen3.8-Flash-Next at 5.05 bits a weight, the branch 5.05bpw_h6_ng6: the weights, the vision tower, the multi-token-prediction draft layer and the n-gram table. Its earlier blocker was the 7-bit dense projections; the dense dispatch now covers K 2..8 (the routed experts already had 5 and 7). Full-pack load and generation are still unverified.",
     "tags": [
      "quantisation",
      "mixture-of-experts",
