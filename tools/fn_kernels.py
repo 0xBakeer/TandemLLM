@@ -154,7 +154,7 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
 def gemv_bf16(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """`gemv` with the fp32 sums rounded to bf16 in the kernel (what `F.linear` returns in bf16)."""
     if hasattr(w, "mul_rows"):
-        y = w.mul_rows(x)
+        y = w.mul_rows(x).to(torch.bfloat16)
         return y if out is None else out.copy_(y)
     q, s = (w.q, w.s) if hasattr(w, "q") else (w, None)
     if out is None:

@@ -81,6 +81,13 @@ class HFIndex:
         a = np.memmap(t.file, dtype=_NP[t.dtype], mode="r", offset=t.offset, shape=t.shape if t.shape else (1,))
         return a if t.shape else a.reshape(())
 
+    def array(self, name: str) -> np.ndarray:
+        """The tensor's bytes read into memory (no map kept open: thousands of small tensors stay within the
+        process's file limit)."""
+        t = self.tensors[name]
+        a = np.fromfile(t.file, dtype=_NP[t.dtype], count=t.nbytes // _ITEM[t.dtype], offset=t.offset)
+        return a.reshape(t.shape) if t.shape else a.reshape(())
+
     def read(self, name: str, device="cpu") -> torch.Tensor:
         t = self.tensors[name]
         raw = np.fromfile(t.file, dtype=np.uint8, count=t.nbytes, offset=t.offset)
@@ -254,6 +261,24 @@ class NVFP4RowTable(NVFP4NGramTable):
         return nvfp4_dequant(b[:, :self.cb], b[:, self.cb:self.cb + self.sb], self._s2[str(dev)])
 
 
+class BF16Rows:
+    """A bf16 weight the engine multiplies through `mul_rows` (fp32 out): tools/bf16_skinny on the tensor cores up to
+    32 rows (row-invariant: a decode row and a verify block's row are the same bits), fp32 products above."""
+
+    def __init__(self, w: torch.Tensor):
+        self.w = w.contiguous()
+        self.shape = self.w.shape
+
+    def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[0] <= 32:
+            from tools import bf16_skinny as BS
+            return BS.mm(x, self.w)
+        return x.float() @ self.w.float().T
+
+    def dequant(self, dtype=torch.bfloat16) -> torch.Tensor:
+        return self.w.to(dtype)
+
+
 # ------------------------------------------------------------------------------ the expert bank
 class NVBank:
     """One layer's routed experts stacked as stored (NVFP4: gate|up [E, 2I, H/2], down [E, H, I/2], plain e4m3 block
@@ -324,19 +349,19 @@ def load_bank(idx: HFIndex, p: str, cfg, device) -> NVBank:
 
     def scales(b):
         if b + ".weight_scale" + FIXED in idx:
-            return decode_csf_fixed(idx.numpy(b + ".weight_scale" + FIXED), idx.numpy(b + ".weight_scale" + EXC))
-        return np.asarray(idx.numpy(b + ".weight_scale"))
+            return decode_csf_fixed(idx.array(b + ".weight_scale" + FIXED), idx.array(b + ".weight_scale" + EXC))
+        return idx.array(b + ".weight_scale")
 
     gu_w, gu_s, gu_s2, d_w, d_s, d_s2 = [], [], [], [], [], []
     for e in range(E):
         b = f"{p}experts.{e}."
-        gu_w.append(np.concatenate([idx.numpy(b + "gate_proj.weight"), idx.numpy(b + "up_proj.weight")]))
+        gu_w.append(np.concatenate([idx.array(b + "gate_proj.weight"), idx.array(b + "up_proj.weight")]))
         gu_s.append(np.concatenate([scales(b + "gate_proj"), scales(b + "up_proj")]))
-        gu_s2.append([float(idx.numpy(b + "gate_proj.weight_scale_2").reshape(-1)[0]),
-                      float(idx.numpy(b + "up_proj.weight_scale_2").reshape(-1)[0])])
-        d_w.append(np.asarray(idx.numpy(b + "down_proj.weight")))
+        gu_s2.append([float(idx.array(b + "gate_proj.weight_scale_2").reshape(-1)[0]),
+                      float(idx.array(b + "up_proj.weight_scale_2").reshape(-1)[0])])
+        d_w.append(idx.array(b + "down_proj.weight"))
         d_s.append(scales(b + "down_proj"))
-        d_s2.append(float(idx.numpy(b + "down_proj.weight_scale_2").reshape(-1)[0]))
+        d_s2.append(float(idx.array(b + "down_proj.weight_scale_2").reshape(-1)[0]))
 
     def dev(a, dt=None):
         t = torch.from_numpy(np.ascontiguousarray(np.stack(a) if isinstance(a, list) else a))
@@ -430,7 +455,7 @@ def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=N
         ij = site + ".block_inject_weight.weight"
         di = torch.cat([dn, idx.read(ij, device)]) if ij in idx else dn
         cs = canonical(site)
-        W[cs + ".down_inject"] = di.contiguous()
+        W[cs + ".down_inject"] = BF16Rows(di)
         W[cs + ".input_mix_weight_up.weight"] = idx.read(site + ".input_mix_weight_up.weight", device).contiguous()
         W[cs + ".rank"] = dn.shape[0]
 
@@ -453,7 +478,7 @@ def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=N
         else:
             a = p + "self_attn."
             W[a + "qkv"] = fuse([a + f"{x}_proj.weight" for x in ("q", "k", "v")])
-        W[p + "mlp.router"] = torch.cat([W[p + "mlp.gate.weight"], W[p + "mlp.shared_expert_gate.weight"]]).contiguous()
+        W[p + "mlp.router"] = BF16Rows(torch.cat([W[p + "mlp.gate.weight"], W[p + "mlp.shared_expert_gate.weight"]]))
     timing = {"dense_s": round(time.time() - t0, 2)}
     t1 = time.time()
     banks = {}

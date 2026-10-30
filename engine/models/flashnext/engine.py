@@ -1922,22 +1922,26 @@ class FlashNextEngine(FlashNextRef):
     draft_head = None          # Int8Rows over a hot vocabulary (`set_draft_head`), else the full head
     draft_ids = None
 
-    def set_draft_head(self, ids) -> None:
+    def set_draft_head(self, ids, fmt: str = "int8") -> None:
         """Draft over a hot vocabulary `ids` (token ids; None: the full head): the head's rows,
         dequantised and stored as int8 rows with an fp32 scale (`tools.fn_kernels.gemv`), read in place
         of the full EXL3 head by the MTP drafts. Only the drafts change; the verify reads the served
-        head. A head once built is kept for the process (captured draft graphs point into it)."""
-        if ids is None:
+        head. A head once built is kept for the process (captured draft graphs point into it).
+        `fmt` (QWEN38_QUANT draft:lm_head, engine/models/flashnext/quant.py): int8 or nvfp4; with
+        nvfp4 `ids` None is every id."""
+        if ids is None and fmt == "int8":
             self.draft_head = self.draft_ids = None
             return
-        from engine.models.flashnext.pack import Int8Rows
+        from engine.models.flashnext import quant
+        if ids is None:
+            ids = np.arange(self.cfg.vocab_size, dtype=np.int64)
         heads = self.__dict__.setdefault("_draft_heads", {})
-        key = hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
+        key = (fmt, hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64))))))
         if key not in heads:
             idx = torch.as_tensor(np.asarray(ids, dtype=np.int64), device=self.device)
             w = self.W["lm_head.weight"]
             w = w.dequant() if hasattr(w, "dequant") else w
-            heads[key] = (Int8Rows.of(w.index_select(0, idx).half().contiguous()), idx)
+            heads[key] = (quant.draft_head(w, idx, fmt), idx)
             del w
             torch.cuda.empty_cache()
         self.draft_head, self.draft_ids = heads[key]
