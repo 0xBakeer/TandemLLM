@@ -9,6 +9,26 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
+// Programmatic dependent launch (SM90+; on GB10 the step is memory-bound, so the pipe should never drain between
+// kernels): a CTA streams its weights -- which never depend on the kernel before -- into L2 and its first registers,
+// then waits for the predecessor's output (the activations), then lets its own successor launch. The arithmetic is
+// the same with or without it.
+__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+__device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" :: "l"(p)); }
+static int g_pdl = 1;
+template <typename... KArgs, typename... Args>
+static void launch_pdl(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = grid; cfg.blockDim = block; cfg.dynamicSmemBytes = smem; cfg.stream = st;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
+    TORCH_CHECK(e == cudaSuccess, "launch: ", cudaGetErrorString(e));
+}
+
 __device__ __forceinline__ uint4 ldw(const void* p) {
     uint4 r;
     asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
@@ -48,6 +68,11 @@ bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __r
         wok[n] = row < N;
         wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
     }
+    // this warp's K slice of its rows into L2 (one 128-byte line a K step), before the wait
+    for (int kk = k0; kk < k1 && t == 0; ++kk)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+            if (wok[n]) prefetch_l2(wr[n] + (size_t)kk * 64);
     uint4 nlo[NT], nhi[NT];
     if (PF && k0 < k1) {
 #pragma unroll
@@ -56,6 +81,8 @@ bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __r
             nhi[n] = wok[n] ? ldw(wr[n] + (size_t)k0 * 64 + 8) : make_uint4(0, 0, 0, 0);
         }
     }
+    pdl_wait();
+    pdl_trigger();
     for (int kk = k0; kk < k1; ++kk) {
         uint32_t B[NT][8];
 #pragma unroll
@@ -135,9 +162,9 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
     auto kern = bf16_skinny_kernel<MT, WK, NT, PF>;
     if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    kern<<<(N + 8 * NT - 1) / (8 * NT), 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
+    launch_pdl(kern, dim3((N + 8 * NT - 1) / (8 * NT)), dim3(32 * WK), smem, at::cuda::getCurrentCUDAStream(),
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),
-        y.data_ptr<float>(), M, N, K / 64, x.stride(0), w.stride(0), y.stride(0));
+        y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0), (int)w.stride(0), (int)y.stride(0));
 }
 
 void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nt, int64_t pf) {

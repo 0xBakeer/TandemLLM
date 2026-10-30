@@ -24,6 +24,24 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
+
+// Programmatic dependent launch: the plan reads the router's ids and the expert launches the plan, so each waits at
+// its start (which experts to stream is the predecessor's output) and lets its successor launch right away.
+__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+static int g_pdl = 1;
+template <typename... KArgs, typename... Args>
+static void launch_pdl(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = grid; cfg.blockDim = block; cfg.dynamicSmemBytes = smem; cfg.stream = st;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
+    TORCH_CHECK(e == cudaSuccess, "nvfp4_moe launch: ", cudaGetErrorString(e));
+}
+
 #define PMAX 1024                                         // pairs a plan holds (64 rows x 16 slots)
 
 __device__ __forceinline__ uint4 ldg16(const void* p) {
@@ -73,6 +91,8 @@ __global__ void __launch_bounds__(PMAX) moe_plan_kernel(const int* __restrict__ 
         int* __restrict__ order, int* __restrict__ gstart, int* __restrict__ gcount, int* __restrict__ gexp,
         int* __restrict__ ng) {
     __shared__ int se[PMAX], sc[PMAX];
+    pdl_wait();
+    pdl_trigger();
     const int i = threadIdx.x;
     const int e = i < P ? ids[i] : 0x7fffffff;
     if (i < P) {
@@ -159,6 +179,8 @@ __global__ void __launch_bounds__(32 * WK) moe_gu_kernel(const __nv_bfloat16* __
         const int* __restrict__ gexp, const int* __restrict__ ngp, const uint8_t* __restrict__ W,
         const uint8_t* __restrict__ SC, const float* __restrict__ S2, __nv_bfloat16* __restrict__ A, int I, int H) {
     extern __shared__ float part[];
+    pdl_wait();
+    pdl_trigger();
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
     const int c0 = blockIdx.x * 8 * NT, KQ = H / 128, per = (KQ + WK - 1) / WK;
     const int q0 = warp * per, q1 = min(KQ, q0 + per);
@@ -247,6 +269,8 @@ __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* 
         const int* __restrict__ gexp, const int* __restrict__ ngp, const uint8_t* __restrict__ W,
         const uint8_t* __restrict__ SC, const float* __restrict__ S2, float* __restrict__ Y, int I, int H) {
     extern __shared__ float part[];
+    pdl_wait();
+    pdl_trigger();
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
     const int n0 = blockIdx.x * 8 * NT, KQ = I / 128, per = (KQ + WK - 1) / WK;
     const int q0 = warp * per, q1 = min(KQ, q0 + per);
@@ -324,6 +348,8 @@ __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* 
 // -> a bf16 [M, I] = bf16(bf16(silu(g)) u), the routed experts' arithmetic (moe_gu_kernel's epilogue)
 __global__ void silu_mul_kernel(const __nv_bfloat16* __restrict__ gu, int ldg, __nv_bfloat16* __restrict__ a, int I,
                                 int total) {
+    pdl_wait();
+    pdl_trigger();
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const int m = i / I, c = i - m * I;
@@ -337,7 +363,7 @@ void nvfp4_silu_mul(torch::Tensor gu, torch::Tensor a) {
     TORCH_CHECK(gu.dtype() == torch::kBFloat16 && a.dtype() == torch::kBFloat16 && gu.size(1) == 2 * I &&
                 gu.stride(1) == 1 && a.is_contiguous(), "silu_mul: gu bf16 [M, 2I], a bf16 [M, I]");
     const int total = M * I;
-    silu_mul_kernel<<<(total + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+    launch_pdl(silu_mul_kernel, dim3((total + 255) / 256), dim3(256), 0, at::cuda::getCurrentCUDAStream(),
         (const __nv_bfloat16*)gu.data_ptr(), (int)gu.stride(0), (__nv_bfloat16*)a.data_ptr(), I, total);
 }
 
@@ -345,8 +371,8 @@ void nvfp4_moe_plan(torch::Tensor ids, int64_t E, torch::Tensor order, torch::Te
                     torch::Tensor gexp, torch::Tensor ng) {
     const int P = ids.numel();
     TORCH_CHECK(P <= PMAX && ids.dtype() == torch::kInt && ids.is_contiguous(), "nvfp4_moe_plan: <= 1024 int32 ids");
-    moe_plan_kernel<<<1, PMAX, 0, at::cuda::getCurrentCUDAStream()>>>(
-        ids.data_ptr<int>(), P, (int)E, order.data_ptr<int>(), gstart.data_ptr<int>(), gcount.data_ptr<int>(),
+    launch_pdl(moe_plan_kernel, dim3(1), dim3(PMAX), 0, at::cuda::getCurrentCUDAStream(),
+        (const int*)ids.data_ptr<int>(), P, (int)E, order.data_ptr<int>(), gstart.data_ptr<int>(), gcount.data_ptr<int>(),
         gexp.data_ptr<int>(), ng.data_ptr<int>());
 }
 
@@ -360,10 +386,12 @@ void nvfp4_moe_gu(torch::Tensor x, int64_t S, torch::Tensor order, torch::Tensor
 #define L(WK, NT, MT)                                                                                               \
     if (wk == WK && nt == NT && mt == MT) {                                                                         \
         TORCH_CHECK(I % (8 * NT) == 0, "I % 8 NT");                                                                 \
-        moe_gu_kernel<WK, NT, MT><<<dim3(I / (8 * NT), (int)gy), 32 * WK, (WK - 1) * MT * 2 * NT * 4 * 32 * 4, st>>>( \
-            (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (int)S, order.data_ptr<int>(),                    \
-            gstart.data_ptr<int>(), gcount.data_ptr<int>(), gexp.data_ptr<int>(), ng.data_ptr<int>(),              \
-            w.data_ptr<uint8_t>(), sc.data_ptr<uint8_t>(), s2.data_ptr<float>(), (__nv_bfloat16*)a.data_ptr(), I, H); \
+        launch_pdl(moe_gu_kernel<WK, NT, MT>, dim3(I / (8 * NT), (int)gy), dim3(32 * WK),                          \
+            (size_t)(WK - 1) * MT * 2 * NT * 4 * 32 * 4, st.stream(),                                               \
+            (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (int)S, (const int*)order.data_ptr<int>(),        \
+            (const int*)gstart.data_ptr<int>(), (const int*)gcount.data_ptr<int>(), (const int*)gexp.data_ptr<int>(), \
+            (const int*)ng.data_ptr<int>(), (const uint8_t*)w.data_ptr<uint8_t>(), (const uint8_t*)sc.data_ptr<uint8_t>(), \
+            (const float*)s2.data_ptr<float>(), (__nv_bfloat16*)a.data_ptr(), I, H);                                \
         return;                                                                                                     \
     }
     L(4, 1, 1) L(2, 2, 1) L(4, 2, 1) L(4, 1, 2) L(4, 1, 4) L(2, 2, 4) L(4, 2, 2) L(2, 1, 4) L(1, 1, 4) L(1, 2, 4)
@@ -381,10 +409,12 @@ void nvfp4_moe_down(torch::Tensor a, torch::Tensor order, torch::Tensor gstart, 
 #define L(WK, NT, MT)                                                                                               \
     if (wk == WK && nt == NT && mt == MT) {                                                                         \
         TORCH_CHECK(H % (8 * NT) == 0, "H % 8 NT");                                                                 \
-        moe_down_kernel<WK, NT, MT><<<dim3(H / (8 * NT), (int)gy), 32 * WK, (WK - 1) * MT * NT * 4 * 32 * 4, st>>>( \
-            (const __nv_bfloat16*)a.data_ptr(), order.data_ptr<int>(), gstart.data_ptr<int>(), gcount.data_ptr<int>(), \
-            gexp.data_ptr<int>(), ng.data_ptr<int>(), w.data_ptr<uint8_t>(), sc.data_ptr<uint8_t>(),               \
-            s2.data_ptr<float>(), y.data_ptr<float>(), I, H);                                                       \
+        launch_pdl(moe_down_kernel<WK, NT, MT>, dim3(H / (8 * NT), (int)gy), dim3(32 * WK),                        \
+            (size_t)(WK - 1) * MT * NT * 4 * 32 * 4, st.stream(),                                                   \
+            (const __nv_bfloat16*)a.data_ptr(), (const int*)order.data_ptr<int>(), (const int*)gstart.data_ptr<int>(), \
+            (const int*)gcount.data_ptr<int>(), (const int*)gexp.data_ptr<int>(), (const int*)ng.data_ptr<int>(),    \
+            (const uint8_t*)w.data_ptr<uint8_t>(), (const uint8_t*)sc.data_ptr<uint8_t>(),                          \
+            (const float*)s2.data_ptr<float>(), y.data_ptr<float>(), I, H);                                         \
         return;                                                                                                     \
     }
     L(1, 2, 1) L(1, 1, 1) L(5, 2, 1) L(1, 2, 2) L(1, 2, 4) L(1, 4, 4) L(1, 1, 4) L(5, 2, 4)
