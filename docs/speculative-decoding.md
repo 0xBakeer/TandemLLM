@@ -55,7 +55,7 @@ After two wide rounds in a row that commit their whole width, the lookup drafter
 
 ### The corpus of each tokenizer
 
-A corpus holds token ids, so it serves only the tokenizer that wrote it. Its `meta.json` records the sha256 of that tokenizer's `tokenizer.json`, and the engine refuses a store that records another one. Qwen3.8 and Flash-Next share one tokenizer; Ornith, Flint, LFM2.5 and the Nemotron models use others.
+A corpus holds token ids, so it serves only the tokenizer that wrote it. Its `meta.json` records the sha256 of that tokenizer's `tokenizer.json`. A read skips a store that records another one, with one log line naming both fingerprints, and the lookup reads the conversation only; a write to such a store is refused. Qwen3.8 and Flash-Next share one tokenizer; Ornith, Flint, LFM2.5 and the Nemotron models use others.
 
 The corpus I serve with has 38 million tokens and is not published. `install.sh` builds a public one with the same recipe: one English and one German Wikipedia shard (CC BY-SA 4.0) and the Python sources of transformers, torch, triton and this repository, about 31 million tokens. It builds it for the 27B, at `~/TandemLLM/corpus`.
 
