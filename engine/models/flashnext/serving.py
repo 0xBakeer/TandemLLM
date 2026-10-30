@@ -51,6 +51,7 @@ MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/confi
            "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
            "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py",
            "engine/models/flashnext/vision.py", "engine/models/flashnext/knobs.py",
+           "engine/models/flashnext/nvidia.py", "engine/models/flashnext/quant.py",
            "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
@@ -791,8 +792,16 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
     before the weights, the self-check's first Triton launch refused a pointer, "cannot be accessed
     from Triton", 2026-10-12).
     Returns (serving, drafter or None, info)."""
+    from engine.models.flashnext import nvidia, quant
     from engine.models.flashnext.load import load as fn_load
-    idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
+    nv = nvidia.is_checkpoint(pack)
+    if nv:
+        # NVIDIA's FP4-Local as stored (engine/models/flashnext/nvidia.py): no pack, the HF checkpoint itself
+        from types import SimpleNamespace
+        cfg, W, banks, tables, timing = nvidia.load_engine(pack, "cuda", mtp=spec, log=log)
+        idx = SimpleNamespace(cfg=cfg)
+    else:
+        idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
     mark("weights")
     fn = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max_len)
     if kv_pool is not None:
@@ -800,9 +809,15 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
     eng = FlashNextServing(fn, max_len)
     mark("engine")
     drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
+    # QWEN38_QUANT (engine/models/flashnext/quant.py); NVIDIA's bf16 head drafts in NVFP4 by default (a draft: rule:
+    # the verify reads the served head, the text is unchanged)
+    rules = quant.parse(_S.get("QUANT") or ("draft:lm_head=bf16>nvfp4" if nv else ""))
     if spec:
-        if hot:
-            fn.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
+        hot_ids = np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot] if hot else None
+        if rules:
+            quant.apply(fn, rules, hot_ids, log=log)
+        elif hot:
+            fn.set_draft_head(hot_ids)
         text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
@@ -820,8 +835,9 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")
     mark("drafters")
-    info = {"pack": pack, "load": timing, "self_check": check,
-            "draft_head": f"hot {hot}" if spec else None, "depth": depth if drafter is not None else 0}
+    head = (f"{rules[0].dst} " if rules else "") + (f"hot {hot}" if hot else "full")
+    info = {"pack": pack, "load": timing, "self_check": check, "format": "nvidia-fp4local" if nv else "exl3",
+            "draft_head": head if spec else None, "depth": depth if drafter is not None else 0}
     return eng, drafter, info
 
 
@@ -850,7 +866,10 @@ def serve(a, ctx) -> dict:
         from engine.models.flashnext.pack import PackIndex
         from engine.models.flashnext.vision import load_tower
         return load_tower(PackIndex.open(a.model, table=False), a.model)
-    ctx.vision(a.model, tower_of)
+    if info["format"] == "exl3":
+        ctx.vision(a.model, tower_of)
+    else:
+        ctx.log("[server] Flash-Next NVIDIA FP4-Local: the vision tower is not loaded yet (text only)")
     ctx.mark("vision")
     if drafter is not None:
         a.depth = depth
@@ -865,7 +884,7 @@ def serve(a, ctx) -> dict:
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "weights_info": {"format": "exl3", "weights": a.model,
+                        "weights_info": {"format": info["format"], "weights": a.model,
                                          "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
                                          "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
                                          "self_check": info["self_check"]}}}

@@ -31,9 +31,37 @@ def _module():
     return _MOD
 
 
+def plan_torch(ids: torch.Tensor, E: int) -> dict:
+    """`plan` in torch ops for any number of pairs (a prompt chunk; not for a graph: one host read of the count),
+    the same groups the plan kernel makes."""
+    flat = ids.reshape(-1).long()
+    P = flat.numel()
+    dev = flat.device
+    order = torch.argsort(flat * P + torch.arange(P, device=dev))        # by (expert, pair)
+    se = flat[order]
+    pos = torch.arange(P, device=dev)
+    new = torch.ones(P, dtype=torch.bool, device=dev)
+    new[1:] = se[1:] != se[:-1]
+    start = torch.cummax(torch.where(new, pos, torch.zeros_like(pos)), 0).values      # each position's run start
+    lead = (((pos - start) % 16) == 0) & (se < E)
+    gpos = torch.nonzero(lead).view(-1)
+    end = torch.empty(P, dtype=torch.long, device=dev)                  # each position's run end
+    last = torch.ones(P, dtype=torch.bool, device=dev)
+    last[:-1] = new[1:]
+    ends = torch.nonzero(last).view(-1) + 1
+    end = ends[torch.cumsum(new.long(), 0) - 1]
+    return {"order": order.to(torch.int32), "gstart": gpos.to(torch.int32),
+            "gcount": torch.minimum(end[gpos] - gpos, torch.full_like(gpos, 16)).to(torch.int32),
+            "gexp": se[gpos].to(torch.int32),
+            "ng": torch.tensor([gpos.numel()], dtype=torch.int32, device=dev), "n": gpos.numel()}
+
+
 def plan(ids: torch.Tensor, E: int) -> dict:
-    """ids int32 [M, S] (the shared expert as E) -> the routed pairs by expert in groups of <= 16 (device tensors)."""
+    """ids int32 [M, S] (the shared expert as E) -> the routed pairs by expert in groups of <= 16 (device tensors).
+    Up to PMAX pairs: one CTA on the device (a graph can hold it); more: `plan_torch`."""
     P = ids.numel()
+    if P > PMAX:
+        return plan_torch(ids, E)
     dev = ids.device
     p = {"order": torch.empty(P, dtype=torch.int32, device=dev), "gstart": torch.empty(P, dtype=torch.int32, device=dev),
          "gcount": torch.empty(P, dtype=torch.int32, device=dev), "gexp": torch.empty(P, dtype=torch.int32, device=dev),
@@ -47,11 +75,10 @@ def experts(x: torch.Tensor, ids: torch.Tensor, bank, wk_gu: int = 4, wk_d: int 
     (the shared expert's rows left unwritten: the caller's). The K splits are the weights' shapes' (row invariance)."""
     M, S = ids.shape
     P = M * S
-    assert P <= PMAX, P
     p = plan(ids, bank.n)
     a = torch.empty(P, bank.I, dtype=torch.bfloat16, device=x.device)
     y = torch.empty(P, bank.H, dtype=torch.float32, device=x.device)
-    gy = min(P, GY)
+    gy = min(P, GY) if "n" not in p else max(1, min(p["n"], 1024))
     m = _module()
     m.nvfp4_moe_gu(x.contiguous(), S, p["order"], p["gstart"], p["gcount"], p["gexp"], p["ng"], bank.gu_w, bank.gu_s,
                    bank.gu_s2, a, gy, wk_gu)

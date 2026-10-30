@@ -42,6 +42,17 @@ _ITEM = {"BF16": 2, "F16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1, "U32": 4, "I64": 
 E2M1 = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6, -0., -.5, -1, -1.5, -2, -3, -4, -6], dtype=torch.float32)
 
 
+def is_checkpoint(path: str) -> bool:
+    """An NVIDIA ModelOpt Flash-Next checkpoint (HF safetensors + `quantization_config.quant_method: modelopt`), not an
+    EXL3 pack."""
+    try:
+        c = json.load(open(os.path.join(path, "config.json")))
+    except (OSError, ValueError):
+        return False
+    return (c.get("quantization_config") or {}).get("quant_method") == "modelopt" and \
+        os.path.isfile(os.path.join(path, "model.safetensors.index.json"))
+
+
 # ------------------------------------------------------------------------------ the index
 @dataclass
 class TensorInfo:
@@ -279,6 +290,14 @@ class BF16Rows:
         return self.w.to(dtype)
 
 
+class BF16Lin(BF16Rows):
+    """A bf16 projection read through `lin` (the MTP layer's attention, input fusion and shared expert): `BF16Rows`
+    with the sums rounded once to bf16, as `F.linear` in bf16 returns them."""
+
+    def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
+        return super().mul_rows(x).to(torch.bfloat16)
+
+
 # ------------------------------------------------------------------------------ the expert bank
 class NVBank:
     """One layer's routed experts stacked as stored (NVFP4: gate|up [E, 2I, H/2], down [E, H, I/2], plain e4m3 block
@@ -295,7 +314,7 @@ class NVBank:
         self.d_w, self.d_s, self.d_s2 = d_w, d_s, d_s2                # [E, H, I/2], [E, H, I/16], [E]
         self.shared = shared                                          # {"gate", "up", "down"}: NVWeight or bf16
         g, u = shared["gate"], shared["up"]
-        self.shared["gu"] = NVWeight.cat([g, u]) if isinstance(g, NVWeight) else torch.cat([g, u]).contiguous()
+        self.shared["gu"] = NVWeight.cat([g, u]) if isinstance(g, NVWeight) else BF16Lin(torch.cat([g.w, u.w]))
         self.n = gu_w.shape[0]
         self.I = gu_w.shape[1] // 2
         self.H = d_w.shape[1]
@@ -314,8 +333,6 @@ class NVBank:
         unweighted."""
         from tools import nvfp4_moe as NM
         M, S = ids.shape
-        if M * S > NM.PMAX:
-            return self.experts_torch(x, ids)
         yd = NM.experts(x, ids, self)
         yd.view(M, S, self.H)[:, S - 1].copy_(self._sh(x))
         return yd
@@ -367,6 +384,7 @@ def load_bank(idx: HFIndex, p: str, cfg, device) -> NVBank:
         t = torch.from_numpy(np.ascontiguousarray(np.stack(a) if isinstance(a, list) else a))
         return (t if dt is None else t.to(dt)).to(device)
     shared = {x: projection(idx, f"{p}shared_expert.{x}_proj", device) for x in ("gate", "up", "down")}
+    shared = {x: BF16Lin(w) if isinstance(w, torch.Tensor) else w for x, w in shared.items()}
     return NVBank(dev(gu_w), dev(gu_s), dev(np.asarray(gu_s2, dtype=np.float32)), dev(d_w), dev(d_s),
                   dev(np.asarray(d_s2, dtype=np.float32)), shared)
 
@@ -479,6 +497,11 @@ def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=N
             a = p + "self_attn."
             W[a + "qkv"] = fuse([a + f"{x}_proj.weight" for x in ("q", "k", "v")])
         W[p + "mlp.router"] = BF16Rows(torch.cat([W[p + "mlp.gate.weight"], W[p + "mlp.shared_expert_gate.weight"]]))
+    # the bf16 projections the engine reads through `lin` (the MTP layer's): onto the tensor-core skinny kernel
+    for k, v in list(W.items()):
+        if (isinstance(v, torch.Tensor) and v.dtype == torch.bfloat16 and v.dim() == 2 and k.startswith("mtp.")
+                and k.endswith(("_proj.weight", ".qkv", "fc_embedding.weight", "fc_hidden.weight"))):
+            W[k] = BF16Lin(v)
     timing = {"dense_s": round(time.time() - t0, 2)}
     t1 = time.time()
     banks = {}
