@@ -1132,8 +1132,10 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     lane = lane_kind is not None
     try:
         ids = build_prompt(body, client, count="ids", left_out=left_out)
-    except Exception:                                              # noqa: BLE001
-        return None                       # the render fails again under the lock, as a 400
+    except Exception as exc:                                       # noqa: BLE001
+        # the render fails again under the lock, as a 400; SPD-249: said, since this request now waits for slot 0
+        print(f"[parallel] no side window: the prompt's ids failed ({type(exc).__name__}: {exc})", flush=True)
+        return None
     rows = len(ids)
     if lane and own and lane_kind == "raw" and OWN_SIDE == "on" and not images:
         why.update(ids=ids, lane_side=True)
@@ -6047,7 +6049,11 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     text = body.get("prompt")
     if isinstance(text, list):
         text = text[0]
-    ids = _as_ids(tok(text or "", return_tensors="pt"))
+    # SPD-249: on the host until the caller wants the tensor. `count` runs before any lock (`_par_side_need`): a
+    # copy to the device there landed inside the idle window's graph capture on a fresh server, broke the capture
+    # (cudaErrorStreamCaptureInvalidated) and failed the count, so the request waited for slot 0 behind a whole
+    # generation (8 raw requests at once: 7 decoding, the 8th's first token after 34 s)
+    ids = _as_ids(tok(text or "", return_tensors="pt"), device="cpu")
     # SRV-443: a text prompt answers every `count` as a chat prompt does (`_par_side_need` asks
     # for the host ids before it picks a slot; a tensor there was a 500 on every
     # /v1/completions request with parallel slots)
@@ -6057,7 +6063,7 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         return int(ids.numel()), False
     if count:
         return int(ids.numel())
-    return ids, "text", False
+    return ids.to(STATE["device"]), "text", False
 
 
 def _vision_context(ids: list[int], images: list, eng, on_encode=None) -> tuple:
