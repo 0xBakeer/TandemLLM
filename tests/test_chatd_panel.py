@@ -42,10 +42,10 @@ def test_the_usage_counts_every_tool_call_and_the_files_part_what_the_file_tools
                 if p["type"] == "tool_call"]
         assert len(made) == 2 and s["usage"]["tool_calls"] == 2, s["usage"]
         files = next(p for p in s["context"]["parts"] if p["kind"] == "files")["tokens"]
-        # the write's content is a stub in the next request (chatd/render.py): its tokens, not
-        # the page's
-        stub = render.wrote_stub("site/a.html", page)
-        assert 0 < files <= ctx_mod.estimate_tokens(stub) + 10, (files, s["context"]["parts"])
+        # the write's content stays whole in the next request (chatd/render.py `folded_calls`):
+        # the page's tokens and the edit's
+        assert ctx_mod.estimate_tokens(page) <= files <= ctx_mod.estimate_tokens(page) + 10, \
+            (files, s["context"]["parts"])
         c.send(cid, calls(("read_file", {"path": "site/a.html"})))
         s = c.wait_idle(cid, 20)
         assert s["usage"]["tool_calls"] == 3
@@ -351,3 +351,8 @@ def test_a_running_sandboxs_figures_go_out_with_the_context():
     conv.sandbox_sent = (0.0, None)
     svc_mod.Service._send_context(svc, conv)
     assert events[-1]["type"] == "context.changed"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

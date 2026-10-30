@@ -33,26 +33,14 @@
 // 458 KB with each running worker's live figures (SRV-579, VIS-219, 2026-10-17: 457.3 KB from
 // 455.1): its own Now in the Context panel, a row per worker in the Now dock, the rate on its card,
 // and the mock's two workers at once.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { gzipSync } from 'node:zlib';
+// #130 (2026-10-23): the size is pako's gzip at level 6 (scripts/gzip-size.mjs), the same on every Node, OS and CPU.
+import { BUDGET, distSizes } from './gzip-size.mjs';
 
 const dist = new URL('../dist/', import.meta.url).pathname;
-let total = 0;
-const walk = (d, rel = '') => {
-  for (const f of readdirSync(d)) {
-    const p = join(d, f);
-    if (statSync(p).isDirectory()) walk(p, rel + f + '/');
-    else {
-      const gz = gzipSync(readFileSync(p)).length;
-      total += gz;
-      console.log(`${(gz / 1024).toFixed(1).padStart(7)} KB  ${rel}${f}`);
-    }
-  }
-};
-walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 460 KB)`);
-if (total > 460 * 1024) {
+const { files, total } = distSizes(dist);
+for (const f of files) console.log(`${(f.gzip / 1024).toFixed(1).padStart(7)} KB  ${f.path}`);
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget ${BUDGET / 1024} KB, ${BUDGET - total} bytes left)`);
+if (total > BUDGET) {
   console.error('over budget');
   process.exit(1);
 }

@@ -14,6 +14,7 @@ schema: 1
 id: nemotron-3.5-super-vl-120b-a12b
 name: Nemotron 3.5 Super VL 120B-A12B
 family: Nemotron 3.5
+engine: nemotron_h
 params: ~120B, ~12B active a token
 recommended: false
 order: 6
@@ -24,6 +25,14 @@ architecture: 88 layers, 40 Mamba2, 40 mixture-of-experts (512 experts a layer, 
   checkpoint), 256 to 3,328 prompt rows an image (1,000 for a 1,280 x 800 screenshot).
 license: The model's license (OpenMDW-1.1) is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.
 icon: null
+# ENG-409 (ENG-377): community packs on this base take the place of its nearest own profile (its limits, LiLiCorr
+# and the lookup, their assets); a pack brings no drafter of its own; its config has the base's 88 layers
+community_base:
+  serves: profile
+  loads: {standalone: [text]}
+  drafters: [none]
+  layers: 88
+  hook: engine.models.nemotron_h.community
 links:
 - label: Model card
   url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
@@ -413,11 +422,6 @@ parallelism:
     max: 1048576
     default: 262144
     step: 4096
-  side_window:
-    min: 8192
-    max: 1048576
-    default: 262144
-    step: 4096
   kv_pool:
     default: false
   floor_gb:
@@ -458,6 +462,21 @@ methods:
   recommended: 0.95
   knob: TOP_P
   docs: docs/nemotron-h.md
+- id: reasoning_effort
+  label: Thinking effort
+  what: How long the model may think before it answers, when a client does not say.
+  type: enum
+  options:
+  - value: low
+    label: low
+  - value: medium
+    label: medium
+  - value: xhigh
+    label: extra high
+  default: medium
+  recommended: medium
+  knob: REASONING_EFFORT
+  docs: docs/server.md
 - id: default_max_tokens
   label: Default answer length
   what: The longest answer, in tokens, when a client does not set max_tokens.

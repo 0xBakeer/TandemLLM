@@ -6,8 +6,7 @@ weight (`EXL3Block.dequant()`, bf16 of the fp32 rotation product), a mixer by it
 fp16 weight (`pack.mixer_weight`), the n-gram rows as `ple.EXL3NGramTable` decodes them. Activations
 stay in the compute dtype (bf16 when serving; fp32 in the tight CPU test against `transformers`);
 norms, softmaxes, the router and the recurrent state run in fp32 as in the reference. Ported from
-branch `flashnext` (1a6b91ec, 5ac0e35a, 36ef4e3c, ef246906, 87522636), where it read Mia's NVFP4
-checkpoint.
+branch `flashnext` (1a6b91ec, 5ac0e35a, 36ef4e3c, ef246906, 87522636).
 
 One step of the model, per layer (hc = 4 residual streams of `hidden`):
 
@@ -543,7 +542,7 @@ class FlashNextRef:
         that follow them. Returns (logits [T, vocab] for the token after next, the MTP layer's
         own pre-mixer streams for the next draft step) and advances the MTP state `st`.
 
-        The input fusion follows the vLLM and SGLang Qwen4Exp MTP (they agree): one RMS norm
+        The input fusion follows the reference MTP's: one RMS norm
         (1 + w) over all hc*H values of the streams, `fc_hidden` shared by every stream, plus
         `fc_embedding(norm(embed(token)))` added to every stream; then one full-attention layer
         with QSA, MoE and hyper-connections, its own final mixer, and the shared head."""

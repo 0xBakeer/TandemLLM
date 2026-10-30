@@ -20,7 +20,9 @@ worked; the text is the same, as the rows past the end were never sent.
      next turn are bit for bit those of a drafter that never drafted past the end; the text is the
      plain greedy text cut at the end token; unfolded commits (the CPU default) were refused before
   2  the budget: a generation that reaches max_tokens inside a block keeps its end anchor too
-  3  the memory refusal stays a refusal (`memory`, `end_refused`), with the next turn at the anchors
+  3  memory (SRV-655): refused new buffers, the end anchor takes an anchor's and the next turn
+     resumes at the end; with no anchor to take the refusal stays a refusal (`memory`,
+     `end_refused`), said with the policy's figures
   4  NemotronH (GPU, the tiny board engine through `NemotronHServing`): the incident's +1 and +2;
      before the fix `ahead`, now kept, the state bit for bit the never-past-the-end run's, the next
      turn resumed at the end with the same tokens and logits as that run, and the same greedy tokens
@@ -39,6 +41,7 @@ from contextlib import redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test_forward_tree as T  # noqa: E402,F401  (the CPU environment before the engine imports)
+os.environ.setdefault("QWEN38_PROMPT_END", "0")   # the grid and the end anchor alone (tests/test_prompt_end.py)
 
 import torch  # noqa: E402
 
@@ -257,20 +260,47 @@ class Refuse(cache.Budget):
         return level != "end" and super().admit(level, nbytes)
 
 
-def test_the_memory_refusal_stays_a_refusal():
+class RefuseAnchors(Refuse):
+    """No room for an anchor's buffers either: nothing to take the end's from."""
+
+    def admit(self, level, nbytes):
+        self.asked.append(level)
+        return level not in ("end", "anchors") and cache.Budget.admit(self, level, nbytes)
+
+
+def test_the_memory_refusal_takes_an_anchors_buffers_for_the_end():
+    """SRV-655: the end anchor is worth more than an anchor below it (the next turn resumes at
+    the end and reads only its new tail). Refused new buffers for it, the end takes the buffers
+    of the anchor whose loss leaves the smallest gap; the next turn resumes at the end."""
     plain, i, E, _ = _case(True, 1, labels=())
     mem = Refuse()
     res = _state(drafter=Past(PROMPT + plain, _width_for(i, 1)), tree=True, k=_width_for(i, 1),
                  mem=mem)
+    out, pre, ctx, kv, log = run(PROMPT, 60, {E})
+    assert "end" in mem.asked, mem.asked
+    assert res.end is not None and res.end["at"] == kv, res.stats
+    assert res.stats["end_from_anchor"] == 1 and res.stats["end_refused"] == 0, res.stats
+    assert len(res.anchors) == len(PROMPT) // CH - 1, sorted(res.anchors)
+    assert res._allocated == len(res.anchors) + len(res._free), res._allocated
+    _, pre2, _, _, _ = run(PROMPT + out + TOOL, 4, set())
+    assert pre2["kind"] == "end" and pre2["reused"] == kv, pre2
+    return f"memory: the end from an anchor's buffers, the next turn resumed at {kv}"
+
+
+def test_the_memory_refusal_stays_a_refusal_with_no_anchor_to_take():
+    plain, i, E, _ = _case(True, 1, labels=())
+    mem = RefuseAnchors()
+    res = _state(drafter=Past(PROMPT + plain, _width_for(i, 1)), tree=True, k=_width_for(i, 1),
+                 mem=mem)
     app.STATE["verbose"] = True
     out, pre, ctx, kv, log = run(PROMPT, 60, {E})
-    assert "end" in mem.asked and res.end is None, res.stats
+    assert "end" in mem.asked and res.end is None and not res.anchors, res.stats
     assert res.stats["end_refused"] == 1 and res.stats["end_ahead"] == 0, res.stats
-    assert "end anchor not kept (memory)" in log, log
+    assert "end anchor not kept (memory, allocated " in log, log
     app.STATE["verbose"] = False
     _, pre2, _, _, _ = run(PROMPT + out + TOOL, 4, set())
-    assert pre2["kind"] == "resident" and pre2["reused"] == (len(PROMPT) // CH) * CH, pre2
-    return "memory: refused, counted, the next turn at the prompt's line"
+    assert pre2["reused"] == 0, pre2
+    return "memory: refused, counted, said with the policy's figures; the next turn from 0"
 
 
 # ------------------------------------------------------------------ 4. NemotronH, GPU

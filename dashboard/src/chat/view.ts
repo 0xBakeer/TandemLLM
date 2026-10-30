@@ -214,32 +214,36 @@ export class QseChat extends LightElement {
         this.down = null;
         this.backend = new (await import('./remote')).RemoteChatBackend();
         this.backendReason = 'probed';
-        await this.loadCaps();
+        await this.loadCaps(run);
         if (!this.boots.live(run)) return true;
-        if (!this.needSignIn) await this.afterSignIn();
+        if (!this.needSignIn) await this.afterSignIn(run);
         return true;
       }, true);
       return;
     }
     this.backend = choice.backend;
     this.backendReason = choice.reason;
-    await this.loadCaps();
+    await this.loadCaps(run);
     if (!this.boots.live(run)) return;
     if (this.needSignIn) return;
-    await this.afterSignIn();
+    await this.afterSignIn(run);
   }
 
-  private async loadCaps(): Promise<void> {
+  private async loadCaps(run: number): Promise<void> {
     try {
       this.caps = await this.backend!.capabilities();
       this.needSignIn = !!this.caps.session && this.caps.session.password_set && !this.caps.session.signed_in;
     } catch (e) {
+      if (!this.boots.live(run)) return;   // left mid-call: no reprobe, no toast
       if (isChatDown(e)) this.onLost();
       else this.say('warn', `The chat server did not answer: ${(e as Error).message}`);
     }
   }
 
-  private async afterSignIn(): Promise<void> {
+  /** run: the caller's generation, taken before its first await (a late caller's own read of
+   *  current() would be the detach's new value and pass) */
+  private async afterSignIn(run: number): Promise<void> {
+    if (!this.boots.live(run)) return;
     const b = this.backend!;
     void b.tools().then((t) => (this.tools = t)).catch(() => undefined);
     void b.packages().then((p) => (this.packages = p)).catch(() => undefined);
@@ -250,6 +254,7 @@ export class QseChat extends LightElement {
     this.globalSub?.close();
     this.globalSub = b.subscribeGlobal((ev) => void this.onGlobal(ev));
     await this.loadList();
+    if (!this.boots.live(run)) return;   // left while the list loaded: open no chat stream
     await this.openFromRoute();
   }
 
@@ -315,13 +320,14 @@ export class QseChat extends LightElement {
   }
 
   private async open(id: string): Promise<void> {
+    const run = this.boots.current();
     this.detach();
     this.wantId = id;
     this.loading = true;
     this.convError = null;
     try {
       const c = await this.backend!.getConversation(id);
-      if (this.wantId !== id) return;
+      if (!this.boots.live(run) || this.wantId !== id) return;   // left mid-load: no navigate, no stream
       this.conv = c;
       this.agentsNote = null;
       lsSet(LS.last, id);
@@ -915,11 +921,14 @@ export class QseChat extends LightElement {
   }
 
   private onSignedIn = async (): Promise<void> => {
+    const run = this.boots.current();
     if (!this.needSignIn || !this.backend) return;
     if (this.backend.kind === 'mock') await this.backend.signIn('');
+    if (!this.boots.live(run)) return;   // left during the sign-in: start nothing
     this.needSignIn = false;
-    await this.loadCaps();
-    if (!this.needSignIn) await this.afterSignIn();
+    await this.loadCaps(run);
+    if (!this.boots.live(run)) return;   // left while the capabilities loaded
+    if (!this.needSignIn) await this.afterSignIn(run);
   };
 }
 

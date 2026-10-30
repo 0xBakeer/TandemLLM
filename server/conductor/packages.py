@@ -60,6 +60,9 @@ SHIPPED_ROOT = shipped_root()
 # `{repo}` in a `skill_dirs` entry: the directory whose `packages/` holds the shipped texts
 REPO_TOKEN = "{repo}"
 URL_TOKEN = "{tandem_url}"
+# SRV-615: the results a package can name as its `deliverable`, the kinds signals.tool_effects
+# reads off a tool's declaration (`post` has no schema rule; the keep-out question decides it)
+DELIVERABLES = ("send", "schedule", "post")
 # SRV-171: the session's scratch directory, outside the user's project
 SCRATCH_TOKEN = "{tandem_scratch}"
 SCRATCH_DEFAULT = ".tandem"
@@ -121,7 +124,7 @@ def request_url(headers) -> str | None:
             return (headers.get(name) or "").split(",")[0].strip()
         except Exception:                                          # noqa: BLE001
             return ""
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     fixed = _S.get("TANDEM_URL").strip().rstrip("/")
     if fixed:
         return fixed                       # SRV-163: the operator's address for the notes
@@ -137,7 +140,7 @@ def scratch_for(url: str | None) -> str:
     (FX15: the conversation's own folder, so a `.tandem` the user or another conversation left is
     never the one the testing package creates, marks and deletes; `.tandem/session` without a
     token)."""
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     want = _S.get("TANDEM_SCRATCH").strip() or SCRATCH_SESSION
     if "{token}" in want:
         m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
@@ -253,6 +256,13 @@ class Library:
             return tuple(str(w) for w in want)
         body, _ = self._body(doc, name)
         return ("shell",) if body and URL_TOKEN in body else ()
+
+    @staticmethod
+    def deliverable(doc: dict, name: str) -> str | None:
+        """SRV-615: what the package's result is for when a tool can make it (`send`, `schedule`,
+        `post`), or None: a write-message draft is a message to send."""
+        d = ((doc.get("packages") or {}).get(name) or {}).get("deliverable")
+        return d if isinstance(d, str) and d in DELIVERABLES else None
 
     @staticmethod
     def fallback(doc: dict, name: str) -> str | None:

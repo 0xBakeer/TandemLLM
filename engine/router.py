@@ -426,6 +426,10 @@ class MergedRouter(Drafter):
         fn = getattr(self.mtp, "kv_views", None)
         return fn() if fn is not None else []
 
+    @property
+    def hidden_free(self) -> bool:
+        return bool(getattr(self.mtp, "hidden_free", False))
+
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         if getattr(self.mtp, "wants_rows", False):
             self.mtp.sync(tokens, hidden, first_pos, rows=rows)

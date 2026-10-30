@@ -63,13 +63,24 @@ def tokenizer(model_dir: str, cfg: dict):
 
 
 def encoder(model_dir: str):
-    """The bare encoder, randomly initialised from `encoder/config.json` (the weights come from
+    """The bare encoder from `encoder/config.json`, not initialised (the weights come from
     `model.safetensors` with the head's)."""
     from transformers import AutoConfig, AutoModel
     enc_dir = os.path.join(model_dir, "encoder")
     if not os.path.exists(enc_dir):
         raise CheckpointError(f"{model_dir}: no encoder/ directory")
-    enc = AutoModel.from_config(AutoConfig.from_pretrained(enc_dir), attn_implementation="sdpa")
+    try:
+        from transformers.initialization import no_init_weights   # transformers 5
+    except ImportError:
+        try:
+            from transformers.modeling_utils import no_init_weights
+        except ImportError:                                        # neither: initialised as before
+            import contextlib
+            no_init_weights = contextlib.nullcontext
+    # SRV-717: no random initialisation -- every parameter is overwritten by model.safetensors (`verify`
+    # checks each one), and initialising ModernBERT's took seconds of CPU on a request's thread
+    with no_init_weights():
+        enc = AutoModel.from_config(AutoConfig.from_pretrained(enc_dir), attn_implementation="sdpa")
     for module in (enc, getattr(enc, "model", None)):
         cfg = getattr(module, "config", None)
         if cfg is not None:

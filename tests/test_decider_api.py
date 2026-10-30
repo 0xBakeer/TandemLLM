@@ -235,13 +235,15 @@ def test_raw_answers_are_the_same_with_the_deciders_loaded():
     """The fake-engine form of the raw identity gate: one raw request (`X-Tandem: raw`) to the
     server with a decision model loaded and asked, and to the server without the runtime, streams
     the same text and the same usage. (The real gate, flagoff_identity and the PASS identity on
-    the model, runs on the box under a hold.)"""
+    the model, runs on the box under a hold.) Since SRV-617 the raw path gives a plain client
+    the thinking in reasoning_content and the answer alone in content, so the budget reaches past
+    the reasoning and both fields must hold text."""
     _until_loaded()
     assert _ask({"state": "debug", "questions": CHOICE})[0] == 200
     _wait(OFF, SRV_OFF)
 
     def raw(port):
-        body = {"model": "TandemLLM", "stream": False, "max_tokens": 48, "temperature": 0,
+        body = {"model": "TandemLLM", "stream": False, "max_tokens": 96, "temperature": 0,
                 "messages": [{"role": "user", "content": "Name three prime numbers."}]}
         req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
                                      data=json.dumps(body).encode(),
@@ -254,7 +256,7 @@ def test_raw_answers_are_the_same_with_the_deciders_loaded():
         return m.get("content"), m.get("reasoning_content"), out["usage"]
 
     on, off = raw(PORT), raw(OFF)
-    assert on == off and on[0], (on, off)
+    assert on == off and on[0] and on[1] and "<think>" not in on[0], (on, off)
 
 
 # ------------------------------------------------------------------ the Deciders screen's routes

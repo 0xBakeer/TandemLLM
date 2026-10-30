@@ -396,6 +396,29 @@ def test_7b_an_exception_says_where_it_was_thrown():
                     "exception: Uncaught SyntaxError"], errs
 
 
+def test_7c_a_shader_error_keeps_the_compiler_lines():
+    """Ornith's reef replay (2026-10-21): three.js's shader error came back clipped after its first
+    `ERROR:` line, and the model read the library for 14 calls. The report keeps the first line,
+    every compiler error line and the marked source line, without the source dump; other errors
+    are clipped as before."""
+    dump = "\n".join(f"{i}: float x{i} = 0.0;" for i in range(1700, 1766))
+    msg = ("THREE.WebGLProgram: Shader Error 0 - VALIDATE_STATUS false\n\nMaterial Name: \n"
+           "Material Type: MeshStandardMaterial\n\nProgram Info Log: Fragment shader is not "
+           "compiled.\n\nFRAGMENT\n\nERROR: 0:1768: 'vReefW' : undeclared identifier\n"
+           "ERROR: 0:1771: 'uTime' : undeclared identifier\n\n" + dump +
+           "\n> 1768: \tfloat r = vReefW.y * 0.5;\n1769: }")
+    ev = [{"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [
+              {"type": "string", "value": msg}]}},
+          {"method": "Runtime.consoleAPICalled", "params": {"type": "error", "args": [
+              {"type": "string", "value": "x" * 400}]}}]
+    errs, _ = ld._problems(ev)
+    assert errs[0] == ("console: THREE.WebGLProgram: Shader Error 0 - VALIDATE_STATUS false\n"
+                       "ERROR: 0:1768: 'vReefW' : undeclared identifier\n"
+                       "ERROR: 0:1771: 'uTime' : undeclared identifier\n"
+                       "> 1768: \tfloat r = vReefW.y * 0.5;"), errs[0]
+    assert errs[1] == "console: " + "x" * 231 + "...", errs[1]
+
+
 def test_8_browser_cdp_and_the_in_page_kit():
     if ld.find_chrome() is None:
         print("    (skipped: no Chrome or Chromium on this machine)")
@@ -583,6 +606,12 @@ def test_10_page_check():
     srv, url = _serve_dir(d)
     before = set(_pids_with("laya-drive-chrome-"))
     try:
+        # #120: Chrome's first start on a machine reads its files from the disk, 6 to 19 s on a fresh
+        # runner and 35 s with the suite's other jobs beside it; every start after it took 0.1 to
+        # 0.6 s. One start first, so the bound below measures a start and not that read
+        t_warm = time.monotonic()
+        ld.Browser(url + "/timer.html", headless=True, need_state=False).close()
+        print(f"    Chrome's first start and page: {time.monotonic() - t_warm:.1f} s")
         t0 = time.monotonic()
         code, rep = _page([url + "/timer.html", "--shots", d, "--step", "click:text=Start",
                            "--step", "wait:1200", "--step", "read:document.getElementById('t').textContent",
@@ -590,7 +619,9 @@ def test_10_page_check():
                            "--step", "expect:document.getElementById('name').value === 'Ada'",
                            "--step", "click:#pause", "--step", "shot:after-pause"])
         took = time.monotonic() - t0
-        print(f"    timer page: {rep['verdict']} in {took:.1f} s; read {rep['steps'][2]['value']}, "
+        steps = rep.get("steps") or [{}, {}, {}]
+        print(f"    timer page: {rep['verdict']} in {took:.1f} s (Chrome up and the page loaded in "
+              f"{rep.get('start_seconds')} s, the steps {rep.get('seconds')} s); read {steps[2].get('value')}, "
               f"state {rep.get('state')}")
         assert code == 0 and rep["ok"], rep
         assert rep["steps"][2]["value"] in ("24:59", "24:58"), rep["steps"][2]
@@ -601,7 +632,10 @@ def test_10_page_check():
             assert os.path.getsize(os.path.join(os.getcwd(), w["shot"])) > 1000, w
         assert os.path.exists(os.path.join(d, "after-pause.png"))
         assert {c.get("id") for c in rep["controls"]} >= {"start", "pause", "name"}, rep["controls"]
-        assert took < 30, took                  # the keyring wait (25 s per launch) is gone
+        # the keyring wait (25 s at the first network request, on every start) is gone: a start and
+        # the first load of a page on 127.0.0.1 take a few seconds on a loaded runner, the whole
+        # check more
+        assert rep["start_seconds"] < 20, rep["start_seconds"]
 
         laya = FakeLaya(policy=lambda c, st: "failure")
         try:
@@ -635,12 +669,34 @@ def test_10_page_check():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_10b_chrome_starts_without_the_desktop_keyring():
+    """SRV-195: the two flags that end Chrome's 25 s keyring wait are on its command line."""
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def popen(args, **kw):
+        seen.append(args)
+        raise Stop
+    old, ld.subprocess.Popen = ld.subprocess.Popen, popen
+    old_find, ld.find_chrome = ld.find_chrome, lambda: "/bin/chrome"
+    try:
+        ld.Browser("about:blank", None, headless=True)
+        raise AssertionError("Chrome was not started")
+    except Stop:
+        pass
+    finally:
+        ld.subprocess.Popen, ld.find_chrome = old, old_find
+        for a in (seen[0] if seen else ()):
+            if a.startswith("--user-data-dir="):
+                shutil.rmtree(a.split("=", 1)[1], ignore_errors=True)
+    assert seen and "--password-store=basic" in seen[0] and "--use-mock-keychain" in seen[0], seen
+
+
 def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    from ports import free_port
+    return free_port()                 # OPS-231: no two tests get one port
 
 
 if __name__ == "__main__":

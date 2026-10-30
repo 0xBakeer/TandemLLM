@@ -58,11 +58,8 @@ TOOLS = [{"type": "function", "function": {"name": "bash", "description": "run a
 
 
 def _port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    from ports import free_port
+    return free_port()                 # OPS-231: no two tests get one port
 
 
 def _env():
@@ -71,8 +68,11 @@ def _env():
 
 
 def _server(port, conductor_dir=None, extra=()):
+    """The fake engine's server; `port` None: the kernel picks a free one (`--port 0`), which `_wait` reads
+    from the listening line and returns (OPS-231: a port picked here first and bound by the server later
+    could be taken in between by another file of a parallel suite)."""
     ledger = os.path.join(tempfile.mkdtemp(prefix="qse-cond-"), "ledger.sqlite3")
-    args = [sys.executable, "-c", LAUNCH, "--fake-engine", "--port", str(port),
+    args = [sys.executable, "-c", LAUNCH, "--fake-engine", "--port", str(port or 0),
             "--served-model", "qwen38-spark-engine", "--usage-ledger", ledger,
             "--fake-tps", "2000", *extra]
     if conductor_dir:
@@ -90,11 +90,25 @@ def _decider(port, *extra):
 
 
 def _wait(port, proc, path="/health"):
+    """Until the server answers `path`; returns its port (read from its listening line when `port` is None)."""
     end = time.time() + 60
+    if port is None:
+        seen = []
+        while time.time() < end:
+            line = proc.stdout.readline()
+            if not line:
+                raise AssertionError("the server ended before it listened:\n" + "".join(seen[-40:]))
+            seen.append(line)
+            m = re.search(r"\[server\] listening on http://[^:]+:(\d+)", line)
+            if m:
+                port = int(m.group(1))
+                break
+        else:
+            raise AssertionError("no listening line in 60 s")
     while time.time() < end:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2)
-            return
+            return port
         except OSError:
             if proc.poll() is not None:
                 raise AssertionError(proc.stdout.read())

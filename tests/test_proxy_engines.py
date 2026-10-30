@@ -169,17 +169,45 @@ def test_mapped_page_is_prometheus_text():
     assert fams["qse_backend_spec_accepted_tokens_per_pos"].type == "counter"
 
 
+def _reference_read(text: str) -> dict:
+    """The box's own unit for a page's cost: every sample line split into its name and a float, nothing
+    else (what any reader of the format must do)."""
+    out = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        name, _, val = line.rpartition(" ")
+        try:
+            out[name] = float(val)
+        except ValueError:
+            pass
+    return out
+
+
+#: map_page's CPU time against `_reference_read`'s on the same page: 22.7 to 23.3 on the Spark (aarch64,
+#: Python 3.11) and on a laptop (Python 3.9), 2026-10-22; 44 under coverage.py's tracer
+MAP_VS_READ = 60.0
+
+
 def test_scrape_cost():
+    """OPS-231: the cost on the box's own scale. The absolute gate (a 300-line page under 2 ms) held on the
+    Spark (1.6 ms for 500 lines) and failed on a hosted runner (5.6 ms) and under coverage.py; a slower box is
+    slower at the reference read too. CPU time, after one warm call (the first compiles the patterns: 20 ms)."""
     text = page("vllm-metrics-0.30.0-b.txt")
+    E.map_page("vllm", text)
+    _reference_read(text)
     n = 50
-    t0 = time.perf_counter()
+    c0 = time.process_time()
     for _ in range(n):
         E.map_page("vllm", text)
-    per = (time.perf_counter() - t0) / n * 1e3
+    per = (time.process_time() - c0) / n
+    c0 = time.process_time()
+    for _ in range(n):
+        _reference_read(text)
+    ref = max((time.process_time() - c0) / n, 1e-6)
     lines = len(text.splitlines())
-    # the gate: a 300-line page under 2 ms; this page has about 500 lines
-    assert per * 300 / lines < 2.0, f"{per:.2f} ms for {lines} lines"
-    print(f"  map_page: {per:.2f} ms for a {lines}-line page")
+    print(f"  map_page: {per * 1e3:.2f} ms for a {lines}-line page, {per / ref:.1f} times the reference read")
+    assert per / ref < MAP_VS_READ, f"{per * 1e3:.2f} ms, {per / ref:.1f} times the reference read's {ref * 1e3:.3f} ms"
 
 
 def test_unknown_families_and_garbage_are_ignored():

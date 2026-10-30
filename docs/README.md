@@ -11,6 +11,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
+| [conductor.md](conductor.md) | the conductor in one page: modes and headers, profiles, the router, effort, packages, the note, side requests, sessions, the monitor and loop guards, the journal, raw mode, measured effect |
 | [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text, Flash-Next |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |
@@ -20,6 +21,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [tool-eval-bench.md](tool-eval-bench.md) | tool-eval-bench results of 2026-10-19: the raw path at five thinking settings, four conductor profiles, hard mode |
 | [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |
 | [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md) | LiquidAI's LFM2.5-24B-A2B: the model, its profiles, its tool-call format, how the engine runs it |
+| [flint.md](flint.md) | Recursive's Flint: the model, its EXL3 and BF16 profiles, reasoning and tools, the lookup at long context, how the engine runs it |
 | [nemotron-h.md](nemotron-h.md) | NVIDIA's NemotronH (Nemotron 3.5 Bolt, Super VL, Lightning): the models, the EXL3, GGUF and NVFP4 profiles, LiLiCorr, how the engine runs them |
 | [setup.md](setup.md) | a new box from the command line, the dashboard's setup guide, the model registry behind it, and Wren |
 | [chat.md](chat.md) | the Chat tab (in beta) and chatd, the service behind it: the sandbox, the permission modes, the known limitations |
@@ -27,7 +29,9 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [memory.md](memory.md) | memory notes: what the model keeps about the user and the work |
 | [shadow-reader.md](shadow-reader.md) | the small model that follows each session and answers questions about it |
 | [proxy.md](proxy.md) | the dashboard as a proxy in front of other engines and cloud APIs |
+| [threat-model.md](threat-model.md) | where untrusted input enters, the parts that matter most for security |
 | [roadmap.md](roadmap.md) | what Flash-Next still lacks, parallel requests, other GPUs |
+| [labels.md](labels.md) | the GitHub labels of issues and pull requests, by group |
 
 Two more references live next to the code. [server/METRICS.md](../server/METRICS.md) lists every Prometheus metric, and [contract/dashboard-v1/](contract/dashboard-v1/README.md) holds the dashboard API's schemas.
 

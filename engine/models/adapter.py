@@ -58,3 +58,56 @@ class CostModel:
         """The dashboard's `cache.snapshot_cost` row (contract 1.3 keys)."""
         return {"recurrent_bytes": int(self.parts.get("recurrent", 0)), "conv_bytes": int(self.parts.get("conv", 0)),
                 "kv_bytes_per_token": int(self.view_bytes_per_token)}
+
+
+@dataclass(frozen=True)
+class EngineHooks:
+    """Launch options a family turns on in the shared kernels it builds on (ENG-408): a shared kernel takes
+    an option as a plain argument and names no family; the family's engine passes it when its entry says
+    so (and its own knob does not turn it off)."""
+
+    # programmatic dependent launches of the Triton row kernels (`launch_pdl`, `griddepcontrol`)
+    pdl: bool = False
+    # a second CUDA stream beside the routed experts for the shared expert
+    side_stream: bool = False
+
+
+@dataclass(frozen=True)
+class ReasoningSpec:
+    """How a family's model reasons (ENG-406), for the server's reasoning split, budget and thinking-off
+    render. The default is a template that opens the reasoning block in the prompt and closes it for
+    thinking off (`enable_thinking`)."""
+
+    # the model writes the opening `<think>` itself as its first token; its template opens none, so thinking
+    # off renders an empty block after the generation prompt and a budget counts from the model's opener
+    opens_itself: bool = False
+    # SRV-697: with thinking off, a message the server adds before the conversation (`off_role`, after the
+    # client's own system messages) for a model that otherwise writes its reasoning into the answer; None:
+    # nothing added
+    off_note: str | None = None
+    off_role: str = "developer"
+
+
+@dataclass(frozen=True)
+class PromptSpec:
+    """How a family's chat template takes the conversation's messages (SRV-697 follow-up)."""
+
+    # the template renders one system prompt, first: a `developer` message is read as `system`, a leading run
+    # of them is joined into one, and one after the conversation began is refused (400). False: the template
+    # renders system and developer messages where they stand, with their own role
+    system_first: bool = True
+
+
+@dataclass(frozen=True)
+class ServeSpec:
+    """What a family tells the server about serving it (ENG-406, ENG-407): the form its model writes tool
+    calls in (a name the server's tool formats know, server/toolformats/) and how it reasons. The family's
+    `serve()` returns it as `serving["spec"]`; shared code reads it, never a model's name."""
+
+    tool_format: str = "xml"
+    reasoning: ReasoningSpec = field(default_factory=ReasoningSpec)
+    prompt: PromptSpec = field(default_factory=PromptSpec)
+    # #104: the family's engine builds side slots (`--parallel` beyond one); False: it serves one chat at a
+    # time, and the Setup Guide caps its parallel chats at one. The engine's own Capabilities.side_slots says
+    # the same (tests/test_modelspec.py holds them together)
+    side_slots: bool = True

@@ -16,6 +16,8 @@ no known checkpoints — it stays a clean refusal.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 
@@ -27,6 +29,10 @@ except ImportError:
     HAVE_TRITON = False
 
 from tools import gguf_grids as _G
+
+#: TRITON_INTERPRET=1 runs the packed kernels on the CPU interpreter (the tests' CPU coverage);
+#: otherwise a CPU input always takes the dense fallback, Triton installed or not
+_INTERP = os.environ.get("TRITON_INTERPRET") == "1"
 
 ROWS_MAX = 32   # iq2_linear's contract: rows up to this use the packed kernel (row-invariant)
 ROWS_KERN = ROWS_MAX + 1          # rows up to this still run the packed kernel (the verify block)
@@ -1378,7 +1384,8 @@ class _Packed:
         a slice of rows at a time (a slice stays under PREFILL_W_BYTES) and each goes through
         cuBLAS into its columns of y. Off-GPU (or no Triton) falls back to the fp32 twin."""
         if not x2.is_cuda or not HAVE_TRITON:
-            y = torch.nn.functional.linear(x2, self._twin().to(x2.device))
+            xb = x2 if x2.dtype == torch.bfloat16 else x2.to(torch.bfloat16)
+            y = torch.nn.functional.linear(xb, self._twin().to(x2.device))
             return y.float() if f32 else y
         xb = x2 if x2.dtype == torch.bfloat16 else x2.to(torch.bfloat16)
         y = torch.empty(x2.shape[0], self.N, dtype=torch.bfloat16, device=x2.device)
@@ -1391,7 +1398,7 @@ class _Packed:
     def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
         x2 = x.reshape(-1, self.K).contiguous()
         M = x2.shape[0]
-        if M > ROWS_KERN or not HAVE_TRITON:
+        if M > ROWS_KERN or not HAVE_TRITON or (not x2.is_cuda and not _INTERP):
             y = self._prefill(x2, f32)
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:

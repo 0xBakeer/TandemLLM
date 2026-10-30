@@ -7,17 +7,18 @@ data as a read-only memory map, and the per-type histogram.
 
 The format (version 2 and 3): magic "GGUF", version u32, tensor count u64, metadata count u64; each
 metadata entry a string key, a u32 type and its value (strings are u64 length + bytes, arrays a u32
-item type, a u64 count and the items); each tensor a string name, u32 dims, the dims as u64 (ggml's
-order: the fastest dimension first), a u32 ggml type and a u64 offset from the data start, which sits
+item type, a u64 count and the items); each tensor a string name, u32 dims, the dims as u64 (the
+format's order: the fastest dimension first), a u32 tensor type and a u64 offset from the data start, which sits
 at the next multiple of `general.alignment` (32 when absent) after the table.
 
 Only the types this engine decodes are accepted (`BLOCKS`); any other stops the open with the tensor's
-name and the type's. The canonical names of llama.cpp's NemotronH tensors are in `CANONICAL`, so a
+name and the type's. The GGUF format's NemotronH tensor names map to canonical ones in `CANONICAL`, so a
 GGUF reads to the same names as the safetensors checkpoint (engine/models/nemotron_h/pack.py).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import struct
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 MAGIC = b"GGUF"
-#: ggml type id -> (name, values a block, bytes a block): the types the engine reads (packed or
+#: GGUF tensor type id -> (name, values a block, bytes a block): the types the engine reads (packed or
 #: load-time dequant; Q1_0 stays out — no settled ggml decode and no checkpoints use it)
 BLOCKS = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20), 6: ("Q5_0", 32, 22),
           7: ("Q5_1", 32, 24), 8: ("Q8_0", 32, 34), 9: ("Q8_1", 32, 40), 10: ("Q2_K", 256, 84),
@@ -37,14 +38,14 @@ BLOCKS = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 2: ("Q4_0", 32, 18), 3: ("Q4_1", 3
           23: ("IQ4_XS", 256, 136), 24: ("I8", 1, 1), 25: ("I16", 1, 2), 26: ("I32", 1, 4), 27: ("I64", 1, 8),
           28: ("F64", 1, 8), 29: ("IQ1_M", 256, 56), 30: ("BF16", 1, 2), 34: ("TQ1_0", 256, 54),
           35: ("TQ2_0", 256, 66), 39: ("MXFP4", 32, 17), 40: ("NVFP4", 64, 36)}
-#: every ggml type id this reader names in a refusal (llama.cpp's ggml.h)
+#: every GGUF tensor type id this reader names in a refusal (the format's type table)
 TYPE_NAMES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1", 10: "Q2_K",
               11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
               19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32",
               27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0", 35: "TQ2_0", 39: "MXFP4", 40: "NVFP4"}
 _SCALAR = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
 
-#: llama.cpp's NemotronH tensor names (blk.N.*) -> the canonical names of ref.py / pack.py
+#: the GGUF format's NemotronH tensor names (blk.N.*) -> the canonical names of ref.py / pack.py
 CANONICAL = [
     (r"^token_embd\.weight$", "embeddings.weight"),
     (r"^output_norm\.weight$", "norm_f.weight"),
@@ -86,7 +87,7 @@ def canonical(name: str) -> str | None:
 @dataclass
 class GGUFTensor:
     name: str               # as stored
-    dims: tuple             # ggml order: the fastest dimension first
+    dims: tuple             # GGUF order: the fastest dimension first
     type: int
     offset: int             # absolute byte offset in the file
     nbytes: int
@@ -135,6 +136,8 @@ class GGUFFile:
                 infos.append((name, dims, ty, off))
             pos = f.tell()
         align = int(meta.get("general.alignment", 32))
+        if align <= 0 or align & (align - 1):
+            raise ValueError(f"{path}: general.alignment {align} is not a power of two")
         start = (pos + align - 1) // align * align
         size = os.path.getsize(path)
         tensors = {}
@@ -142,7 +145,7 @@ class GGUFFile:
             if ty not in BLOCKS and not accept_all:
                 raise ValueError(f"{path}: tensor {name} is {TYPE_NAMES.get(ty, f'type {ty}')}; this engine decodes "
                                  f"{', '.join(v[0] for v in BLOCKS.values())}")
-            n = int(np.prod(dims))
+            n = math.prod(dims)                 # Python ints: np.prod wraps at 64 bits
             per, nb = BLOCKS.get(ty, (1, 0))[1:] if ty in BLOCKS else (1, 0)
             if ty in BLOCKS and n % per:
                 raise ValueError(f"{name}: {n} values are not whole {TYPE_NAMES[ty]} blocks of {per}")

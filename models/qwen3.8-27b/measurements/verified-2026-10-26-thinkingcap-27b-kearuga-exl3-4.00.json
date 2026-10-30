@@ -1,0 +1,34 @@
+{
+ "label": "cards-tc",
+ "version": "0.14.2+community/thinkingcap-27b-kearuga-exl3-4.00",
+ "drafters": "exl3-drafters-k3",
+ "answers": {
+  "prose": {
+   "tok_s": 42.28,
+   "per_block": 3.47,
+   "n": 282,
+   "prompt": 3295,
+   "text_sha256": "06864e49925124aa"
+  },
+  "code": {
+   "tok_s": 83.99,
+   "per_block": 7.1,
+   "n": 512,
+   "prompt": 3320,
+   "text_sha256": "708894d465966d97"
+  },
+  "chat": {
+   "tok_s": 41.42,
+   "per_block": 3.53,
+   "n": 121,
+   "prompt": 3426,
+   "text_sha256": "25653df4261328be"
+  }
+ },
+ "tool": "tools/q35m_ab.py --only prose,code,chat",
+ "setup": "live8-cold: 8 lanes of 262,144, suffix store and response cache off",
+ "build": "0.14.2",
+ "commit": "6d691a11",
+ "date": "2026-10-26",
+ "device": "dgx-spark"
+}

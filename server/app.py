@@ -52,15 +52,23 @@ from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
-    CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
-    answer_stops, drop_stray_close, opens_think, split_full,
+    CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, OffClose, Reasoning, StopStrings, StrayClose,
+    answer_stops, drop_stray_close, off_full, off_split, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, rewrite_pythonic, schema_types, strip_blocks)
+from server import toolformats  # noqa: E402  (ENG-407 the forms a model writes calls in)
+from server import callrepair  # noqa: E402  (SRV-691 argument names matched to the schema)
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_native, schema_types,
+                             strip_blocks)
 from server import compat  # noqa: E402
+from server import sampling_defaults  # noqa: E402  (SPD-245 a request's filters when it names none)
+from server import prefill_burst  # noqa: E402  (SPD-245 the prefills of requests that arrive together)
+from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
+from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
 from server import logprobs as lp_mod  # noqa: E402
 from server import metrics  # noqa: E402
 from server import usage as usage_mod  # noqa: E402
@@ -78,6 +86,7 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
+from server import gpu_health  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import rolemem  # noqa: E402
 from server import refwatch as refwatch_mod  # noqa: E402
@@ -534,6 +543,19 @@ def _lane_room(job, where: str) -> bool:
         return where != "prefill"
 
 
+def _par_status() -> dict:
+    """`/health`'s `parallel` key: the pool's report with side slots, the one slot and why when `--parallel N`
+    asked for more than the model's engine builds (#104), nothing otherwise."""
+    if dict.get(STATE, "pool") is not None:
+        return {"parallel": _par_health()}
+    n = dict.get(STATE, "parallel_unbuilt")
+    if n:
+        return {"parallel": {"n": 1, "running": INFLIGHT["running"], "decoding": [], "requested": n,
+                             "max_running": 1, "max_running_reason": "side slots are not built for this "
+                             "model yet: one slot", "slots": []}}
+    return {}
+
+
 def _par_health() -> dict:
     """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
     (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader), and the
@@ -541,10 +563,23 @@ def _par_health() -> dict:
     out = dict.get(STATE, "pool").report()
     r = dict.get(STATE, "disk_side")
     out["side_disk"] = r.report() if r is not None else None
-    jg = getattr(getattr(dict.get(STATE, "engine"), "fn", None), "__dict__", {}).get("joint_graphs")
+    eng = dict.get(STATE, "engine")
+    jg = getattr(getattr(eng, "fn", None), "__dict__", {}).get("joint_graphs")
     out["joint_graphs"] = jg.report() if hasattr(jg, "report") else None
+    rep = getattr(eng, "joint_graphs_report", None)
+    if out["joint_graphs"] is None and callable(rep):
+        out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
+    rr = _round_runner.RUNNER
+    out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
+    pool = dict.get(STATE, "pool")
+    pl = getattr(getattr(pool, "meeting", None), "planner", None)
+    out["planner"] = pl.report() if pl is not None and hasattr(pl, "report") else None   # SPD-187
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
+    # SRV-709: lanes that gave their memory back mid-answer and went on (`Handler._recomputing`)
+    out["recompute"] = {"on": KV_RECOMPUTE, "admit_rows": KV_ADMIT_ROWS,
+                        **(dict.get(STATE, "kv_recompute") or {"gave_way": 0, "resumed": 0,
+                                                              "gave_up": 0, "freed_gib": 0.0})}
     return out
 
 
@@ -578,6 +613,15 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 #: SRV-305: a request waiting for memory gets its line again this often (s)
 MEM_LINE_EVERY_S = 15.0
+#: SRV-709: a lane whose next pages the KV pool refuses while other lanes run gives its memory back
+#: and goes on as soon as memory is free: its prompt and the text it wrote are read again, as a
+#: continuation of the same answer (`Handler._recomputing`); off: it ends with `memory_full`
+KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
+#: SRV-709: the most of a request's max_tokens its admission reserves KV pages for (0: all of it). A
+#: lane that writes past it and finds the pool full gives way and continues later (KV_RECOMPUTE)
+KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
+#: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
+KV_RECOMPUTE_MAX = 16
 
 #: The least output a side slot's window must leave a request (its prompt and the margins
 #: taken): below it the request waits for slot 0, at or above it the request runs there with its
@@ -755,6 +799,13 @@ SIDE_SLOT0_WAIT_S = float(_S.get("SIDE_SLOT0_WAIT_S") or 3.0)
 SIDE_RESIDENT_GB = float(_S.get("SIDE_RESIDENT_GB") or 0.5)
 SIDE_STASH_GB = float(_S.get("SIDE_STASH_GB") or 1.0)
 
+#: SRV-629: `on`: a request with images may take a side slot (each slot is its own engine over the
+#: same weights, with its own `mm` and rotary offset; the tower runs in the slot's prefill), routed
+#: on its expanded key ids (`_mm_keys`); `off`: slot 0 only, as 0.12.0. Live 2026-10-19: two
+#: Chat-tab agent runs with 3 to 8 screenshots a request ran all 31 requests on slot 0 (56.6 min
+#: of wall time for 18.9 min of decoding) while slot 1 stayed idle
+SIDE_IMAGES = (_S.get("SIDE_IMAGES") or "on").strip().lower()
+
 
 def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
     """FX5: a request of `n` rendered tokens that shares `rc` with slot 0's resident rows is a
@@ -775,6 +826,14 @@ def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
                 and n <= int(getattr(res, "guest_max", 0) or 0))
     except Exception:                                              # noqa: BLE001
         return False
+
+
+def _keyed(ctx: list | None, mm) -> list | None:
+    """SRV-629: a request's context as the caches hold it: the image rows as their key ids
+    (`_remember`'s `committed`)."""
+    if ctx is None or mm is None or len(ctx) < int(mm.n):
+        return ctx
+    return list(mm.key_ids) + list(ctx[int(mm.n):])
 
 
 def _par_view_keep(served: list | None, view: list | None) -> bool:
@@ -850,12 +909,53 @@ def _holder_name() -> str:
         who.get("rank"), "a request")
 
 
+def _mm_keys(ids: list[int], images: list) -> list[int] | None:
+    """SRV-629: the rendered ids with each image's one placeholder expanded to its rows, each row
+    its image's key id (engine/vision.py `key_id`): the prompt as the caches compare it
+    (`MMContext.key_ids`), on the host, before any lock and without the tower. None when the
+    expansion fails (the handler answers it as a 400 under the lock) or the tower builds its own
+    context (Super VL's RADIO tower: no side slot reads its images yet, they stay on slot 0)."""
+    tower = STATE.get("vision")
+    if tower is None or getattr(tower, "context", None) is not None:
+        return None
+    from engine.vision import expand, key_id
+    try:
+        full, spans = expand(list(ids), images, tower.cfg.image_token_id,
+                             tower.cfg.spatial_merge_size)
+    except Exception:                                              # noqa: BLE001
+        return None
+    for sp_ in spans:
+        full[sp_.start:sp_.start + sp_.n] = [key_id(images[sp_.image].digest)] * sp_.n
+    return full
+
+
+def _mm_rows(n_text: int, images: list) -> int:
+    """SRV-629: the rows a prompt of `n_text` rendered tokens with `images` takes once each
+    image's placeholder is expanded (`_vision_context`); `n_text` when that cannot be told."""
+    tower = STATE.get("vision")
+    if not images or tower is None:
+        return int(n_text)
+    try:
+        ph = int(tower.cfg.image_token_id)
+        own = getattr(tower, "context", None)
+        if own is not None:
+            full, _ = own([ph] * len(images), images)
+        else:
+            from engine.vision import expand
+            full, _ = expand([ph] * len(images), images, ph, tower.cfg.spatial_merge_size)
+        return int(n_text) + len(full) - len(images)
+    except Exception:                                              # noqa: BLE001
+        return int(n_text)
+
+
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
                    parent: str | None = None, session: str | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
-    lane job (served at slot 0's safe points), a request with images (side slots are text only),
-    or one no side slot is long enough for. A request that continues slot 0's resident
+    lane job (served at slot 0's safe points), a request with images while SIDE_IMAGES is off (or
+    with a tower that builds its own context, `_mm_keys`), or one no side slot is long enough for.
+    SRV-629: a request with images is routed on its expanded key ids and its window counts their
+    rows (`why["n_images"]`, `why["n_rows"]`). A request that continues slot 0's resident
     conversation (it resumes there in place; on a side slot it prefills what the disk tier does not
     hold) gets its window too, with `why["slot0_first"]`: the handler tries slot 0 first, for
     SIDE_SLOT0_WAIT_S (0.8.2). Host work only: the ids are rendered on the CPU, before any lock.
@@ -877,7 +977,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
         return None
-    if images:
+    if images and SIDE_IMAGES != "on":
         why["images"] = True              # the Lanes view's reason (`_queue_why`)
         return None
     # a side lane job is served at slot 0's safe points, unless it is a guest of slot 0's
@@ -888,7 +988,23 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         ids = build_prompt(body, client, count="ids", left_out=left_out)
     except Exception:                                              # noqa: BLE001
         return None                       # the render fails again under the lock, as a 400
+    rows = len(ids)
+    if images:
+        # SRV-629: the window holds the expanded rows, not one placeholder an image (8
+        # screenshots: about 7,700 rows), and every test below runs on the key ids, as the caches
+        # compare them: the resident rows, the views, the park and the NVMe hold an image's rows
+        # as its key, so the rendered ids part from them at the first image
+        keys = _mm_keys(ids, images)
+        if keys is None:
+            why["images"] = True
+            return None
+        ids = keys
+        rows = len(keys)
+        why.update(n_images=len(images), n_rows=rows)
     why["ids"] = ids
+    # SRV-629: an end kept after images (slot 0's park, an NVMe entry) is offered to a request
+    # with images, as its own restore asks (`_spill_before_replay(..., mm_ok=True)`)
+    mm_kw = {"mm_ok": True} if images else {}
     res = dict.get(STATE, "resident")
     chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
     # Past the client's head, or it is a new conversation (`_continues_resident`)
@@ -922,14 +1038,17 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
             else:
-                if SIDE_GUESTS == "on" and not stay and _guest_of_slot0(res, len(ids), rc, chunk):
+                if (SIDE_GUESTS == "on" and not stay and not images
+                        and _guest_of_slot0(res, len(ids), rc, chunk)):
+                    # SRV-629: never a request with images: a guest on slot 0 is served over the
+                    # resident rows with the stash, which no image request ever was
                     why["guest"] = valid  # FX5: an idle side slot first (the handler's `_take`)
                 # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
                 # comes back through slot 0, whose prefill reads the spill; a side slot has none
                 sp = STATE.get("spill")
                 if not why.get("guest") and sp is not None and sp.entries:
                     with cache_peek.quiet(sp):
-                        got = sp.candidate(res, ids, len(ids) - 1)
+                        got = sp.candidate(res, ids, len(ids) - 1, **mm_kw)
                     # 0.8.2: only an entry that holds this conversation past its first user
                     # message (`conv`) is its conversation. A line at the client's head is not:
                     # a new Open WebUI chat matched another chat's entry at 8,192 tokens, its
@@ -950,7 +1069,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         # the lock), and no failure here skips the parent's or the worker's check below
         if getattr(res, "park_rows", 0):
             try:
-                bk = int(res.park_offer(ids, rc, len(ids) - 1) or 0)
+                bk = int(res.park_offer(ids, rc, len(ids) - 1, **mm_kw) or 0)
             except Exception:                                      # noqa: BLE001
                 bk = 0
             if bk and (conv is None or bk >= conv):
@@ -975,13 +1094,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
                             else 0)
     why["margin"] = margin
-    need = len(ids) + int(max_new) + margin
+    need = rows + int(max_new) + margin
     why["need"] = need
     if not any(need <= s.max_len for s in pool.side()):
         # the whole output limit does not fit beside the prompt: a side slot with at least
         # SIDE_MIN_ROOM rows of output left takes the request with its limit cut to that room
         # (`_side_room`, applied once the slot is known); else the request waits for slot 0
-        least = len(ids) + margin + SIDE_MIN_ROOM
+        least = rows + margin + SIDE_MIN_ROOM
         if SIDE_MIN_ROOM > 0 and any(least <= s.max_len for s in pool.side()):
             why["need"], why["clip"] = least, True
             need = least
@@ -1026,7 +1145,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # SRV-546: a conversation with images runs on slot 0 only (side slots read no images):
             # a new chat that takes slot 0 from it sends it to the NVMe, as one too long for a side
             # slot (live 2026-10-17 10:38: a 7,293-token chat took slot 0 beside a free side slot
-            # and the 140,191-token pagoda run went to the NVMe)
+            # and the 140,191-token pagoda run went to the NVMe). SRV-629: kept with SIDE_IMAGES
+            # on: its next turn may take a side slot, but reads its prompt there again
             bound = (valid + margin + SIDE_MIN_ROOM > longest
                      or bool(res.end is not None and res.end.get("mm")))
             # ENG-371: a worker beside its own parent: the parent stays on slot 0
@@ -1054,7 +1174,10 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
         return _wait_reason(me)[0]
     if side_need is None:
         if why.get("images"):
-            return "it has images, which only slot 0 reads; waits for slot 0"
+            if SIDE_IMAGES != "on":
+                return "it has images, which only slot 0 reads; waits for slot 0"
+            # SRV-629: a tower with its own context (Super VL) is read on slot 0 only
+            return "this model's images are read on slot 0 only; waits for slot 0"
         if why.get("wait") == "too_long" or why.get("too_long"):
             longest = max((s.max_len for s in pool.side()), default=0)
             return f"too long for a side slot ({longest:,} tokens); waits for slot 0"
@@ -1076,6 +1199,20 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
     if all(s.busy for s in pool.slots):
         return f"all {pool.n} slots are busy"
     return _wait_reason(me)[0]
+
+
+def _par_nums(why: dict) -> str:
+    """The numbers of the `[parallel]` line: what the slot was chosen on (SRV-197), and for a
+    request with images their count and the expanded rows (SRV-629)."""
+    nums = " ".join(f"{k}={why[k]}" for k in ("view", "view_common", "valid", "res_common",
+                                              "conv", "need", "guest", "park", "slot0_wait_s",
+                                              "home", "home_share", "home_wait", "hop_from",
+                                              "prefer_side", "slot0_stale", "new_wait", "spill",
+                                              "spill_head", "slot0_wait")
+                    if k in why)
+    if "n_images" in why:
+        nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
+    return nums
 
 
 def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
@@ -1163,6 +1300,8 @@ def _par_end(pool, side, cid) -> None:
     the turn and the side slot given back."""
     if pool.admission is not None:
         pool.admission.release(cid)
+    if pool.burst is not None:
+        pool.burst.leave(side.index if side is not None else 0)
     if side is None:
         pool.slots[0].phase = ""
         return
@@ -1178,6 +1317,43 @@ def _par_end(pool, side, cid) -> None:
 # ------------------------------------------------------------------ parallel requests
 # `--parallel N` (server/slots.py). Every helper below runs only when `STATE["pool"]` exists; a
 # server without side slots never calls one.
+def _burst_prefilled() -> None:
+    """SPD-245: a member of the prefill burst has prefilled: the GPU turn back, until every member has."""
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.burst is None:
+        return
+    i = _par_index()
+    if not pool.burst.member(i):
+        return
+    if PREFILL_BURST == "joint":
+        pool.burst.join(i, None, None)      # a prefill that took no forward hook: out of the burst
+        return
+    held = pool.turn is not None and pool.turn.held_by(i)
+    pool.burst.prefilled(i, release=(lambda: pool.turn.release(i)) if held else None,
+                         acquire=(lambda: pool.turn.acquire(i)) if held else None)
+
+
+def _joint_forward(eng, tokens, start: int, whole: bool):
+    """SPD-245, engine/cache.py `FIRST_FORWARD`: a burst member's prompt into the burst's joint forward,
+    when that forward can take it (the prompt's only forward, `prefill_joint_ok`); its logits, or None
+    (it prefills alone, and is out of the burst)."""
+    from engine import model as model_mod
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.burst is None:
+        return None
+    i = _par_index()
+    if not pool.burst.member(i):
+        return None
+    ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+    held = pool.turn is not None and pool.turn.held_by(i)
+    done, logits = pool.burst.join(
+        i, (eng, tokens, int(start)) if ok else None, model_mod.prefill_joint,
+        release=(lambda: pool.turn.release(i)) if held else None,
+        acquire=(lambda: pool.turn.acquire(i)) if held else None,
+        rows=int(tokens.numel()) if ok else 0)
+    return logits if done else None
+
+
 def _par_index() -> int:
     """The slot the current thread's request runs on: a side slot's index, else 0."""
     s = slots_mod.current()
@@ -1197,6 +1373,7 @@ def _phased(gen):
         yield from gen
     finally:
         slot.phase = ""
+        pool.wake()                    # SPD-161: the others' barrier set may be complete now
 
 
 def _par_chunks(on_chunk):
@@ -1216,7 +1393,10 @@ def _par_block(pool, tree_mode: bool) -> None:
     go through `_verify_tree`; a chain loop verifies alone and is not waited for -- and the GPU is
     offered to a waiting slot."""
     slot = _par_slot(pool)
+    was = slot.phase
     slot.phase = "decode" if tree_mode else "solo"
+    if was == "decode" and slot.phase != "decode":
+        pool.wake()                    # SPD-161: it left the barrier's set
     if pool.turn is not None and pool.turn.waiting():
         pool.turn.pause(slot.index)
 
@@ -1227,9 +1407,9 @@ def _share_trim(pool, tree):
     joint pass then stays at or under 32 rows, where every projection is row-invariant. Dropping
     candidates never changes what is accepted, only how much. A slot alone keeps its tree."""
     meet = pool.meeting
-    if meet is None or meet.cut == "joint":
+    if meet is None or meet.joint_for(len(pool.decoding())):
         return tree                    # a joint cut is the round's (`_run_round`)
-    budget = slots_mod.share(len(pool.decoding()), meet.max_rows)
+    budget = slots_mod.share(len(pool.decoding()), meet.max_rows, getattr(meet, "shares", None))
     if budget is None or len(tree.parents) <= budget:
         return tree
     order = sorted(range(1, len(tree.tokens)), key=lambda i: -tree.scores[i])
@@ -1257,10 +1437,41 @@ def _run_round(meet) -> None:
     with meet.cv:
         groups = meet.batches()
         meet.pending.clear()
+    from server import roundlog
+    rlog = roundlog.LOG
     for group in groups:
-        if meet.cut == "joint" and len(group) > 1 and all(r.tree is not None for r in group):
-            # one cut over every slot's whole tree, to the pass's row budget
-            keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows)
+        # SPD-163: in slot order, whatever order the slots arrived in -- a joint graph is kept per ordered
+        # set of engines (engine/models/qwen3_5/joint_graphs.py), and with 8 slots the arrival order made
+        # most C8 passes a set never seen; a row's bits do not depend on where its block sits in the pass
+        group.sort(key=lambda r: r.slot)
+        tc = getattr(meet, "tree_cap", None)
+        cap = tc(len(group), meet.max_rows) if tc is not None and len(group) > 1 else None
+        pre_rows = [r.rows for r in group] if rlog is not None else None
+        pl, plan = getattr(meet, "planner", None), None
+        if pl is not None:
+            _plan_tail(meet, pl, time.perf_counter())
+            if len(group) > 1 and all(r.tree is not None for r in group):
+                # SPD-187: the round planner's bucket for this round (shadow: logged; on: the cut and graph)
+                from engine.methods.roundplan import gain_curve
+                tmax = max(pl.buckets)
+                cc = meet.ctx_class(max(int(r.start) for r in group))
+                acc = getattr(pl, "accept", None)
+                curves = [_plan_curve(pl, r, tmax, len(group)) if acc is not None
+                          else gain_curve(r.q, r.tree.parents, r.tree.scores, tmax) for r in group]
+                plan = pl.plan(len(group), cc, curves)
+                plan["ctx"] = cc
+                if pl.mode == "on" and plan.get("T"):
+                    cap = plan["T"]
+                if hasattr(pl, "begin_round") and not plan.get("explore") and cap:
+                    pl.begin_round(len(group), cap, cc)       # SPD-187: the round's tokens vs the reference
+                meet.plan_keys.append((len(group), cc, curves))
+                del meet.plan_keys[:-32]
+                pl.tick(meet.plan_keys)
+        if (len(group) > 1 and all(r.tree is not None for r in group)
+                and (meet.joint_for(len(group)) or sum(r.rows for r in group) > meet.max_rows
+                     or (cap is not None and any(r.rows > cap for r in group)))):
+            # one cut over every slot's whole tree, to the pass's row budget (and the family's tree cap)
+            keeps = slots_mod.joint_cut([r.tree for r in group], meet.max_rows, cap)
             for r, keep in zip(group, keeps):
                 if len(keep) < len(r.tree.tokens):
                     t = r.tree_cut = r.tree.subset(keep)
@@ -1269,9 +1480,28 @@ def _run_round(meet) -> None:
                     r.rows = len(t.parents)
             with meet.cv:
                 meet.stats["trimmed"] += sum(1 for r in group if r.tree_cut is not None)
+        md = getattr(meet, "max_depth", None)
+        if md and len(group) > 1:
+            # SPD-223: no tree deeper than the family's joint kernels carry
+            for r in group:
+                cur = r.tree_cut if r.tree_cut is not None else r.tree
+                t = slots_mod.depth_cut(cur, md)
+                if t is not cur:
+                    r.tree_cut = t
+                    r.tokens = h2d(t.tokens, torch.long, r.tokens.device)
+                    r.parents = t.parents
+                    r.rows = len(t.parents)
         if meet.timing:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
+        ev = rlog.begin() if rlog is not None else None
+        pev = roundlog.PassTimer.begin() if pl is not None else None
+        rep = (getattr(group[0].eng, "joint_graphs_report", None)
+               if rlog is not None or pl is not None else None)
+        r0 = (rep() or {}) if callable(rep) else {}
+        g0, c0 = r0.get("replayed"), r0.get("captures")
+        if pl is not None and pl.mode == "on" and plan is not None and plan.get("T"):
+            pl.force(plan["T"])
         try:
             if len(group) == 1:
                 r = group[0]
@@ -1283,6 +1513,46 @@ def _run_round(meet) -> None:
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
+        finally:
+            if pl is not None and pl.mode == "on":
+                pl.force(None)
+        r1 = (rep() or {}) if callable(rep) and err is None else {}
+        g1 = r1.get("replayed")
+        graphed = None if g0 is None or g1 is None else g1 > g0
+        captured = c0 is not None and (r1.get("captures") or 0) > c0
+        if pl is not None and err is None and len(group) > 1:
+            # SPD-187: the pass's price, learned from its events once they are done (no synchronize): a
+            # graphed pass costs its bucket's E x T rows, an eager one its rows
+            E = len(group)
+            tp = cap if graphed and cap else None
+            rows_cost = E * tp if tp else sum(r.rows for r in group)
+            cc = meet.ctx_class(max(int(r.start) for r in group))
+            # a bucket's round counts toward its period only when it ran as it will run: graphed (eager
+            # rounds before the shape is captured, and the capturing round, are not its price)
+            holder = {"E": E, "t": t0, "ms": None, "T": cap if (graphed is not False and not captured) else None,
+                      "cc": cc}
+            meet.plan_last = holder
+
+            def _seen(ms, E=E, rows=rows_cost, cc=cc, eager=not graphed, skip=captured, holder=holder):
+                holder["ms"] = ms
+                if not skip:                 # a round that captured its graph is not a price
+                    pl.observe_pass(E, rows, ms, cc, eager=eager)
+            roundlog.PassTimer.end(pev, _seen)
+        if rlog is not None and err is None:
+            # SPD-187: the pass, timed by its events (read once done, on a later round)
+            rid = rlog.round(group, ev, cap=cap, pre_rows=pre_rows, graphed=graphed, plan=plan)
+            for r in group:
+                r.rid = rid
+        if err is None and any(getattr(r, "walk_spec", None) is not None for r in group):
+            try:
+                _round_walk(group, outs)
+            except Exception as exc:                                    # noqa: BLE001
+                # the slots walk their own blocks (none of the batch's results is handed out)
+                print(f"[parallel] the round's batched walk failed ({type(exc).__name__}: {exc}); "
+                      f"the slots walk their own", flush=True)
+                for r in group:
+                    if r.walked is None or r.walked[0] != "pen_applied":
+                        r.walked = None
         if meet.timing and err is None:
             torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1e3
@@ -1312,6 +1582,124 @@ def _run_round(meet) -> None:
             meet.cv.notify_all()
 
 
+#: SPD-161: the round runner walks the round's blocks in one batch (engine/sample.py `round_walks`): each
+#: slot's penalties and walk, bit for bit its own, one copy to the host for all; 0: each slot walks its own
+ROUND_WALK = os.environ.get("QSE_ROUND_WALK", "0") == "1"
+
+
+def _round_walk(group, outs) -> None:
+    """SPD-161: apply each block's penalties and walk every block of the round (`round_walks`); a slot whose
+    walk the batch does not take walks it itself (its `walked` stays None)."""
+    from engine.sample import round_walks
+    specs = []
+    for r, lg in zip(group, outs):
+        sp = getattr(r, "walk_spec", None)
+        r.walked = None
+        if sp is None or lg is None:
+            specs.append(None)
+            continue
+        tree = r.tree_cut if r.tree_cut is not None else sp["tree"]
+        if sp["pen"] is not None:
+            sp["pen"].apply_tree(lg, tree)
+            r.walked = ("pen_applied", None)            # whatever happens next, not applied twice
+        specs.append({"sampler": sp["sampler"], "rows": lg, "tokens": tree.tokens, "parents": tree.parents,
+                      "start": sp["start"], "q": sp["q"], "picks": None})
+    got = round_walks(specs)
+    for r, sp, g in zip(group, specs, got):
+        if sp is not None and g is not None:
+            r.walked = g                  # else the slot walks itself (its penalties, if any, are applied)
+
+
+#: SPD-161: a slot drafts no wider than its joint round keeps (the family's tree cap at the slots decoding now)
+ROW_CAP = os.environ.get("QSE_PARALLEL_ROW_CAP", "1") != "0"
+#: SPD-201: the row cap counts the round runner's slots (0: only the slot loop's, as before)
+RUNNER_ROWCAP = os.environ.get("QSE_RUNNER_ROWCAP", "1") == "1"
+
+
+def _row_cap(par, drafter) -> None:
+    """Hand the drafter the rows its next joint round keeps of its tree (`row_cap`, engine/lenrouter.py):
+    the family's tree cap at the decoding slots, None alone or without a cap."""
+    if not hasattr(drafter, "row_cap"):
+        return
+    cap = None
+    meet = par.meeting if par is not None else None
+    tc = getattr(meet, "tree_cap", None) if meet is not None else None
+    n = len(par.decoding()) if par is not None else 0
+    if RUNNER_ROWCAP and par is not None:
+        # SPD-201: a slot the round runner decodes (phase "runner") is decoding too (`Pool.report`)
+        n = sum(1 for s in par.slots if s.phase in ("decode", "runner"))
+    if ROW_CAP and tc is not None and n > 1:
+        cap = tc(n, meet.max_rows)
+    drafter.row_cap = cap
+
+
+def _tree_feats(tree):
+    """A tree's node depths and ranks by drafter score (rank 0 the root)."""
+    n = len(tree.tokens)
+    order = sorted(range(1, n), key=lambda i: -tree.scores[i])
+    rank = [0] * n
+    for r, i in enumerate(order, start=1):
+        rank[i] = r
+    return tree.depths(), rank
+
+
+def _plan_curve(pl, r, tmax: int, E: int) -> list:
+    """SPD-187: a slot's gain curve from the planner's acceptance model (its tree before the cut)."""
+    from engine.methods.roundplan import curve_class, gain_curve
+    t = r.tree
+    dep, rank = _tree_feats(t)
+    cls = curve_class(gain_curve(r.q, t.parents, t.scores, tmax))
+    p = pl.accept.predict(t.parents, t.scores, r.q, dep, rank, t.source, cls, r.slot, int(r.start), E)
+    return gain_curve(p, t.parents, t.scores, tmax)
+
+
+def _plan_observe(pl, drafter, full, q_full, cut, path, slot: int, pos: int, E: int, request) -> None:
+    """SPD-187: a verified block into the planner: the acceptance model (prequential, on the verified tree's
+    nodes) and the round's accounting (the tokens written, and the reference cut's: exact on the verified
+    rows, the model's estimate past them)."""
+    from engine.methods.roundplan import admission, curve_class, gain_curve
+    q = _roundlog.tree_q(drafter, cut)
+    dep, rank = _tree_feats(cut)
+    cls = curve_class(gain_curve(q, cut.parents, cut.scores, 16))
+    pl.accept.observe(cut.parents, cut.scores, q, dep, rank, cut.source, cls, slot, pos, E, path, request)
+    tokens = float(len(path))                           # the accepted nodes plus the walk's own token
+    ref = tokens
+    T = pl.ref_T(E) if pl.ref_T is not None else None
+    if T is not None:
+        if len(cut.parents) >= T:
+            keep = {0} | {k for k, _ in admission(cut.parents, cut.scores, T)}
+            n_ok = 0
+            for node in path[1:]:
+                if node not in keep:
+                    break
+                n_ok += 1
+            ref = 1.0 + n_ok
+        elif full is not None and len(full.parents) > len(cut.parents):
+            fd, fr = _tree_feats(full)
+            fcls = curve_class(gain_curve(q_full, full.parents, full.scores, 16))
+            p = pl.accept.predict(full.parents, full.scores, q_full, fd, fr, full.source, fcls, slot, pos, E)
+            g = gain_curve(p, full.parents, full.scores, max(T, len(cut.parents)))
+            ref = tokens + max(0.0, g[min(T, len(g)) - 1] - g[len(cut.parents) - 1])
+    pl.add_block(tokens, ref)
+
+
+def _plan_tail(meet, pl, now: float) -> None:
+    """SPD-187: the rest of the last round (its start to this one's, less its pass), for the planner's
+    tails(E); and the pass timings that are done by now."""
+    from server import roundlog
+    roundlog.PassTimer.drain()
+    last = getattr(meet, "plan_last", None)
+    if last is not None and last["ms"] is not None:
+        period = (now - last["t"]) * 1e3
+        if period < 5000.0:
+            pl.observe_tail(last["E"], period - last["ms"])
+            if hasattr(pl, "end_round"):
+                pl.end_round(period)
+            if last.get("T") and hasattr(pl, "observe_period"):
+                pl.observe_period(last["E"], last["T"], last["cc"], period)   # SPD-187: the bucket's round
+        meet.plan_last = None
+
+
 def _par_note(pool, key: str, n, value: float) -> None:
     """One sample into the barrier's stats: `stats[key][str(n)] = [sum, count]`. Only while
     timing (`QSE_PARALLEL_TIMING=1`): a served round pays nothing for it."""
@@ -1336,18 +1724,26 @@ def _run_draft_round(meet) -> None:
     for r in reqs:
         by.setdefault(id(r.drafter.module.w), []).append(r)        # one checkpoint, one group
     for group in by.values():
+        # SPD-157: in slot order, whatever order the slots arrived in: a packed draft's graphs are kept
+        # per ordered set of drafters (draft_graph.py `_PACKED`), and with 8 slots the arrival order
+        # made almost every round a new set, so a capture where a replay was meant
+        group.sort(key=lambda r: r.slot)
         per = max(1, meet.max_rows // max(1, group[0].rows))
         for k in range(0, len(group), per):
             part = group[k:k + per]
             if meet.timing:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
+            from server import roundlog
+            ev = roundlog.LOG.begin() if roundlog.LOG is not None else None
             try:
                 if len(part) == 1:
                     outs = [part[0].drafter.graph_run(part[0].anchor, part[0].pos0)]
                 else:
                     outs = packed_draft([(r.drafter, r.anchor, r.pos0) for r in part])
                 err = None
+                if roundlog.LOG is not None:
+                    roundlog.LOG.draft(part, ev)
             except BaseException as exc:                                # noqa: BLE001
                 outs, err = [None] * len(part), exc
             if meet.timing and err is None:
@@ -1372,10 +1768,47 @@ def _run_draft_round(meet) -> None:
                 meet.cv.notify_all()
 
 
+def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
+                   deadline, device, think=None):
+    """SPD-201: hand this slot's decode to the round runner and stream what it pushes. The turn is the
+    runner's while it decodes; this thread takes it back before the request's bookkeeping."""
+    i = _par_index()
+    slot = par.slots[i]
+    task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
+                              bs, k, deadline, device, think)
+    slot.phase = "runner"
+    owner = slot.owner
+    par.wake()
+    runner = _round_runner.runner_for(par, sys.modules[__name__])
+    par.turn.release(i)
+    runner.add(task)
+    try:
+        while True:
+            kind, val = task.q.get()
+            if kind != "tokens":
+                break
+            for t in val:
+                yield t
+    finally:
+        task.cancel = True
+        # SRV-709: the turn back only while the slot is still this request's; a generator closed
+        # after its request gave the slot back (`_par_end`) would hold the turn for good
+        if slot.phase == "runner" and slot.owner == owner:
+            par.turn.acquire(i)
+            slot.phase = ""
+    if task.err is not None:
+        raise task.err
+
+
 def _draft_meet(drafter, anchor: int, pos0: int):
     """`dflash2.DRAFT_MEET`: with other slots decoding, this slot's draft call joins the round's
     packed draft (one read of the drafter's layers and one head call for every slot); alone, or
     outside a request, None -- the drafter's own graph, as without side slots."""
+    rr = _round_runner.RUNNER
+    if rr is not None:
+        got = rr.meet(drafter, anchor, pos0)        # SPD-201: the runner's packed draft
+        if got is not None:
+            return got
     pool = dict.get(STATE, "pool")
     meet = getattr(pool, "draft_meeting", None) if pool is not None else None
     if meet is None or pool.turn is None:
@@ -1388,7 +1821,16 @@ def _draft_meet(drafter, anchor: int, pos0: int):
     return req.out
 
 
-def _verify_tree(pool, eng, block, parents, pos, tree=None):
+class _LoneReq:
+    """SPD-187: a lone verify as the round logger reads a round's block."""
+
+    __slots__ = ("slot", "rows", "start")
+
+    def __init__(self, slot: int, rows: int, start: int):
+        self.slot, self.rows, self.start = slot, rows, start
+
+
+def _verify_tree(pool, eng, block, parents, pos, tree=None, q=None, walk=None):
     """A tree block's verify: `forward_tree` alone, or a joint round with the other decoding
     slots (`slots.barrier`). Returns (logits, ms, tree): `ms` None when it verified alone (the
     caller times it), the lone verify's time when another slot ran it, False for a joint pass;
@@ -1403,11 +1845,16 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
                 why = meet.stats.setdefault("alone_why", {})
                 k = "one" if len(pool.decoding()) <= 1 else "turn"
                 why[k] = why.get(k, 0) + 1
+        pool.last_walk[i] = None
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
-                              tree=tree if meet.cut == "joint" else None)
+                              tree=tree if meet.cut != "share" else None)
+    req.q = q
+    req.walk_spec = walk
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
+    pool.last_rid[i] = req.rid                            # SPD-187: the round logger's id
+    pool.last_walk[i] = req.walked                        # SPD-161: the runner's walk of this block, or None
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
 
 
@@ -1438,6 +1885,36 @@ def _end_cut_said(rows: int) -> None:
         print(f"[spec] the accepted path ran {rows} row(s) past the end: not committed", flush=True)
 
 
+#: #98: `cache_prompt: false`. The caches compare a cold prompt under this first key, which no token
+#: id has, so no cache resumes it and no anchor it leaves matches a later prompt; and file it under
+#: this session, so the conversation in place is stashed, parked or spilled as for another client's
+COLD_KEY = -1
+COLD_SESSION = "cache_prompt:false"
+
+
+def cache_prompt_off(body: dict) -> bool:
+    """#98: the request asks for its prompt read whole, with no prompt cache read or written.
+    Only `false` does: `true`, a missing field or any other value is the prompt cache as always."""
+    return body.get("cache_prompt") is False
+
+
+def _cold_release() -> None:
+    """#98: after a `cache_prompt: false` request, under the engine lock. Its rows hold no one's
+    conversation: the resident prefix forgets them, so no later request parks or spills them, and
+    the conversation it stashed (a guest) comes back at the next prefill, the one it parked or
+    spilled at that conversation's next turn."""
+    res = STATE.get("resident")
+    if res is not None and res.owner == COLD_SESSION and res._stash is None:
+        res.clear()
+        res.owner = None
+
+
+def _sampled_q_free() -> bool:
+    """SPD-245: the sampled verify carries no q: `--sampled-tree det` with a tree, where the drafter
+    gets no sampler (`_generate_stream`) and every walk draws the target's token at each node."""
+    return bool(STATE.get("sampled_tree") == "det" and STATE.get("tree"))
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -1457,7 +1934,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
                     disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
-                    scratch: bool = False, stay: bool = False):
+                    scratch: bool = False, stay: bool = False, cold: bool = False):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -1502,6 +1979,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     `pos_delta`, `end_mm` (server/compaction.py): a text prompt that continues a
     conversation with images: the rotary offset its rows take and leave to the end anchor kept
     after those images. `scratch`: a summary prepared in the background, whose rows are nobody's.
+
+    `cold` (#98, a request's `cache_prompt: false`): the prompt is read whole and no prompt cache
+    is read or written (`COLD_KEY`, `COLD_SESSION`); the handler gives the rows back after it
+    (`_cold_release`).
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -1550,6 +2031,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
                        and sampler is not None and sampler.on)
                 drafter.set_sampling(None if det else sampler)
+            if hasattr(drafter, "note_sampled"):
+                drafter.note_sampled(sampler is not None and bool(sampler.on))   # SPD-181
             if hasattr(drafter, "prime"):
                 drafter.prime(ctx)
         t_pre = time.perf_counter()
@@ -1566,19 +2049,25 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             on_chunk = _lane_chunks(on_chunk)
         if dict.get(STATE, "pool") is not None:
             on_chunk = _par_chunks(on_chunk)
+        keys = mm.key_ids if mm is not None else None
+        if cold:
+            # #98: a key no cache holds, so nothing resumes; another session's, so the resident
+            # conversation is stashed (a short prompt) or parked or spilled as for any other one
+            keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
         logits, reused, forwarded = cache.prefill(
-            eng, drafter, ctx, prompt.device, store=STATE.get("state_store"),
-            chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
-            on_chunk=on_chunk, info=where,
-            key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
-            compacting=compacting, disk=_slot_disk(), disk_tag=disk_tag,
+            eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
+            chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
+            checkpoint=bool(STATE.get("prefix_cache")) and not cold,
+            resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
+            key_ids=keys, mem=STATE.get("mem"),
+            compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
             end_mm=end_mm, scratch=scratch, stay=stay,
             # FX5: the highest row this generation can write, for a guest's stash; the monitor's
             # hidden tokens are not in `max_new`
             reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
+        _burst_prefilled()
         if where.get("why"):
             # SRV-546: a long re-read is never silent (positions only, never text)
             print(f"[cache] re-read {forwarded:,} of {len(ctx):,} tokens (resumed at {reused:,}, "
@@ -1624,6 +2113,11 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 pen.commit([tok])
             if drafter is not None:
                 drafter.observe([tok])
+            if think is not None and not think.inside:
+                # a model that opens its own reasoning block (Flint) writes `<think>` as its first token:
+                # unobserved, the budget never saw the block open and never closed it (a block the prompt
+                # opened counts from the second token, as before)
+                think.observe([tok])
             yield tok
             if tok in eos:
                 return
@@ -1655,6 +2149,16 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
         ahead = None                  # the next proposal, launched before the last stream
         par = dict.get(STATE, "pool")
         t_post = None                 # parallel requests: when this slot's last verify returned
+        if _round_runner.ON and par is not None and tree_mode and n_out < max_new:
+            # SPD-201: the runner-owned round takes this slot's decode from here (server/round_runner.py);
+            # this thread streams what it pushes and takes the turn back at the end. A reasoning
+            # block's bookkeeping goes with it while nothing can close the block (no budget, no arms)
+            why = _round_runner.why_not(sup=sup, probe=probe, lpr=lpr, think=think, ahead=ahead,
+                                        drafter=drafter, lane=STATE.get("lane"), turn=par.turn)
+            if why is None:
+                yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
+                                          max_new, eos, bs, k, deadline, prompt.device, think)
+                return
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -1689,6 +2193,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 if ahead is not None:
                     tree, ahead = _collect(*ahead), None
                 else:
+                    _row_cap(par, drafter)
                     tree = drafter.propose_tree(ctx, min(k, max_new - n_out))
                 if par is not None:
                     _par_note(par, "draft_ms", len(par.decoding()), (time.perf_counter() - t_dr) * 1e3)
@@ -1711,21 +2216,52 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 else:
                     block = h2d(tree.tokens, torch.long, prompt.device)
                     tvt = time.perf_counter()
+                    rlog = _roundlog.LOG
+                    pre_n, rid = len(tree.tokens), None
+                    rev = rlog.begin() if rlog is not None else None
                     if par is None:
                         lg, vms = eng.forward_tree(block, tree.parents, start=pos), None
                     else:
-                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree)
+                        # SPD-187: the nodes' calibrated q for the round planner (its gain curves)
+                        nq = (_roundlog.tree_q(drafter, tree)
+                              if getattr(par.meeting, "planner", None) is not None else None)
+                        wspec = None
+                        if ROUND_WALK and par.meeting is not None:
+                            # SPD-161: the round runner walks this block with the round's others (one batch)
+                            if pen is not None:
+                                pen.mask = bool(think is not None and think.inside)
+                            wspec = {"sampler": sampler if sampler is not None and sampler.on else None,
+                                     "pen": pen, "start": len(ctx), "q": tree.q, "tree": tree}
+                        tree_full = tree
+                        lg, vms, tree = _verify_tree(par, eng, block, tree.parents, pos, tree, q=nq,
+                                                     walk=wspec)
                         t_post = time.perf_counter()
                         _par_note(par, "verify_wait_ms", len(par.decoding()), (t_post - tvt) * 1e3)
-                    if pen is not None:
+                    if rlog is not None:
+                        # SPD-187: a lone pass is this slot's round (E = 1); a barrier's by the slot that ran it
+                        if vms is not None:      # it went through the round's barrier: the runner logged it
+                            rid = par.last_rid.get(_par_index())
+                        else:
+                            rid = rlog.round([_LoneReq(_par_index() if par is not None else 0,
+                                                       len(tree.tokens), pos)], rev)
+                    pln = getattr(par.meeting, "planner", None) if par is not None and par.meeting is not None else None
+                    walked = par.last_walk.get(_par_index()) if par is not None else None
+                    if pen is not None and walked is None:
                         pen.mask = bool(think is not None and think.inside)
                         pen.apply_tree(lg, tree)
+                    # SPD-187: the target's top-k of the verified rows, copied behind the walk's synchronize
+                    rtop = (rlog.topk_async(lg[:len(tree.tokens)], eng.hidden_post_norm)
+                            if rlog is not None else None)
                     on_verify = getattr(drafter, "on_verify", None)
                     if on_verify is not None and vms is not False:
                         # a joint round's time is the round's, not this block's (`_verify_tree`)
                         on_verify(tree.n_draft + 1,
                                   vms if vms is not None else (time.perf_counter() - tvt) * 1e3)
-                    if sampler is not None and sampler.on:
+                    if walked is not None and walked[0] == "walk":
+                        path, new = walked[1]          # SPD-161: the round runner's batch, this slot's walk
+                    elif walked is not None and walked[0] == "picks":
+                        path, new = walk.accept_tree(tree, walked[1])
+                    elif sampler is not None and sampler.on:
                         # Rejection accept down the tree: the target's own token is
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
@@ -1738,6 +2274,14 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
                         path, new = walk.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
+                    if pln is not None and getattr(pln, "accept", None) is not None and vms is False:
+                        # SPD-187: the planner learns from every verified block (predicted first, then learned)
+                        _plan_observe(pln, drafter, tree_full, nq, tree, path, _par_index(), pos,
+                                      par.last_joint.get(_par_index(), 1), id(ctx))
+                    if rlog is not None:
+                        rlog.slot(rid, _par_index() if par is not None else 0,
+                                  (par.last_joint.get(_par_index(), 1) if vms is False else 1),
+                                  pos, tree, path, pre_n, drafter, top=rtop, drawn=new, sampler=sampler)
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
                         _par_note(par, "accept", f"joint{par.last_joint.get(_par_index(), 1)}"
@@ -1791,6 +2335,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                             close = _sp1(sup, think, n_out + len(new), eng.max_len - pos,
                                          len(ctx))
                         if (think is None or not think.hit) and close is None:
+                            _row_cap(par, drafter)
                             ahead = _launch(tree_steps(drafter, ctx,
                                                        min(k, max_new - n_out - len(new))))
                         sent = 0
@@ -2304,6 +2849,10 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
+    fmt = _tool_format()
+    # the checks read the model's own call format as the stream and the final parse do: an
+    # arg-key or Pythonic call is a call here too, not a block that does not parse
+    answer = rewrite_native(answer, fmt, eos=True)
     calls = ""
     sup.lift_ids = None
     if (not answer.strip() and getattr(sup.req, "tools_offered", False)
@@ -2314,7 +2863,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
                                   think.end_id if think is not None else None)
             if ids:
                 sup.lift_ids = ids
-                calls = STATE["tok"].decode(ids, skip_special_tokens=False)
+                calls = rewrite_native(STATE["tok"].decode(ids, skip_special_tokens=False), fmt,
+                                       eos=True)
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
     # the block's tokens before the end token (`extra`) reach the client after this returns: the
@@ -2425,10 +2975,7 @@ def _argloop_fired(v, tbuf, sup, rec, cid: str) -> bool:
     never close, which opencode runs as an `invalid` tool and answers with the parse error, so
     the model's next step comes at once, with the note. That is what the token limit gave too,
     63,000 tokens later. False (logged only): `--argloop log`, or no acting monitor."""
-    name = None
-    m = re.match(r"\s*<function=([^>\s]+)", tbuf.open_text() or "")
-    if m:
-        name = m.group(1)
+    name = _tool_format().open_call_name(tbuf.open_text() or "")
     act = STATE.get("argloop", "on") == "on" and sup is not None and sup.mode == "on"
     v.detail["streamed"] = bool(tbuf.open_streamed)
     print(f"[argloop] {cid} {'stopped' if act else 'would stop'} {name or '?'}: "
@@ -2501,7 +3048,8 @@ def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list,
     if cuts:
         k = max(cuts)                 # every earlier segment is inside the last one's prefix
         answer = strip_blocks(answer[:k]) + answer[k:]
-    items = answer_items(answer, names, eos=eos, types=types)
+    renamed: list = []
+    items = sup.as_sent(answer_items(answer, names, eos=eos, types=types), renamed)
     if stopped:
         items = [dict(it, stop=True) if "cut" in it else it for it in items]
     if not sup.checked and items:
@@ -2509,6 +3057,7 @@ def _sp3_calls(sup, answer: str, eos: bool, names, types, cuts: list,
     content, calls = parse_tool_calls(answer, names=names, eos=eos, types=types)
     if sup.gave_up:
         return strip_blocks(content), []
+    _call_repairs(sup.req.request_id, sup, renamed)
     out = []
     for it in items:
         if "function" in it:
@@ -2543,6 +3092,32 @@ def _outcome(sup, calls: list, ids: list, in_think: bool, finish: str) -> None:
     sup.finish(outcome, finish=finish, resume_ms=sup.resume_ms)
 
 
+#: a family that names no ServeSpec: the XML call form, a template that opens the reasoning block
+DEFAULT_SPEC = ServeSpec()
+
+
+def _call_repairs(cid: str, sup, renamed: list) -> None:
+    """SRV-691, SRV-693: the tools and argument names a request's calls had matched to the offered tools, in
+    the log and, under the conductor, in its journal: {kind, tool, from, to} each."""
+    if not renamed:
+        return
+    print(f"[call-repair] {cid} " + "; ".join(f"{e['kind']} {e['tool']}: {e['from']} -> {e['to']}" for e in renamed),
+          flush=True)
+    if sup is not None:
+        sup.note_repairs(renamed)
+
+
+def _tool_format() -> "toolformats.ToolFormat":
+    """ENG-407: the form the served model writes tool calls in (server/toolformats)."""
+    return toolformats.get(_spec().tool_format)
+
+
+def _spec() -> ServeSpec:
+    """ENG-406: what the served family says about its model (its `serve()`'s `serving["spec"]`): the tool-call
+    form and how it reasons. Every request path reads these through here, never a model's name."""
+    return STATE.get("spec") or DEFAULT_SPEC
+
+
 def _answer(ctx, start: int, extra, think) -> str:
     """The text written after the reasoning block (all of it when the prompt did not open one),
     hidden tokens included: after a hidden turn the answer is what follows its empty block."""
@@ -2555,8 +3130,15 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0, served_hidden=None) -> None:
+              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
+              learn: bool = True) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
+
+    `learn` (SPD-151): False leaves the suffix store as it was (`suffix_learns`: a request that
+    asked for the raw engine, a benchmark's); the lookup still reads the store for it.
+
+    `cold` (#98, `cache_prompt: false`): no state is kept, neither a session snapshot nor the end
+    anchor; the suffix store, the lookup's memory of text, takes the tokens as for every turn.
 
     The resident prefix keeps the end of the generation as its end anchor
     (`ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
@@ -2572,6 +3154,10 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
+    if cold:
+        if learn:
+            _suffix_add(prompt_ids, out_ids, mm, delta)
+        return
     store = STATE.get("state_store")
     committed = STATE.get("last_ctx") or []
     if mm is not None and len(committed) >= mm.n:
@@ -2618,11 +3204,22 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             est = cache._snapshot_estimate(eng, eng.kv.length, drafter)
             mem = STATE.get("mem")
             big = bool(store.max_entry) and est > store.max_entry
-            snap = (cache.capture(eng, drafter, max_bytes=store.max_entry)
-                    if store.reserve(est) and (mem is None or mem.admit("store", est)) else None)
+            room = store.reserve(est)
+            admitted = room and (mem is None or mem.admit("store", est))
+            snap = cache.capture(eng, drafter, max_bytes=store.max_entry) if admitted else None
             if snap is None:
-                store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
-                why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
+                # SRV-655: the reason itself. Every decline read "too big for the per-entry cap"
+                # (Ornith, 2026-10-20: at kv.length 18, a 0.31 GB snapshot under a 1 GiB cap),
+                # while the memory policy had refused it: its ceiling left the caches no room
+                if big or not room:
+                    store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
+                    why = (f"too big for the per-entry cap ({store.max_entry >> 20} MiB)" if big
+                           else f"over the store's budget ({store.budget >> 20} MiB)")
+                else:
+                    store.stats["declined_mem"] = store.stats.get("declined_mem", 0) + 1
+                    big = False
+                    why = (f"the memory policy refused its {est >> 20} MiB "
+                           f"({cache.mem_words(mem)})")
             else:
                 store.put(committed, snap, conv_id, kind="session")
                 why = ("the engine is ahead of the committed tokens" if
@@ -2677,7 +3274,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                delta=int(mm.delta) if mm is not None else int(delta), mm=True)
         if STATE.get("verbose") and why != "kept":
-            print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
+            more = f", {cache.mem_words(STATE.get('mem'))}" if why == "memory" else ""
+            print(f"[cache] end anchor not kept ({why}{more}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
         if slots_mod.current() is not None:
             # FX16: on a side slot with a resident prefix, what its next turn on slot 0 would
@@ -2689,6 +3287,29 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         if STATE.get("verbose") and why not in ("kept", "off"):
             print(f"[parallel] side end not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
+    if learn:
+        _suffix_add(prompt_ids, out_ids, mm, delta)
+
+
+#: SPD-151: the suffix store's rule for a request that asks for the raw engine (`X-Tandem: raw` or
+#: `off`, or the locked `raw` / `bench` profile): `read` (the default) drafts from the store and
+#: writes nothing into it, so a benchmark that repeats its prompts measures the same engine every
+#: run; `write` learns from it as from any other request (`QSE_SUFFIX_RAW`)
+SUFFIX_RAW = (os.environ.get("QSE_SUFFIX_RAW") or "read").strip().lower()
+
+
+def suffix_learns(headers) -> bool:
+    """Whether a request's tokens go into the suffix store (SPD-151, `SUFFIX_RAW`)."""
+    if SUFFIX_RAW == "write" or headers is None:
+        return True
+    forced = str(headers.get("X-Tandem") or "").strip().lower()
+    profile = str(headers.get("X-Tandem-Profile") or "").strip().lower()
+    return not (forced in ("raw", "off") or profile in ("raw", "bench"))
+
+
+def _suffix_add(prompt_ids: list[int], out_ids: list[int], mm=None, delta: int = 0) -> None:
+    """A turn's tokens into the suffix store (`_remember`)."""
+    eng = STATE["engine"]
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         if mm is not None:
@@ -2715,7 +3336,7 @@ GLUE_TEXTS = ("\n", "\n\n", "\n\n\n", "\n\n\n\n", " ", "  ", " \n", "\t")
 REREAD_SAY_TOKENS = int(_S.get("REREAD_SAY_TOKENS") or 8192)
 
 
-def _say_reread(cid: str, res, copy: list[int], plan) -> None:
+def _say_reread(cid: str, res, copy: list[int], plan, why_mm: str | None = None) -> None:
     """One log line and a journal field for a long prompt the end anchor did not serve: where
     the client's copy parts from the rows (token position and message number, never text) and
     what the alignment refused. The prefill then resumes at the last grid line below it."""
@@ -2724,8 +3345,13 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
             return
         e = int(res.end["at"])
         c = _shared_head(copy, res.tokens[:e])
-        if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048):
-            return          # another conversation's rows: nothing of this copy was ever kept
+        if c >= e:
+            return          # the copy holds every row: the end anchor serves it, nothing to say
+        if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048) and (
+                why_mm is None or c < 2048):
+            # another conversation's rows: nothing of this copy was ever kept (a request with
+            # images that the end replay did not serve says so from 2,048 shared tokens on)
+            return
         al = STATE.get("end_align")
         ref = dict(al.last_refusal) if al is not None and al.last_refusal else {}
         marks = _conv_marks()
@@ -2738,6 +3364,7 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
         print(f"[cache] {cid} re-read ahead: the copy ({len(copy)} tokens) parts from the end "
               f"anchor's rows at token {c} of {e}"
               + (f" (message {k} of {m})" if k is not None else "")
+              + (f"; with images not served: {why_mm}" if why_mm else "")
               + f"; alignment refused: {why}"
               + (f" at {ref['at']}" if ref.get("at") is not None else "")
               + "; the prefill resumes at the last line below it", flush=True)
@@ -2751,12 +3378,20 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
 def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
     """The end anchor's replay of a client's copy: the hidden spans put back
     (`ResidentPrefix.replay`), or, with `--end-align on`, the copy aligned to the rows where it
-    differs from them in whitespace alone (server/endalign.py). `(ids, spans, tokens aligned)`."""
+    differs from them in whitespace alone (server/endalign.py); when no pass aligns the whole
+    copy, the part up to the highest anchor it aligns (SRV-657). `(ids, spans, tokens aligned)`."""
     al = STATE.get("end_align")
     if al is None:
         out, spans = res.replay(ids)
         return out, spans, 0
-    return al.replay(res, ids)
+    got = al.replay(res, ids)
+    if al.last_partial is not None and res.end is not None:
+        ref = (al.last_refusal or {})
+        print(f"[cache] end alignment partial: the rows served up to token {al.last_partial:,} of "
+              f"{int(res.end['at']):,} (the copy parts from them at {ref.get('c', 0):,}; the whole "
+              f"refused: {ref.get('why')}" + (f" at {ref['at']:,}" if ref.get("at") is not None else "")
+              + ")", flush=True)
+    return got
 
 
 def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
@@ -2829,6 +3464,10 @@ def _side_note_end(res, why: str, conv_id) -> None:
                                     (res.end.get("served_hidden") or ())],
                   "mark": res.end.get("mark"), "owner": conv_id, "resident": True,
                   "regions": [tuple(x) for x in (al.regions(res) if al is not None else ())]}
+    if res.end.get("mm") or res.end.get("delta"):
+        # SRV-629: an end kept after images keeps its rotary offset and its mark on slot 0, where
+        # it is offered only to a request with these images and a compaction reads its offset
+        slot.carry.update(delta=int(res.end.get("delta") or 0), mm=bool(res.end.get("mm")))
 
 
 def _carry_live(slot, rec) -> bool:
@@ -2872,8 +3511,12 @@ def _carry_candidate(pool, res, ids: list[int], max_len: int):
     if best is None:
         return None
     c0 = res.common(ids) if res.valid else 0
-    here = max(res.best(c0, max_len), res.end_offer(c0, max_len),
-               res.pin_offer(ids, c0, max_len), res.park_offer(ids, c0, max_len))
+    # SRV-629: a prompt with images (its keys past the vocabulary) counts slot 0's end and park
+    # kept after images, as its prefill does (`end_mm`)
+    from engine.vision import KEY_BASE
+    kw = {"mm_ok": True} if ids and int(max(ids)) >= KEY_BASE else {}
+    here = max(res.best(c0, max_len), res.end_offer(c0, max_len, **kw),
+               res.pin_offer(ids, c0, max_len), res.park_offer(ids, c0, max_len, **kw))
     return best if int(best[1]["at"]) > here + chunk else None
 
 
@@ -2947,7 +3590,8 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")
             if drafter is not None and hasattr(drafter, "state_resume"):
                 drafter.state_resume(e)    # again, over the rows carried in (`cache.drafter_resume`)
-            pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"]})
+            pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"],
+                                       "delta": rec.get("delta"), "mm": rec.get("mm")})
             if pair is not None:
                 # FX16: with a resident prefix on the side slot the state at the end is its end
                 # anchor's pair (a guest served there since wrote the live state); else the live
@@ -3446,6 +4090,28 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
             _PARK_LET_GO.on = False
 
 
+class EndLost(Exception):
+    """SRV-669: the memory gate gave back the end anchor a scratch turn continues after images."""
+
+
+def _gate_record(res, r, ids: list[int]) -> None:
+    """SRV-669: the memory gate of a scratch turn that continues the record `r` (the preparer's
+    summary, the memory writer's notes), with the end anchor it resumes at held as a request's
+    (`_gate_holding_end`). A record after images holds the images' key ids, which only the end
+    anchor's state has read: when the gate gave that end back all the same (a refusal with it
+    held runs once more without the hold), the turn does not run (`EndLost`). Live 2026-10-21
+    about 15:00 the writer's own gate (a plain `Budget.gate`) shed the end of a 174,166-token
+    record with 8 images, the prefill resumed at an anchor below them and forwarded their key ids
+    as token ids: the embedding's gather asserted on the device and every later request failed."""
+    mem = STATE.get("mem")
+    if mem is None:
+        return
+    memlimits.refresh(STATE)
+    _gate_holding_end(mem, res, ids, len(ids), True)
+    if r.mm and not _end_held(res, ids, len(ids), True):
+        raise EndLost(f"the end anchor at {r.at} went at the memory gate")
+
+
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
                      row: dict | None) -> dict | None:
     """A compaction request served as the continuation of the conversation the engine
@@ -3673,10 +4339,7 @@ def prepare_once() -> str:
             return why
         saved = (list(res.tokens), res.valid, res.taint, res.owner, res.capturing)
         prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
-        mem = STATE.get("mem")
-        if mem is not None:
-            memlimits.refresh(STATE)
-            mem.gate(int(prompt.numel()))
+        _gate_record(res, r, r.tokens + tail)
 
         def check(done, total):
             if _waiting() or yielded():
@@ -3711,9 +4374,13 @@ def prepare_once() -> str:
     except cache.MemoryRefused:
         why = "memory"
         return why
-    except Exception:                                              # noqa: BLE001
+    except EndLost:
+        why = "end_lost"
+        return why
+    except Exception as exc:                                       # noqa: BLE001
         prep.stats["failed"] += 1
         logbuf.print_exc()
+        gpu_health.note(exc, "summary preparer", STATE.get("device"))  # SRV-671
         return why
     finally:
         if gen is not None:
@@ -3726,6 +4393,7 @@ def prepare_once() -> str:
             # written, the end anchor's state is in its own buffers, no anchor was taken
             res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
             res._cut(res.valid)
+        res.end_hold = False                 # SRV-669: never a hold the turn left behind
         if STATE.get("mem") is not None:
             try:
                 STATE["mem"].done()
@@ -3750,7 +4418,9 @@ def graphs_once() -> str:
     commit and draft graphs of a class its rounds have not used yet), slot 0's and each side slot's,
     captured in the idle window one at a time under the engine lock (which holds the GPU turn as slot
     0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
-    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
+    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`). An engine also takes
+    the classes ahead of its state's length (`idle_captures(wants=...)`): a conductor-planned prompt
+    starts in a class the class of a short state never reached (SRV-713)."""
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
@@ -3774,8 +4444,9 @@ def graphs_once() -> str:
         return "busy"
     t0, n, why = time.perf_counter(), 0, "nothing"
     try:
-        for e, _ in engines:
-            steps = e.idle_captures()
+        for e, d in engines:
+            # SRV-713: and the classes ahead of the state's length where drafting can pay there
+            steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
             if steps is None:
                 continue
             why = "captured"
@@ -3839,7 +4510,8 @@ def _writer_look(got: str) -> None:
         st["last_look_since_ms"] = int(time.time() * 1000)
         if got == "no_session":
             print("[memory] writer look: no session (the resident conversation has no memory "
-                  "session: no session id, raw, or memory off in its profile)", flush=True)
+                  "session: no session id, raw, or memory off in its profile or for the model)",
+                  flush=True)
         elif got in WRITER_BLOCKED:
             res = STATE.get("resident")
             print(f"[memory] writer look: {got} ({_record_why(res, getattr(res, 'owner', None))})",
@@ -4015,9 +4687,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
     why = "failed"
     try:
         prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
-        if STATE.get("mem") is not None:
-            memlimits.refresh(STATE)
-            STATE["mem"].gate(int(prompt.numel()))
+        _gate_record(res, r, r.tokens + tail)
 
         def check(done, total):
             if stop():
@@ -4069,8 +4739,13 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
         why = "memory"
         mem.writer.skipped(conv, trigger, why, r.at, info)
         return why
-    except Exception:                                              # noqa: BLE001
+    except EndLost:
+        why = "end_lost"
+        mem.writer.skipped(conv, trigger, why, r.at, info)
+        return why
+    except Exception as exc:                                       # noqa: BLE001
         logbuf.print_exc()
+        gpu_health.note(exc, "memory writer", STATE.get("device"))   # SRV-671
         mem.writer.skipped(conv, trigger, "failed", r.at, info)
         return why
     finally:
@@ -4081,6 +4756,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
                 pass
         res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
         res._cut(res.valid)
+        res.end_hold = False                 # SRV-669: never a hold the turn left behind
         print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}"
               f"{f': {said}' if why == 'wrote' else ''}, {r.at} tokens, "
               f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
@@ -4485,6 +5161,45 @@ def _kv_reclaim_side(want: int, owner) -> int:
     return got
 
 
+def _kv_give_back_own() -> int:
+    """SRV-709: the calling request's slot gives every page back to the pool (it continues later by
+    reading its prompt and its text again): slot 0's conversation goes to the NVMe first when the
+    spill is on, as when the pool reclaims it idle. Bytes given back."""
+    eng = dict.get(STATE, "engine")
+    pages = getattr(getattr(eng, "kv", None), "pages", None)
+    if pages is None:
+        return 0
+    res = dict.get(STATE, "resident")
+    if res is not None:
+        try:
+            if getattr(res, "_stash", None) is not None:
+                res.settle_guest(eng)
+            sp = getattr(res, "spiller", None)
+            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
+                res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+        res.clear()
+    eng.kv.length = 0
+    return int(pages.trim(0))
+
+
+def _keep_think(think) -> None:
+    """SRV-709: the thinking budget's count and state survive a lane's continuation: the generation
+    that reads prompt + text again arms it with `start`, which would count the thinking from 0 and
+    read `inside` from the last six tokens only. Its next `start` restores the state instead."""
+    if think is None or not hasattr(think, "start"):
+        return
+    saved = {k: (list(v) if isinstance(v, list) else v) for k, v in vars(think).items()
+             if k != "start"}
+
+    def start(_ids):
+        del think.start
+        vars(think).update(saved)
+        return think
+    think.start = start
+
+
 def _kv_reclaim_slot0(want: int, owner) -> int:
     """Pool reclaim, level 4: slot 0's idle conversation, to the NVMe first when the spill is on
     (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
@@ -4598,6 +5313,15 @@ PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
 #: SRV-321: between two layers of a layer-major window the GPU turn is offered to a waiting slot,
 #: as between two chunks ("off" offers it after the window only, kept for the A/B)
 PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().lower() != "off"
+
+#: SPD-245: requests bound to slots while none decodes prefill as one burst before any of them decodes
+#: (server/prefill_burst.py). "wait" (or "on"): each prefills alone, then waits for the others; "joint":
+#: their prompts in one forward (engine/model.py `prefill_joint`, each row its own forward's bits), a
+#: prompt it cannot take alone. A member waits at most QSE_PREFILL_BURST_WAIT_S for the others. "joint" by
+#: default: a burst forms only while no slot decodes, and each member's rows keep their own forward's bits.
+PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "joint").strip().lower()
+PREFILL_BURST = "wait" if PREFILL_BURST == "on" else PREFILL_BURST if PREFILL_BURST in ("wait", "joint") else None
+PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
 
 
 def _par_window_yield() -> None:
@@ -4814,6 +5538,27 @@ def _finishing(rec, step: str) -> None:
     rec.step = step
 
 
+#: SRV-709: when a request stopped for memory is worth sending again (the Retry-After)
+MEMORY_FULL_RETRY_S = 30
+
+
+def memory_full_error(exc, generated: int | None = None) -> dict | None:
+    """SRV-709: the error body of a request the KV pool's gate stopped (engine/kvpool.py
+    `PoolFull`: its next pages would have taken MemAvailable under the hard floor after every
+    reclaim), or None for any other failure. Code `memory_full`, type `server_busy`: the box is
+    full, not broken. The rows were never written, so the text so far is good; a client that sends
+    the same request again with the text as a continuation (the Chat tab does) waits for memory at
+    the admission and goes on from there. A streamed answer ends with it beside `finish_reason`
+    "error"; one not streamed yet gets it as a 503 with Retry-After."""
+    if not isinstance(exc, kvpool.PoolFull):
+        return None
+    done = f" after {int(generated):,} tokens" if generated else ""
+    return {"message": (f"memory is full: this request stopped{done} to keep the box above its "
+                        f"memory floor; send it again to continue once memory is free"),
+            "type": "server_busy", "code": "memory_full", "retry_after": MEMORY_FULL_RETRY_S,
+            "detail": str(exc)}
+
+
 def _stop_detail(finish: str, ids: list, eos, cut: bool, pstop) -> str | None:
     """What refines a `stop`: the end token, a stop string or the repetition guard."""
     if finish != "stop":
@@ -4897,7 +5642,7 @@ def continues_final(body: dict, messages: list | None = None) -> bool:
     story again from its title (chatcmpl-9ea66357: 1,613 new tokens, the saved answer twice). A
     last message from the assistant with text and no tool calls is continued: the template's
     `continue_final_message` leaves it open, after its closed (empty) think block, so no new turn
-    and no new reasoning. The body's `continue_final_message` (vLLM's name) or
+    and no new reasoning. The body's `continue_final_message` (the OpenAI-compatible field) or
     `add_generation_prompt` says otherwise when it is given."""
     explicit = body.get("continue_final_message")
     if isinstance(explicit, bool) and not explicit:
@@ -4973,6 +5718,18 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         note = compat.directive(mode, name) if tools else None
         if note:
             messages = _with_directive(messages, note)
+        # SRV-697: thinking off, for a model whose spec has a line for it (it writes its reasoning into the
+        # answer otherwise): the line before the conversation, after the client's own system messages
+        rs = _spec().reasoning
+        if client.off and rs.off_note:
+            if _spec().prompt.system_first:
+                # #93: a template that reads one system prompt first (and refuses another role there):
+                # the line ends that system prompt
+                messages = _with_directive(messages, rs.off_note)
+            else:
+                k = next((i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")),
+                         len(messages))
+                messages = list(messages[:k]) + [{"role": rs.off_role, "content": rs.off_note}] + list(messages[k:])
         # The template resolves `reasoning_effort` to xhigh unless told otherwise, and xhigh is a
         # paragraph of instructions telling the model to check its assumptions and consider
         # alternatives. A server default is the cheapest way to make it think less, because it
@@ -4996,6 +5753,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # Qwen template's own thinking off renders it, so the answer starts at once
         close = (list(tok(CLOSE_THINK, add_special_tokens=False).input_ids)
                  if client.off and kwargs.get("add_generation_prompt") else [])
+        # SRV-685: a model that opens its own reasoning block (`ReasoningSpec.opens_itself`, no thinking switch in its
+        # template) gets an empty block after the generation prompt, so it answers at once
+        selfoff = (list(tok(OPEN_THINK + CLOSE_THINK, add_special_tokens=False).input_ids)
+                   if close and _spec().reasoning.opens_itself else [])
         seg = STATE.get("segments")
         if seg is None:
             enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
@@ -5003,6 +5764,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             cids = _as_ids(enc, device="cpu")
             if close and opens_think(tok.decode(cids[-8:].tolist(), skip_special_tokens=False)):
                 cids = torch.cat([cids, torch.tensor(close, dtype=cids.dtype)])
+            elif selfoff:
+                cids = torch.cat([cids, torch.tensor(selfoff, dtype=cids.dtype)])
             if count == "ids":
                 return cids.tolist()
             if count == "think":
@@ -5020,6 +5783,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         ids = seg.encode(text)
         if close and opens_think(tok.decode(ids[-8:], skip_special_tokens=False)):
             ids = list(ids) + close
+        elif selfoff:
+            ids = list(ids) + selfoff
         if count == "ids":
             return list(ids)
         if count == "think":
@@ -5150,19 +5915,26 @@ def _mm_end_replay(res, text: torch.Tensor, prompt: torch.Tensor, mm, images: li
     they were when nothing applies."""
     keys = list(mm.key_ids)
     out, spans, aligned = _end_replay(res, keys)
+    # SRV-657: why the replay did not serve, for `_say_reread`'s line (live 2026-10-21 00:05:59:
+    # 43,856 tokens re-read after a guest, and the log said nothing of where or why)
+    STATE["mm_end_why"] = "nothing to replay or align"
     if not spans and not aligned:
         return prompt, mm, [], 0, 0
     if out[:len(keys)] == keys and len(out) == len(keys):
         return prompt, mm, [], 0, 0
+    STATE["mm_end_why"] = "the images differ from the rows' (ones or order)"
     if _mm_runs(out) != _mm_runs(keys):
         return prompt, mm, [], 0, 0         # the images are not the same ones, in the same order
+    STATE["mm_end_why"] = "the replayed ids do not collapse to text"
     new_text = _mm_collapse(out, mm)
     if new_text is None:
         return prompt, mm, [], 0, 0
     t = torch.tensor(new_text, dtype=text.dtype, device=text.device)
     prompt2, mm2 = _mm_prompt(t, images, rec)
+    STATE["mm_end_why"] = "the rebuilt prompt's rows are not the replay's"
     if list(mm2.key_ids) != out:
         return prompt, mm, [], 0, 0         # never serve rows the replay did not ask for
+    STATE["mm_end_why"] = None
     mm.release()
     return prompt2, mm2, list(spans), int(aligned), len(out) - len(keys)
 
@@ -5505,17 +6277,18 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
 
 
-def _grammar_vocab(calls: bool = False) -> "grammar_mod.Vocab":
+def _grammar_vocab(markers: tuple = ()) -> "grammar_mod.Vocab":
     """Every token as bytes, for the constraint masks: built on the first constrained
-    request (half a second over 248k tokens) and kept. `calls`: SRV-619, the
-    vocabulary of a calls-or-document constraint, the call markers' own ids allowed (built once
-    more, on the first such request)."""
-    key = "grammar_vocab_calls" if calls else "grammar_vocab"
+    request (half a second over 248k tokens) and kept, one a set of `markers`: the tags a
+    constraint lets the model write as its own ids (SRV-619 a calls-or-document constraint's
+    call markers, SRV-689 a form's own tags; built once more, on the first such request)."""
+    markers = tuple(markers)
+    key = ("grammar_vocab" if not markers else "grammar_vocab_calls" if markers == grammar_mod.CALL_MARKERS
+           else "grammar_vocab_" + "".join(markers))
     v = STATE.get(key)
     if v is None:
         v = STATE[key] = grammar_mod.Vocab.from_tokenizer(
-            STATE["tok"], STATE["engine"].cfg.vocab_size,
-            markers=grammar_mod.CALL_MARKERS if calls else ())
+            STATE["tok"], STATE["engine"].cfg.vocab_size, markers=markers)
     return v
 
 
@@ -5599,8 +6372,7 @@ def _system() -> dict:
                   "lane": INFLIGHT["lane"],
                   "side_lane": STATE["lane"].report() if STATE.get("lane") is not None else None,
                   # `--parallel N` only: a server without side slots sends what it always did
-                  **({"parallel": _par_health()}
-                     if dict.get(STATE, "pool") is not None else {}),
+                  **_par_status(),
                   "max_queue": STATE.get("max_queue"),
                   "queue_timeout_s": STATE.get("queue_timeout"),
                   "request_timeout_s": STATE.get("request_timeout")},
@@ -5681,11 +6453,12 @@ def served_name() -> str:
 
 def _card_facts() -> dict:
     """What the loader serves, for the model card (server/model_card.py): the pack, the window,
-    the default output limit, the vision tower, the effort levels' caps."""
+    the default output limit, the vision tower, the effort levels' caps, the image cap."""
     w = weights_profile()
     return {"pack": w.get("name") or w.get("format"), "max_len": STATE.get("max_len"),
             "max_output": STATE.get("default_max_tokens"), "vision": STATE.get("vision") is not None,
-            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True}
+            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True,
+            "max_images": (STATE.get("image_limits") or images_mod.Limits()).max_images}
 
 
 def _effort_caps() -> dict:
@@ -5809,7 +6582,7 @@ def _engine_own_settings() -> dict:
     pool = dict.get(STATE, "pool")
     a = dict.get(STATE, "args") or {}
     par = {"n": 1, "requested": int(a.get("parallel") or 1), "side_max_len": None,
-           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb")}
+           "side_graphs": None, "floor_gib": a.get("parallel_floor_gb"), "max_len": a.get("max_len")}
     if pool is not None and getattr(pool, "n", 1) > 1:
         side = pool.side()
         par.update(n=pool.n, side_max_len=side[0].max_len if side else None,
@@ -5848,7 +6621,7 @@ def _proxy_backends() -> list | None:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "TandemLLM"
-    # 2026-10-05: no Nagle, as uvicorn's servers (vLLM, SGLang). The headers and the first frame
+    # 2026-10-05: no Nagle, as uvicorn's servers. The headers and the first frame
     # go out as two writes; on a keep-alive connection (the proxy's pool, an SDK's) Linux holds
     # the second for the reader's delayed ACK, up to 40 ms (the night pass measured that stall
     # on tests/fake_backend.py)
@@ -5945,9 +6718,13 @@ class Handler(BaseHTTPRequestHandler):
             if ev is not None:                   # SRV-249: no status line left shimmering
                 self.wfile.write(_chunk(e["cid"], e["model"], e["created"], None,
                                         extra={"event": ev}).encode())
+            # the refusal's own code where it names one (SRV-709 `memory_full`), else the status
+            named = err.get("code") if isinstance(err.get("code"), str) else None
             self._early_write(_chunk(e["cid"], e["model"], e["created"], {}, finish="error",
                                      error={"message": str(err.get("message") or code),
-                                            "type": err.get("type") or "error", "code": code}))
+                                            "type": err.get("type") or "error",
+                                            "code": named or code,
+                                            **({"status": code} if named else {})}))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -6268,7 +7045,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
-                   stream: bool = False) -> bool:
+                   stream: bool = False, rows: int | None = None, respond: bool = True) -> bool:
         """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
         worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
         shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
@@ -6290,12 +7067,20 @@ class Handler(BaseHTTPRequestHandler):
         state `waiting_memory` (the dashboard counts it, `rec.wait_reason` is "memory"), its line
         says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
         (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
-        `Retry-After` and the code `memory_wait_timeout`."""
+        `Retry-After` and the code `memory_wait_timeout`.
+
+        SRV-629: `rows`, the prompt's rows once its images are expanded (`_mm_rows`), where the
+        text prompt has one placeholder an image: the workspace and the KV pages are reserved for
+        what the prefill writes.
+
+        SRV-709: the KV pages are reserved for at most `KV_ADMIT_ROWS` of `max_new` while lanes
+        that outgrow it give way (`KV_RECOMPUTE`), so more lanes start; `respond=False` (a lane
+        resuming inside its own answer) sends nothing on a refusal."""
         self._mem_wait = False
         adm = pool.admission
         if adm is None:
             return True
-        n = int(prompt.numel())
+        n = max(int(prompt.numel()), int(rows or 0))
         mem = dict.get(STATE, "mem")
         ws = mem.workspace(n) if mem is not None else max(
             cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
@@ -6306,7 +7091,10 @@ class Handler(BaseHTTPRequestHandler):
             if pages is not None:
                 # the served prompt carries the router's notes and the anchors' replay beyond the
                 # client's tokens: PLAN_MARGIN rows of room for them
-                rows = min(int(eng.kv.max_len), n + int(max_new) + PLAN_MARGIN + SIDE_MARGIN)
+                grow = int(max_new)
+                if KV_RECOMPUTE and KV_ADMIT_ROWS > 0:
+                    grow = min(grow, KV_ADMIT_ROWS)
+                rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
                 kv = pages.need_bytes(rows)
                 owner = pages.owner
         need = ws + kv
@@ -6377,12 +7165,66 @@ class Handler(BaseHTTPRequestHandler):
               f"{slots_mod.Admission.describe(d)}", flush=True)
         if rec is not None:
             rec.stop_detail = "memory_wait_timeout"
+        if not respond:
+            return False
         self._send_bytes(503, json.dumps({"error": {
             "message": (f"memory is almost full; {running} request(s) are running; "
                         f"try again in about 30 s"),
             "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
             extra_headers=(("Retry-After", "30"),))
         return False
+
+    def _recomputing(self, pool, cid: str, rec, stream: bool, prompt, max_new: int, think, make):
+        """SRV-709: the tokens of `make(prompt, max_new)`; when the KV pool refuses this lane's next
+        pages and other lanes run, the lane gives its memory back (`_kv_give_back_own`), waits at
+        the head of the admission's line (`Admission.first`) and goes on with `make(prompt + its
+        text, what is left)`: the same answer, read again from its prompt and text. A streamed
+        client gets an SSE comment while the lane waits (no client reads it as a token). Alone, or
+        after `KV_RECOMPUTE_MAX` times, the refusal stands (`memory_full`)."""
+        produced: list[int] = []
+        cur, left, gave = prompt, int(max_new), 0
+        while True:
+            gen = make(cur, left)
+            try:
+                for t in gen:
+                    produced.append(int(t))
+                    yield t
+                return
+            except kvpool.PoolFull:
+                adm = pool.admission
+                if adm is None or pool.running() <= 1 or gave >= KV_RECOMPUTE_MAX:
+                    raise
+                gen.close()
+                gave += 1
+                freed = _kv_give_back_own()
+                st = STATE.setdefault("kv_recompute", {"gave_way": 0, "resumed": 0, "gave_up": 0,
+                                                       "freed_gib": 0.0})
+                st["gave_way"] += 1
+                st["freed_gib"] = round(st["freed_gib"] + freed / (1 << 30), 3)
+                if rec is not None:
+                    rec.gave_way = gave
+                print(f"[kv-pool] {cid} gives way after {len(produced):,} tokens: {_gib(freed)} GiB "
+                      f"back to the pool, {pool.running() - 1} lane(s) go on; it continues when "
+                      f"memory is free", flush=True)
+                adm.release(cid)
+                adm.first(cid)
+                cur = torch.cat([prompt, torch.tensor(produced, dtype=prompt.dtype,
+                                                      device=prompt.device)])
+                left = int(max_new) - len(produced)
+
+                def paused(short: float, place: int = 1) -> None:
+                    if stream:
+                        self.wfile.write(f": paused: waiting for memory ({short:.1f} GiB short)\n\n"
+                                         .encode())
+                        self.wfile.flush()
+                if not self._par_admit(pool, cid, cur, rec=rec, say=paused, max_new=left,
+                                       stream=True, respond=False):
+                    st["gave_up"] += 1
+                    raise
+                _keep_think(think)
+                st["resumed"] += 1
+                print(f"[kv-pool] {cid} goes on: reads its {int(cur.numel()):,} tokens again",
+                      flush=True)
 
     def _prefill_watch(self, stream: bool, rec=None):
         """`on_prefill` for this request. After every prefill chunk: raise `ClientGone` if
@@ -6474,12 +7316,20 @@ class Handler(BaseHTTPRequestHandler):
             # "not taking work" and "broken", and a restarter that cannot tell them apart will
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
+            status = "draining" if STATE.get("draining") else "ok"
+            # SRV-671: a CUDA context that no longer answers is a failure, never "ok": 500 and
+            # `failed`, which the watchdog restarts (a 503 is a drain it leaves alone)
+            fault = gpu_health.check(STATE.get("device"))
+            failed = ({"failed": fault["error"], "error": gpu_health.words(fault),
+                       "gpu": dict(fault)} if fault is not None else {})
+            if fault is not None:
+                code, status = 500, "failed"
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
                 # through the proxy, the status and nothing about the configuration (a page there
                 # reaches the status responder through the same proxy, OPS-175)
-                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+                return self._json(code, {"status": status, **failed})
             return self._json(code, {
-                "status": "draining" if STATE.get("draining") else "ok",
+                "status": status, **failed,
                 "status_port": _status_port(),
                 "model": served_name(), "base_model": STATE.get("model"),
                 "version": STATE.get("version", ""), "weights": weights_profile(),
@@ -6492,6 +7342,13 @@ class Handler(BaseHTTPRequestHandler):
                 "sampling": {"temperature": STATE.get("temperature", 0.0),
                              "top_p": STATE.get("top_p", 1.0),
                              "top_k": STATE.get("top_k", 0),
+                             # SPD-245: what a sampled request that names no filter runs with
+                             "unnamed_filters": sampling_defaults.resolve(
+                                 None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
+                             # SPD-245: whether an unseeded sampled request draws its own seed
+                             "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
+                                          "keyed": sampling_defaults.keys_unseeded(
+                                              _S.get("FRESH_SEED"), _sampled_q_free())},
                              # SRV-241: what a regenerate samples with, and how many there were
                              "regenerate": (STATE["regenerate"].report()
                                             if STATE.get("regenerate") is not None
@@ -6515,14 +7372,14 @@ class Handler(BaseHTTPRequestHandler):
                 "roles": _safe(roles_report),
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
                 # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
-                **({"parallel": _par_health()}
-                   if dict.get(STATE, "pool") is not None else {}),
+                **_par_status(),
             })
         if path == "/metrics/up":
             # a public page with one number and nothing else, so the scrape can tell an
             # engine that is down from a metrics token that is wrong (the real page's 401).
             raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
-                   b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
+                   b"# TYPE qse_up gauge\nqse_up "
+                   + (b"0" if STATE.get("draining") or gpu_health.FAULT is not None else b"1")
                    + b"\n")
             try:
                 self.send_response(200)
@@ -6782,8 +7639,23 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):                      # SRV-167: `[]`, `"hi"`, `null`
             return self._json(400, compat.Refusal("body", "the request body must be a JSON "
                                                           "object").body())
-        with logbuf.serving(body):
-            return self._complete_logged(body, path)
+        if gpu_health.FAULT is not None:
+            # SRV-671: a failed CUDA context serves nothing until a restart; the client and the
+            # Chat tab get the reason in words, not the driver's text
+            return self._send_bytes(503, json.dumps({"error": {
+                "message": gpu_health.words(), "type": "engine_failed", "code": 503}}).encode(),
+                extra_headers=(("Retry-After", str(gpu_health.RETRY_AFTER_S)),))
+        # SPD-245: on its way to a slot, for the prefill burst (server/prefill_burst.py `received`)
+        pool = dict.get(STATE, "pool")
+        burst = pool.burst if pool is not None else None
+        self._burst_tok = burst.received() if burst is not None else None
+        try:
+            with logbuf.serving(body):
+                return self._complete_logged(body, path)
+        finally:
+            if burst is not None:
+                burst.settle(self._burst_tok)
+            self._burst_tok = None
 
     def _loop_escape(self, body: dict, plan, rec, sampler, cid: str):
         """SRV-475: this request's sampling under the profile's `sampling` section. While the
@@ -6897,6 +7769,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as exc:                                  # noqa: BLE001
             logbuf.print_exc()
+            fault = gpu_health.note(exc, "request", STATE.get("device"))
+            if fault is not None:
+                # SRV-671: the CUDA context is lost; the reason in words, not the driver's text
+                return self._fail_gpu()
+            full = memory_full_error(exc)
+            if full is not None and self._early is not None and not self._early["done"] \
+                    and not self._early_body:
+                return self._early_end(503, json.dumps({"error": full}).encode())
             if self._early is not None and not self._early["done"] and not self._early_body:
                 # a stream opened early that failed before its generation: closed, with the reason
                 return self._early_end(500, json.dumps({"error": {
@@ -6907,6 +7787,10 @@ class Handler(BaseHTTPRequestHandler):
                 # truncation without the reason -- which is precisely bug 2's symptom.
                 return
             try:
+                if full is not None:
+                    # SRV-709: the box at its floor is a wait, not a failure: 503 and when to retry
+                    return self._send_bytes(503, json.dumps({"error": full}).encode(),
+                                            extra_headers=(("Retry-After", str(MEMORY_FULL_RETRY_S)),))
                 if isinstance(exc, grammar_mod.GrammarError):
                     # the constraint left no legal token -- the request's own doing
                     return self._json(400, compat.Refusal(compat.constraint_field(body),
@@ -6915,6 +7799,20 @@ class Handler(BaseHTTPRequestHandler):
                                                   "type": "internal_error"}})
             except Exception:
                 return
+
+    def _fail_gpu(self) -> None:
+        """SRV-671: a request that failed with the CUDA context: 503, the reason in words."""
+        raw = json.dumps({"error": {"message": gpu_health.words(), "type": "engine_failed",
+                                    "code": 503}}).encode()
+        try:
+            if self._early is not None and not self._early["done"] and not self._early_body:
+                return self._early_end(503, raw)
+            if self._streamed:
+                return
+            return self._send_bytes(503, raw, extra_headers=(
+                ("Retry-After", str(gpu_health.RETRY_AFTER_S)),))
+        except Exception:                                          # noqa: BLE001
+            return
 
     _streamed = False
 
@@ -6950,6 +7848,7 @@ class Handler(BaseHTTPRequestHandler):
         mon = STATE.get("monitor")
         self._tandem = (mon.mode_for(self.headers.get("X-Tandem"), n_req) if mon is not None
                         else "raw")
+        rec.learn_suffix = suffix_learns(self.headers)         # SPD-151
         self._images_left_out = 0                      # a keep-alive socket's handler is reused
         live_registry().register(rec)                  # visible from now until 30 s after
         try:
@@ -6996,7 +7895,7 @@ class Handler(BaseHTTPRequestHandler):
         # and the output limit -- so a malformed request is the client's 400 naming the field,
         # never a 500 with the chat template's exception text (which clients retry)
         try:
-            compat.request_shape(body, chat)
+            compat.request_shape(body, chat, system_first=_spec().prompt.system_first)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
         # SRV-477: `--reasoning-effort none|off`, thinking off for a request that says nothing
@@ -7034,14 +7933,14 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=STATE.get("tool_format") != "pythonic")
+                                           xml_calls=_tool_format().joins_documents, fmt=_tool_format())
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None
             tool_types = ac.types if ac is not None else None
             # compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
-            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(calls=ac.calls),
+            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(ac.markers),
                                             parts=ac.parts)
                     if pattern else None)
         except compat.Refusal as exc:
@@ -7079,13 +7978,12 @@ class Handler(BaseHTTPRequestHandler):
             sampler = Sampler(
                 temperature=float(body["temperature"]) if body.get("temperature") is not None
                 else float(STATE.get("temperature", 0.0)),
-                top_p=float(body["top_p"]) if body.get("top_p") is not None
-                else float(STATE.get("top_p", 1.0)),
-                top_k=int(body["top_k"]) if body.get("top_k") is not None
-                else int(STATE.get("top_k", 0)),
+                # SPD-245: a request that names no filter samples with the card's (server/sampling_defaults.py)
+                **{k: v for k, v in sampling_defaults.resolve(
+                    body, STATE.get("sampling_flags"), STATE.get("card_sampling")).items()
+                   if k != "source"},
                 seed=body.get("seed"),
-                draft_temperature=body.get("draft_temperature"),
-                min_p=float(body["min_p"]) if body.get("min_p") is not None else 0.0)
+                draft_temperature=body.get("draft_temperature"))
         except (TypeError, ValueError) as exc:
             return self._json(400, {"error": {"message": f"bad sampling parameter: {exc}",
                                               "type": "invalid_request_error",
@@ -7183,6 +8081,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # the caches' session key: the body's conversation, else opencode's x-session-id (OPS-47)
         conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
+        # #98: `cache_prompt: false` reads the prompt whole and leaves every prompt cache as it was
+        cold = cache_prompt_off(body)
         # ENG-371: an agent's worker (its session comes back at its next call) and its parent
         stay, parent = _worker_of(self.headers)
         if stay:
@@ -7256,6 +8156,12 @@ class Handler(BaseHTTPRequestHandler):
                 logbuf.print_exc()             # a bug here serves the request as sent
         if rec.sampling is None and sampler.on:
             rec.sampling = "client"
+        # SPD-245: an unseeded sampled request draws its own seed here and takes the keyed walk a
+        # seeded one takes (server/sampling_defaults.py); recorded in the decision row like a
+        # regenerate's seed. The response is as for a client's seed (no seed field).
+        drawn = sampling_defaults.admit_seed(sampler, _S.get("FRESH_SEED"), _sampled_q_free())
+        if drawn is not None and plan is not None and plan.row is not None:
+            plan.row["extra"]["seed_drawn"] = drawn
         # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
         # under a conductor plan; its reasoning ends with the template's blank lines as content,
         # so each round's block is timed. SRV-617: on the raw path too for a plain API caller
@@ -7337,15 +8243,19 @@ class Handler(BaseHTTPRequestHandler):
         n_choices = int(body.get("n") or 1)
         lp_top = compat.top_logprobs(body, chat)
         tool_mode = compat.tool_choice(body)[0] if chat else "none"
-        parse_calls = chat and tool_mode != "none"
+        offered = bool(body.get("tools"))
+        # SRV-723: an answer to a request that offered no tools is text on the raw path: never
+        # parsed, never held. LFM2.5's call opener is an ordinary token, and its code answer to the
+        # card prompt opened with it (`[write_file(file_path=..., content=...)]`): the stream rewriter
+        # held the whole answer and sent it at the end, and one that closed the block went out as a
+        # call with finish `tool_calls`. Under a conductor plan such a call is refused (SRV-247)
+        parse_calls = chat and tool_mode != "none" and (offered or (plan is not None and plan.active))
         tool_names = compat.tool_names(body) if parse_calls else []
         # SRV-247 (UX2, 2026-10-07): a call the model writes in an answer to a request that offered
         # no tools is read out of the text and dropped, never handed over: a curl client with
         # memory on received the model's own `tool` call (a GET on the memory search, with the
-        # session's share address) and finish `tool_calls`. Under a conductor plan only: the raw
-        # path is the release's, byte for byte
-        refuse_calls = bool(parse_calls and not body.get("tools") and plan is not None
-                            and plan.active)
+        # session's share address) and finish `tool_calls`. Under a conductor plan only
+        refuse_calls = bool(parse_calls and not offered and plan is not None and plan.active)
         max_calls = 1 if body.get("parallel_tool_calls") is False else None
         # a value the model writes as text goes back as the JSON type its schema asks for
         # (`"offset": 150`, not `"150"`) -- clients validate the arguments against the schema and
@@ -7355,6 +8265,8 @@ class Handler(BaseHTTPRequestHandler):
             for fname, keys in (tool_types or {}).items():
                 typed.setdefault(fname, {}).update({k: JSON_ANY for k in keys})
             tool_types = typed or None
+        # SRV-691: the offered tools' parameters, which a call's argument names are matched to
+        tool_schemas = callrepair.schemas_of(body.get("tools")) if parse_calls and body.get("tools") else {}
 
         # S1: a client's side request goes ahead of a waiting turn when it is short, and after
         # every waiting turn when it is not (the module's WAITERS)
@@ -7581,6 +8493,8 @@ class Handler(BaseHTTPRequestHandler):
                 if got:
                     side.no_carry = bool(me["own"]) or lane_kind is not None
             micro = not got and lane_kind is not None
+            if not got and par is not None and par.burst is not None:
+                par.burst.settle(getattr(self, "_burst_tok", None))   # SPD-245: queued, not on its way
             while not got and not micro:
                 # 0.8.2: the Lanes view's queued line says why (server/parallel.py)
                 rec.queue_why = _queue_why(par, par_why, side_need, time.monotonic() - t_wait, me)
@@ -7701,14 +8615,7 @@ class Handler(BaseHTTPRequestHandler):
                                               or par_why.get("hop_from") is not None):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
-            nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
-                                                          "res_common", "conv", "need", "guest",
-                                                          "park", "slot0_wait_s", "home",
-                                                          "home_share", "home_wait",
-                                                          "hop_from", "prefer_side", "slot0_stale",
-                                                          "new_wait", "spill", "spill_head",
-                                                          "slot0_wait")
-                            if k in par_why)
+            nums = _par_nums(par_why)
             if side is not None:
                 # A request that shares only the client's head with slot 0's
                 # conversation is a new conversation, and says so
@@ -7727,7 +8634,8 @@ class Handler(BaseHTTPRequestHandler):
                 clip = ""
                 if par_why.get("clip"):
                     # FX16: the slot's window leaves this request less than its output limit
-                    room = _side_room(side, len(par_why.get("ids") or ()),
+                    room = _side_room(side, int(par_why.get("n_rows")
+                                                or len(par_why.get("ids") or ())),
                                       int(par_why.get("margin") or 0), max_new)
                     if room < max_new:
                         clip = f" max_tokens {max_new} -> {room} (the slot's window)"
@@ -7741,6 +8649,12 @@ class Handler(BaseHTTPRequestHandler):
             elif par_why.get("hop_from") is not None:
                 print(f"[parallel] {cid} slot 0, moved from slot {par_why['hop_from']} (busy "
                       f"{par_why.get('home_wait')} s): carried in or read again: {nums}", flush=True)
+        if par is not None and not micro and par.burst is not None:
+            # SPD-245: a member of the prefill burst when none of the slots decodes (or one is open)
+            par.burst.arrive(side.index if side is not None else 0,
+                             idle=not any(s.phase in ("decode", "runner") for s in par.slots))
+        if par is not None and par.burst is not None:
+            par.burst.settle(getattr(self, "_burst_tok", None))       # SPD-245: bound (or a micro lane)
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns
@@ -7759,6 +8673,8 @@ class Handler(BaseHTTPRequestHandler):
         # (`_generate_stream` publishes a new list) records its conversation as slot 0's
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
+        mm_end = None                      # SRV-629: the served images' context, for the view keep
+        source = None                      # the token source the answer reads (`open_source`)
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
             if int(prompt.numel()) == 0:
@@ -7767,10 +8683,9 @@ class Handler(BaseHTTPRequestHandler):
                 # never "a prefill needs at least one token" as a 500
                 return self._json(400, compat.Refusal(
                     "messages" if chat else "prompt", "the prompt is empty").body())
-            if par is not None and not micro and not self._par_admit(par, cid, prompt, rec=rec,
-                                                                       say=mem_wait,
-                                                                       max_new=max_new,
-                                                                       stream=stream):
+            if par is not None and not micro and not self._par_admit(
+                    par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -7857,7 +8772,7 @@ class Handler(BaseHTTPRequestHandler):
             # the park in and the 15,8k-token chat lost its end anchor; its next turn re-read it)
             guest = bool(par_why.get("guest")) or bool(me.get("own")) or lane_kind is not None
             if (res_ is not None and not images and not (comp and comp["prepared"] is not None)
-                    and not guest):
+                    and not guest and not cold):
                 if comp is None:
                     # FX10 (SRV-213): a conversation that ran on a side slot is carried over first
                     with torch.no_grad():
@@ -7865,7 +8780,8 @@ class Handler(BaseHTTPRequestHandler):
                 # A conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
                 _spill_before_replay(prompt.tolist(), mm_ok=comp is not None)
-            if res_ is not None and res_.end is not None and not images and comp is None:
+            if (res_ is not None and res_.end is not None and not images and comp is None
+                    and not cold):
                 before = prompt.tolist()
                 ids_, replayed, aligned = _end_replay(res_, before)
                 if replayed or aligned:
@@ -7922,7 +8838,8 @@ class Handler(BaseHTTPRequestHandler):
                     constrained=gram is not None,
                     profile=plan.res.profile if plan is not None and plan.active else "",
                     cls=str((plan.row or {}).get("class_id") or "")
-                    if plan is not None and plan.active else "")
+                    if plan is not None and plan.active else "",
+                    tool_format=str(_spec().tool_format or ""))
                 # one session for the router and the monitor: the router's key when it has one
                 sup = rec.sup = mon.begin(
                     mon_mode, req_ev, prompt.tolist(), rec.conv, policy=mon_policy,
@@ -7983,7 +8900,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": {"message": str(exc),
                                                       "type": "invalid_request_error",
                                                       "param": "messages"}})
-                if MM_END == "on" and res_ is not None and comp is None and not guest:
+                if MM_END == "on" and res_ is not None and comp is None and not guest and not cold:
                     # SRV-546: the conversation on the NVMe read back, and the end anchor's replay
                     # and alignment, on the expanded key ids (`_mm_end_replay`); SP4's note
                     # (text positions) moves to the rows' coordinates with it
@@ -8017,9 +8934,11 @@ class Handler(BaseHTTPRequestHandler):
                                     plan.row["extra"]["end_aligned"] = mm_aligned
                                 plan.row["extra"]["end_mm"] = True
                         elif keys_n >= REREAD_SAY_TOKENS:
-                            _say_reread(cid, res_, list(mm.key_ids), plan)
+                            _say_reread(cid, res_, list(mm.key_ids), plan,
+                                        why_mm=STATE.pop("mm_end_why", None))
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()      # served as rendered, as before SRV-546
+            mm_end = mm
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
@@ -8117,9 +9036,11 @@ class Handler(BaseHTTPRequestHandler):
                         if obj is not None:
                             obj.drop_session(conv_id)
                 try:
+                    # SRV-669: a compaction served as the continuation resumes at the end
+                    # anchor (`end_mm`), after images too: its end is held as well
                     _gate_holding_end(mem, res_, list(mm.key_ids) if mm is not None
                                       else prompt.tolist(), n_prompt,
-                                      mm is not None and MM_END == "on" and comp is None)
+                                      (mm is not None and MM_END == "on") or comp is not None)
                 except cache.MemoryRefused as exc:
                     rec.stop_detail = "memory"
                     print(f"[memory] {cid} refused: {exc}", flush=True)
@@ -8160,7 +9081,7 @@ class Handler(BaseHTTPRequestHandler):
             elif comp is not None and comp["prepared"] is not None:
                 cached_ids = comp["prepared"]       # the summary written ahead (no engine)
             elif (rcache is not None and not STATE["relax"].on and not sampler.on
-                    and lp_top is None and comp is None
+                    and lp_top is None and comp is None and not cold
                     and not (plan is not None and plan.changed) and not replayed):
                 # A sampled answer is not a function of (prompt, params) in any replayable sense
                 # without the RNG stream; do not memoise it. A request for log-probabilities needs
@@ -8171,8 +9092,15 @@ class Handler(BaseHTTPRequestHandler):
                 tools_key = hashlib.sha256(json.dumps(
                     [body.get("tools"), body.get("tool_choice")], sort_keys=True).encode()
                     ).hexdigest()[:16] if body.get("tools") else ""
+                # The effort level the request resolved to, the client's word and the router's
+                # level: two levels can render one prompt and one cap (`high` and `xhigh` at a
+                # 16,384-token limit), and a run at one level must not replay the other's answers
+                effort_key = (client.effort or "",
+                              str(((plan.row or {}).get("effort") if plan is not None else None)
+                                  or ""))
                 rkey = cache.ResponseCache.key(
-                    mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
+                    mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget,
+                    effort=effort_key, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key, **({"grammar": ("parts:" if gram.side is not None else "")
                                          + gram.pattern} if gram is not None else {}),
@@ -8212,6 +9140,15 @@ class Handler(BaseHTTPRequestHandler):
                     kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
                 if stay:
                     kw["stay"] = True                  # ENG-371: never a guest of the resident
+                if cold:
+                    kw["cold"] = True                  # #98
+                if KV_RECOMPUTE and par is not None:
+                    # SRV-709: a lane the pool refuses gives way and goes on (`_recomputing`)
+                    return rec.track(self._recomputing(
+                        par, cid, rec, stream, prompt, max_new, budget_state,
+                        lambda p, n: generate_stream(p, n, eos, budget_state, conv_id, deadline,
+                                                     pen=pen, pstop=guard, sampler=samp,
+                                                     on_prefill=watch, **kw)))
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -8298,6 +9235,20 @@ class Handler(BaseHTTPRequestHandler):
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)
                         for x in (*more, ids))
+                elif _spec().reasoning.opens_itself or client.off:
+                    # a model that opens its own block (Flint), or reasons with thinking off (#93): the
+                    # tokens after its opening `<think>`; with thinking off and no streaming, also the
+                    # working-out before a lone `</think>` the answer moved to the reasoning field
+                    o = usage_mod.special_id(tok, "<think>")
+                    c = usage_mod.special_id(tok, "</think>")
+                    n_ = 0
+                    for x in (*more, ids):
+                        if len(x) and o is not None and int(x[0]) == o:
+                            n_ += usage_mod.reasoning_count(list(x)[1:], c, think.end_text)
+                        elif (client.off and not stream and len(x)
+                              and off_split(tok.decode(list(x), skip_special_tokens=False)) is not None):
+                            n_ += usage_mod.reasoning_count(list(x), c, think.end_text)
+                    rec.reasoning_tokens = n_
                 if (prefill and cached_ids is None and not micro
                         and STATE.get("last_prefill") is not prefill_before):
                     rec.absorb_prefill(STATE.get("last_prefill"))
@@ -8346,7 +9297,8 @@ class Handler(BaseHTTPRequestHandler):
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)))
+                                                 else getattr(rec, "note_at", None)), cold=cold,
+                                  learn=getattr(rec, "learn_suffix", True))
                         if rkey is not None and not ci and not (sup is not None and sup.acted) \
                                 and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
@@ -8375,8 +9327,7 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         ended = bool(ids) and ids[-1] in eos
-                        if STATE.get("tool_format") == "pythonic":
-                            answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
+                        answer = rewrite_native(answer, _tool_format(), eos=ended)  # SRV-425
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -8391,6 +9342,9 @@ class Handler(BaseHTTPRequestHandler):
                             if sup is not None and last_choice and not sup.checked and calls:
                                 # shadow: an answer cut short is still checked, and journaled
                                 sup.check_answer(calls, final=True)
+                        if calls and tool_schemas:
+                            calls, renamed = callrepair.repair_calls(calls, tool_schemas, tool_types)
+                            _call_repairs(cid, sup, renamed)
                         if refuse_calls and calls:
                             _refused(plan, cid, calls)
                             calls = []
@@ -8435,7 +9389,13 @@ class Handler(BaseHTTPRequestHandler):
                     entries = (lp_mod.emitted(d["lpr"].entries, d["ids"], eos)
                                if d["lpr"] is not None else None)
                     if chat:
-                        content, reasoning = split_full(d["text"], fmt, in_think=in_think)
+                        # #93: thinking off, reasoning the model wrote anyway goes to its field: a lone
+                        # `</think>` before the answer, or a block it opened at its start
+                        off_mode = bool(client.off) and not in_think
+                        moved = off_full(d["text"], fmt) if off_mode else None
+                        content, reasoning = moved if moved is not None else split_full(
+                            d["text"], fmt, in_think=in_think,
+                            self_open=_spec().reasoning.opens_itself or off_mode)
                         if plan is not None and plan.active:
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
@@ -8498,7 +9458,11 @@ class Handler(BaseHTTPRequestHandler):
             # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
-            split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary)
+            off_mode = bool(client.off) and not in_think
+            split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary,
+                              self_open=_spec().reasoning.opens_itself or off_mode)
+            # #93: thinking off, the model's own lone `</think>` before its answer is not sent
+            offc = [OffClose() if off_mode else None]
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
@@ -8513,11 +9477,11 @@ class Handler(BaseHTTPRequestHandler):
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
-                                   live=not any(stops))
+                                   live=not any(stops), fmt=_tool_format(), schemas=tool_schemas)
                     if parse_calls else None)
-            # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
-            # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
-            pyc = PythonicCalls() if tbuf is not None and STATE.get("tool_format") == "pythonic" else None
+            # SRV-425: a form whose blocks are rewritten into the buffer's JSON tier as they arrive has a
+            # stream rewriter; a form the buffer reads in place (its reader) streams its arguments as written
+            pyc = _tool_format().stream_rewriter() if tbuf is not None else None
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
@@ -8545,7 +9509,7 @@ class Handler(BaseHTTPRequestHandler):
             opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
             #, the same mistake with the other chunk: the role chunk went out before the
             # loop, and a client that stamps TTFT on the first chunk with a `choices` array
-            # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
+            # (a common benchmark client does, whatever the chunk holds) read the HTTP round trip. It
             # now goes out in the same write as the first chunk after it -- the first text, or the
             # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
             role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
@@ -8590,6 +9554,10 @@ class Handler(BaseHTTPRequestHandler):
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if offc[0] is not None and field == "content" and not split.in_think:
+                        piece = offc[0].push(piece)      # #93: the lone tag of a thinking-off answer
+                        if not piece:
+                            continue
                     if stray[0] is not None and field == "content" and not split.in_think:
                         piece = stray[0].push(piece)     # SRV-187: no bare `</think>` line
                         if not piece:
@@ -8742,8 +9710,12 @@ class Handler(BaseHTTPRequestHandler):
             # the shadow's in-turn reading after it (narrator.Share)
             share = narrator_mod.Share(float((ui_doc.get("live") or {}).get(
                 "share", voice_mod.DEFAULTS["share"]))) if use_voice else None
+            # SR1's in-turn reading runs between two of the turn's own rounds on its thread; with side slots
+            # the round runner drives the GPU from its thread, and a lane's slices ran beside every lane's
+            # rounds (2026-10-25, 27B at 8 lanes: C1 35.1 / C8 124 with the shadow, 38.8 / 139 without).
+            # There it reads in the idle window only (`shadow_once`)
             sh_inline = (shadow_svc.inline(shadow_key, budget=share)
-                         if shadow_key is not None else None)
+                         if shadow_key is not None and par is None else None)
             voice = (narr.for_voice(ui, lang=ui.voice, opened=bool(in_think),
                                     close_id=tok.convert_tokens_to_ids(CLOSE_THINK),
                                     decode=lambda xs: tok.decode(xs, skip_special_tokens=True),
@@ -8841,6 +9813,11 @@ class Handler(BaseHTTPRequestHandler):
                         send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if offc[0] is not None:
+                    oc, offc[0] = offc[0], None
+                    send([("content", oc.finish())])
+                    if oc.dropped:
+                        print(f"[think-off] {cid}: the answer's own `</think>` was not sent (#93)", flush=True)
                 if stray[0] is not None:
                     sc, stray[0] = stray[0], None
                     send([("content", sc.finish())])
@@ -8905,6 +9882,7 @@ class Handler(BaseHTTPRequestHandler):
                                    **(lp_take() if lpr is not None else NO_LP)))
                     if left or sweep:
                         w.flush()
+                    _call_repairs(cid, sup, tbuf.repairs)
                     if tbuf.calls and finish == "stop":
                         finish = "tool_calls"
                     if tbuf.calls:
@@ -8968,7 +9946,8 @@ class Handler(BaseHTTPRequestHandler):
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
-                                                 else getattr(rec, "note_at", None)))
+                                                 else getattr(rec, "note_at", None)), cold=cold,
+                                  learn=getattr(rec, "learn_suffix", True))
                 if rkey is not None and not (sup is not None and sup.acted) and \
                         not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
@@ -8981,6 +9960,8 @@ class Handler(BaseHTTPRequestHandler):
             rec.stop_detail = _stop_detail(finish, ids, eos, stopper.hit, pstop)
             if aloop is not None:
                 rec.stop_detail = "tool_arg_loop"
+            if isinstance(failed, kvpool.PoolFull):
+                rec.stop_detail = "memory_full"            # SRV-709
             if sup is not None:
                 _outcome(sup, tbuf.calls if tbuf is not None else [], ids, in_think, finish)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
@@ -8998,7 +9979,8 @@ class Handler(BaseHTTPRequestHandler):
                     put(_chunk(cid, model, created, {"content": opener.pop()}))
                 if failed is not None and chat:
                     put(_chunk(cid, model, created, {}, finish=finish,
-                               error={"message": str(failed), "type": type(failed).__name__},
+                               error=memory_full_error(failed, len(ids)) or
+                               {"message": str(failed), "type": type(failed).__name__},
                                extra=on_finish, **(lp_take() if lpr is not None else NO_LP)))
                 else:
                     put(_chunk(cid, model, created, {}, finish=finish, extra=on_finish,
@@ -9012,6 +9994,16 @@ class Handler(BaseHTTPRequestHandler):
             except BrokenPipeError:
                 pass
         finally:
+            if source is not None:
+                # SRV-709: a stream that ends at its end token or a stop string leaves its source
+                # half read; closed here, its generation ends (the round runner's task cancelled,
+                # the slot's turn taken back) before the bookkeeping below and `_par_end`. Closed
+                # when this frame went away instead, it took the turn after `_par_end` gave the slot
+                # back and held it for good: every lane waited (Ornith, 8 lanes, 2026-10-24)
+                try:
+                    source.close()
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
             if micro:
                 # the side lane never held the engine past its job (server/preempt.py)
                 with QUEUE:
@@ -9030,6 +10022,8 @@ class Handler(BaseHTTPRequestHandler):
                 res_h = STATE.get("resident")
                 if res_h is not None:
                     res_h.end_hold = False
+                if cold:
+                    _cold_release()                    # #98: its rows are nobody's
                 # SRV-307: the pages past what this slot keeps go back to the pool, before the
                 # slot is given to the next request
                 kv_trim_current()
@@ -9045,22 +10039,26 @@ class Handler(BaseHTTPRequestHandler):
                         getattr(STATE.get("conductor"), "memory", None) is not None:
                     STATE["conductor"].memory.writer.mark(conv_id, "give_up")
                 if par is not None:
-                    if side is None and not micro:
+                    if side is None and not micro and not cold:
                         # SRV-197: the conversation slot 0 now holds, as its client renders it
                         try:
                             ctx_ = STATE.get("last_ctx")
                             n_ = int(STATE.get("last_prompt_n") or 0)
                             if ctx_ is not None and ctx_ is not ctx_found and n_:
-                                _par_view_keep(list(ctx_[:n_]), par_why.get("ids"))
+                                # SRV-629: with images, the rows and the view in key space
+                                _par_view_keep(_keyed(list(ctx_[:n_]), mm_end),
+                                               par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
-                    elif side is not None and not micro and not getattr(side, "no_carry", False):
+                    elif (side is not None and not micro and not cold
+                          and not getattr(side, "no_carry", False)):
                         # FX16: the conversation the side slot now holds (its resident prefix)
                         try:
                             ctx_ = STATE.get("last_ctx")
                             n_ = int(STATE.get("last_prompt_n") or 0)
                             if ctx_ is not None and n_:
-                                _side_view_keep(side, list(ctx_[:n_]), par_why.get("ids"))
+                                _side_view_keep(side, _keyed(list(ctx_[:n_]), mm_end),
+                                                par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
                     if par_why.get("hop_from") is not None and \
@@ -9348,8 +10346,9 @@ def _refused(plan, cid: str, calls: list) -> None:
 
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
     """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
-    the block, the rest after it. A block that never closed has no answer yet."""
-    if not in_think:
+    the block (or the model opened it as its first words, `ReasoningSpec.opens_itself`), the rest after it. A
+    block that never closed has no answer yet."""
+    if not in_think and not (_spec().reasoning.opens_itself and text.lstrip().startswith(OPEN_THINK)):
         return "", text
     i = text.find("</think>")
     return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])
@@ -9394,8 +10393,11 @@ def parser() -> argparse.ArgumentParser:
                     help="server default sampling temperature (0 = greedy, the exact path). "
                          "A request that sends temperature > 0 samples -- via engine/sample.py -- "
                          "and decodes without a drafter until rejection sampling exists")
-    ap.add_argument("--top-p", type=float, default=1.0)
-    ap.add_argument("--top-k", type=int, default=0)
+    ap.add_argument("--top-p", type=float, default=None,
+                    help="server default top_p for a sampled request that names no filter; unset: the "
+                         "checkpoint card's (generation_config.json), else 1.0 (server/sampling_defaults.py)")
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="server default top_k, as --top-p; unset: the card's, else 0")
     ap.add_argument("--no-repeat-ngram", type=int, default=0,
                     help="forbid the token that would complete an n-gram already seen "
                          "(HF's no_repeat_ngram_size; 0 = off, must be >= 2). Deterministic, so "
@@ -9404,7 +10406,7 @@ def parser() -> argparse.ArgumentParser:
                     help="end a generation that repeats one short pattern forever, as MAX:MIN:COUNT "
                          "(e.g. 64:1:8 -- a block of 1..64 tokens repeated 8 times ends the "
                          "generation with finish_reason stop). The backstop for a greedy loop the "
-                         "penalties cannot break, vLLM's RepetitionDetectionParams; empty = off")
+                         "penalties cannot break; empty = off")
     ap.add_argument("--argloop", default="on", choices=("on", "log", "off"),
                     help="the tool-argument loop guard (server/argloop.py): `on` stops a held "
                          "tool call whose arguments loop and tells the model on its next turn; "
@@ -9774,9 +10776,10 @@ def parser() -> argparse.ArgumentParser:
                          "drafter stack over the one copy of the weights, `--side-max-len` long), "
                          "and two or more decoding requests verify their trees in one pass")
     ap.add_argument("--side-max-len", type=int,
-                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "65536") or 65536),
-                    help="a side slot's window in tokens; slot 0 keeps --max-len (262,144). A "
-                         "request whose prompt + max_tokens does not fit waits for slot 0")
+                    default=int(os.environ.get("QSE_SIDE_MAX_LEN", "0") or 0),
+                    help="a side slot's window in tokens; 0 (the default, SRV-707): --max-len, every "
+                         "slot the same window. A shorter one is kept for old setups; a request whose "
+                         "prompt + max_tokens does not fit it waits for slot 0")
     ap.add_argument("--parallel-floor-gb", type=float,
                     default=float(os.environ.get("QSE_PARALLEL_FLOOR_GB", "15") or 15),
                     help="admission: MemAvailable less the caches' growth, the requests in flight "
@@ -9794,13 +10797,23 @@ def parser() -> argparse.ArgumentParser:
                     default=float(os.environ.get("QSE_PARALLEL_SWITCH_MS", "0") or 0),
                     help="with side slots: the interpreter's thread switch interval in ms (0 keeps "
                          "Python's 5 ms); a woken slot waits up to this long for the GIL")
-    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", "share"),
-                    choices=("share", "joint"),
+    ap.add_argument("--parallel-cut", default=os.environ.get("QSE_PARALLEL_CUT", ""),
+                    choices=("", "share", "joint", "auto"),
                     help="how a joint pass's rows are shared: share (each slot cuts its tree to a "
-                         "fixed share before it submits: 16 at two slots, 10 at three, 8 at four) or "
-                         "joint (the round cuts every slot's whole tree together, best nodes first)")
-    ap.add_argument("--parallel-max-rows", type=int, default=32,
-                    help="rows of a joint pass at most (32: the row-invariant kernels' range)")
+                         "fixed share before it submits: 16 at two slots, 10 at three, 8 at four), "
+                         "joint (the round cuts every slot's whole tree together, best nodes first), or "
+                         "auto (SPD-155: joint from QSE_PARALLEL_AUTO_N decoding slots, share below); "
+                         "empty (the default): the model family's (`joint_policy`, else share)")
+    ap.add_argument("--parallel-max-rows", type=int,
+                    default=int(os.environ.get("QSE_PARALLEL_MAX_ROWS", "0") or 0),
+                    help="rows of a joint pass at most; 0 (the default): the model family's "
+                         "(`joint_policy`, else 32, the row-invariant kernels' range). SPD-159: the 27B "
+                         "on EXL3 weights takes 64, each engine's joint rows bit for bit its own verify")
+    ap.add_argument("--parallel-draft-rows", type=int,
+                    default=int(os.environ.get("QSE_PARALLEL_DRAFT_ROWS", "128") or 128),
+                    help="rows of a packed draft pass at most (SPD-157): drafting decides speed only, "
+                         "so the drafter's pass is not held to the verify's row-invariant range; at "
+                         "128, eight slots' 16-row blocks draft in one pass (32 packed two)")
     ap.add_argument("--batch-timeout-ms", type=float, default=2.0,
                     help="a joint round runs without a missing slot once the GPU turn has been "
                          "idle this long")
@@ -9853,7 +10866,7 @@ def parser() -> argparse.ArgumentParser:
                          "decoded; the processor then resizes to its own limits")
     ap.add_argument("--image-max-pixels", type=int, default=0,
                     help="the processor's resize target cap in pixels (0: the checkpoint's "
-                         "preprocessor_config.json, 16,777,216 for Qwen3.8 = 16,384 rows an image)")
+                         "preprocessor_config.json, e.g. 16,777,216 = 16,384 rows an image)")
     ap.add_argument("--image-backend", default=os.environ.get("QSE_IMAGE_BACKEND", "torchvision"),
                     choices=("torchvision", "pil"),
                     help="the image processor's backend, pinned so the patches do not depend on "
@@ -9934,7 +10947,7 @@ def parser() -> argparse.ArgumentParser:
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")
     ap.add_argument("--setup", action="store_true",
-                    help="setup mode (docs/setup.md, `ops/start.sh --setup`): no model of Qwen's "
+                    help="setup mode (docs/setup.md, `ops/start.sh --setup`): no served model "
                          "is loaded; the dashboard, /v1/setup/* and Wren, the setup guide's "
                          "assistant, alone. Every other route answers 503 setup_mode")
     ap.add_argument("--fake-engine", action="store_true",
@@ -10048,7 +11061,7 @@ def _serve_setup(a) -> None:
                  dashboard_dir=a.dashboard_dir, model="setup")
     print(f"[server] {STATE['auth'].describe()}", flush=True)
     print(f"[setup] setup mode {STATE['version']}: the dashboard's #/setup, /v1/setup/* and Wren "
-          f"on http://{a.host}:{a.port}; no model of Qwen's loaded", flush=True)
+          f"on http://{a.host}:{a.port}; no served model loaded", flush=True)
     w = setup_api.wren_of(sys.modules[__name__])
     threading.Thread(target=w.load, name="wren-autoload", daemon=True).start()
     serve_until_drained(EngineServer((a.host, a.port), SetupHandler))
@@ -10125,78 +11138,12 @@ def _blocking_sync() -> None:
         raise SystemExit("[server] QWEN38_BLOCKING_SYNC=1 but the context flag did not take")
 
 
-def _make_lenrouter(a, eng, max_len: int, corpus_from=None):
-    """The served drafter stack (`--drafter lenrouter`) over `eng`, its draft caches `max_len`
-    long: slot 0's at the engine's window, a side slot's (`--parallel N`) at its own. Sets
-    `a.depth`. `corpus_from`: the lookup drafter whose corpus (and suffix store) a side slot's
-    lookup drafter reads too, instead of loading its own copy."""
-    from engine.drafters.dflash2 import DFlash2Drafter
-    from engine.lenrouter import LengthRouter, NoArm
-    if not a.dflash2_ckpt16:
-        raise SystemExit("--drafter lenrouter needs --dflash2-ckpt16")
-    if a.narrow_arm == "off":
-        # SPD-75: the wide arm alone; the router keeps the narrow arm's place released
-        small = NoArm(eng, block=8)
-    else:
-        small = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, path=a.dflash2_path,
-                               draft_head=a.draft_head, max_len=max_len, block=8)
-        small._build()
-    large = DFlash2Drafter(eng, a.dflash2_ckpt16, blocks=1, path=a.dflash2_path,
-                           draft_head=a.draft_head, max_len=max_len, block=16)
-    large._build()
-    if a.tree:
-        # The combined configuration: each arm is the lookup drafter's tree merged with that
-        # arm's own lattice, and the length router chooses the node budget. One NgramDrafter
-        # for both arms -- its suffix index is updated in `observe`, and two arms each
-        # observing every block would index every token twice.
-        from engine.drafters.ngram import NgramDrafter
-        from engine.router import MergedRouter, served_tree_table, tree_nodes
-        tree_table = served_tree_table(PRICES.get("tree_ms"))
-        ng = NgramDrafter(corpus_path=a.corpus if corpus_from is None else "",
-                          tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
-                          node_budget=large.cfg.block_size - 1, branch_top_k=3,
-                          min_expected=0.2, alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
-                          verify_base_ms=tree_table[8],
-                          verify_per_node_ms=(tree_table[16] - tree_table[8]) / 8)
-        if corpus_from is not None:
-            ng.corpus = corpus_from.corpus           # the same corpus and suffix store, read-only
-        arms = [MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
-                             node_budget=tree_nodes(head.cfg.block_size) - 1, mtp_ms_per_token=0.0,
-                             head_fixed_ms=PRICES.get("head_fixed_ms", 27.0), adaptive_depth=False,
-                             rollback_ms=PRICES.get("rollback_ms", 6.4),
-                             verify_ms_table=dict(tree_table), tree_ms_table=dict(tree_table))
-                if not isinstance(head, NoArm) else head for head in (small, large)]
-        try:
-            drafter = LengthRouter(arms[0], arms[1], fixed=a.len_fixed,
-                                   explore_period=a.len_explore, tree=True, ngram=ng,
-                                   verify_table=PRICES.get("lenrouter_tree_ms"),
-                                   draft_table=PRICES.get("lenrouter_draft_ms"),
-                                   latch=a.len_latch, drop_idle=a.drop_idle, deep=a.deep,
-                                   deep_after=a.deep_after, latch_table=dict(tree_table),
-                                   learn_cost=a.learn_cost)
-        except ValueError as exc:
-            raise SystemExit(f"[server] {exc}")
-    else:
-        try:
-            drafter = LengthRouter(small, large, fixed=a.len_fixed,
-                                   explore_period=a.len_explore, latch=a.len_latch,
-                                   width_trim=not a.len_latch, drop_idle=a.drop_idle,
-                                   learn_cost=a.learn_cost)
-        except ValueError as exc:
-            raise SystemExit(f"[server] {exc}")
-    # The router may propose the wide block on any step, so the loop's cap has to be the wide
-    # one; asking it for fewer would silently pin it to the narrow length. With the deep chain
-    # it is the deep width, for the same reason.
-    a.depth = max(large.cfg.block_size - 1, a.deep - 1 if a.tree else 0)
-    return drafter
-
-
 def _arch_of(model: str | None):
     """The registered architecture of `--model` (engine/models `REGISTRY`); the 27B's when `--model`
     names no checkpoint directory (the 27B's snapshot is resolved later)."""
-    from engine.models import REGISTRY, architecture
+    from engine.models import architecture, default_arch
     if not model or not os.path.isfile(os.path.join(model, "config.json")):
-        return REGISTRY["qwen3_5"]
+        return default_arch()
     with open(os.path.join(model, "config.json")) as f:
         return architecture(json.load(f))
 
@@ -10216,7 +11163,9 @@ def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
                  answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
                  pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
                                      a.frequency_penalty, a.no_repeat_ngram),
-                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
+                 temperature=a.temperature,
+                 top_p=1.0 if a.top_p is None else a.top_p, top_k=0 if a.top_k is None else a.top_k,
+                 sampling_flags={"top_p": a.top_p, "top_k": a.top_k},
                  pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
                                if a.pattern_stop else None),
                  argloop=a.argloop,
@@ -10229,7 +11178,7 @@ def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs (SRV-341, one
     loader for every model). The model's own part -- its weights, engine, tokenizer and drafter --
     comes from the builder its registry entry names (`Arch.serve`, chosen by the checkpoint's config;
-    the 27B's is the server's own, `_build_qwen3_5`); what the engine cannot hold yet its adapter's
+    every family has one, ENG-406); what the engine cannot hold yet its adapter's
     capabilities say (`eng.caps`: the caches, the KV pool and side slots), and the rest is every
     model's."""
     if _S.get("BLOCKING_SYNC") == "1":
@@ -10258,8 +11207,13 @@ def _load(a) -> None:
     ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
                                 kv_pool=lambda: _kv_pool_open(a),
                                 vision=lambda path, tower_of=None, config_of=None:
-                                _load_vision(a, path, tower_of, config_of))
-    m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
+                                _load_vision(a, path, tower_of, config_of),
+                                state=STATE, prices=PRICES, side_const_gb=lambda: _side_const_gb(a))
+    arch = _arch_of(a.model)
+    build = arch.serve_builder()
+    if build is None:
+        raise SystemExit(f"[server] the {arch.name} family names no builder (engine/models: Arch.serve)")
+    m = build(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
     gen_cfg = os.path.join(m["path"], "generation_config.json")
@@ -10288,7 +11242,8 @@ def _load(a) -> None:
                   "resident": None, "prefix_chunk": 0, "suffix_store": None}
     STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
                          if a.prompt_token_cache > 0 else None)
-    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], **m["serving"], **caches)
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], spec=_arch_of(a.model).spec,
+                   **m["serving"], **caches)
     led.mark("caches")
     print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
     # one warm request, so the first measured one is not paying for Triton autotuning; a drafter
@@ -10320,11 +11275,13 @@ def _load(a) -> None:
               "one's generation yet (caps.side_lane)", flush=True)
     if int(getattr(a, "parallel", 1) or 1) > 1:
         if eng.caps.side_slots:
-            _build_side_slots(a, m["cfg"], m["w"], tok)
+            _build_side_slots(a, m["cfg"], m["w"], tok, m.get("side_slots"))
             led.mark("side_slots")
         else:
             print(f"[parallel] --parallel {a.parallel}: side slots are not built for this model yet "
                   f"(ENG-241): one slot", flush=True)
+            # #104: /health names the slot the server runs, not the count asked for
+            STATE["parallel_unbuilt"] = int(a.parallel)
     print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
         f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
         for x in led.stages()), flush=True)
@@ -10342,84 +11299,6 @@ def _kv_pool_open(a) -> None:
     if kvpool.Driver.get() is None:
         print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
               "only its accounts, every buffer is allocated in full", flush=True)
-
-
-def _build_qwen3_5(a, ctx) -> dict:
-    """The 27B (and every `qwen3_5` checkpoint): its weights (NVFP4, FP8 head), the KV pool, the
-    engine, the tokenizer, the vision tower and the drafter `--drafter` names. `ctx` as for a
-    registry builder (engine/models `Arch.serve`)."""
-    from engine.config import load_config
-    from engine.loader import Weights
-    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
-    from transformers import AutoTokenizer
-    cfg = load_config(a.model)
-    ctx.keys(cfg.path, [cfg.path, a.nvfp4, a.fp8_head])
-    w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
-                nvfp4=a.nvfp4,
-                fp8_head=a.fp8_head)
-    ctx.mark("weights")
-    _kv_pool_open(a)
-    eng = Qwen38Engine(cfg, w, max_len=a.max_len)
-    ctx.mark("engine")
-    tok = AutoTokenizer.from_pretrained(cfg.path)
-    _load_vision(a, cfg.path)
-    ctx.mark("vision")
-    drafter = None
-    if a.drafter == "mtp":
-        from engine.drafters.mtp import MTPDrafter
-        drafter = MTPDrafter(eng, max_len=a.max_len, depth=a.depth, draft_head=a.draft_head)
-    elif a.drafter == "router":
-        from engine.router import RouterDrafter
-        drafter = RouterDrafter(eng, max_len=a.max_len, depth=a.depth)
-    elif a.drafter == "merged":
-        # The configuration the 11:18 gate passed on, plus the tree: the block drafter priced
-        # against the lookup drafter every step, both putting candidates in one verify call.
-        from engine.drafters.dflash2 import DFlash2Drafter
-        from engine.drafters.ngram import NgramDrafter
-        from engine.router import MergedRouter, VERIFY_MS, VERIFY_MS_NVFP4
-        table = VERIFY_MS_NVFP4 if a.nvfp4 or _S.get("NVFP4") else VERIFY_MS
-        head = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=1, max_len=a.max_len,
-                              path=a.dflash2_path, draft_head=a.draft_head)
-        head.tree_temp = a.df2_temp
-        head._build()
-        # `--budget` counts nodes INCLUDING the anchor, because that is what the measured curve is
-        # keyed by and where its cliff is: 16 nodes cost 164.4 ms and 17 cost 172. So the drafters
-        # get one fewer.
-        ng = NgramDrafter(corpus_path=a.corpus, tokenizer_sha=STATE.get("tokenizer_sha"), min_order=3, max_depth=16,
-                          node_budget=a.budget - 1, branch_top_k=3, min_expected=0.2,
-                          alpha=0.6, corpus_weight=0.5, min_corpus_order=8,
-                          verify_base_ms=table[min(table)],
-                          verify_per_node_ms=(table[max(table)] - table[min(table)])
-                          / (max(table) - min(table)))
-        drafter = MergedRouter(ng, head, mtp_depth=head.cfg.block_size - 1,
-                               node_budget=a.budget - 1, mtp_ms_per_token=0.0,
-                               head_fixed_ms=35.0, adaptive_depth=False,
-                               rollback_ms=6.2, verify_ms_table=table)
-        a.depth = a.budget - 1
-    elif a.drafter == "dflash2":
-        from engine.drafters.dflash2 import DFlash2Drafter
-        drafter = DFlash2Drafter(eng, a.dflash2_ckpt, blocks=a.dflash2_blocks,
-                                 path=a.dflash2_path, draft_head=a.draft_head,
-                                 max_len=a.max_len)
-        drafter._build()
-        # The block width, not `--depth`, is what this drafter proposes per verify pass.
-        a.depth = (drafter.cfg.block_size - 1) * a.dflash2_blocks
-    elif a.drafter == "lenrouter":
-        drafter = _make_lenrouter(a, eng, a.max_len)
-    if a.narrow_arm == "off" and a.drafter != "lenrouter":
-        raise SystemExit("[server] --narrow-arm off is the length router's (--drafter lenrouter)")
-    ctx.mark("drafters")
-    relax = Relax(a.relax_tau, a.relax_rank)
-    print(f"[server] {w.report()}")
-    if relax.on:
-        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
-              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
-              f"docs/exactness.md")
-    describe = (f"drafter={a.drafter} depth={a.depth} k={a.k or a.depth} "
-                f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} ")
-    return {"engine": eng, "tok": tok, "drafter": drafter, "path": cfg.path, "device": "cuda",
-            "cfg": cfg, "w": w, "describe": describe,
-            "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax}}
 
 
 def _load_caches(a, eng, tok, drafter, rcache) -> dict:
@@ -10474,7 +11353,8 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
             STATE["end_align"] = endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
                 reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off",
-                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off")
+                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off",
+                calls=(_S.get("END_ALIGN_CALLS") or "on").strip().lower() != "off")
             STATE["end_align"].marks = _marks_of(tok)       # FX16: the moved-block pass
         # SRV-546: the guest stash's buffers while no guest's rows wait in them, before anything
         # that holds a conversation (live 10:14:34: the end anchor went for 0.31 GB, then 1.27 GB
@@ -10579,7 +11459,7 @@ def _par_fake_slots(a, engine_cls) -> None:
     """`--parallel N` on the fake engine: N - 1 side slots with their own fake engines, the turn,
     and the admission on `FAKE_MEMAVAILABLE_GIB` (none: every request is admitted). No joint verify:
     the fake has no tree to verify."""
-    L = int(min(a.side_max_len, a.max_len))
+    L = side_window(a)
     gib = slots_mod.GiB
     avail = float(os.environ.get("FAKE_MEMAVAILABLE_GIB") or 0)
     meminfo = (lambda: {"MemAvailable": int(avail * gib)}) if avail else (lambda: None)
@@ -10591,8 +11471,20 @@ def _par_fake_slots(a, engine_cls) -> None:
         slots.append(slots_mod.Slot(i, L, values=values))
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3)
     STATE["pool"] = slots_mod.Pool(slots, turn=turn, meeting=None, admission=adm)
+    if PREFILL_BURST:
+        STATE["pool"].burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245 (no joint forward here)
     LOCK.turn = turn
     print(f"[parallel] FAKE: {len(slots)} slots, side window {L}", flush=True)
+
+
+def side_window(a) -> int:
+    """SRV-707: a side slot's window: `--side-max-len` when it is set and shorter, else `--max-len`.
+    Every slot gets the one window the setup names; with the KV pool on a slot's window is
+    addresses and its pages are committed as its conversation grows, so a full window per slot
+    costs no memory at load (engine/kvpool.py). With the pool off each window is allocated at load
+    and a slot is built only while the floor holds (`_build_side_slots`)."""
+    n = int(getattr(a, "side_max_len", 0) or 0)
+    return int(a.max_len) if n <= 0 else min(n, int(a.max_len))
 
 
 #: A side slot's bytes beyond its window with `--side-graphs off`: its drafter stack's scratch,
@@ -10675,29 +11567,30 @@ def _side_resident(a, tok):
     return res
 
 
-def _build_side_slots(a, cfg, w, tok) -> None:
-    """Slots 1..N-1 (`--parallel N`): each a `Qwen38Engine` over the same weights at
-    `--side-max-len`, with its own drafter stack over the same checkpoints (engine/drafters/dflash2
-    caches the weights) and the same lookup corpus and suffix store. A slot is built only if the
+def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
+    """Slots 1..N-1 (`--parallel N`): each an engine over the same weights at `--side-max-len`, with
+    its own drafter stack over the same checkpoints and the same lookup corpus and suffix store: the
+    engine's own (`side_slot`, `side_slot_bytes`), else the builder's `hooks` (`make`, `bytes`,
+    `precapture`, `check`: the default family's, engine/models/qwen3_5/serving.py). A slot is built only if the
     memory floor holds with its bytes added -- computed before anything is allocated -- and is
     warmed and its verify graphs captured before the server answers. The engine's own memory
     policy (engine/cache.py `Budget`) then counts what the side slots took as the engine's: its
     ceiling and peak go up by that much, so slot 0's caches are not shed for it."""
-    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
     n = int(a.parallel)
     # ENG-241: an engine that builds its own side slots (`side_slot`: its state, graphs and drafter over
-    # the same weights); else the 27B's, below
+    # the same weights); else its builder's hooks (ENG-406)
     make = getattr(STATE["engine"], "side_slot", None)
-    if make is None and a.drafter not in ("lenrouter", "none"):
-        raise SystemExit(f"[parallel] --parallel {n} is built for --drafter lenrouter (or none), "
-                         f"not {a.drafter}")
-    L = int(min(a.side_max_len, a.max_len))
+    hooks = hooks or {}
+    if make is None:
+        if not hooks:
+            raise SystemExit(f"[parallel] --parallel {n}: this model's builder gives no side slots")
+        hooks["check"]()
+    L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
-    ng0 = getattr(drafter0, "ngram", None)
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]
     a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
     depth0 = a.depth
@@ -10706,12 +11599,9 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     for i in range(1, n):
         # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a
         # token) and its constant are memory at load
-        if make is not None:
-            per_token, const = STATE["engine"].side_slot_bytes(L, paged)
-            need = slots_mod.slot_bytes(L, per_token=per_token, constant=const)
-        else:
-            need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
-                                        constant=int(_side_const_gb(a) * slots_mod.GiB))
+        per_token, const = (STATE["engine"].side_slot_bytes(L, paged) if make is not None
+                            else hooks["bytes"](L, paged))
+        need = slots_mod.slot_bytes(L, per_token=per_token, constant=const)
         ok, d = adm.check(need, count=False)
         if not ok:
             not_built = (f"slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
@@ -10722,12 +11612,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         a1 = torch.cuda.memory_allocated()
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
-        if make is not None:
-            e2, d2 = make(L, drafter0)
-        else:
-            e2 = Qwen38Engine(cfg, w, max_len=L)
-            e2.graphs_off = a.side_graphs == "off"
-            d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
+        e2, d2 = make(L, drafter0) if make is not None else hooks["make"](L, drafter0)
         a.depth = depth0
         values = {k: None for k in slots_mod.OVERLAY}
         values.update(engine=e2, drafter=d2, max_len=L)
@@ -10736,7 +11621,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
             values.update(resident=res_i, end_align=endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
                 reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off",
-                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off"))
+                moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off",
+                calls=(_S.get("END_ALIGN_CALLS") or "on").strip().lower() != "off"))
             values["end_align"].marks = _marks_of(tok)
         slot = slots_mod.Slot(i, L, values=values)
         slots.append(slot)
@@ -10750,9 +11636,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                 _warm_prefill(_generate_stream, tok, res_i)    # FX17: the router's question shape
                 if make is not None:
                     e2.precapture(d2)          # its class 0 graphs now, not in its first request
-                elif a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
-                    e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
-                                          else range(2, 17))
+                else:
+                    hooks["precapture"](e2, d2)
             values.update({k: None for k in ("last_ctx", "last_prompt_n", "hidden_spans",
                                              "blocks", "last_prefill")})
             if res_i is not None:
@@ -10785,21 +11670,48 @@ def _build_side_slots(a, cfg, w, tok) -> None:
               f"the side slots ({_gib(mem.ceiling)} / {_gib(mem.peak)} GiB)", flush=True)
     settle = torch.cuda.synchronize if a.parallel_settle == "on" else None
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
-    meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3,
-                              cut=a.parallel_cut)
+    # SPD-159/155: the joint pass's row cap and cut are the model family's (`joint_policy`: what its
+    # kernels keep row-invariant), unless the flags name them
+    pol_fn = getattr(STATE["engine"], "joint_policy", None)
+    pol = dict(pol_fn() or {}) if callable(pol_fn) else {}
+    max_rows = int(a.parallel_max_rows or pol.get("max_rows") or 32)
+    cut = a.parallel_cut or pol.get("cut") or "share"
+    meet = (slots_mod.Meeting(max_rows, a.batch_timeout_ms / 1e3, cut=cut, auto_n=pol.get("auto_n"),
+                              shares={int(k): int(v) for k, v in (pol.get("shares") or {}).items()})
             if a.parallel_batch == "on" and STATE["engine"].caps.joint_verify else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
         meet.timing = timing
+        # SPD-163: the family's per-tree cap of a joint cut (`joint_policy` "tree_cap": a callable of the
+        # block count and the row cap), e.g. the row bucket of its joint graphs
+        meet.tree_cap = pol.get("tree_cap")
+        meet.max_depth = pol.get("max_depth")       # SPD-223
+        # SPD-233: the rows a pass keeps by lanes (the family's measured table, under the cap)
+        meet.rows_at = {int(k): int(v) for k, v in (pol.get("rows_at") or {}).items()}
+        # SPD-187: the family's round planner (`joint_policy` "planner") and its context classes
+        # SPD-161: every slot's length router keeps its narrow arm when the joint cap can fall to it
+        tcap = meet.tree_cap(len(slots), max_rows) if meet.tree_cap is not None else None
+        for sl in slots:
+            d = STATE.get("drafter") if sl.index == 0 else (sl.values or {}).get("drafter")
+            if (ROW_CAP and tcap is not None and hasattr(d, "keep_narrow")
+                    and tcap <= getattr(d, "w_small", 0) and not d.idle == "s"):
+                d.keep_narrow = True
+        meet.planner = pol.get("planner")
+        meet.ctx_class = pol.get("ctx_class") or (lambda n: 1024)
+        meet.plan_keys, meet.plan_last = [], None
     dmeet = None
     if meet is not None and a.parallel_draft == "on" and a.drafter == "lenrouter":
         # the packed draft: the decoding slots' draft calls in one pass over the drafter
         from engine.drafters import dflash2 as _df2
-        dmeet = slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3)
+        dmeet = slots_mod.Meeting(a.parallel_draft_rows, a.batch_timeout_ms / 1e3)
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
+    if PREFILL_BURST:
+        pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
+        if PREFILL_BURST == "joint":
+            cache.FIRST_FORWARD = _joint_forward
     slots[0].lock = LOCK
     if a.parallel_switch_ms > 0:
         # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms
@@ -10813,7 +11725,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         WINDOW_TURN[0] = True                           # SRV-321, in `_window_layer`
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
-          f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "
+          f"{'up to ' + str(max_rows) + ' rows, cut ' + cut if meet else 'off'}; packed draft "
           f"{'on' if dmeet is not None else 'off'}; admission floor "
           f"{a.parallel_floor_gb:g} GiB MemAvailable", flush=True)
 
@@ -10924,6 +11836,10 @@ def _serve(a, led) -> None:
         print(f"[ledger] on: {led.path}, retention {led.retention_days} days", flush=True)
     else:
         print("[ledger] off", flush=True)
+    # OPS-231: bound here, before the port is read anywhere: `--port 0` takes a free port from the kernel and
+    # the listening line names it (a test's free port picked first and bound later raced the other tests)
+    httpd = EngineServer((a.host, a.port), Handler)
+    a.port = httpd.server_address[1]
     STATE["port"] = a.port
     root = conductor_root(a)
     if root is not None and getattr(a, "conductor_defaults", "builtin") == "shipped":
@@ -11006,6 +11922,10 @@ def _serve(a, led) -> None:
         raise SystemExit(f"[shadow] {exc}")
     if STATE.get("shadow") is not None:
         threading.Thread(target=_shadow_loop, name="shadow-reader", daemon=True).start()
+    if os.environ.get("QSE_STACK_SAMPLE"):
+        # SRV-717: every thread's busy stacks, sampled (server/stack_sampler.py), a measurement only
+        from server import stack_sampler
+        stack_sampler.start(os.environ["QSE_STACK_SAMPLE"])
     # the small models under memory pressure (server/rolemem.py): unloaded before a conversation
     # is parked or a request waits, loaded again once memory has stayed back
     _roles_start(a)
@@ -11046,7 +11966,7 @@ def _serve(a, led) -> None:
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
-    serve_until_drained(EngineServer((a.host, a.port), Handler))
+    serve_until_drained(httpd)
 
 
 class SetupHandler(Handler):

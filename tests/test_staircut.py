@@ -269,6 +269,22 @@ def test_staircut():
     return "confident chain kept, unsure dropped, a paying sibling first, calibration learned, prices monotone"
 
 
+def test_the_cut_scores_each_row_by_its_path_probability():
+    """SPD-225: a block's rows carry their calibrated path probabilities (`last_scores`, the tree's scores the
+    joint round's cut ranks lanes by): one a row, the anchor 1, a spine row its parent's times its own q (so
+    never above its parent), and for a merged block with a lookup likewise one a row."""
+    sc = _new(True)
+    tok = [[10 + k, 20 + k] for k in range(5)]
+    for prob in ([[0.99, 0.005]] * 5, [[0.3, 0.65]] + [[0.97, 0.01]] * 4, [[0.8, 0.15]] * 5):
+        toks, par = sc.cut(1, tok, prob)
+        s_ = sc.last_scores
+        assert len(s_) == len(toks) and s_[0] == 1.0, (toks, s_)
+        assert all(0.0 <= s_[i] <= s_[par[i]] + 1e-12 for i in range(1, len(toks))), (toks, par, s_)
+    toks, par = sc.cut(1, tok, [[0.5, 0.1]] * 5, ([10, 11, 90, 91, 92], 0.97))
+    assert len(sc.last_scores) == len(toks) and sc.last_scores[0] == 1.0, (toks, sc.last_scores)
+    return "one score a row, the anchor 1, a child never above its parent (spine, siblings, lookup)"
+
+
 def test_the_lookup_joins_the_cut_in_one_tree():
     """ENG-229: the lookup's continuation shares the spine while their tokens agree (a shared node is
     likelier: either being right), leaves it where they differ, and runs on past the spine's end; the
@@ -379,7 +395,8 @@ def test_one_slow_request_does_not_keep_a_class_plain():
             assert n < 400
         return n
     back = plain_turns_to_return()
-    assert 2 <= back <= 8 and sc.plain_turns[0] == 0, back
+    # SPD-237: a measured drafted price weighs TURN_MARGIN less, so the return comes after 1..8 plain turns
+    assert 1 <= back <= 8 and sc.plain_turns[0] == 0, back
     # the return loses again (its rounds cost 30 ms a token): the next return takes about twice as long
     for _ in range(40):
         sc.observe_spec(30.0, 0)
@@ -451,6 +468,21 @@ def test_price_model():
     assert stair.prior(16, "tree", 16384) == doc["16384"]["tree"]["16"]
     assert stair.prior(16, "tree", 20000) == doc["16384"]["tree"]["16"]
     return "Flash-Next's file (provisional, learned); missing file logged once; classes, interpolation; the 27B's stair tables"
+
+
+def test_ornith_long_turns_take_the_plain_step():
+    """#110: Ornith's price file prices a backlog row the MTP head reads (prime) in every class, so a fresh
+    server's first long turn weighs it: at 112k and 220k tokens (no drafted round there beats the plain
+    step) the turn takes the plain step instead of paying 4.6 and 10.2 s to read the prompt into the head;
+    at 3.5k and 28k it drafts."""
+    path = os.path.join(ROOT, "ops", "prices", "ornith-1.5-122b", "ornith-1.5-122b-exl3-4.0.dgx-spark.json")
+    pm = PriceModel.load(path)
+    classes = [k for k in json.load(open(path)) if k.isdigit()]
+    assert classes and all(pm.prior(1, "prime", int(c)) for c in classes), classes
+    sc = StairCut(pm, siblings=False)
+    assert sc.turn(0, 3_500, 256.0) and sc.turn(32768, 11_377, 256.0)
+    assert not StairCut(pm, siblings=False).turn(131072, 87_717, 256.0)      # 112,068 tokens
+    assert not StairCut(pm, siblings=False).turn(262144, 109_443, 256.0)     # 220,038: priced as 131,072
 
 
 def test_no_price_constant_in_the_flashnext_package():

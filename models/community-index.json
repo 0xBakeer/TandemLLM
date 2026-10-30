@@ -3,10 +3,76 @@
  "generator": "server.setup.community 1",
  "entries": [
   {
+   "model": "nemotron-3.5-super-vl-120b-a12b",
+   "id": "nemotron-super-vl-exl3-3.5bpw",
+   "path": "models/nemotron-3.5-super-vl-120b-a12b/community/nemotron-super-vl-exl3-3.5bpw.json",
+   "sha256": "2c86b67c05be71c812893064e8ada99c1e0b7f49ebabbf870cbf97c8f7c617f8",
+   "entry": {
+    "schema": 1,
+    "id": "nemotron-super-vl-exl3-3.5bpw",
+    "name": "Nemotron 3.5 Super VL 120B A12B EXL3 3.5bpw HQ",
+    "base_model": "nemotron-3.5-super-vl-120b-a12b",
+    "finetune_of": null,
+    "author": {
+     "github": "styles01",
+     "social": {
+      "huggingface": "aitamedia"
+     }
+    },
+    "hf": {
+     "repo": "aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw",
+     "revision": "358667cf420fc2869dff43d9ff64bafe31aef03b"
+    },
+    "format": "exl3",
+    "bpw": 3.58,
+    "size_gb": 57.8,
+    "load": "standalone",
+    "modalities": {
+     "text": true,
+     "image": false,
+     "audio": false,
+     "video": false
+    },
+    "modalities_in_pack": [
+     "text"
+    ],
+    "drafters": "none",
+    "license": "OpenMDW-1.1",
+    "license_url": "https://openmdw.ai/license/1-1/",
+    "description": "EXL3 (exllamav3) HQ quantization of NVIDIA's Nemotron 3.5 Super VL 120B A12B (88-layer hybrid mamba-attention-MoE with MTP; text arch remapped from the omni checkpoint). Encoded -b 3.5 --hq (3.5bpw experts, 5bpw attention+dense, 16bpw head and embeddings). The pack holds the language model only, no vision tower: text only.",
+    "tags": [
+     "exl3",
+     "hybrid-mamba",
+     "mtp",
+     "120b-a12b",
+     "dgx-spark"
+    ],
+    "added": "2026-10-17",
+    "status": "verified",
+    "verified": {
+     "build": "0.12.1",
+     "device": "dgx-spark",
+     "date": "2026-10-20",
+     "tok_s": {
+      "prose": 33.2,
+      "code": 53.9,
+      "chat": 37.4,
+      "plain": 25.9
+     },
+     "tokens_per_round": {
+      "prose": 2.97,
+      "code": 5.38,
+      "chat": 3.41
+     },
+     "notes": "text only; one run per kind, 512 greedy, thinking off, LiLiCorr + lookup from the 4.0 profile; 53.58 GiB at load; top-1 99.6 % against the converter's own forward on 512 positions"
+    }
+   }
+  },
+  {
    "model": "qwen3.8-27b",
    "id": "thinkingcap-27b-kearuga-exl3-4.00",
    "path": "models/qwen3.8-27b/community/thinkingcap-27b-kearuga-exl3-4.00.json",
-   "sha256": "1c5e7016bf75ce164fc8b85934f03e6e9244d28ca9c21fa9489340303c81bd8f",
+   "sha256": "a35bad866ffd85787f7d154e7cac28234c11427678f38630d67261b8ed3ec78f",
    "entry": {
     "schema": 1,
     "id": "thinkingcap-27b-kearuga-exl3-4.00",
@@ -52,21 +118,20 @@
     "added": "2026-10-13",
     "status": "verified",
     "verified": {
-     "build": "0.8.2",
+     "build": "0.14.2",
      "device": "dgx-spark",
-     "date": "2026-10-13",
+     "date": "2026-10-26",
      "tok_s": {
-      "prose": 39.6,
-      "code": 95.9,
-      "chat": 51.3,
-      "plain": 15.2
+      "prose": 42.3,
+      "code": 84.0,
+      "chat": 41.4
      },
      "tokens_per_round": {
-      "prose": 3.09,
-      "code": 7.69,
-      "chat": 4.11
+      "prose": 3.47,
+      "code": 7.1,
+      "chat": 3.53
      },
-     "notes": "text only; one run per kind"
+     "notes": "text only; tools/q35m_ab.py, one greedy request a kind of up to 512 tokens, thinking off, through the conductor, 8 lanes, suffix store and response cache off; raw file models/qwen3.8-27b/measurements/verified-2026-10-26-thinkingcap-27b-kearuga-exl3-4.00.json"
     },
     "links": {
      "pr": "https://github.com/0xBakeer/TandemLLM-early-access/pull/1"

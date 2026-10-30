@@ -1,8 +1,7 @@
 """SRV-341: one loader for every model (server/app.py `_load`), no GPU.
 
-The model's builder is the one its registry entry names (`Arch.serve`; the 27B's is the server's own
-`_build_qwen3_5`). Everything after it is the shared loader, run for real on the server's argument
-defaults:
+The model's builder is the one its registry entry names (`Arch.serve`; every family has one since ENG-406).
+Everything after it is the shared loader, run for real on the server's argument defaults:
 
   * an engine whose capabilities hold no caches and no side slots (Flash-Next today) gets the request
     path's state with every cache off and is told so, `--parallel` falls back to one slot, its
@@ -45,7 +44,8 @@ KEYS_27B = {"engine", "tok", "drafter", "k", "device", "tree", "sampled_tree", "
             "queue_timeout", "draining", "cfg_eos", "think_budget", "think_stall", "reasoning_effort",
             "answer_reserve", "pen_spec", "temperature", "top_p", "top_k", "pattern_stop", "argloop",
             "state_store", "session_cache", "prefix_cache", "session_trim", "resident", "prefill_heartbeat",
-            "prefix_chunk", "response_cache", "suffix_store", "suffix_scope", "usage_default"}
+            "prefix_chunk", "response_cache", "suffix_store", "suffix_scope", "usage_default",
+            "spec"}   # ENG-406: every family's ServeSpec
 
 
 class _Eng:
@@ -76,9 +76,10 @@ def _run(caps, argv, serving, registry_builder: bool):
         return {"engine": eng, "tok": FakeTokenizer(), "drafter": None, "path": "/nonexistent", "device": "cpu",
                 "cfg": "cfg", "w": "w", "serving": serving, "describe": "stub,"}
 
-    arch = types.SimpleNamespace(serve_builder=lambda: build if registry_builder else None)
+    from engine.models.adapter import ServeSpec
+    arch = types.SimpleNamespace(serve_builder=lambda: build, spec=ServeSpec(), name="toy")
     saved_state = dict(app.STATE)
-    patches = {"_arch_of": lambda m: arch, "_build_qwen3_5": build,
+    patches = {"_arch_of": lambda m: arch,
                "generate_stream": lambda *a, **k: iter(()), "_warm_prefill": lambda *a, **k: None,
                "_build_side_slots": lambda *a: calls.append(a)}
     saved = {k: getattr(app, k) for k in patches}
@@ -128,7 +129,7 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     assert KEYS_27B <= written, sorted(KEYS_27B - written)
     # SRV-475: the checkpoint's sampling (generation_config.json), read for every model
     extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem",
-                                  "card_sampling"}
+                                  "card_sampling", "sampling_flags"}
     assert not extra, sorted(extra)
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
 

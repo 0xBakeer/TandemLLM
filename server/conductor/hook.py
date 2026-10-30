@@ -118,7 +118,7 @@ class Conductor:
         _, settings = self.store.get("settings")
         return [{"id": COMPOSITE, "object": "model", "created": created, "owned_by": "tandemllm",
                  "profile": settings["default_profile"],
-                 "description": f"{schema.model_name()} with the conductor: per-turn task "
+                 "description": f"{schema.model_name() or COMPOSITE} with the conductor: per-turn task "
                                 "routing, effort and hidden skills, under a profile"}]
 
     def model_card(self, name: str, raw_model: str, created: int) -> dict | None:

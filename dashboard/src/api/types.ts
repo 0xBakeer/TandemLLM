@@ -1198,6 +1198,41 @@ export interface SetupMeasurements {
   rows: SetupMeasureRow[];
 }
 
+/** SPD-245: a weight card's speed row on one build (tools/parallel_card.py, the raw file in `raw`). */
+export type SetupParallelLevel = '1' | '2' | '4' | '8';
+export type SetupParallelDepth = '2048' | '8192' | '32768';
+export interface SetupParallelRow {
+  /** a profile id, or community/<pack> */
+  profile: string;
+  build: string;
+  commit: string;
+  date: string;
+  raw: string;
+  setup: {
+    env: string;
+    lanes: number;
+    window: number;
+    max_tokens: number;
+    suffix_store: boolean;
+    response_cache: boolean;
+    thinking: boolean;
+    sampling: { temperature: number; top_k: number; top_p: number; min_p: number; seed: string };
+    prompts: { set: string; sha256: string; prompt_tokens: { code?: number; prose?: number } };
+  };
+  rounds: number;
+  /** one request alone, decode tok/s by workload */
+  decode?: { code?: number; prose?: number };
+  /** the first token of a cold prompt, by its length in tokens */
+  prefill?: Partial<Record<SetupParallelDepth, { ttft_s: number; tok_s: number; prompt_tokens: number }>>;
+  /** N requests at once: total tok/s with the first tokens (wall) and over the decode window; `at_once` is N */
+  levels: Partial<Record<SetupParallelLevel, { wall_tok_s: number; decode_tok_s: number | null; ttft_s: number | null; at_once: number; rounds: number }>>;
+  note?: string | null;
+}
+export interface SetupParallel {
+  method: string;
+  rows: SetupParallelRow[];
+}
+
 export type SetupComponentGroup = 'speed' | 'roles' | 'caches' | 'disk' | 'features';
 /** A tool that runs beside the model (the narrator, Laya, the caches, ...). */
 export interface SetupComponent {
@@ -1226,6 +1261,8 @@ export interface SetupComponent {
   note: string | null;
   /** 1.0+: SetupAsset ids that must be on disk for it to load */
   assets: string[];
+  /** the KV bytes a token while it is on, in place of parallelism.kv_bytes_per_token (Flint's e4m3 cache) */
+  kv_bytes_per_token?: number | null;
 }
 
 /** A field of the methods and advanced steps. */
@@ -1247,9 +1284,11 @@ export interface SetupField {
 }
 
 export interface SetupParallelism {
-  slots: { min: number; max: number; default: number };
+  /** engine_max (#104): the most chats the model's engine serves (ENGINE_MAX_SLOTS, or 1 for a family with no
+   *  side slots), with the reason when it is 1 */
+  slots: { min: number; max: number; default: number; engine_max?: number; engine_max_reason?: string | null };
+  /** every lane's window (SRV-707: one for all) */
   window: { min: number; max: number; default: number; step: number };
-  side_window: { min: number; max: number; default: number; step: number };
   kv_pool: { default: boolean };
   floor_gb: { min: number; max: number; default: number };
   kv_hard_floor_gb: number;
@@ -1257,6 +1296,7 @@ export interface SetupParallelism {
   kv_bytes_per_token: number;
   /** a side slot's bytes beyond its window (verify graphs off) */
   side_slot_const_gib: number;
+  /** `side_window`: the serve.env key the window is also written to (QSE_SIDE_MAX_LEN) */
   knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
   /** 1.0+: a slot's conversation in the estimate's typical case (32,768) */
   typical_fill_tokens: number;
@@ -1288,6 +1328,8 @@ export interface SetupModel {
   icon: string | null;
   profiles: SetupProfile[];
   measurements: SetupMeasurements;
+  /** SPD-245: the weight cards' speed rows (absent: none measured) */
+  parallel?: SetupParallel;
   components: SetupComponent[];
   parallelism: SetupParallelism;
   methods: SetupField[];
@@ -1317,11 +1359,10 @@ export interface SetupSelection {
   model: string;
   profile: string;
   components: Record<string, boolean>;
+  /** the parallel lanes (QSE_PARALLEL) */
   slots: number;
-  /** slot 0's window (MAX_LEN) */
+  /** every lane's window (MAX_LEN, and QSE_SIDE_MAX_LEN with it: SRV-707) */
   window: number;
-  /** each side slot's window (QSE_SIDE_MAX_LEN); default = window */
-  side_window?: number;
   kv_pool: boolean;
   floor_gb: number;
   methods: Record<string, SetupValue>;
@@ -1373,6 +1414,10 @@ export interface SetupEstimate {
   fits_worst: boolean;
   /** 1.0+ */
   typical_fill_tokens: number;
+  /** SRV-707: one lane at its full window, GiB */
+  lane_full_gb: number;
+  /** SRV-707: the lanes that can all hold the full window at once (the guarantee); past it they share */
+  lanes_full: number;
 }
 
 /** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
@@ -1605,7 +1650,8 @@ export interface SetupJobSummary {
   tools: string[];
   slots: number | null;
   window: number | null;
-  side_window: number | null;
+  /** an older server's: each extra lane's window */
+  side_window?: number | null;
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {

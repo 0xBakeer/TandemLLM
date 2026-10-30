@@ -8,7 +8,7 @@ every model through (the LFM2 adapter's, engine/models/lfm2_moe/serving.py).
   forward_block           a chain verify whose commit waits for `rollback_to` or the next call
 
 so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
-the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
+the reasoning split, the tool-call form the model writes (its `ServeSpec`), the live view -- is the
 server's code. A verified row is the decode step's row bit for bit and a commit leaves the decode
 steps' SSM and conv states (engine.py), so greedy speculation writes the plain greedy text. The chat
 template opens `<think>` itself and writes `<think></think>` for thinking off; tool calls are the XML
@@ -37,14 +37,33 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py", "engine/models/lfm2_moe/kernels.py",
-           "engine/models/lfm2_moe/pack.py", "engine/settings.py")
+           "engine/models/lfm2_moe/pack.py", "engine/settings.py", "engine/vision.py")
+#: the engine/ modules those files import (top level or inside a function) that compute no row, and why;
+#: a change to one keeps the tier files. tests/test_tier_identity.py holds every such import to MODULES or
+#: here (ENG-379)
+LEFT_OUT = {
+    "engine/__init__.py": "empty",
+    "engine/capture_lock.py": "a lock held around graph capture (engine.py); no arithmetic",
+    "engine/kvpool.py": "where K and V live, not what they hold: a paged buffer's tensor has the shape, dtype and "
+                        "contiguous strides of the torch.zeros it replaces (new_state), and a page is zeroed when it is "
+                        "mapped, so every kernel reads the same values at the same offsets",
+    "engine/config.py": "resolve_snapshot only (config.py, lfm2_moe/config.py): the folder that holds config.json; the "
+                        "weights in it count by content in the extra (server/diskcache.py fingerprint_extra)",
+    "engine/models/lfm2_moe/__init__.py": "a docstring",
+    "engine/models/lfm2_moe/config.py": "LFM2.5's config, read by lfm2_moe/pack.py's PackIndex; NemotronH takes only "
+                                        "that file's constants, safetensors_header and TensorInfo (pack.py)",
+}
 #: the model's name in ops/prices/ and models/, by the served weight profile's name
 MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b",
              "nemotron-super-vl-": "nemotron-3.5-super-vl-120b-a12b"}
 
 
 def model_id(path: str) -> str:
+    """The model of the served profile: by its name, or for a community pack (community/<id>, ENG-377) the base its
+    profile names (QSE_NH_MODEL)."""
     p = profile_of(path)
+    if p.startswith("community/") and os.environ.get("QSE_NH_MODEL"):
+        return os.environ["QSE_NH_MODEL"]
     return next((m for k, m in MODEL_IDS.items() if p.startswith(k)), "nemotron-3.5-lightning-30b-a3b")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -343,6 +362,23 @@ class NemotronHServing:
         self.stats["verify_rows"] += M
         return rb["logits"][:M]
 
+    #: SPD-233: the rows a joint pass of 8 lanes keeps (QSE_NH_JOINT_ROWS8; 0: the cap, 32), the best lanes'
+    #: nodes by score. The routed experts of a pass are read once for the union the rows pick (Bolt: 9 of 240 a
+    #: row), so a pass's cost grows with its rows faster than a dense model's. Bolt EXL3 4.0, 8 lanes x 2 / 3 / 4
+    #: rows, in process: the pass 79.4 / 93.3 / 103.4 ms; served C8 T1 with the packed draft, 16 rows 78.3 /
+    #: 78.1 tok/s against 75.5 / 74.7 at 32 (2026-10-27)
+    JOINT_ROWS_AT = {8: int(os.environ.get("QSE_NH_JOINT_ROWS8", "16") or 0)}
+
+    #: SPD-233: the round runner may give a round of this many lanes to the joint plain step when its plain rounds
+    #: make more tokens a ms than its drafted ones (server/round_runner.py `_lane_plain`, QSE_RUNNER_LANE_PLAIN
+    #: auto). Bolt EXL3 4.0, 8 lanes, T1 prose, served C8: 78.3 / 78.1 -> 90.5 / 90.1 tok/s (2026-10-27)
+    lane_plain = True
+
+    def joint_policy(self) -> dict:
+        """The joint pass: 32 rows (the row kernels' range, `tree_batchable`) and, by lanes, the rows a pass
+        keeps (`JOINT_ROWS_AT`)."""
+        return {"max_rows": 32, "rows_at": {e: n for e, n in self.JOINT_ROWS_AT.items() if n}}
+
     def tree_batchable(self, parents) -> bool:
         """A block a joint pass may take: its rows within the row kernels' 32."""
         return len(parents) <= 32
@@ -615,7 +651,6 @@ def serve(a, ctx) -> dict:
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "tool_format": "xml",
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": (what if drafter is not None else None),
                                          "load_s": info["load"].get("total_s"),

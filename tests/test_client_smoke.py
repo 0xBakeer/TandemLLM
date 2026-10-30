@@ -56,7 +56,17 @@ def _sse(*items):
 def test_heartbeat_comments_before_the_first_event_pass():
     got = read_heartbeat(_sse(": prefill 2048/24016", ": prefill 4096/24016",
                               _ev(role="assistant", content=""), _ev(content="ok")))
-    assert got == {"comments": 2, "events": 2, "done": True, "problems": []}, got
+    assert got == {"comments": 2, "events": 2, "done": True, "problems": [], "first": None,
+                   "prompt_ms": None}, got
+    # the clock reads when the model's first token came (an empty role chunk is not one)
+    ticks = iter(range(10))
+    got = read_heartbeat(_sse(": prefill 1/2", _ev(role="assistant", content=""), _ev(content="ok")),
+                         clock=lambda: next(ticks))
+    assert got["first"] == 0 and got["comments"] == 1, got
+    # the server's own prefill time from the finish chunk's timings
+    got = read_heartbeat(_sse(_ev(content="ok"),
+                              "data: " + json.dumps({"choices": [], "timings": {"prompt_ms": 4120.5}})))
+    assert got["prompt_ms"] == 4120.5, got
 
 
 def test_heartbeat_comments_after_step_lines_pass():

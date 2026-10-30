@@ -158,7 +158,7 @@ turboderp publishes Qwen3.8-Flash-Next in five sizes, one branch each of \code{t
 \end{tabularx}
 \end{table}
 
-\code{tools/fn_exl3_xcheck.py} holds our reading against exllamav3's own on the 3.05 pack: the trellis decode equal bit for bit on 16 tensors, the dequantised weight within 0.36~\% of the largest weight (our BF16 rounding of the fp32 rotations), and 4,096 n-gram rows equal bit for bit (\measured).
+\code{tools/fn_exl3_xcheck.py} holds our reading against the converter's own on the 3.05 pack: the trellis decode equal bit for bit on 16 tensors, the dequantised weight within 0.36~\% of the largest weight (our BF16 rounding of the fp32 rotations), and 4,096 n-gram rows equal bit for bit (\measured).
 
 The mixers are read on every token, so the engine keeps them as int8 with one fp32 scale for each group of 128 weights of a row (\code{QWEN38_FN_MIX}, \code{int8}; \code{int8rows} is one scale a row, \code{fp16} the pack's values); a weight is off by at most its group's largest weight over 254. Against the pack's fp16 mixers on the same kernels, with 8,192 tokens on 3.05, the groups gave a KL of 0.0031 on code and 0.0188 on prose, inside the arithmetic noise between the reference forward and the kernels (0.0038 and 0.0255). One scale a row gave 0.267 on code and 0.047 on prose, because rows whose largest weight is 10 to 420 times their median left the small weights coarse. Int4 gave 0.38 on prose and changed the continuation at its first token, so the mixers stay int8 (\measured, \code{tools/fn_mix_quality.py}). The groups cost no decode speed and 0.02~GiB. The prefill reads exact fp32 copies of the mixers, the router and the small projections (\code{QWEN38_FN_PREFILL_MM}); with fp16 copies it failed its agreement gate on a 3k-token code prompt.
 
@@ -183,7 +183,7 @@ Nobody has measured a pack's quality against the BF16 model. The BF16 release is
 \code{tools/quant_sensitivity.py measure}, \code{mix --keep-gb} & per-piece sensitivity, and a mix that keeps the most sensitive pieces in FP8 \\
 \code{tools/quality_gate.py --plan plan.json} & weight sets against a reference checkpoint \\
 \code{QWEN38_FN_MIX}, \code{QWEN38_FN_TABLE}, \code{QWEN38_FN_PREFILL_MM} & Flash-Next: the mixers' form, the n-gram table's policy, the prefill's weights \\
-\code{tools/fn_exl3_xcheck.py}, \code{tools/fn_mix_quality.py} & Flash-Next: our reading against exllamav3's; a mixer form against the pack's \\
+\code{tools/fn_exl3_xcheck.py}, \code{tools/fn_mix_quality.py} & Flash-Next: our reading against the converter's; a mixer form against the pack's \\
 \bottomrule
 \end{tabularx}
 \end{table}

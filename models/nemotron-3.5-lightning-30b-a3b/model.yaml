@@ -9,6 +9,7 @@ schema: 1
 id: nemotron-3.5-lightning-30b-a3b
 name: Nemotron 3.5 Lightning 30B-A3B
 family: Nemotron 3.5
+engine: nemotron_h
 params: ~31.6B, ~3.5B active a token
 recommended: false
 # the test model: after the served models on the models step
@@ -293,11 +294,6 @@ parallelism:
     max: 262144
     default: 262144
     step: 4096
-  side_window:
-    min: 8192
-    max: 262144
-    default: 262144
-    step: 4096
   kv_pool:
     default: false
   floor_gb:
@@ -336,6 +332,21 @@ methods:
   recommended: 0.95
   knob: TOP_P
   docs: docs/nemotron-h.md
+- id: reasoning_effort
+  label: Thinking effort
+  what: How long the model may think before it answers, when a client does not say.
+  type: enum
+  options:
+  - value: low
+    label: low
+  - value: medium
+    label: medium
+  - value: xhigh
+    label: extra high
+  default: medium
+  recommended: medium
+  knob: REASONING_EFFORT
+  docs: docs/server.md
 - id: default_max_tokens
   label: Default answer length
   what: The longest answer, in tokens, when a client does not set max_tokens.

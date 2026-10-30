@@ -90,13 +90,15 @@ def _is_tool_response(content) -> bool:
     return t.startswith("<tool_response>") and t.endswith("</tool_response>")
 
 
-def messages(body: dict) -> list:
+def messages(body: dict, system_first: bool = True) -> list:
     """SRV-167 (UT1, 2026-10-06): the message list as the chat template can render it, or a 400
     that names it. Empty or missing messages, an unknown role, a list without a user message (only
     a system prompt) and a system message after the first used to reach the template, which
     raised, and the client got `500 internal_error` with the exception's text (and retried, as
     OpenAI clients do on a 5xx). Returns the list with `developer` read as `system` and a leading
-    run of system messages joined into one (the template renders one system message, first)."""
+    run of system messages joined into one (the template renders one system message, first).
+    `system_first` False (the family's PromptSpec: a template that renders them where they stand):
+    system and developer messages keep their place and role."""
     msgs = body.get("messages")
     if msgs is None:
         raise Refusal("messages", "messages is required")
@@ -117,7 +119,7 @@ def messages(body: dict) -> list:
                           f"messages[{i}].content must be a string or a list of parts")
         if content is None and role not in ("assistant",):
             raise Refusal(f"messages[{i}].content", f"messages[{i}].content is required")
-        if role in ("system", "developer"):
+        if role in ("system", "developer") and system_first:
             if any(o.get("role") != "system" for o in out):
                 raise Refusal(f"messages[{i}]",
                               f"messages[{i}]: a {role} message must come before the "
@@ -165,14 +167,15 @@ def prompt(body: dict) -> None:
         raise Refusal("prompt", "prompt must be a non-empty string")
 
 
-def request_shape(body: dict, chat: bool) -> None:
+def request_shape(body: dict, chat: bool, system_first: bool = True) -> None:
     """The request's own shape, before anything reads it: the messages (rewritten in place:
-    `developer` as `system`, the leading system prompts as one) or the prompt, and the output
-    limit. A Refusal names the field."""
+    `developer` as `system`, the leading system prompts as one, unless the family's template takes
+    them where they stand: `system_first`) or the prompt, and the output limit. A Refusal names the
+    field."""
     if not isinstance(body, dict):
         raise Refusal("body", "the request body must be a JSON object")
     if chat:
-        body["messages"] = messages(body)
+        body["messages"] = messages(body, system_first=system_first)
     else:
         prompt(body)
     max_tokens(body)
@@ -369,7 +372,7 @@ def structured_pattern(body: dict) -> str | None:
     """The regex a request constrains its answer to, or None.
 
     `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
-    engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,
+    engine's own `structured_outputs` field: `{"regex": ...}`, `{"choice": [...]}`,
     `{"json": <schema>}`. One constraint a request. The document alone: with tools offered,
     `answer_constraint` joins it with the calls (SRV-619).
     """
@@ -414,22 +417,24 @@ def constraint_field(body: dict) -> str:
     return "structured_outputs" if body.get("structured_outputs") is not None else "response_format"
 
 
-def tool_constraint(body: dict) -> tuple[str, dict] | None:
+def tool_constraint(body: dict, fmt=None) -> tuple[str, dict] | None:
     """`tool_choice` required or a named function, enforced -- the answer (after the
     reasoning) as tool calls only, in the model's own format: an allowed function (the named one,
     or any tool for required), the schema's parameters with the required ones present, and typed
     values. One call, unless the request says `parallel_tool_calls: true`: a model forced to call
     when it meant to answer in words otherwise opens call after call (37 in the run).
     Returns (regex, the parameters written as JSON literals per function), or None for auto and
-    none."""
+    none. `fmt`: the model's own form (a `ToolFormat` or its name, server/toolformats; the default
+    form for None), whose constraint this is (SRV-689)."""
     from engine import grammar
     mode, name = tool_choice(body)
     if mode not in ("required", "named") or not body.get("tools"):
         return None
     allowed = [name] if mode == "named" else tool_names(body)
     try:
-        return grammar.tool_call_regex(body["tools"], allowed,
-                                       many=body.get("parallel_tool_calls") is True)
+        from server import toolformats
+        return toolformats.resolve(fmt).forced_regex(body["tools"], allowed,
+                                                     many=body.get("parallel_tool_calls") is True)
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"tool_choice {mode}: {exc}")
 
@@ -437,16 +442,19 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
 class Answer(NamedTuple):
     """The answer's constraint: its regex, the field it came from (`rec.constrained`), the
     parameters written as JSON literals per function, and whether a tool-call branch sits beside
-    a document (the vocabulary then keeps the call markers' own ids; `parts`, the two apart: the
-    model picks the branch, `engine/grammar.Grammar`)."""
+    a document (`parts`, the two apart: the model picks the branch, `engine/grammar.Grammar`), and
+    `markers`: the tags the vocabulary lets the model write as its own ids (a calls branch's call
+    markers, SRV-619; a forced form's own tags, SRV-689)."""
     pattern: str
     kind: str                       # "response_format" | "tool_choice"
     types: dict | None
     calls: bool
     parts: tuple[str, str] | None = None
+    markers: tuple = ()
 
 
-def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> Answer | None:
+def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True,
+                      fmt=None) -> Answer | None:
     """The constraint on the answer (after the reasoning), or None.
 
     `tool_choice` required or named: the calls (`tool_constraint`), a document asked for beside
@@ -456,13 +464,17 @@ def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> 
     `parallel_tool_calls` is false) or the document alone, the branch the model's own first answer
     token picks (a call's start: the calls; anything else: the document), so an agent loop that asks for its
     final answer as JSON keeps its tools. `xml_calls` false (a model whose calls are not the XML
-    format, `--tool-format pythonic`): the 400 as before.
+    format, its `ToolFormat.joins_documents`): the 400 as before. `fmt`: the model's own form (a
+    `ToolFormat` or its name, server/toolformats), whose forced calls and markers tool_choice takes.
     """
     from engine import grammar
+    from server import toolformats
+    form = toolformats.resolve(fmt)
     doc = structured_pattern(body)
-    forced = tool_constraint(body) if chat else None
+    forced = tool_constraint(body, form) if chat else None
     if forced is not None:
-        return Answer(forced[0], "tool_choice", forced[1] or None, False)
+        return Answer(forced[0], "tool_choice", forced[1] or None, bool(form.markers),
+                      markers=tuple(form.markers))
     if doc is None:
         return None
     if not chat or not body.get("tools") or tool_choice(body)[0] == "none":
@@ -479,5 +491,5 @@ def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> 
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"structured outputs with tools: {exc}")
     return Answer(grammar.calls_or_document(calls, doc), "response_format", typed or None, True,
-                  (calls, doc))
+                  (calls, doc), markers=grammar.CALL_MARKERS)
 

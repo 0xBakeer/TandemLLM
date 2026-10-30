@@ -23,7 +23,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `schema` | yes | `1` |
 | `id` | yes | The file name without `.json`. Lowercase letters and digits, with single dots or dashes between them, at most 80 characters. |
 | `name` | yes | The name the card shows and the model calls itself when asked, at most 120 characters. |
-| `base_model` | yes | The TandemLLM model it runs on, which is the folder it sits in. Today only `qwen3.8-27b`, or any model when `profile` names one of its own profiles. |
+| `base_model` | yes | The TandemLLM model it runs on, which is the folder it sits in: `qwen3.8-27b` or `nemotron-3.5-super-vl-120b-a12b` ([Bases](#bases)), or any model when `profile` names one of its own profiles. |
 | `finetune_of` | no | The Hugging Face id of the fine-tune, or `null` for a quantisation of the stock model. |
 | `author.github` | yes | Your GitHub user name. The card shows `https://github.com/<you>.png` and links to your profile. |
 | `author.name` | no | The name you go by. |
@@ -36,7 +36,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `load` | yes | `standalone` when the pack is the whole model, or `overlay` when it holds EXL3 projections that go over the base checkpoint. |
 | `modalities` | yes | `text`, `image`, `audio` and `video`, each `true` or `false`: what works in TandemLLM today. |
 | `modalities_in_pack` | no | What the pack contains, even when TandemLLM cannot serve it yet. The card shows those in grey. |
-| `drafters` | yes | `tandem-exl3` for our EXL3 draft models (K3 drafters and K4 draft head), `dflash2` for our BF16 draft models, `in-pack` for a draft layer inside the pack (only with `profile`), or `none`. |
+| `drafters` | yes | `tandem-exl3` for our EXL3 draft models (K3 drafters and K4 draft head), `dflash2` for our BF16 draft models, `in-pack` for a draft layer inside the pack (only with `profile`), or `none`. On Nemotron 3.5 Super VL only `none`: the pack brings no drafter of its own and drafts with the model's own ([Bases](#bases)). |
 | `license` | yes | The license as its SPDX names, e.g. `Apache-2.0`. |
 | `license_url` | no | An https link to the license file, best at your commit. |
 | `description` | no | One or two plain sentences, at most 500 characters. The card shows it as text: no HTML, no Markdown. |
@@ -47,14 +47,23 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `links` | no | https links, such as `pr` for a pull request that made the pack load. |
 | `profile` | no | The model's own profile that serves this pack, for a pack TandemLLM already runs as one of its profiles. The entry must have that profile's repository, format and bits a weight. Set by a maintainer. |
 
-The check refuses a modality the load path cannot serve. A standalone pack is text only for now (ENG-271), even when it carries a vision tower: write `"image": false` and list `image` in `modalities_in_pack`. An overlay keeps the base checkpoint's vision tower, so `"image": true` is allowed there. No path serves audio or video yet.
+The check refuses a modality the load path cannot serve. A standalone pack is text only for now (ENG-271), even when it carries a vision tower: write `"image": false` and list `image` in `modalities_in_pack`. An overlay keeps the base checkpoint's vision tower, so `"image": true` is allowed there. A text-only entry's profile also writes `QSE_PACK_VISION=off`, which `ops/serve.env` applies after the Setup Guide's `run/setup.env`, so a box whose setup turned vision on still starts the pack text only and `ops/start.sh` says so (SPD-167; before, the start failed on the pack's tower). A 27B pack's profile also carries its base's Setup Guide defaults for parallel requests (SPD-165: 4 slots, the KV pool, side windows of 262,144 tokens, the admission floor and the fixed keys from `models/qwen3.8-27b/model.yaml`), so `ops/use-profile.sh community/<id>` serves four chats at once without the guide; one request alone measured the same as with one slot (prose 38.4 against 37.4 tok/s, 8K prefill 867 against 855). The switch's smoke turn (`ops/use-profile.sh`) gets two tries within `SMOKE_TIMEOUT_S` (300 s, as the single try had) and logs the whole answer before it rolls back; an answer in the reasoning field counts. No path serves audio or video yet.
+
+## Bases
+
+| Base | Loader | Load paths | Serves | Drafters |
+|---|---|---|---|---|
+| `qwen3.8-27b` | the 27B family's (`engine/loader.py`) | `standalone`, `overlay` | text; images on `overlay` | `tandem-exl3`, `dflash2` or `none` |
+| `nemotron-3.5-super-vl-120b-a12b` | NemotronH (`engine/models/nemotron_h`, [nemotron-h.md](nemotron-h.md)) | `standalone` | text | `none`: LiLiCorr and the lookup, from the model's own profile |
+
+A Nemotron 3.5 Super VL pack (ENG-377) is served with the model's own EXL3 profile nearest in size (`nemotron-super-vl-exl3-4.0` for a 3.5 bpw pack): its memory limits, its sampler, NVIDIA's LiLiCorr drafter and the lookup, with the pack in place of that profile's weights. Its files must be a NemotronH checkpoint: `config.json` flat (`NemotronHForCausalLM`) or the Omni wrapper's `llm_config`, 88 layers, an EXL3 `quantization_config`, every shard the index names. A pack that lists `image` in `modalities_in_pack` holds the RADIO tower too: `vision_model.radio_model.*` and `vision_projector.*` (or `mlp1.*`) tensors, `preprocessor_config.json` and the config's `vision_config`. `python -m server.setup.community check-pack community/<id> [--dir <folder>]` checks the files and names what differs; the loader's audit checks every tensor's shape and rate at load.
 
 ## What is not accepted
 
 - A pack that is private or gated, or that needs a token to download.
 - A branch or tag in `hf.revision` instead of a commit.
 - A format other than EXL3, until a loader for it is in TandemLLM.
-- A base model other than `qwen3.8-27b`, unless the entry names one of that model's own profiles in `profile`.
+- A base model outside [Bases](#bases), unless the entry names one of that model's own profiles in `profile`.
 - A claim in `modalities` that the load path does not serve.
 - Links that are not https, and HTML or Markdown in any text field.
 - A license that does not let others download and run the weights.

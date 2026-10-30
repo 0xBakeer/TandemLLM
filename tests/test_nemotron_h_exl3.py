@@ -143,6 +143,43 @@ def test_pack_audits_and_loads_every_layer_kind_as_exl3():
             assert (experts[li].I, experts[li].X) == (cfg.moe_ffn[li], cfg.moe_latent_size)
 
 
+def test_flat_pack_with_a_stored_head_under_a_tied_config():
+    """ENG-377: a community pack's layout (PR #63): a flat NemotronH config with `tie_word_embeddings` true and the
+    quantization_config at the top, `backbone.*` keys, no tower, and the head stored in fp16 beside the embedding.
+    The stored head is read (the tie dropped, an audit note); without it the embedding is the head."""
+    from safetensors.torch import load_file, save_file
+    for stored in (True, False):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, W, blocks = _write_pack(d)
+            flat = {**TEXT, "architectures": ["NemotronHForCausalLM"], "model_type": "nemotron_h", "eos_token_id": 11,
+                    "tie_word_embeddings": True, "quantization_config": dict(OMNI["quantization_config"], head_bits=16)}
+            head = torch.randn(cfg.vocab_size, cfg.hidden_size, generator=torch.Generator().manual_seed(7)).to(torch.float16)
+            for fn in sorted(f for f in os.listdir(d) if f.endswith(".safetensors")):
+                t = load_file(os.path.join(d, fn))
+                t = {k[len("language_model."):]: v for k, v in t.items() if k.startswith("language_model.")
+                     and not k.startswith("language_model.lm_head.")}
+                save_file(t, os.path.join(d, fn))
+            if stored:
+                save_file({"lm_head.weight": head}, os.path.join(d, "model-head.safetensors"))
+            wm = {}
+            for fn in sorted(f for f in os.listdir(d) if f.endswith(".safetensors")):
+                wm.update({k: fn for k in load_file(os.path.join(d, fn))})
+            json.dump({"metadata": {}, "weight_map": wm}, open(os.path.join(d, "model.safetensors.index.json"), "w"))
+            json.dump(flat, open(os.path.join(d, "config.json"), "w"))
+            idx = PackIndex.open(d)
+            notes = idx.audit()
+            assert idx.skipped == 0 and idx.is_exl3 and idx.stored_head is stored, notes
+            assert idx.cfg.tie_word_embeddings is (not stored)
+            assert any("stored head is read" in n for n in notes) is stored, notes
+            _, LW, _, _ = load(d, "cpu", log=None, idx=idx)
+            if stored:
+                assert idx.formats["lm_head"] == "f16"
+                assert torch.equal(LW["lm_head.weight"], head.to(torch.bfloat16))
+                assert not torch.equal(LW["lm_head.weight"], LW["embeddings.weight"])
+            else:
+                assert LW["lm_head.weight"] is LW["embeddings.weight"]
+
+
 def test_bad_packs_stop_with_the_name():
     for kw, needles in (({"bad_shape": "layers.0.mixer.in_proj"}, ("layers.0.mixer.in_proj.trellis", "does not fit")),
                         ({"codebook": "mcg"}, ("mul1",)),

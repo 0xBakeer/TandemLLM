@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 
+import unittest
 import numpy as np
 import torch
 
@@ -40,7 +41,7 @@ def test_dequant_matches_gguf_py():
         from gguf.constants import GGMLQuantizationType as GT
         from gguf.quants import dequantize
     except Exception:  # noqa: BLE001
-        return "skipped: gguf-py missing"
+        raise unittest.SkipTest("gguf-py missing")
     rng = np.random.default_rng(0)
     ok = 0
     for tid, (qk, ts, _fn) in sorted(Q.TYPES.items()):
@@ -65,7 +66,7 @@ def test_dequant_matches_gguf_py():
 
 def test_packed_linears():
     if not KERNELS:
-        return "skipped: no triton/gpu"
+        raise unittest.SkipTest("no triton/gpu")
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
         shapes = [(128, 512), (256, 1024)]
@@ -83,40 +84,97 @@ def test_packed_linears():
 
 
 def test_row_invariance():
-    """Every call width M = 1..33 (decode's 1 to the ROWS_MAX+1 verify block) gives a row bitwise
-    identical to the M=1 row — the packed linears plus iq2_linear's IQ2/Q8 linears."""
+    """Every call width M = 1..33 (decode's 1 to the ROWS_MAX+1 verify block) gives each row bitwise
+    identical to that row computed alone in its own allocation — a view into a shared batch buffer
+    can hide an over-read, so the solo calls clone. bf16 and fp32 out, an N that is not a tile
+    multiple, and the 32-block formats' K tail."""
     if not KERNELS:
-        return "skipped: no triton/gpu"
+        raise unittest.SkipTest("no triton/gpu")
     from tools.iq2_linear import IQ2Linear, Q8Linear
+
+    def check(lin, N, K, tag):
+        x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
+        for f32 in (False, True):
+            solo = torch.cat([lin.matmul(x[r:r + 1].clone(), f32=f32) for r in range(33)])
+            for M in range(1, 34):
+                got = lin.matmul(x[:M], f32=f32)
+                assert torch.equal(got, solo[:M]), (tag, N, K, M, f32)
+
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
-        shapes = [(128, 512)]
-        if qk == 32:
-            shapes.append((64, 96))          # 3 blocks a row: exercises the K tail
-        for N, K in shapes:
-            lin = cls(random_blocks(tid, N * (K // qk)).reshape(-1), N, K, device=DEV)
-            x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
-            one = lin.matmul(x[:1])
-            for M in range(2, 34):
-                assert torch.equal(one, lin.matmul(x[:M])[:1]), (tid, N, K, M)
+        for N, K in [(35, 512)] + ([(35, 96)] if qk == 32 else []):
+            lin = cls(random_blocks(tid, N * (K // qk), seed=1).reshape(-1), N, K, device=DEV)
+            check(lin, N, K, tid)
     # iq2_linear's production linears hold the same contract (IQ2_XXS needs K % 256 == 0)
     rng = np.random.default_rng(1)
-    for cls, ts, qk, shapes in ((IQ2Linear, 66, 256, [(128, 512)]), (Q8Linear, 34, 32, [(128, 512), (64, 96)])):
+    for cls, ts, qk, shapes in ((IQ2Linear, 66, 256, [(35, 512)]), (Q8Linear, 34, 32, [(35, 512), (35, 96)])):
         for N, K in shapes:
             b = rng.integers(0, 256, (N * (K // qk), ts), dtype=np.uint8)
             b[:, 0:2] = _HALF
-            lin = cls(b.reshape(-1), N, K, device=DEV)
+            check(cls(b.reshape(-1), N, K, device=DEV), N, K, cls.__name__)
+
+
+def test_q8_k_tail_and_row_invariance():
+    """Q8Linear with K / 32 not a multiple of the kernel's SB=8 step (K=96): each boundary-width
+    call matches the fp32 twin, every row is bitwise its own-allocation solo call at bf16 and fp32,
+    and a caller's `out` buffer is honoured. The aligned K=256 control takes the same checks."""
+    if not (KERNELS and DEV == "cuda"):
+        raise unittest.SkipTest("no gpu")
+    from tools.iq2_linear import Q8Linear
+    rng = np.random.default_rng(1)
+    for N, K in ((35, 96), (35, 256)):
+        b = rng.integers(0, 256, (N * (K // 32), 34), dtype=np.uint8)
+        b[:, 0:2] = _HALF
+        lin = Q8Linear(b.reshape(-1), N, K, device=DEV)
+        w32 = lin.dequant().to(DEV)
+        for f32 in (False, True):
+            for M in (1, 2, 9, 16, 17, 32, 33):
+                x = torch.randn(M, K, device=DEV, dtype=torch.bfloat16)
+                out = torch.empty(M, N, dtype=torch.float32 if f32 else torch.bfloat16, device=DEV)
+                got = lin.matmul(x, out=out, f32=f32)
+                assert got.data_ptr() == out.data_ptr()
+                ref = torch.nn.functional.linear(x.float(), w32)
+                rel = ((got.float() - ref).norm() / (ref.norm() + 1e-9)).item()
+                assert rel < 0.01, (N, K, M, f32, rel)
             x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
-            one = lin.matmul(x[:1])
-            for M in range(2, 34):
-                assert torch.equal(one, lin.matmul(x[:M])[:1]), (cls.__name__, N, K, M)
+            solo = torch.cat([lin.matmul(x[r:r + 1].clone(), f32=f32) for r in range(33)])
+            for M in range(1, 34):
+                got = lin.matmul(x[:M], f32=f32)
+                assert torch.equal(got, solo[:M]), (N, K, M, f32)
+
+
+def test_cpu_input_takes_the_dense_fallback():
+    """A CPU activation never reaches the Triton kernel (unless TRITON_INTERPRET=1 is the whole
+    point of the run): M <= ROWS_KERN goes through `_prefill`'s bf16 twin like the prompt path,
+    fp32 x normalised to bf16 first as the GPU row path does."""
+    if os.environ.get("TRITON_INTERPRET") == "1":
+        raise unittest.SkipTest("the interpreter run exercises the kernel on CPU on purpose")
+    lin = Q.Q40Linear(random_blocks(2, 32 * 8, seed=4).reshape(-1), 32, 256, device="cpu")
+    orig = lin._kernel
+    def no_kernel(*a, **kw):
+        raise AssertionError("the Triton kernel ran on a CPU tensor")
+    lin._kernel = no_kernel
+    try:
+        for M in (1, 33, 34):
+            for dt in (torch.bfloat16, torch.float32):
+                x = torch.randn(M, 256, dtype=dt)
+                y = lin.matmul(x)
+                want = torch.nn.functional.linear(x.to(torch.bfloat16), lin._twin())
+                assert y.dtype == torch.bfloat16 and torch.equal(y, want), (M, dt)
+                y32 = lin.matmul(x, f32=True)
+                assert y32.dtype == torch.float32 and torch.equal(y32, want.float())
+                out = torch.empty(M, 32, dtype=torch.bfloat16)
+                assert lin.matmul(x, out=out).data_ptr() == out.data_ptr()
+                assert torch.equal(out, want)
+    finally:
+        lin._kernel = orig
 
 
 def test_dequant_gpu_close():
     """`dequant_gpu` decodes on-device from the packed tensors (folded scales are fp16), so it is
     within ~1 bf16 ulp of the fp32 `dq_*` twin — the whole weight and a partial row slice."""
     if not (KERNELS and DEV == "cuda"):
-        return "skipped: no gpu"
+        raise unittest.SkipTest("no gpu")
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
         N, K = 128, 512
@@ -131,7 +189,7 @@ def test_prefill_path():
     """M > ROWS_MAX + 1 takes the chunked GPU dequant + cuBLAS path; a forced tiny chunk budget
     exercises several N slices with a ragged tail."""
     if not (KERNELS and DEV == "cuda"):
-        return "skipped: no gpu"
+        raise unittest.SkipTest("no gpu")
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
         N, K = 128, 512
@@ -152,12 +210,12 @@ def test_prefill_path():
 
 def test_twins_match_oracle():
     if not KERNELS:
-        return "skipped: no triton/gpu"
+        raise unittest.SkipTest("no triton/gpu")
     try:
         from gguf.constants import GGMLQuantizationType as GT
         from gguf.quants import dequantize
     except Exception:  # noqa: BLE001
-        return "skipped: gguf-py missing"
+        raise unittest.SkipTest("gguf-py missing")
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
         N, K = 64, 512
@@ -165,3 +223,7 @@ def test_twins_match_oracle():
         lin = cls(raw, N, K, device=DEV)
         ref = torch.from_numpy(np.asarray(dequantize(raw.copy(), GT(tid)), np.float32)).reshape(N, K)
         assert torch.equal(lin.dequant(), ref), tid
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

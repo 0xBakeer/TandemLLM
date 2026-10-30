@@ -61,12 +61,18 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # overnight reads as off, its shipped value)
           "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow", "memory",
                               "sampling", "tasks.C5", "toolgate.sequence"},
+          # SRV-703: every shipped profile sets its memory switch (`none` there, as absent)
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word", "sampling",
-                                 "tasks.C5", "toolgate.sequence"},
+                                 "tasks.C5", "toolgate.sequence", "memory"},
           "profiles/chat": {"thinking.by_size", "ui", "memory", "sampling", "tasks.C5",
                             "toolgate.sequence"},
           # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)
-          "packages": {"packages.tandem-memory", "packages.memory"}}
+          # SRV-615: the deliverable of six everyday packages (the migration stores it on the
+          # live box too)
+          "packages": {"packages.tandem-memory", "packages.memory"} | {
+              f"packages.{n}.deliverable" for n in (
+                  "write-message", "formal-letter", "event-plan", "weekly-schedule",
+                  "checklist-builder", "social-post")}}
 # what the shipped documents changed on purpose since that day, keyed by the document: the path
 # and the value they ship. SRV-473: the same-call guard on (the live box: coding v21 by hand,
 # overnight and chat by the migration), chat's C3 acting, chat's description. SRV-534: the

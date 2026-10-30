@@ -83,11 +83,17 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
     # ENG-221: Flash-Next's decode step (engine/models/flashnext/engine.py DecodeGraph); ENG-227/153:
     # its verify block (VerifyGraph), its commit (CommitGraph) and its MTP chain draft (MTPChainGraph)
     # ENG-287: LFM2's decode step, joint decode step, verify block and commit (engine/models/lfm2_moe/engine.py)
-    # ENG-319: NemotronH's decode step, joint decode step, verify block and commit; SPD-123: the LiLiCorr draft
+    # ENG-319: NemotronH's decode step, joint decode step, verify block and commit; SPD-123: the LiLiCorr draft;
+    # SPD-233: the LiLiCorr draft of several lanes in one pass (lilicorr.py _PackedGraph)
+    # ENG-399: Flint's decode step, joint decode step, verify block and commit (engine/models/flint/engine.py)
+    # SPD-163: the 27B's joint verify pass (engine/models/qwen3_5/joint_graphs.py JointGraphs)
     assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/drafters/draft_graph.py",
-                             "engine/drafters/lilicorr.py", "engine/generative/qwen35.py"] + [
-                             "engine/models/flashnext/engine.py"] * 4 + ["engine/models/lfm2_moe/engine.py"] * 4 + [
-                             "engine/models/nemotron_h/engine.py"] * 4 + ["engine/verify_graph.py"], found
+                             "engine/drafters/lilicorr.py", "engine/drafters/lilicorr.py",
+                             "engine/generative/qwen35.py"] + [
+                             "engine/models/flashnext/engine.py"] * 4 + ["engine/models/flint/engine.py"] * 4 + [
+                             "engine/models/lfm2_moe/engine.py"] * 4 + [
+                             "engine/models/nemotron_h/engine.py"] * 4 + [
+                             "engine/models/qwen3_5/joint_graphs.py", "engine/verify_graph.py"], found
     return f"{len(found)} capture sites, each under the lock"
 
 
@@ -140,6 +146,30 @@ def test_the_drafters_capture_runs_with_the_lock_held():
             setattr(torch.cuda, k, v)
     assert seen == [("capture", True), ("replay", False), ("replay", False)], seen
     assert not capture_lock.LOCK._is_owned()
+
+
+def test_a_capture_stream_has_one_owner_at_a_time():
+    """SPD-223: torch drops a capture stream's cuBLAS workspace when any graph captured on it is reset, so two
+    graph owners must never hold one stream (a shared pooled stream left a kept draft graph bound to a freed
+    workspace). The lease hands a stream to one owner until it is given back, then hands it on."""
+    made = []
+    saved = capture_lock._new_stream, list(capture_lock._FREE), dict(capture_lock.LEASES)
+    capture_lock._new_stream = lambda: made.append(object()) or made[-1]
+    capture_lock._FREE.clear()
+    try:
+        a, b, c = capture_lock.lease_stream(), capture_lock.lease_stream(), capture_lock.lease_stream()
+        assert len({id(a), id(b), id(c)}) == 3 and len(made) == 3
+        capture_lock.give_back(b)
+        d = capture_lock.lease_stream()
+        assert d is b and len(made) == 3, "a given-back stream serves the next owner"
+        e = capture_lock.lease_stream()
+        assert e not in (a, c, d) and len(made) == 4
+        capture_lock.give_back(None)
+    finally:
+        capture_lock._new_stream = saved[0]
+        capture_lock._FREE[:] = saved[1]
+        capture_lock.LEASES.clear()
+        capture_lock.LEASES.update(saved[2])
 
 
 # ------------------------------------------------------------------ 2. the writer waits

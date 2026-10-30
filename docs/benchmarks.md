@@ -12,7 +12,7 @@ The numbers below are from bench 2.8.1.
 
 ## Two paths
 
-A benchmark of the model runs the plain engine. The `X-Tandem: raw` header serves it: no turn class, no notes, no effort change, the session monitor off ([server.md](server.md#tandemllm-and-the-conductor)). Run the default path, without the header, only when the conductor itself is under test. The two runs then differ in the conductor alone, and the decision journal shows what it added to each turn.
+A benchmark of the model runs the plain engine. The `X-Tandem: raw` header serves it: no turn class, no notes, no effort change, the session monitor off ([server.md](server.md#tandemllm-and-the-conductor)). A request with the header reads the persistent suffix store and never writes into it (SPD-151, [caches.md](caches.md#persistent-suffix-store)), so repeating the bench does not teach the engine its answers. Run the default path, without the header, only when the conductor itself is under test. The two runs then differ in the conductor alone, and the decision journal shows what it added to each turn.
 
 Without a header the bench, a client kind no profile maps that offers tools, gets the `tools` profile (SRV-621): the raw path's prompt ids, with the loop guards and the tool-call checks acting (D1, D1b, D2, E1, C3, C4). An answer that differs from the raw run's comes from a journaled monitor act or the secret echo mask (SRV-625: a key from a tool result repeated in the answer, `extra.secret_mask`). `--header X-Tandem-Profile=tools` names the profile; `--header X-Tandem-Profile=general` runs the profile the default path served before.
 
@@ -48,6 +48,23 @@ A plain API client gets the thinking in `reasoning_content` and the answer alone
 ```bash
 --backend-kwargs '{"reasoning_format": "reasoning_content"}'
 ```
+
+## A batch
+
+`tools/teb_batch.sh` runs rows one at a time against one server and keeps what each ran under; `tools/teb_summary.py` prints the table (OPS-209).
+
+```bash
+bash tools/teb_batch.sh --base-url http://<host>:8000/v1 --out results/teb-1020 \
+  --health "ssh <host> curl -s http://127.0.0.1:8000/health" \
+  --restart "ssh <host> tandem restart" standard
+python3 tools/teb_summary.py results/teb-1020 --md --misses
+```
+
+- Every row: `--seed 42 --temperature 0 --timeout 600 --no-live --parallel 1`. The batch stops when `/health` reports no slot.
+- `standard` is four rows: raw at `xhigh` (`--header X-Tandem=raw --backend-kwargs '{"reasoning_effort":"xhigh"}'`), the conductor with no header, and both again with `--hardmode-only`. `pack` adds `--variant-seed 7` on both paths and, with `--pack DIR`, a held-out scenario pack on both. A row of your own is `label:flags`.
+- The conductor rows pin no profile. The server resolves each request by what it offers: `tools` when it offers tools, the default profile when it offers none, as any client meets it. A hard-mode scenario without tools then runs under the default profile. Pinned to `tools` on 2026-10-20, hard mode scored 82 twice and failed TC-88 both times; unpinned it scored 86 and passed TC-88 (n = 1 each; one scenario, the cause not tested). Pin a profile in a row of your own with `--header X-Tandem-Profile=<name>`.
+- `batch.knobs` holds the bench's version, the server's version and pack, its slots, `max_len`, the default `max_tokens`, sampling, the prefix and response cache settings, and the output of `--knobs CMD` (the effort default and the slots from `serve.env`, for example).
+- Each row keeps its result JSON, log, flags, start and end times and `/health` before and after. A row during which the response cache's hits grew replayed answers of an earlier request; the summary marks it, and its times are not the engine's. `--restart` before the batch empties the cache.
 
 ## Results on a DGX Spark
 

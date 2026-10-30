@@ -38,7 +38,7 @@ G = torch.Generator().manual_seed(0)
 
 # --------------------------------------------------------------------- exllamav3's n-gram encoder
 def pack_rows(states: torch.Tensor, scales: torch.Tensor, K: int) -> torch.Tensor:
-    """exllamav3 `ngram_codec.pack_rows` (vcruz305 fork 329e051), the encoder of the format."""
+    """`ngram_codec.pack_rows`, the format's reference encoder."""
     N = states.shape[0]
     new_bits = states.to(torch.int64) & ((1 << K) - 1)
     bits = (new_bits.unsqueeze(-1) >> torch.arange(K)) & 1

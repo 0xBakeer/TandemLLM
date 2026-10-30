@@ -13,6 +13,7 @@ import time
 
 import torch
 
+from engine.methods import draft_meet
 from engine.models.flashnext.engine import FlashNextEngine, MTPChainGraph
 from engine.models.flashnext.ref import MTP
 
@@ -78,6 +79,12 @@ class FlashNextMTPHead:
         fn = self.fn
         n = len(nexts)
         cls = fn.qsa_class(self.st.length + n + self.depth - 1)
+        if draft_meet.MEET is not None and draft_meet.MEET(self):
+            # SPD-235: the round runner runs this draft with its other lanes' (`run_packed`), before the read
+            fn._mtp_bufs(self.depth)["stack"][:n].copy_(rows)
+            assert fn.stage_mtp(self.st, nexts, self.depth) == cls
+            self._n, self._cls = n, cls
+            return
         g = self.graphs.get((n, cls))
         if (n, cls) in self.fresh:
             self.fresh.discard((n, cls))
@@ -93,6 +100,11 @@ class FlashNextMTPHead:
         fn.host_ms["stage_mtp"] = fn.host_ms.get("stage_mtp", 0.0) + 1e3 * (time.perf_counter() - t0)
         g.graph.replay()
         self._n = n
+
+    @staticmethod
+    def run_packed(heads: list) -> None:
+        """SPD-235: the staged drafts of these heads (one engine) in one packed chain."""
+        heads[0].fn.mtp_chain_multi([(h.key, h.st, h._n, h.depth, h._cls) for h in heads])
 
     def read(self) -> tuple[list, list]:
         """After `launch`: per depth the (first, second) token and their probabilities; the fed rows

@@ -46,6 +46,32 @@ def test_the_gate_projections_split_the_concatenated_call():
     return "one call over [a; b], split back; flag off is the two F.linear calls, bit for bit"
 
 
+def test_spd163_the_joint_gate_request_is_each_engines_own_split():
+    """The joint pass's `gate` request: one call over every engine's rows, each engine's part the
+    rows `_gate_inputs` gives it alone (the kernel's rows are independent: tools/small_linear.py)."""
+    eng, _ = T.build(seed=9)
+    calls = []
+
+    def stand_in(x, w):
+        # the kernel's contract: a row's output is its own row's alone (one product a row here)
+        calls.append(tuple(x.shape))
+        return torch.cat([torch.nn.functional.linear(r[None], w) for r in x])
+
+    old, SL.small_linear = SL.small_linear, stand_in
+    M.GDN_AB = True
+    try:
+        xs = [torch.randn(n, eng.cfg.hidden_size) for n in (3, 7, 1)]
+        joined = M._run_request(eng, "gate", "layers.0", torch.cat(xs))
+        alone = [eng._gate_inputs(x, "layers.0") for x in xs]
+    finally:
+        SL.small_linear, M.GDN_AB = old, False
+    assert calls[0] == (11, eng.cfg.hidden_size), calls
+    n = joined.shape[1] // 2
+    for part, (a, b) in zip(joined.split([3, 7, 1]), alone):
+        assert torch.equal(part[:, :n], a) and torch.equal(part[:, n:], b)
+    return "one 11-row call; each engine's a | b split is its own call's"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

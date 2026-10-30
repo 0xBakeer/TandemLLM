@@ -487,7 +487,7 @@ ROLE = {"role": "assistant", "content": ""}
 
 
 def test_nothing_with_a_choices_array_goes_out_before_the_prefill():
-    """The role chunk went out before the loop, i.e. before the prefill. vLLM's bench
+    """The role chunk went out before the loop, i.e. before the prefill. A common benchmark
     client stamps TTFT on the first chunk that has a `choices` array, whatever is in it, so against
     this server it read the HTTP round trip as TTFT on every request. Before the engine's first
     `next()` the wire holds the headers and nothing else, thinking on or off, in every format."""

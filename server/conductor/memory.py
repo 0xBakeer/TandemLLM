@@ -1,9 +1,10 @@
 """The memory notes in a request: what the router puts in, and what the model's blocks write
 (2026-10-05; the design: Memo "Memory for TandemLLM: design advice", sections 2 and 3).
 
-A profile's `memory` switch (server/conductor/schema.py, absent: off):
+A profile's `memory` switch (server/conductor/schema.py; absent: none):
 
-  off      nothing: no card, no filter on the stream, no read. The request is the release's.
+  none     nothing: no card, no filter on the stream, no read. The request is the release's.
+  off      as none, and one note a session that memory is off in this profile (SRV-471).
   shadow   the card goes in (the model may write) and its blocks are stored; nothing is read back,
            so an operator can read what a model would remember before it is read back to it.
   on       the card, the writes, and the three reads below.
@@ -61,7 +62,7 @@ import time
 
 from server.conductor import notes as notes_mod
 from server.conductor import packages as packages_mod
-from server.conductor import schema, signals
+from server.conductor import modelfit, schema, signals
 from server.conductor.transcripts import WORKDIR
 from server import memblock
 from server.conductor.libsearch import words as signals_words
@@ -476,6 +477,32 @@ def _live_ids(sess) -> set:
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+#: SRV-703: why the served model reads no memory (modelfit), in the Notes tab's words
+MODEL_WHY = {"model_notes": "the model's prompt has no place for the conductor's notes",
+             "model_fit": "the model's conductor fit turns memory off"}
+
+
+def where(store) -> dict:
+    """SRV-703, the Notes tab's "where memory is on": the served model (its fit: a prompt with no
+    place for a note, or memory off for the model) and every profile's switch as stored, `set`
+    False when the key is absent (read as `none`). The raw profiles (locked) are left out: the
+    conductor does nothing there. Never a note or a text."""
+    fit = modelfit.FIT
+    why = "model_notes" if not fit["notes"] else (None if fit["memory"] else "model_fit")
+    model = {"memory": why is None, "why": why, "words": MODEL_WHY.get(why)}
+    default = (store.peek("settings")[1] or {}).get("default_profile")
+    profiles = []
+    for name in store.names():
+        if name in schema.LOCKED:
+            continue
+        _, doc = store.peek("profiles", name)
+        raw = doc.get("memory")
+        profiles.append({"name": name, "memory": raw if raw is not None else "none",
+                         "set": raw is not None, "mode": doc.get("mode"),
+                         "clients": list(doc.get("clients") or []), "default": name == default})
+    return {"model": model, "profiles": profiles}
 
 
 def mark_injected(mem: "Memory | None", plan) -> None:

@@ -70,6 +70,13 @@
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9_.-]*$",
             "maxLength": 80
+          },
+          "deliverable": {
+            "enum": [
+              "send",
+              "schedule",
+              "post"
+            ]
           }
         },
         "required": [

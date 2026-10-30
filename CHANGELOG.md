@@ -2,6 +2,370 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.15.0, 2026-10-27
+
+0.15.0 serves 8 requests at once by default and rebuilds the path they share. Every lane gets the full window, and a lane that runs out of memory gives way and goes on in the same answer. One thread runs every lane's round: one packed draft, one joint verify pass from CUDA graphs on the 27B, one batch of walks and commits. Flash-Next and Ornith verify their lanes in one joint pass too, and Ornith builds side slots. Requests that arrive together on an idle engine prefill before any of them decodes, the 27B's short prompts in one forward, and the 27B reads long prompts faster. A sampled request that names no filter takes the model card's top_k and top_p. Every weight card carries a speed row of this build. On one DGX Spark the 27B ThinkingCap EXL3 4.0 pack decodes 8 requests of 512 tokens at 155.9 tok/s in total greedy and 146.2 sampled. Two summation orders move on purpose, the 27B's prompt reading and Flash-Next's mixer kernels, each held by a gate. Every family's fingerprint moves once, so saved prompt-cache entries and spilled conversations from 0.14.2 are rebuilt once.
+
+### Lanes
+
+- `ops/serve.env`, the Setup Guide and every profile of a family with side slots run 8 lanes on the KV pool (SRV-707). `--parallel` itself still defaults to 1. Every lane has the window the setup names: `--side-max-len` defaults to 0, which is `--max-len`, and the Setup Guide has no side window of its own any more. With the pool on, a side slot's window is addresses and costs its constant part at load. The guide counts how many lanes can all hold the full window at once (`lanes_full`), says what happens past that, and takes up to 64 lanes. A round of more than 16 decoding lanes verifies in more passes.
+- A lane whose next pages the KV pool refuses after every reclaim, while other lanes run, gives every page back, waits at the head of the line and goes on in the same stream from its prompt and the text it wrote (SRV-709). A streamed client sees `: paused: waiting for memory` meanwhile. Alone, or after 16 times, it stops with `memory_full` (type `server_busy`, `Retry-After` 30) instead of an error, and the Chat tab continues it once memory is free. Admission reserves pages for at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens`. `/health` `parallel.recompute` counts the lanes that gave way.
+- Measured at 8 lanes on 2026-10-24 (1, 2, 4 and 8 requests at once, total tok/s, 3-round medians, N decoding at once): the 27B ThinkingCap EXL3 4.0 38.3 / 67.6 / 100.1 / 154.5, Flash-Next 3.05 36.5 / 45.6 / 57.5 / 71.3, Ornith EXL3 4.0 37.7 / 47.0 / 58.4 / 69.8, Flint EXL3 4.0 111.7 / 154.9 / 193.3 / 232.3 (SRV-711). A card's lanes default is never above the lanes its speed row measured: LFM2.5 and Nemotron Bolt measured 8 and default to 8, Nemotron Lightning and Super VL measured 3 and default to 3 (SPD-245).
+- Ornith builds side slots and verifies them in one joint pass (SPD-217): the row-wise parts once over every lane's rows, the GDN recurrence and the attention per lane. 0.14.2's one-chat limit in the Setup Guide is gone.
+- chatd lets as many runs talk to the engine as it has lanes (`/health` `parallel.n`, 8 until known); `QSE_CHAT_MAX_RUNS` still fixes the number (SRV-707).
+- A side slot gets its drafters' built weights and draft head from slot 0 (SPD-165). Before, each side slot read both drafter checkpoints again, 38 to 40 s a slot, and kept the copies. The drafters drop the BF16 projections their EXL3 blocks replace, 5.72 to 2.74 GiB (SPD-179).
+
+### The round
+
+- One thread runs every lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the proposals, one packed draft of up to 128 rows (SPD-157), one joint verify pass, the walks of every lane's tree on the device, and the tails in two halves around the next draft. `/health` `parallel.round_runner` gives its host and GPU milliseconds by phase.
+- The 27B's joint pass on EXL3 weights takes 64 rows (32 on NVFP4 and FP8), and each engine's rows are bit for bit its own eager verify (SPD-159). From 3 decoding lanes the round cuts all trees together, best nodes first (`--parallel-cut auto`, SPD-155), and a chain-shaped block shares the pass (SPD-153). The row-wise steps run once over every lane's rows, and the GDN recurrence of every lane is one grouped launch (SPD-163). A 4-lane pass keeps 8 rows a lane (`QWEN38_JOINT_ROWS_AT_LANES=4:8`, SPD-245).
+- The 27B's joint pass runs from CUDA graphs once its shape has come 4 times (`QWEN38_JOINT_GRAPHS`, `QWEN38_JOINT_GRAPHS_AFTER`, SPD-163, SPD-245), every lane's logits, state and KV bit for bit the eager pass's. A graphed pass runs every lane's attention of a layer in one scatter, one split and one combine launch (`QWEN38_JOINT_ATTN_GROUP`).
+- Each graph owner captures on a stream of its own (SPD-223). A graph's reset frees the cuBLAS workspace of its capture stream, which every graph captured on that stream reads; with shared streams one owner's eviction freed another's workspace, and its next replay was an illegal memory access in 4- and 8-lane greedy rounds. A full joint set is reset whole and captured into a new pool. A draft graph maps the window pages its gather reads before it runs and is rebuilt when a tensor it baked moved, and a joint pass never gets a tree deeper than the GDN verify carries.
+- The 27B's EXL3 projections at 33 to 64 rows read fragment-major activations, the same bits (SPD-201). The block drafter's walk and tree are built in C++ (`QWEN38_TREE_NATIVE`), with a Python fallback that builds the same tree.
+- Flash-Next's joint pass runs its row-wise parts and grouped experts once over every lane's rows (SPD-215), the GDN delta rule of every lane in one launch (SPD-239), a round's commits in one call (`QSE_RUNNER_COMMIT_MULTI`), the lanes' MTP drafts in one packed pass (`QSE_RUNNER_MTP_PACK`, SPD-235), 24 rows a pass at 8 lanes (SPD-233), and its mixer GEMV on the tensor cores (SPD-241). Measured served C1 to C8: 43.3 / 56.9 / 83.2 / 107.8 tok/s with the tensor-core mixers against 41.6 / 55.4 / 75.5 / 95.0 without, then C2 to C8 58.9 / 85.5 / 108.0 with the PLE read during the layers before it (`QWEN38_FN_PLE_LATE`).
+- NemotronH's lanes draft in one packed LiLiCorr pass (`QSE_NH_LILICORR_PACK`), its joint pass keeps 16 rows at 8 lanes (`QSE_NH_JOINT_ROWS8`), and the round runner takes the joint plain step at a lane count where drafted rounds make fewer tokens a GPU ms (`QSE_RUNNER_LANE_PLAIN=auto`, decided on live rounds, the other mode probed every 16th round) (SPD-233). Nemotron 3.5 Bolt EXL3 4.0 at 8 requests at once, the card's row (temperature 1.0, top-k 20, top-p 0.95, 512 tokens, 3 rounds): 54.3 -> 92.2 tok/s wall; at 8 lanes the runner took 1,503 plain rounds and 340 drafted, 65.2 ms a round of 8 tokens.
+- A lane without a draft joins the round's pass with its plain step as a one-row block (ENG-241, SPD-215, SPD-217). The MTP drafter learns its prices only from rounds it decoded alone, and a turn takes the plain step only when a drafted round's measured price a token is over 20 % above the plain step's (SPD-237, SPD-239).
+
+### Reading prompts
+
+- Requests bound to lanes while no lane decodes prefill before any of them decodes (`QSE_PREFILL_BURST=joint`, SPD-245). On the 27B's EXL3 packs their prompts of up to 512 tokens run in one layer-major forward, each row bit for bit its own prefill: 8 prompts of 512 tokens in 3.55 s against 4.43 s one after another, in process. A request on its way to a lane holds a member that would otherwise run alone, up to `QSE_PREFILL_BURST_WAIT_S` (10 s); a lone request never waits. No token changes; a member's first token comes after every member's prefill.
+- The 27B's GDN prefill runs at a 64-row chunk with a value-block-fastest walk (`QWEN38_GDN_CHUNKED`), the prep kernel's scan at 16 by 4, the GDN gate read in place and no normed-row store before the slab MLP (SPD-245). In process, 8K 7.103 to 6.636 s and 32K 30.149 to 28.038 s with the scan, then 8K -0.31 s and 32K -1.30 s with the chunk-64 walk. Served at 8K in one session: 6.76 s with it, 6.97 s without.
+- A layer-major window runs its chunks' projections and MLP as one call, with the slab product and its rotation in one kernel, bit for bit the chunk-major prefill (SPD-169, SPD-189, SPD-193). The EXL3 skinny kernel takes prefill calls up to 512 rows: on the 27B's cached prefill 160 tokens 0.596 to 0.237 s, 256 tokens 0.653 to 0.330 s (SPD-171).
+- The resident prefix keeps the state at the end of the last prompt (`QWEN38_PROMPT_END`, SPD-215). An agent that sends the conversation back with its own words for the answer resumes there instead of at the grid line below.
+
+### Sampling
+
+- A sampled request that names none of `top_p`, `top_k` and `min_p` takes `--top-p` / `--top-k` when given at start, else the model card's filters (Qwen3.8-27B: top_k 20, top_p 0.95), else the whole vocabulary (SPD-245). Before, a request that sent `temperature` alone sampled the whole vocabulary. `/health` `sampling.unnamed_filters` shows the filters.
+- A sampled request without a `seed` draws one at admission (63 bits of OS entropy) and takes the keyed walk a seeded request takes, a draw from the same filtered distribution (`QWEN38_FRESH_SEED=auto`, SPD-245). Two requests get two seeds. Under an active plan the seed is in the decision row (`extra.seed_drawn`). [docs/exactness.md](docs/exactness.md#sampling) has the argument and the tests.
+
+### Caches and drafting
+
+- A request for the raw engine (`X-Tandem: raw` or `off`, the `raw` or `bench` profile) drafts from the persistent suffix store and writes nothing into it, so a repeated benchmark cannot teach the engine its answers (SPD-151). `QSE_SUFFIX_RAW=write` keeps the old rule.
+- The 27B's drafters keep a 2,048-row window of context KV (SPD-177): a 40K greedy decode gives the same tokens with 0.98 GB of draft KV in the pool instead of 1.69. Resuming below a long session's window maps the pages it uncovers again (SPD-211; before, an illegal memory access past 20K).
+- A text-only community pack starts under a Setup Guide that turned vision on, and a 27B pack's profile carries its base's parallel defaults (SPD-165, SPD-167).
+
+### Server
+
+- A stream that ends at its end token or a stop string closes its source before the request's bookkeeping, so a closed stream no longer keeps the GPU turn and stops every lane (SRV-709).
+- With side slots the shadow reader reads in the idle window only (SRV-711). The Laya decider's encoder loads in 1.35 s instead of 15.9, bit for bit (SRV-717), the decision models' pool reads reuse one allocator snapshot for 5 s, and `QSE_STACK_SAMPLE` samples every thread's busy stacks on a box without ptrace.
+- The small generative model's decode step captures its graph again (SRV-711).
+- A raw request that offers no tools gets its answer streamed as text (SRV-723). The raw path read every answer for tool calls, and LFM2.5 writes its call opener as an ordinary token: an answer to a code prompt that opened with it arrived in one event at the end (512 tokens, the first text at 4.2 s), and one that closed the block went out as `tool_calls`. Now the raw path holds calls only when the request offers tools; without tools the model's call markup is the answer's text, and the finish is `stop` or `length`. With tools nothing changes, and under a conductor plan a call in an answer to a request without tools is still dropped (SRV-247).
+- Flash-Next's idle windows capture the context class past the conversation's length, each further class within 6,144 tokens of it, and every class a turn found without its graphs (SRV-713). A turn through the conductor starts 4.1 to 4.8k tokens long, a class the warm-up had not captured, so StairCut priced the missing graphs into the turn and took the plain step. Code through the conductor, two requests on a fresh server: 39.5 and 59.0 tok/s before, 58.5 and 65.2 after, the same text; 480 graphs over 8 lanes take 20.9 s of idle time and 5.3 GiB.
+- A Flash-Next MTP step keeps the verify block's records until its commit (SRV-713). With the round runner's next draft issued before the commit, an MTP graph captured there emptied the records the commit graph read: a raw 4,024-token request on a class without graphs ended in HTTP 500. The same request now writes its 512 tokens, the text of a run with the class's graphs captured ahead.
+
+### Text and fingerprints
+
+- The 27B's prompt reading moves its summation order once: the GDN prep kernel, its 16 by 4 scan and the chunk-64 walk keep the recurrent state's bits and round a few chunk outputs one BF16 ulp the other way, top-1 64 or 65 of 65 on prose, code and repeated text at 2K, 8K and 32K tokens (`tools/gdn_tile_gate.py`). Flash-Next's tensor-core mixers agree on top-1 99.6, 99.6 and 98.8 % with the kernels before, KL 5e-4 to 1.7e-3. Greedy text can part from 0.14.2's at a near tie. [docs/exactness.md](docs/exactness.md#stronger-than-the-promise-release-identity) lists the gates and the knobs that give the earlier orders.
+- Every family's fingerprint moves once (`tests/test_adapter_guards.py`): the disk tier's files and the spilled conversations 0.14.2 wrote are read again once.
+
+### Weight cards
+
+- Every weight card carries a speed row of this build (SPD-245, SRV-713): `parallel` in `models/<id>/model.yaml`, one row a profile or community pack with the commit and setup it was measured on, and its raw file under `measurements/`, which the registry checks the row against. `tools/parallel_card.py` measures a row against the served profile ([docs/measurement.md](docs/measurement.md#the-weight-cards-speed-rows)). The Setup Guide's Model step shows the rows, and each weight card its rate alone and with 8 requests at once.
+- The rows, 2026-10-26 (LFM2.5 and Bolt 2026-10-27, after SRV-723 and SPD-233): 8 lanes, thinking off, temperature 1.0, top-k 20, top-p 0.95, a seed a request, suffix store and response cache off, `X-Tandem: raw`. Decode is one request of 512 tokens alone (median of 3), the 32K row the time to first token of a cold 32,768-token prompt, the last two columns the total wall tok/s of 1 and 8 prose requests at once (median of 3 rounds, every round with N decoding at once).
+
+| card | decode code / prose | 32K first token | 1 at once | 8 at once |
+|-|-:|-:|-:|-:|
+| 27B EXL3 4.0 | 85.1 / 35.8 | 28.72 s | 35.3 | 146.3 |
+| 27B EXL3 6.0 | 66.2 / 28.1 | 28.26 s | 25.6 | 120.1 |
+| ThinkingCap 27B EXL3 4.00 | 68.7 / 36.2 | 28.4 s | 36.1 | 147.6 |
+| Flash-Next 3.05 | 69.6 / 49.0 | 29.82 s | 44.1 | 108.2 |
+| Ornith 1.5 122B EXL3 4.0 | 53.6 / 42.1 | 25.6 s | 34.5 | 85.5 |
+| Flint EXL3 4.0 | 130.0 / 120.4 | 7.75 s | 108.3 | 215.9 |
+| Flint EXL3 6.0 | 93.5 / 106.2 | 8.09 s | 80.7 | 171.9 |
+| LFM2.5 24B-A2B EXL3 4.0 (131,072-token window) | 130.8 / 129.9 | 5.67 s | 122.8 | 238.6 |
+| Nemotron 3.5 Bolt EXL3 4.0 (2026-10-27, after SPD-233) | 50.4 / 39.1 | 43.53 s | 35.2 | 92.2 |
+
+### Measured
+
+The 27B ThinkingCap EXL3 4.0 pack on one DGX Spark, 2026-10-26: 8 lanes at the 262,144-token window, KV pool on, side graphs off, suffix store off, `X-Tandem: raw`. N requests of 512 prompt tokens sent at once, 512 tokens each, greedy or temperature 1.0 alone (the card's filters and a drawn seed). Wall is all completion tokens over the time from the first send to the last end. Medians of the last two of three rounds, every round with N decoding at once and no fault. Greedy and C4 sampled ran on a3dc1e45, the other sampled rows on 345ab0fa. It is not an A/B against 0.14.2, which served one lane by default.
+
+| N at once | greedy, wall tok/s | sampled, wall tok/s |
+|-:|-:|-:|
+| 1 | 42.5 | 36.5 |
+| 2 | 73.5 | 62.9 |
+| 4 | 108.9 | 99.2 |
+| 8 | 155.9 | 146.2 |
+
+One prompt alone, greedy, time to first token: 2,048 tokens 1.90 s, 8,192 tokens 6.76 s, 32,768 tokens 29.4 s. [docs/parallel-requests.md](docs/parallel-requests.md#spd-245-2026-10-26) has the settings and the A/Bs on the way.
+
+### Tools
+
+- `QWEN38_ROUND_LOG` writes a line per verify round, slot block and packed draft (SPD-187). `tools/joint_graph_check.py`, `tools/fn_joint_check.py`, `tools/joint_lone_diff.py` and `tools/overlap_check.py` check the joint passes against the lone verify; `tools/gdn_tile_gate.py` gates a prefill order change. `bench/speed-prompts-v1.json` holds versioned 1.3k-token code and prose prompts (SPD-183).
+
+## 0.14.2, 2026-10-23
+
+0.14.2 fixes what an outside test of Ornith found, and the bugs we met on the way. With thinking off, reasoning that a model writes into its answer anyway now goes to `reasoning_content`. Ornith answers up to its card's 131,072 tokens when a request sets no limit, and at 131,072 tokens and above it decodes plain instead of drafting slower than plain. The Setup Guide no longer offers Ornith parallel chats its engine cannot run, and it sets the thinking effort for every model. `cache_prompt: false` reads the whole prompt and leaves the caches as they were. The lookup corpus is built for each model's tokenizer after its download. `tandem-dash serve` starts without the engine installed. No fingerprint moves: every model writes the same tokens as in 0.14.1 and keeps its saved conversations.
+
+### Answers
+
+- With thinking off, the text before the first `</think>` that stands alone on its line, outside a code block, goes to `reasoning_content`, and usage counts it as reasoning (#93). This applies to every model, and only when no `<think>` of the model's own came before the tag. A block the model opens at its start is read as reasoning, and an empty pair is dropped. Streamed, the text before the tag has gone out already, so only the tag line is dropped. A tag inside a code block or in a line of text stays, and so does every tag after the first. The report's 4 long contest answers wrote everything into `content` on 0.14.1. Replayed on Ornith 4.0, two now carry their working-out in `reasoning_content` (1,536 and 68,172 characters) and only the answer in `content`, the empty pair is gone, and the block opened at the start reads as reasoning. Flint's answers to 10 greedy asks with thinking off are byte for byte those of 0.14.1. Ornith gets no thinking-off line like Flint's: one cleaned 3 of the 4, but it cut the median ordinary answer from 506 to 362 tokens greedy.
+- A family whose template reads one system prompt first gets its thinking-off line at the end of that prompt. A developer message there made Ornith's template answer 500 (#93).
+- A request with no `max_tokens` on Ornith's profiles can write up to 131,072 tokens, the limit its card evaluates with (#96). Every other profile keeps 32,768. The longest answer in the report, at effort `xhigh`, was 39,046 tokens. `/v1/models` shows the value as `tandem.max_output`, and a request's own `max_tokens` still wins, clamped to the window. A box the Setup Guide set up for Ornith before 0.14.2 keeps the 32,768 in `run/setup.env` until the field is changed. docs/setup.md says how ("The answer limit").
+- When several requests arrive together as a fresh server's first traffic, none answers 500 with "no tool-call format 'xml'" any more (SPD-185). The tool-call formats were marked found before their modules had registered, and with parallel slots three of four requests in such a burst failed. The formats are now found once, under a lock.
+
+### Ornith
+
+- Ornith's price file has the measured cost of the MTP head's backlog, the prompt rows the head reads before a turn's first draft (#110). Before, a fresh server's first long turn always drafted and paid it: 87,717 rows in 4.6 s at 112k tokens, 109,443 rows in 10.2 s at 220k. Greedy, one run each: at 112,068 tokens the turn now takes the plain step at 25.11 tok/s, where drafting ran at 18.04 against 25.16 plain. At 220,038 tokens it runs at 18.85, where drafting ran at 10.95 against 18.89. At 3,525 tokens it still drafts, 40.9 against 37.4 plain.
+- The Setup Guide stops Ornith at one parallel chat and says why under the stepper (#104). Its engine builds no side slots yet, so the server ran one slot while `/health` showed the count asked for. Each `model.yaml` names its engine family, and the family's `ServeSpec.side_slots` says whether it builds side slots. With `--parallel N` on such an engine, `/health`'s `parallel` names the one slot and why. The other families keep the engine's 16.
+
+### Caches and drafting
+
+- `cache_prompt: false` on a request is honoured as a cold read (#98). It reads the whole prompt (`timings.cache_n` 0), uses and writes no state-store entry, disk-tier anchor or end anchor, and the response cache neither answers it nor keeps its answer. The conversation in place is set aside as for another client's and is where it was for the next request. `true`, a missing field and any other value keep the caches on. In the report, 32 of 37 requests that sent `false` had reused cached tokens. docs/server.md has a `cache_prompt` section.
+- The lookup corpus is built for the served model's tokenizer after its download (#97). One store a tokenizer sits under `CORPUS/tokenizers/<16 hex of the tokenizer's sha256>/`. `ops/use-profile.sh` and the Setup Guide's install build it once the weights are complete (about 31 million tokens, from one English and one German Wikipedia shard and local Python sources). `install.sh --setup` downloads the two shards (1.2 GB) and sets `CORPUS`, and `ops/start.sh` passes the engine the store of the served model's tokenizer. A failed build logs a line and the switch goes on, and `QSE_CORPUS_BUILD=off` skips it. A `CORPUS` that records no tokenizer is read as before. The speed with and without the corpus is not measured yet.
+- docs/caches.md says why the first request after a restart can report a resident hit: the drain's conversation is read back at the start (#94).
+
+### Conductor and memory
+
+- A model whose prompt has no place for the conductor's notes gets none, and its turns say so (SRV-703). The conductor puts its notes before the last message's `<|im_end|>`, and Flint's template ends no message with a token. On Flint every turn of a profile with memory on found no place: 1,456 turns in a day carried the error `no_insertion_point`, 199 of them with memory on, while the decision rows said `memory: on`. A family's fit has a `notes` key, Flint's is false, and such a turn records `memory: {mode: off, why: model_notes}`. Nothing went into Flint's prompt before either, so it writes the same text.
+- Profiles have a fourth memory switch, `none`: nothing added, as an absent key meant. Every shipped profile sets its switch: `on` in `chat`, `coding`, `hermes` and `chat-app`, `none` in the others. A box's stored profiles keep what they hold.
+- The Notes tab has a "Where memory is on" panel: the served model when it reads no note, and every profile with its switch and its clients.
+
+### Setup Guide and docs
+
+- The Setup Guide sets the thinking effort (`low`, `medium`, `xhigh`, default `medium`) for every model, as it did for the two Qwen models (#100). docs/setup.md has a section on it, and the cards, docs/tool-eval-bench.md and docs/flint.md name the effort of each published number. Speed rows are greedy with thinking off. A fresh install thinks at `medium`, and the tool-eval-bench `tools` rows of the 27B and Ornith ran at `xhigh`.
+- docs/server.md lists the `timings` and `metrics` fields, which chunk of a stream carries them, and the two draft formulas: `tokens_per_block = (completion_tokens - 1) / blocks`, also `mean_acceptance_length`, and `draft_acceptance_rate = draft_n_accepted / draft_n` (#99).
+- The manual's ledger table closes the group its last paragraph opened, which held to the end of the book (#126).
+
+### Chat tab
+
+- The page check and the browser drive close their Chrome in about 0.1 s (#131). The kit sent SIGTERM to Chrome's whole process group, so its helpers died at once and the browser process, waiting for them in its shutdown, sometimes stayed up until the SIGKILL 5 s later: on CI runners 3 closes in 200, and 17 in 200 with the CPUs busy. The SIGTERM now goes to the browser process alone, which ends its helpers, and to the rest of the group once it is gone. On the same runners 0 closes in 400 took more than 1 s.
+
+### Install and dashboard
+
+- `tandem-dash serve` starts without the engine (#108). It exited with `ModuleNotFoundError: No module named 'engine'`, as the standalone proxy ships `proxy` and `server` only. The conductor reads its knobs through `server/knobs.py`: the engine's registry where it is installed, else the environment with the same defaults.
+- The dashboard's tests run on `vitest` 5.0.3, for two moderate advisories in `@vitest/mocker` 5.0.1 (#128). Nothing of it is in `dashboard/dist`.
+
+### Tests and CI
+
+- CPU-job tests that failed at random are fixed at their cause (#113, #120, #122, OPS-231). The disk-tier tests wait for a staging slot, Flint's and LFM2's structure checks run in fp64, the page check bounds Chrome's start and not the whole check, and its test starts Chrome once before it times a start. The page check's Chrome picks its own debugging port. The preview's long-poll stops watching the client once its answer is complete, so a client that closes after the answer leaves the relay to end by itself. The proxy gate's tests hold a kept retry to the gate's own bounds.
+- The dashboard's size budget measures with `pako`, zlib in JavaScript, so `dist/` gets the same gzip size on every Node (#130). Node's own zlib depends on how Node is built: the same bytes read 470,034 with stock zlib and 471,208 on the official Linux builds, against a budget of 471,040, so `npm test` failed on Linux. The bundle sits 1,006 bytes under its 460 KB.
+- `tests/test_manual_braces.py` checks that every table the manual's generator writes closes each brace it opens (#126).
+
+## 0.14.1, 2026-10-22
+
+0.14.1 fixes how Flint's tool calls reach a client and how it answers with thinking off, and moves model code behind adapters. A call's argument names are matched to the offered tool's schema, so Flint's `read` with `path` reaches opencode as `filePath`. A call to a tool the request did not offer goes to the offered tool of its kind. With thinking off, Flint answers without writing its reasoning into the answer. Flint can keep its full layers' keys and values in e4m3, off by default. Each model family now registers itself and declares how it is served, and shared code names no model. The other models write the same text as in 0.14.0 and keep their saved conversations. Flint's fingerprint moves once, so its saved prompt-cache entries from 0.14.0 are rebuilt once.
+
+### Tool calls
+
+- Argument names are matched to the tool's schema before a call leaves the server (SRV-691), on both paths and in every tool-call form. A name is kept when the schema has it. Otherwise it is matched by case, `_` and `-`, then by a small synonym table: a path for the schema's one path-like parameter, `query` / `pattern` / `regex`, `cmd` / `command`, `content` / `text` / `contents`. A rename happens only when exactly one parameter is the target and the call has not set it. A value is never changed, except to take its target's JSON type. A stream renames a key as soon as it is decided, so the streamed call and the parsed one agree. The journal records each rename (ARGS, RENAME). Through opencode's checks at Flint 4.0's card sampling, 8 runs an arm: calls the client refused fell from 4 to 0 under the conductor and from 2 to 0 raw, and the checks passed went from 28 and 29 of 32 to 32 of 32.
+- A call to a tool the request did not offer (SRV-693) goes to the one offered tool of its kind when its arguments then name that tool's required parameters. A search or a listing with no such tool becomes a quoted `grep` or `ls` for the client's bash tool. A write, edit or delete never becomes a shell command. Anything else goes out as written, and the conductor's C4 asks for it again with the offered list.
+- The conductor's call checks read the calls as the client receives them, after the renames (SRV-691).
+- `tools/client_smoke.py --sampling card` runs the tool checks at the server's default sampling (SRV-692). The release gate stays greedy.
+
+### Flint
+
+- With thinking off, Flint's prompt gets one line before the conversation: "Do not show your reasoning. Reply with the answer, or call a tool when one helps." (SRV-697). Without it, Flint opened its answer with reasoning on 7 of 10 hard asks greedy and 13 of 20 at its card's sampling, with a median of 582 and 600 tokens (600 was the cap). With the line it did so on 0 of 10 and 0 of 20, with a median of 153 and 116 tokens. On tool-eval-bench (4.0, raw path, thinking off, one run each) it scored 75 with the line and 77 without. Thinking on is unchanged.
+- Flint's requests keep system and developer messages where they stand, with their own role, since its template renders them in place. The 27B's rule (one system prompt first) is now the default family setting, unchanged for the other models.
+- `FLINT_KV_FP8=1` keeps the 14 full layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 14,784 bytes a token instead of 28,672 (SPD-150). This changes the output, so it is off by default. On 4.0 against the exact cache, the last 1,024 tokens of a 32,768-token source file read at KL 0.070, 93.8 % top-1 agreement and perplexity 7.465 against 7.165. At 122,880 tokens the numbers are KL 0.050, 95.7 % and 4.132 against 4.053. Plain decode runs at 79.4 tok/s against 60.6 at 64k, 57.1 against 39.3 at 128k and 36.6 against 23.05 at 256k. Prompt reading is 5 to 12 % slower. [docs/flint.md](docs/flint.md) has the table.
+  - To turn it on in the Setup Guide, pick Flint, go to the Tools step and switch on "Long-context cache (FP8)" under Features, then finish Review and Install. The switch shows the cost and the gain, and the memory bar counts the smaller cache.
+  - To turn it on from the command line, add `QWEN38_FLINT_KV_FP8=1` at the end of `~/TandemLLM/run/ops/serve.env` and run `~/TandemLLM/bin/tandem restart`. `/health` then shows `"kv_cache": "e4m3"` under `weights`. To turn it off, delete the line and restart, or switch it off in the Setup Guide.
+
+- tool-eval-bench on Flint's three profiles: bench 2.8.1.dev13 (commit f2e368b), seed 42, temperature 0, one run a row (n=1), the Setup Guide's Flint defaults (one slot, effort medium by default, FP8 cache off), BF16 at a 131,072-token window, 2026-10-22. Score, then the time the row took. Raw rows send `X-Tandem: raw`; `bench-pk` is a test profile we do not ship. Hard mode at n=1 varies a lot between runs, so we claim no ranking between the sizes. [docs/flint.md](docs/flint.md#tool-calls) has the chart and [models/flint/measurements/2026-10-22-tool-eval-bench.json](models/flint/measurements/2026-10-22-tool-eval-bench.json) every row.
+
+| row | EXL3 4.0 | EXL3 6.0 | BF16 |
+|-|-|-|-|
+| **full suite, 69 scenarios** | | | |
+| raw, thinking off | 75 (2 min) | 76 (3.1 min) | 76 (4.7 min) |
+| raw, thinking xhigh | 85 (4.7 min) | 86 (11 min) | 86 (21.5 min) |
+| conductor, `bench-pk` | 81 (5.1 min) | 86 (8.9 min) | 83 (16.8 min) |
+| conductor, `tools` | 83 (4.1 min) | 86 (6.3 min) | 84 (15.3 min) |
+| **hard mode, 28 scenarios** | | | |
+| raw, thinking off | 36 (1.8 min) | 41 (2 min) | 41 (4.3 min) |
+| raw, thinking xhigh | 71 (5.5 min) | 61 (8.6 min) | 62 (19.9 min) |
+| conductor, `bench-pk` | 73 (3.5 min) | 61 (5.8 min) | 57 (12.8 min) |
+| conductor, `tools` | 80 (2.2 min) | 54 (4.4 min) | 70 (12.8 min) |
+
+### Model adapters
+
+- Each family registers itself in its package's `arch.py` and keeps its own knobs in `knobs.py` (ENG-405). Adding a model edits no shared file.
+- A family's `ServeSpec` says what the server needs: the tool-call form, how the model opens and turns off its reasoning, and where system messages may stand (ENG-406). The identity note names the model from the profile's card and has no default model.
+- The tool-call forms (XML, Pythonic, arg-key) sit behind one `ToolFormat` interface in `server/toolformats/`, held to one contract by `tests/test_toolformats.py` (ENG-407). `engine/grammar.py` is back to its 0.13 bytes.
+- A family declares which of its files others build on and which it uses from others, and kernel launch options come through `EngineHooks` (ENG-408). A change to a shared file moves exactly the declared dependents' fingerprints.
+- Community-pack rules live in each base model's `model.yaml`, and its profile writer and pack check live in its family (ENG-409). The 27B's builder, drafter stack and side slots moved from `server/app.py` into `engine/models/qwen3_5/serving.py` (ENG-406, ENG-410).
+- Guards hold this (ENG-404). They check v0.14.0's fingerprints as goldens with only Flint allowed to move, and they freeze `SAME_ROWS`. They also check that a change in one package moves only the adapters that hold it, and lint the shared modules for model names. [docs/adding-a-model.md](docs/adding-a-model.md) says what a family declares.
+
+### Tests and CI
+
+- The CPU job on GitHub runs every test file, and a failure fails it (OPS-231). Timing tests bound CPU time against a reference measured in the same run, the two fp32 references bound their error in ulps, and the padded-row check bounds its difference by 2 % of the largest value, a quarter of what padded rows that move the state change. The shared-module lint reads f-strings the same on every Python. The slow-subscriber test gates its reader, and the drain test waits for its signal handler. The gate's fake engine runs in a process of its own. A test server binds before its port is read (`--port 0` works), and helpers that need a port up front take one from a locked counter.
+
+## 0.14.0, 2026-10-22
+
+0.14.0 adds Recursive's Flint, a mixture-of-experts model for coding agents, from our EXL3 packs at 4.0 and 6.0 bits a weight and from Recursive's BF16 checkpoint. It has no draft layer, so every profile drafts with the lookup. On one DGX Spark the 4.0 pack decodes at 128.2 to 136.6 tok/s plain and up to 480.0 with the lookup, 39.5 at a 128k context, and every drafted text is the plain run's. The release also keeps a resumed session's end anchor, serves a re-rendered tool call as the model wrote it, reads the KV heads as they are in every prompt attention, restarts an engine whose CUDA context was lost, and makes a release with one command. The other models write the same text as in 0.13.0 and keep their saved conversations.
+
+### Flint
+
+Flint has 49 layers (ENG-E16). 35 see a window of 513 positions with rotary and 14 see every position with no positional encoding; attention has 32 query heads, 4 KV heads and a learned sink per head. 47 layers have 256 routed experts, 6 a token by sigmoid score, and a shared expert. About 2.5B of its 39.8B parameters run for each token, and the context is 262,144 tokens.
+
+- The family, `engine/models/flint` (ENG-399). The reference forward is written from the published model description. A sliding layer keeps its keys in a ring of 640 rows and its attention reads two 512-key chunks; the sink is one more term in the softmax's denominator. The row kernels compute each row on its own, so a verify block's rows equal the decode step's bit for bit, and the load-time self-check compares 24 rows. A prompt chunk runs on the flash kernel over the 4 KV heads as they are, with the sink applied from the log-sum-exp in one pass; the routed experts run as one grouped GEMM over the chunk (SPD-144).
+- Three profiles. `flint-exl3-4.0` (the default) and `flint-exl3-6.0` read our packs: every projection at 4 or 6 bits, the head at 5 or 8. exllamav3 1.6.2 converted them from the BF16 checkpoint at revision 2a247be0, with a patch that adds the architecture. The routed experts' SwiGLU activations reach 260,000 in the top layers, past fp16, so the packs store each routed expert's up projection divided by 128 (`quantization_config.expert_interm_div`), and the engine multiplies the routing weights back (ENG-403). `flint-bf16` reads RecursiveSI/flint at that revision with a window of 131,072 tokens. The repositories `0xBakeer/TandemLLM-Flint-EXL3-4.0` and `-6.0` are public, pinned at a04d4b95 and 17e16040, and sit in [one collection](https://huggingface.co/collections/0xBakeer/tandemllm-flint-6ad9a9a5e0ebee0bb740826d) with the BF16 checkpoint. A download needs no token.
+- Against BF16, the converter's `model_diff` on 50 rows of 2,048 tokens of held-out docs: 4.0 KL 0.194, top-1 79.7 %; 6.0 KL 0.070, top-1 90.8 %. This engine on 8 rows of 1,024 tokens of the same docs: 4.0 0.160 and 80.5 %, 6.0 0.052 and 91.6 %. Flint's router is sensitive to rounding: two BF16 forwards of the same weights differ by KL 0.034 and agree on 92.9 % of top-1 on those rows.
+- Reasoning and tools (SRV-683, SRV-685). The model opens its own `<think>` block with its first token. Thinking off puts an empty block after the generation prompt, and an effort level or a budget closes the block at its cap, counted from the model's own `<think>`; the usage counts those tokens. Tool calls come in Flint's own form, `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>`, typed by the tool's schema and written back the same way.
+- The conductor's tool-call checks read Flint's calls in that form (SRV-687): the end-token check had read every one as a block that does not parse and asked the model to write it again. The stream reads the form itself, so a string argument goes out as it is written, exactly, and a held call goes out whole. `tool_choice` required or named writes the calls in that form, with the form's tags as the model's own tokens (SRV-689). `/v1/models` gives Flint its card: thinking with the effort levels, tools, structured output (OPS-224).
+- Drafting (SPD-142). The lookup is cut by StairCut from each profile's price file, which holds the cost of a verify block by size and of the plain step for each context class; after a round with no draft, the next 1, 2, 4, then 8 rounds take the plain step without looking. The server captures the first class's verify graphs at start.
+- Decode (SPD-145). The shared expert runs on a second CUDA stream beside the router and the routed experts, and the step's Triton kernels launch as programmatic dependents (`FLINT_SIDE_STREAM`, `FLINT_PDL`, both on). The same kernels give the same bits: 4.0 went from 122.4 to 134.2 tok/s.
+- Measured on one DGX Spark on 2026-10-22: one fresh server a row, 512 greedy tokens (the game file 2,048), thinking off, one run a cell. Every drafted text is the plain run's.
+
+| tok/s | prose | code | chat | edit | copy | game file |
+|-|-|-|-|-|-|-|
+| `flint-exl3-4.0` plain | 136.6 | 133.2 | 133.3 | 128.2 | 128.2 | 129.3 |
+| `flint-exl3-4.0` lookup (the profile) | 135.4 | 139.8 | 134.0 | 142.3 | 480.0 | 149.5 |
+| `flint-exl3-6.0` plain | 98.4 | 97.2 | 97.1 | 94.3 | 94.3 | 95.0 |
+| `flint-exl3-6.0` lookup | 97.1 | 103.2 | 98.5 | 107.3 | 353.4 | 114.1 |
+| `flint-bf16` plain | 42.6 | 42.4 | 42.4 | 41.9 | 41.9 | 41.9 |
+| `flint-bf16` lookup | 42.2 | 50.9 | 42.9 | 48.4 | 144.1 | 42.5 |
+
+- Prose with the lookup runs 0.5 to 0.9 % under plain on 4.0 over three alternated pairs: it drafts 7 of 340 rounds, which cost about what they save, and a plain round carries 21 µs of host work for the drafter.
+- Long prompts on 4.0, in the engine: plain decode at 101.7 tok/s at 16k, 61.0 at 64k, 39.5 at 128k and 23.0 at 256k; at 128k a step spends 17.8 of its 25.3 ms reading the full layers' keys and values. Behind a 124,000-token prompt of code the lookup ran a copy ask at 79.5 tok/s against 41.3 plain and an edit ask at 129.7 against 42.4. A 4,096-token prompt reads at 5,375 tok/s on 4.0, 5,045 on 6.0 and 4,319 on BF16.
+- A start loads the 4.0 pack in about 9 s, 19.25 GiB; 6.0 takes 28.49 GiB, BF16 75.53. [docs/flint.md](docs/flint.md) has the checks and what is not measured, [models/flint/measurements/2026-10-22-summary.json](models/flint/measurements/2026-10-22-summary.json) the runs.
+
+### Caches
+
+- Flint's edits to shared files keep the other models' rows: LFM2's norm and attention-prep kernels take an opt-in programmatic launch, the tree drafter an opt-in lookup back-off, and `SAME_ROWS` names their new bytes as the old, so LFM2.5 and NemotronH adopt 0.13.0's saved conversations.
+- A turn resumed from a session snapshot keeps its end anchor (SRV-678). The restore cleared the resident prefix and took nothing of the prompt, so the next turn read again from the store's last grid line (21,782 tokens after a restore at 20,480). The prefix now takes the prompt up to the restore's line and captures from there.
+- End alignment serves a re-rendered tool call as the model wrote it (SRV-679). When the template writes a call back differently from the rows (a typed value, sorted keys, an escaped character), both are parsed; the same calls with the same text around them serve the rows' tokens. `QWEN38_END_ALIGN_CALLS=off` turns it off. Of Ornith's last 1,858 outputs with a tool call, 11 re-render differently and all 11 are accepted.
+- Prompt attention reads the KV heads as they are (SRV-673, SRV-681). Ornith's prompt chunks and MTP prime, LFM2.5's prompt chunks and NemotronH's MTP head repeated the cache per query head; they pass grouped heads to the flash kernel now, with the same bits. At 131k one layer's NemotronH MTP step went from 28.5 to 1.6 ms; a 179,678-token Ornith replay went from 23.2 to 38.3 tok/s.
+- Scratch turns never forward an image's key ids (SRV-669). The memory writer and the summary preparer could give back an end anchor at the ceiling and forward the key ids into the embedding, which left the CUDA context unusable. They hold the end now, and the prefill refuses an id outside the vocabulary.
+
+### Server and operations
+
+- The note after a tool call that does not parse shows the call's form with an offered tool and one of its arguments, in the model's own form (SRV-688); it showed `NAME` and `KEY`, which a model could copy into its next call.
+- The client smoke decodes its tool checks greedily, since it tests the server and not the model's sampling, and sends a longer prompt when a prefill ends before the heartbeat is due (OPS-228).
+- A lost CUDA context fails `/health` (SRV-671). After a device-side assert every CUDA call fails until the process exits, and `/health` still answered ok. A request that fails with a CUDA error probes the context; then `/health` answers 500 with status `failed`, a completion gets a 503 of type `engine_failed`, and the watchdog restarts the engine after two checks.
+- `tools/release.sh` makes a release with one command (OPS-223): bump, preflight, the box gate (the CPU suite, the Setup Guide gate and a client smoke on the box), tag, push, the GitHub release and a verify of what was published. `--dry-run` runs every step but the three that publish.
+- The ops tests reap every hold they start (OPS-217), and the dashboard is on vite 8.3.3 (OPS-220).
+- The repository text names no other engine, pack or fork except where the proxy talks to one (OPS-219, OPS-225); LiLiCorr is written from its definition, with the same outputs bit for bit. [docs/conductor.md](docs/conductor.md) describes the conductor in one page.
+
+### Chat tab
+
+- chatd folds screenshots in blocks (SRV-676). Past 8 screenshots every new one turned an older one into a line, which changed a message 3 to 37 back and made the engine read every turn since again. The kept set now changes only at a fold point; on a replayed chat, 12 re-reads of 105,530 tokens became 1 of 48,129.
+- Plan mode on our engine keeps the chat's effort word and asks for high's reasoning cap as a budget, so the turn into plan mode does not change the prompt's head (SRV-663).
+- The run monitor steers a run stuck on the same files, then stops it (SRV-677): a streak of checks with no new outcome and edits on a few files gets one steering note, and as long again a stronger note and an interrupted run.
+- `tools/chat_fork.py` runs the live model from a recorded step of a conversation (SRV-667).
+
+## 0.13.0, 2026-10-20
+
+0.13.0 adds Ornith AI's Ornith-1.5-122B, from our EXL3 pack at 4.0 bits a weight. It is a Qwen3.5 mixture-of-experts model that reads images and thinks before it answers, and it drafts with its own MTP layer. On one DGX Spark it decodes 37.2 to 38.4 tok/s plain and 85.3 to 124.8 with the MTP layer and the lookup, and every drafted text is the plain run's. The release also carries the conductor's third round of tool-eval-bench work, room for the caches on Ornith, fixes for long Chat-tab sessions and a test runner that counts what each file ran. The other models write the same text as in 0.12.2 and keep their saved conversations: Flash-Next's, LFM2.5's and NemotronH's fingerprints change, and their first start adopts 0.12.2's files.
+
+### Ornith-1.5-122B
+
+Ornith-1.5-122B has 48 layers, 36 Gated DeltaNet and 12 gated attention (ENG-E15). Each layer has 256 routed experts, of which 8 run a token, and a shared expert. One more layer predicts the next tokens (MTP), a Qwen3.5 vision tower reads images, and the context is 262,144 tokens. About 10B of its 122B parameters run for each token.
+
+- The Qwen3.5 MoE trunk, `engine/models/qwen3_5_moe` (ENG-383, ENG-391). It reads the config strictly and the EXL3 pack with its per-expert projections and mixed rates. The row step and the prefill run on Flash-Next's EXL3 kernels with one residual stream, and the row attention is dense at any context length. The router kernel now takes up to 512 experts. The reference forward matches transformers on tiny configs of both Qwen3.5 MoE shapes, and a cache restore on this trunk builds no sparse-indexer pool (the second call of every tool turn failed without it).
+- One profile, `ornith-1.5-122b-exl3-4.0`. Our pack has every projection at 4 bits, the head at 6, the MTP layer at 4 and the vision tower at 6, 64.6 GB. exllamav3 1.6.2 converted it from the BF16 checkpoint at revision e09bc0dfbe, with a patch for 13 experts whose weights are all zero in fp16. The repository `0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0` is public, pinned at 92f7483c, and sits in [one collection](https://huggingface.co/collections/0xBakeer/ornith-15-122b-exl3-for-tandemllm-6ad7ccf04f93a379ba434c4c) with the base model and the DFlash2 drafter. A download needs no token.
+- Drafting: the MTP layer as a chain of 3 and the lookup in one tree, cut by StairCut from the pack's price file. After a round that StairCut cut to the anchor alone, the next 1, 2, 4, then 8 rounds take the plain step (`QWEN38_Q35M_ANCHOR_BACKOFF`). `QSE_ORN_HEAD=dflash2` drafts with incoai's DFlash2 drafter for Ornith instead, with its projections in NVFP4 and its head over the 32,768 most used tokens; the profile then fetches it (1.86 GB). The lookup keeps a suffix store of its own, since the tokenizer is not the Qwen3.8 one.
+- Serving: one slot, a window up to 262,144 tokens, vision on with the pack's own tower (0.35 GB). The model thinks in a `<think>` block and calls tools in the XML form. Temperature 0.6, `top_k` 20 and `top_p` 0.95 come from its generation config. A start needs 93 GiB of free memory.
+- Against the BF16 checkpoint's logits (`tools/q35m_quality.py`, 8 wikitext rows of 1,024 tokens): KL 0.139, top-1 86.2 %, perplexity 7.27 against BF16's 7.09. exllamav3's own forward of the pack gives KL 0.136 on the same rows.
+- Against exllamav3 1.6.0's forward on the same pack, fed the engine's greedy tokens, the top token agrees at 498 of 512 positions (97.3 %, KL 0.027). Agreement is not exact. Of the 14 differences, 9 have a margin under 0.5 logits and one a margin over 4. The cause is not tested.
+- Measured on one DGX Spark on 2026-10-20: one fresh server a row, greedy, thinking off, 512 new tokens on prompts of 3,146 to 4,165 tokens, one run a cell. The last column is a 2,048-token code answer (a game in one HTML file) through the raw path. Every drafted text is the plain run's.
+
+| tok/s | prose | code | chat | edit | copy | 2,048-token code |
+|-|-|-|-|-|-|-|
+| plain | 37.6 | 38.4 | 37.8 | 38.0 | 38.1 | 37.2 |
+| MTP layer + lookup (the profile) | 85.3 | 114.2 | 110.0 | 115.9 | 124.8 | 103.3 |
+| DFlash2 + lookup | 67.3 | 91.7 | 92.2 | 106.9 | 122.8 | 96.8 |
+
+- A start loads the pack in 65 s: the weights take 59.95 GiB, 61.16 with the MTP layer. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs. Not measured: requests at once (a joint verify for side slots on this trunk is SRV-653), prompt reading speed, images, sampled decoding and repeat runs.
+- tool-eval-bench on the 0.13.0 code, one run a row: 93 and 94 on the raw path at every thinking setting, 96 for the conductor's `tools` profile, 94 to 97 for the other conductor profiles, and 80 raw against 84 for the conductor in hard mode. [docs/tool-eval-bench.md](docs/tool-eval-bench.md#ornith-15-122b-on-0130-2026-10-21) has the rows.
+
+### Caches
+
+- Flash-Next, LFM2.5 and NemotronH adopt their 0.12.2 conversations (OPS-215). ENG-383's router change moved their fingerprints, since `tools/fn_kernels.py` is in their manifests. At 512 experts the router launches the same kernel with the same arguments as before, so a `SAME_ROWS` entry maps the new bytes to the old. Without it their first start on 0.13.0 would have swept every saved chat. The 27B's fingerprint does not change.
+- The response cache keys on the effort level a request resolved to, the client's word and the router's level (SRV-645). `high` and `xhigh` render the same prompt and, at a 16,384-token limit, the same thinking cap after the answer reserve, so a raw `xhigh` tool-eval-bench run replayed 190 answers of the `high` run before it. The same request at the same level still replays.
+- Ornith's caches have room (SRV-655). At the profile's first ceiling of 74 GiB every end anchor, stash, park and store snapshot was refused, and so was a 55k-token turn: 65.5 GiB was allocated against 74 less the KV pool's 6.5 and 2 of slack. The limits are now 86 and 90 GiB with a 2 GiB pin, and a long prefill gives caches back first. The trunk's prefill workspace is priced as its own, 2.75 GiB plus 32 KiB a token; Flash-Next's line had refused a 148k-token turn by 60 MB. A store decline names its reason: the entry cap, the budget, or the memory policy with its figures.
+- A refused end alignment serves the part it aligned (SRV-657). When no pass aligns the whole copy, as when the parser rewrote a tool call, the rows up to the highest resident anchor in the part that matches token for token are served, and the turn resumes there. On Ornith such a turn had read 132,635 of 144,923 tokens again, from an early answer's whitespace. An image turn the end replay did not serve logs why.
+
+### Tools
+
+- `tools/teb_batch.sh` runs tool-eval-bench rows one at a time against one server and keeps what each ran under: the bench's and the server's versions, the pack, the slots, the cache settings, `/health` before and after, the response cache's hits during the row; `tools/teb_summary.py` prints the table and each miss with the grader's reason (OPS-209). The conductor rows send no profile header, so each request is resolved by what it offers, as a client meets it. [docs/benchmarks.md](docs/benchmarks.md#a-batch) has the commands.
+- `tools/chat_trace.py` replays a recorded conversation through a `chatd` of this tree over the fake engine in seconds and checks that no write shows as a stub, requests only append, the bash status follows the exit code and a capped run ends idle; `tools/prefix_check.py` sends the requests it built to the live engine and reads what each one read again (SRV-667).
+
+### Conductor
+
+- A package whose result an offered tool delivers can stay out of the turn (SRV-615); shipped in shadow, it journals what it would keep out and changes no prompt. A package names its result in `deliverable`: write-message and formal-letter `send`; event-plan, weekly-schedule and checklist-builder `schedule`; social-post `post`. When one is about to go in on a request that offers a client tool whose declaration makes the deliverable (C5's reading of the tools), the class question's stages get one more question, done with one of these tools or the text itself; `tool` would keep it out, `text` puts it in ("draft an email to Sarah, I will send it myself" keeps write-message), and with no answer it would stay out. Without such a tool (Open WebUI's search tools, opencode's) nothing is asked; a forced function keeps it out unasked; the tool turns of the same message keep the decision; a pin wins. The journal row has `package_choice.kept_out` (or `shadow.tools.kept_out`), the counter `qse_conductor_package_kept_out_total`; the router's `tool_fit.deliverable` is `shadow` (shipped), `on` or `off`, and a stored packages document gets the field once (migration `2026-10-20-packages-deliverable`). On the DGX Spark with it on (2026-10-20, the chat profile, n = 1) tool-eval-bench's TC-03 passed, where the model had drafted the message with a placeholder for Sarah, and the score stayed 91: TC-47 and TC-51 failed, which passed on 0.12.0; the cause is not tested, so it ships in shadow. In shadow the side question still runs on the turns it would decide (one decision-model question, about 0.9 s on the Spark). The Packages screen shows the field.
+
+### Tests
+
+- New CPU tests for the Qwen3.5 MoE trunk: the config and the pack's layout, the reference against transformers, the row attention (Triton on a GPU, or the interpreter), the DFlash2 selector and its hot ids, and a cache restore on a tiny engine (`tests/test_q35m_*.py`). `test_the_ornith_card_is_the_raw_data` holds the card and the profile's pin to the summary (OPS-215).
+- Every test file runs its tests as a script (SRV-661). Sixteen pytest-style files had no script entry, so on the box they ran nothing and counted as passed. `tests/scriptmode.py` runs a module's test functions with their fixtures, `tests/script_suite.py` fails a file that ran no test and lists a file that skips on purpose apart, and `ops/gate.sh` uses it.
+- The fake backend and a test of SRV-639 describe the strict window as a strict OpenAI-compatible backend's and the relayed model as a `proxy` backend, not by another engine's name (OPS-211).
+- `tests/test_grammar.py` passes run after run (SRV-647): it failed in most runs on 0.12.1 and 0.12.2 because the constraint's mask cache was keyed by `id()` of the grammar, and a grammar built after another was freed read that one's masks (a mask for a 97-token vocabulary on a 99-token one). Each grammar now keys its masks by a serial of its own, and a grammar replaced for another vocabulary drops its masks. On a box the same reuse could serve a wrong mask after the grammar cache replaced a grammar; no case was seen.
+
+### Chat tab
+
+- `grep` given one file's path searches that file line by line, where it answered "is not a directory"; a folder's files over 2 MiB are named as not searched instead of being counted as no match (SRV-649). The tool's description is unchanged, so no chat reads its prompt again.
+- `read_file` reaches every line of a file over 4 MiB (SRV-651). It decoded the first 4 MiB of any file and paged inside them as if the file ended there: the window's last page promised nothing more and an offset past it came back empty. A large file is now read 4 MiB at a time from the line `offset` names, whole lines numbered as in the file, and the marker names the bytes after the page and the offset to read on from; a line longer than 4 MiB says so. Files up to 4 MiB read as before, and the schema is unchanged.
+- A `write_file`'s content and an `edit_file`'s long texts stay whole in the requests after them until a fold point (SRV-659). Past 160k characters of whole texts, or at a compaction, the oldest leave the call down to 48k; the path stays, and the tool result says what left and how to read the file. A heredoc that writes a file folds the same way, with its output and exit code kept. Requests between fold points only append, so the engine's cache keeps them.
+- Plan mode keeps the request's head (SRV-663). The tool list and the system block changed with it, so the turn into plan mode and the turn after Approve read the whole conversation again (84,423 tokens on Ornith). The request now keeps every tool, the run refuses all but the read tools and the todo list, and the plan rule goes into the plan turn's message. A library or sandbox tool check that times out keeps the last tool list.
+- A run stopped at its 100-call cap leaves the chat idle with its Continue card, where the header and the rail said error (SRV-665). `render_page` keeps a shader error's compiler lines, which the 240-character clip cut after the first one.
+
+Upgrade: run the 0.13.0 installer again (`--setup --force-setup` on a box installed with `--setup`, then `ops/use-profile.sh` with your profile; the same `--dir` otherwise), then `tandem restart` and `tandem chat restart`. For Ornith run `ops/use-profile.sh ornith-1.5-122b-exl3-4.0`; it downloads 64.6 GB.
+
+## 0.12.2, 2026-10-20
+
+0.12.2 fixes two Chat-tab bugs that users reported and the adoption of LFM2.5's older saved conversations. A run that reads a large file now ends with an answer instead of a request over the window (#18), and the port preview shows an app's Server-Sent Events and long-polls as they arrive (#86). No model, card or profile changed, and every profile writes the same text as in 0.12.1. `read_file`'s schema changes, so each chat's first request after the update reads its prompt again. A box that comes from 0.9.x to 0.11.1 adopts its LFM2.5 conversations again; a box that ran 0.11.2 to 0.12.1 already lost them.
+
+### Chat tab
+
+- A run that reads a large file no longer dies over the window (SRV-639, #18). One step's tool results share the room the model has left: half of what is left under the compaction line, 2,000 tokens at least, never past the window less twice the answer's room. `read_file` stops at whole lines and names the offset to read on from (a line longer than one read goes on with a new `column` argument); a 700 KB paragraph-per-line file came back as its first and last 16,000 characters and "[117 more lines]", with about 400 KB in between left out unsaid. Eleven 64,000-character results in one step were about 68 % of a 262,144 window. A request's estimate now carries a margin for the text the engine has not counted (#18's was 4,612 tokens low, with 256 left for it): at the edge our engine counts the request exactly (`POST /v1/tokenize`), a request counted over the window fails before it is sent, and a relayed model's `max_tokens` leaves the margin free. On the DGX Spark (Qwen3.8-27B, 262,144 tokens) the #18 repro with read-only tools, a 700 KB `.md` and "read it and summarize", ends with a summary; asked to read the whole file in one step, the model made 49 reads in 5 steps at 26,185, then 21,264, then 14,336 characters each, filled the gaps at the offsets the markers named, and peaked at 190,671 prompt tokens. read_file's schema changes, so each chat's first request after the update reads its prompt again. Reported by AgentSparko (issue #18).
+- The port preview streams (SRV-633, #86). chatd held an app's whole answer until the app closed the connection, so a preview with Server-Sent Events or a long-poll never showed an event, the request's thread waited forever with a growing buffer, a client that left went unnoticed, and the sandbox counted as busy, out of reach of the idle stop. The answer now goes on once its head is read: an event stream, a chunked or until-close answer as it arrives, with no read limit; a sized one with a 60 s limit between reads. A page, script or style sheet up to 8 MiB is still read whole and rewritten; a bigger one passes unrewritten with `X-Tandem-Rewrite: skipped`. The app has 300 s to start its answer (else 504). A client that closes its connection, or takes no bytes for 60 s, ends the relay inside the sandbox and frees the sandbox; the engine's forward now closes its side to chatd when the browser leaves, also while chatd has nothing to send yet (a held long-poll ended in the sandbox within 0.2 s on the DGX Spark, where it ran until the app answered). Port lookups and probes end after 60 s or 4 MiB. Reported by joeynyc (issue #86).
+
+### Caches
+
+- LFM2.5 adopts the saved conversations of 0.9.x to 0.11.1 again (ENG-381). 0.11.2 changed two of its modules without changing a stored row (ENG-363: which joint decode graphs stay, and how the split attention sizes its partials) and gave them no equivalence entry, so 0.11.2 to 0.12.1 adopted none of the older files. The entries are in. On the DGX Spark the split attention at 1 to 32 rows, alone and with shared buffers, equalled 0.11.1's byte for byte (`tools/lfm_attn_rows_check.py`).
+
+### Dashboard
+
+- The dashboard's build uses source-map-js 1.2.2 (OPS-205, GHSA-68fv-2mgg-jv7q). It is a build-time dependency under Vite; the served bundle is unchanged.
+
+### Tests
+
+- Three CPU tests that failed on 0.12.0 and 0.12.1 pass. `test_decider_api` expects the raw path's answer split as SRV-617 splits it (SRV-635), `test_proxy_http1_tls_fd` imports pytest only where it is installed (SRV-637), and `test_fp_same_rows` passes with ENG-381's entries. `tests/test_security_docs.py` checks SECURITY.md and docs/threat-model.md against the tree (OPS-202).
+
+Upgrade: run the 0.12.2 installer again (`--setup --force-setup` on a box installed with `--setup`, then `ops/use-profile.sh` with your profile; the same `--dir` otherwise), then `tandem restart` and `tandem chat restart`.
+
+## 0.12.1, 2026-10-20
+
+0.12.1 serves the first community pack on Nemotron 3.5 Super VL: styles01's EXL3 pack at 3.5 bits a weight, text only, with LiLiCorr and the lookup from our 4.0 profile. A request with images now takes a side slot, the Chat tab's port preview keeps an app's redirects, and eleven pull requests from three contributors fix chatd, the Setup Guide, the GGUF reader and the image path. Every profile writes the same text as in 0.12.0; a request with images can run on a side slot, where it writes the tokens slot 0 writes. The NemotronH profiles' fingerprint changes (ENG-327, ENG-365, ENG-377), so the saved conversations of Bolt, Lightning and Super VL from 0.12.0 are not reused: their first request reads the prompt again. The 27B's and the other models' carry over.
+
+### Nemotron 3.5 Super VL: a community pack
+
+- Super VL is a community base (ENG-377). A pack on it is served as `community/<id>` with our EXL3 profile nearest in size, `nemotron-super-vl-exl3-4.0` for 3.5 bits: its limits, its sampler, NVIDIA's LiLiCorr drafter and the lookup, with the pack in place of the weights. `python -m server.setup.community check-pack community/<id>` checks a pack's files: a NemotronH config with 88 layers, EXL3, every shard, and the image tower when the entry lists images. [docs/community-weights.md](docs/community-weights.md#bases) has the rules.
+- The first pack is `aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw` at 358667cf (57.8 GB) by styles01 (pull request #63): routed experts at 3.5 bits, every other projection at 5, an fp16 head. It holds no image tower, so it serves text. `ops/use-profile.sh community/nemotron-super-vl-exl3-3.5bpw` downloads and starts it.
+- NemotronH reads a stored head under a tied config. The pack's config, remapped from the Omni wrapper, says `tie_word_embeddings: true` and the pack stores `lm_head`; the loader now reads that head and notes it in the audit, where it refused the pack before. Without a stored head the embedding stays the head.
+- Measured on the DGX Spark, 2026-10-20, one request at a time, 512 greedy tokens, thinking off, one run each: plain 25.9 tok/s; with LiLiCorr and the lookup, prose 33.2, code 53.9, chat 37.4, edit 99.0 and copy 112.3 tok/s (2.97, 5.38, 3.41, 15.5 and 16.0 tokens a block). Every drafted text is the plain run's. A cold 7,507-token prompt reads at 529 tok/s. The weights take 53.58 GiB at load, and the served profile (262,144 tokens, 3 slots) starts and answers in 110 s.
+- Against exllamav3 1.6.0's own forward on the same pack, 8 prompts of 64 tokens: the top token agrees at 510 of 512 positions (99.6 %), both differences near ties, KL 0.0019. Images, requests at once and repeat runs were not measured.
+- Plain decoding runs at 25.9 tok/s here and at 31.1 on our 4.0 pack (0.11.0). From the headers, a decode token reads 7.95 GB of this pack and 6.74 GB of ours. `models/nemotron-3.5-super-vl-120b-a12b/measurements/0.12.1-summary.json` has the runs and the card's numbers, and [docs/nemotron-h.md](docs/nemotron-h.md) the layout and the profile of a decode step.
+
+### Parallel requests
+
+- A request with images takes a side slot (SRV-629). On 2026-10-19 two Chat-tab agent runs carried 3 to 8 screenshots a request, and the router sent all 31 of their requests to slot 0: 56.6 min of wall time for 18.9 min of decoding, with slot 1 idle. Nothing but the routing kept them there. Each side slot is its own engine over the same weights, with its own image context and rotary offset. The router now expands each image to its rows on the host and keys them by the image's digest, as the caches do. Window, output cut and memory admission count those rows: a screenshot of 1,280 by 800 pixels is 1,000 rows. Slot 0's admission counts them too. Every continuation test reads the keys, from the resident rows to the NVMe. When the next turn moves to slot 0, slot 0 takes over a side slot's end kept after images with its rotary offset and image mark. A request with images is never a guest of slot 0. `QWEN38_SIDE_IMAGES=off` keeps images on slot 0, as 0.12.0. Super VL's tower stays on slot 0.
+- Checked on the DGX Spark (the 27B, EXL3 6.0, `--parallel 2`, side window 262,144, side graphs off, KV pool on). One image request wrote the same 300 tokens twice on slot 0 and once on slot 1 beside a 6,000-token text run on slot 0, with no response-cache hit. Two image requests (2 and 3 screenshots, 2,000 tokens each, streamed) decoded together on slots 0 and 1 in 373 joint rounds. `/health` showed `decoding` [0, 1] in 118 of 140 samples. A text request alone took 105 to 109 ms a verify block in three restarts with the flag off and 108 ms in three with it on. Its tok/s moved between 69 and 129 in both arms with the tokens each block accepted; that spread was not traced.
+
+### Chat tab
+
+- The Chat view starts nothing when it closes during a sign-in (VIS-235). A sign-in that finished after the view was gone started the 10 s list poll, the global stream and the route's chat, and nothing stopped them. Its sign-in handler now takes the view's mount token before its first wait and checks it after each one, as the view's own start does since #85 (VIS-217). When the chat server stops answering as the view closes, no reprobe starts either.
+- The port preview keeps an app's redirects inside the preview (SRV-631). An app on port 3000 that answered `Location: /login`, or `Location: http://127.0.0.1:3000/login`, sent the browser out of `/sandbox/ports/3000/`. chatd now puts the preview's prefix in front of a `Location` or `Content-Location` that is an absolute path or names the app's own address and port. External URLs, other ports and relative values pass as the app sent them.
+
+### Setup Guide
+
+- The dashboard keeps track of an install that Finish started when the user left the guide before the answer arrived (#34). Since #34 such an answer opens no install page, and the dashboard lost the job too: its engine restart showed as the engine being offline. The dashboard now keeps the job's id, as the install page does, so the restart shows as one and the dashboard moves to the guide while the engine is away. Nothing opens when the answer arrives.
+
+### Contributions
+
+- joeynyc, pull requests #78 to #85. chatd sends a text attachment it could not save instead of failing the send (SEC-1, #78), and measures the inline budget on the branch a message goes on, so an edit of an earlier turn gets its own room (SRV-487, #79). The port preview forwards the path as the client sent it, with its trailing slash and its escapes, and refuses one with a space or a line break (SRV-511, #80). The Setup Guide's remove checks for a running job under the job lock (SRV-560, #81). NemotronH's fingerprint counts `engine/vision.py` (ENG-365, #82), and an image 16 by 40,000 pixels gets a patch grid of at least one cell a side instead of a 400 (ENG-365, #83). The GGUF reader refuses tensor sizes that overflow 64 bits and an alignment that is not a power of 2 (ENG-327, #84). The Chat view opens no stream after it is gone (VIS-217, #85); the dashboard bundle was rebuilt for it (VIS-233).
+- AgentSparko, pull requests #34 and #43. The Setup Guide clears its timers when it closes, drops a model's answer that arrives after a newer pick, and a Finish answer that lands after the user left opens no install page (#34, issues #4 and #5). chatd's sandbox reader closes its stream on every exit, an MCP server's body is capped at 4 MiB and each SSE line at 1 MiB, `read_file` reads 1 to 2,000 lines and promises no more lines past the end, and a negative limit on the conductor's journal routes reads 1 row instead of all (#43).
+- James Aita (styles01), pull request #63: the Super VL community pack above.
+
+### Engine
+
+- NemotronH's manifest names each `engine/` module its files import: a listed one counts in the fingerprint, and `LEFT_OUT` gives the reason for each of the others (kvpool, capture_lock, config, the lfm2_moe package). `tests/test_tier_identity.py` fails on an import in neither list. The fingerprint does not change for it (ENG-379).
+
+### Docs
+
+- [SECURITY.md](SECURITY.md) says how to report a vulnerability in private and what is in scope. [docs/threat-model.md](docs/threat-model.md) says where untrusted input enters a running install and which parts matter most.
+
+Upgrade: run the 0.12.1 installer again (`--setup --force-setup` on a box installed with `--setup`, then `ops/use-profile.sh` with your profile; the same `--dir` otherwise), then restart chatd: `tandem chat restart`.
+
 ## 0.12.0, 2026-10-19
 
 0.12.0 serves API clients that offer tools through a profile of their own. An SDK, curl or an unnamed client that sends tools and names no profile gets `tools` (SRV-621): the prompt as the client sent it, token for token the raw path's, with the loop guards and the tool-call checks acting. A request with tools can ask for a JSON answer: the model's first answer token picks a tool call or the document (SRV-619). An answer that makes two or more changes outside the conversation in one turn is written again one call at a time (C5, SRV-623), and a key the model read in a tool result is masked where the answer repeats it (SRV-625). On the raw path a plain API client now gets the thinking in `reasoning_content` (SRV-617). On [tool-eval-bench](https://github.com/SeraphimSerapis/tool-eval-bench)'s 69 scenarios the raw path scores 92 with thinking off and 95 to 97 with it on, and the `tools` profile 95; in the bench's hard mode the conductor scores 91 against 84 for raw ([docs/tool-eval-bench.md](docs/tool-eval-bench.md)). No change touches the decoding of a request without tools and without a JSON format; the served text against 0.11.4 was not measured.

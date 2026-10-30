@@ -26,6 +26,28 @@ Third-party code and models in the decision-model runtime (engine/decision/, sta
   validation, the error bodies and the equivalence tool (tools/decider_equivalence.py,
   tools/decider_cases.py) were ported from it.
 
+Weight-format code in tools/ (the EXL3 and GGUF readers):
+
+- exllamav3 (https://github.com/turboderp-org/exllamav3), MIT License, Copyright (c) 2025
+  Turboderp: the EXL3 bit extraction and mul1 codebook decode in tools/csrc/exl3_linear/exl3.cu
+  (built by tools/exl3_linear.py, and in part by tools/fn_kernels.py and tools/fn_prefill_kernels.py)
+  were ported from it; the license text is kept with the ported code in tools/csrc/exl3_linear/exl3.cu.
+- The IQ2_XXS grid and sign tables in tools/iq2_linear.py are the GGUF format's constants as
+  published in ggml (https://github.com/ggml-org/ggml), MIT License, Copyright (c) 2023-2024 The
+  ggml authors.
+
+Drafter code in engine/drafters/ (the arithmetic was first adapted from these works, then
+rewritten in this repository with bit-identical outputs):
+
+- engine/drafters/lilicorr.py: the LiLiCorr block drafter's arithmetic and names were first
+  adapted from vLLM (https://github.com/vllm-project/vllm), Apache License 2.0, Copyright
+  contributors to the vLLM project, which adapted it from SGLang
+  (https://github.com/sgl-project/sglang), Apache License 2.0; the sliding-window mask, the
+  attention sinks and the draft confidence were first adapted from llama.cpp
+  (https://github.com/ggml-org/llama.cpp), MIT License, Copyright (c) 2023-2024 The ggml authors.
+- engine/drafters/dflash2.py: the grouped dynamic convolution (`_grouped_conv`) was first ported
+  from the DFlash reference implementation (https://github.com/z-lab/dflash), Apache License 2.0.
+
 Runtime dependencies of the installable package (pyproject.toml: the proxy and the dashboard),
 installed by pip, none of their code copied into this repository:
 

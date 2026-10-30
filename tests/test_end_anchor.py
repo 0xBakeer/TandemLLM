@@ -54,6 +54,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test_forward_tree as T  # noqa: E402  (sets the CPU environment before the engine imports)
+os.environ.setdefault("QWEN38_PROMPT_END", "0")   # the grid and the end anchor alone (tests/test_prompt_end.py)
 
 import torch  # noqa: E402
 
@@ -504,8 +505,9 @@ def test_after_an_end_resume_the_rows_are_a_sessions_and_a_cold_grid_clears_it()
     store = cache.StateStore(BIG, chunk=CH)
     d = tempfile.mkdtemp(prefix="qse-end-disk-")
     try:
-        t = disk_cache.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
-                                free_bytes=lambda p: 10 ** 15, settings={"admit_after": 1}).open()
+        from disk_tier_util import waiting
+        t = waiting(disk_cache.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
+                                        free_bytes=lambda p: 10 ** 15, settings={"admit_after": 1}).open())
         res = _state(store=store, disk=t)
         app.STATE["session_cache"] = False            # the prefix snapshots alone
         prompt = tokens(100, seed=60)
@@ -532,6 +534,41 @@ def test_after_an_end_resume_the_rows_are_a_sessions_and_a_cold_grid_clears_it()
         t.close()
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_srv678_a_turn_resumed_from_a_session_snapshot_keeps_its_end():
+    """SRV-678 (SRV-667's prefix check, 2026-10-21): a turn that resumed from a session snapshot
+    in the store (another conversation had the rows in between) cleared the resident prefix, its
+    generation kept no end anchor (`not_resident`), and the next turn re-read from the store's
+    last grid line (21,782 tokens). The restore writes the snapshot's rows in place: the prefix
+    takes them as the prompt's, the end is kept, the next turn resumes there and writes the same
+    greedy tokens as from a cold prefill."""
+    store = cache.StateStore(BIG, chunk=CH)
+    res = _state(store=store)
+    prompt = tokens(100, seed=60)
+    out1, _, ctx1 = turn(prompt, 30)
+    assert store.stats["puts"] >= 1
+    # another conversation takes the rows (no park, no spill here)
+    turn(tokens(150, seed=80), 4, session="other")
+    assert res.owner == "other"
+    two = prompt + out1 + TOOL
+    out2, pre2, ctx2 = turn(two, 20)
+    assert pre2["kind"] == "session" and pre2["reused"] == len(ctx1) - 1, pre2
+    assert res.end is not None and res.end["at"] in (len(ctx2) - 1, len(ctx2)), res.end
+    assert res.taint == 0 and res.owner == "ses"
+    e2 = res.end["at"]
+    # no session snapshot for the next turn to fall back on: the store keeps none of turn 2's
+    store.clear()
+    three = two + out2 + TOOL2
+    out3, pre3, _ = turn(three, 12)
+    assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
+    assert pre3["forwarded"] == len(three) - e2 <= len(TOOL2) + 1, pre3
+    # the gate: the same greedy tokens as the same turn from a cold prefill
+    _state(end=False)
+    cold, pre_c, _ = turn(three, 12)
+    assert pre_c["kind"] is None and cold == out3, (cold, out3)
+    return (f"turn 2 from the session snapshot at {pre2['reused']}, its end kept at "
+            f"{e2}; turn 3 forwarded {pre3['forwarded']} tokens")
 
 
 def test_an_anchor_above_the_line_is_a_resume_under_the_gate():

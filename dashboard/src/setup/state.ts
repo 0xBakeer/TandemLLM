@@ -6,7 +6,7 @@
 import type { SetupChatMessage, SetupModel, SetupSelection, SetupStepId, SetupValue } from '../api/types';
 import { packVisionOff } from './community';
 import { normaliseComponents, toggleComponent } from './deps';
-import { ENGINE_MAX_SLOTS, fieldError, isStepId, registryField, STEP_IDS, stepIndex } from './fields';
+import { fieldError, isStepId, registryField, slotsMax, STEP_IDS, stepIndex } from './fields';
 import { S } from './strings';
 
 export const STORAGE_KEY = 'tandem.setup.v1';
@@ -45,7 +45,6 @@ export function defaults(m: SetupModel): SetupSelection {
     components: normaliseComponents(m, {}),
     slots: par.slots.default,
     window: par.window.default,
-    side_window: par.side_window.default,
     kv_pool: par.kv_pool.default,
     floor_gb: par.floor_gb.default,
     methods,
@@ -88,10 +87,10 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
     notices.push(S.savedValueBad(label));
     return fb;
   };
-  out.slots = num(s.slots, par.slots.min, ENGINE_MAX_SLOTS, true, S.slots, d.slots);
+  out.slots = num(s.slots, par.slots.min, slotsMax(m), true, S.slots, Math.min(d.slots, slotsMax(m)));
   const wmax = windowMax(m, out.profile);
   out.window = num(s.window, par.window.min, wmax, true, S.window, Math.min(d.window, wmax));
-  out.side_window = num(s.side_window, par.side_window.min, par.side_window.max, true, S.sideWindow, d.side_window ?? d.window);
+  // SRV-707: a saved side window (an older page's) is left behind: every lane has the window
   out.floor_gb = num(s.floor_gb, par.floor_gb.min, par.floor_gb.max, false, S.floor, d.floor_gb);
   if (typeof s.kv_pool === 'boolean') out.kv_pool = s.kv_pool;
   for (const group of ['methods', 'advanced'] as const) {
@@ -109,7 +108,7 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
   return { selection: out, notices };
 }
 
-export type ParallelKey = 'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb';
+export type ParallelKey = 'slots' | 'window' | 'kv_pool' | 'floor_gb';
 
 export type SetupAction =
   /** seed: what the box runs now (GET .../current), used when this browser has no progress for
@@ -143,8 +142,8 @@ export function windowMax(m: SetupModel, profile: string): number {
 }
 
 /** Snap a window to the model's step and range (and `max`, the profile's largest); the note says when it moved. */
-export function clampWindow(m: SetupModel, key: 'window' | 'side_window', n: number, max = m.parallelism[key].max): { value: number; clamped: boolean } {
-  const r = m.parallelism[key];
+export function clampWindow(m: SetupModel, n: number, max = m.parallelism.window.max): { value: number; clamped: boolean } {
+  const r = m.parallelism.window;
   let v = Math.round(n / r.step) * r.step;
   v = Math.min(r.max, max, Math.max(r.min, v));
   return { value: v, clamped: v !== n };
@@ -197,12 +196,12 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
   switch (a.type) {
     case 'profile': {
       if (!m.profiles.some((p) => p.id === a.id)) return st;
-      // a profile with a shorter largest window takes the window down with it, and the side window
+      // a profile with a shorter largest window takes every lane's window down with it
       const max = windowMax(m, a.id);
       const notices: string[] = [];
       let next: SetupSelection = { ...sel, profile: a.id };
       if (sel.window > max) {
-        next = { ...next, window: max, side_window: Math.min(sel.side_window ?? sel.window, max) };
+        next = { ...next, window: max };
         notices.push(S.windowClamped(max));
       }
       // a community pack the engine cannot run images from: the Vision tool goes off with it
@@ -224,17 +223,14 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
       const p = m.parallelism;
       if (a.key === 'kv_pool') return typeof a.value === 'boolean' ? done({ selection: { ...sel, kv_pool: a.value } }) : st;
       if (typeof a.value !== 'number' || !Number.isFinite(a.value)) return st;
-      if (a.key === 'window' || a.key === 'side_window') {
-        const { value, clamped } = clampWindow(m, a.key, a.value, a.key === 'window' ? windowMax(m, sel.profile) : undefined);
-        const next = { ...sel, [a.key]: value };
-        // a side window longer than slot 0's makes no sense: it follows the main window down
-        if (a.key === 'window' && (next.side_window ?? value) > value) next.side_window = value;
-        return done({ selection: next, notice: clamped ? S.windowClamped(value) : null });
+      if (a.key === 'window') {
+        const { value, clamped } = clampWindow(m, a.value, windowMax(m, sel.profile));
+        return done({ selection: { ...sel, window: value }, notice: clamped ? S.windowClamped(value) : null });
       }
       const r = p[a.key];
       // slots: the card's max is how far it was measured, the engine's limit is the cap (VIS-199);
       // the stepper refuses a typed value outside it before it gets here
-      const max = a.key === 'slots' ? ENGINE_MAX_SLOTS : r.max;
+      const max = a.key === 'slots' ? slotsMax(m) : r.max;
       const v = Math.min(max, Math.max(r.min, a.key === 'slots' ? Math.round(a.value) : a.value));
       return done({ selection: { ...sel, [a.key]: v } });
     }
@@ -246,7 +242,7 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
     case 'recommended': {
       const d = defaults(m);
       if (a.scope === 'components') return done({ selection: { ...sel, components: d.components } });
-      if (a.scope === 'parallelism') return done({ selection: { ...sel, slots: d.slots, window: d.window, side_window: d.side_window, kv_pool: d.kv_pool, floor_gb: d.floor_gb } });
+      if (a.scope === 'parallelism') return done({ selection: { ...sel, slots: d.slots, window: d.window, kv_pool: d.kv_pool, floor_gb: d.floor_gb } });
       return done({ selection: { ...sel, methods: d.methods, advanced: d.advanced } });
     }
   }

@@ -85,6 +85,12 @@ checks may repair it, have the model write it again, or let it out as content af
 (`fallback()`). `cut()` drops everything held when the model is asked to write the calls of an
 answer again, and a block the token limit cut is kept in `cut_block`, not in the content.
 `answer_items()` reads a whole answer into the same items, for the checks at the end token.
+
+**A model's own form.** A family names the form its model writes calls in (its `ServeSpec`); the form's
+`ToolFormat` (server/toolformats) does what is particular to it, and this module calls it, never
+naming one: a buffer given a format hands the blocks its reader takes to that reader, which streams
+them in place (exactly as written when the form's values are), a whole answer goes through
+`rewrite_native()`, `diagnose()` and `call_format()` ask the format.
 """
 
 from __future__ import annotations
@@ -93,6 +99,8 @@ import json
 import re
 import time
 import uuid
+
+from server import callrepair
 
 OPEN = "<tool_call>"
 CLOSE = "</tool_call>"
@@ -413,9 +421,11 @@ def strip_blocks(text: str) -> str:
     return text[:k] if k >= 0 else text
 
 
-def diagnose(inner: str) -> str:
+def diagnose(inner: str, fmt=None) -> str:
     """Why a block does not parse, in one line a model can act on (the hidden reminder quotes
-    it). Only called for a block `_parse_one` refused."""
+    it). Only called for a block `_parse_one` refused. `fmt` is the model's own form (a
+    `ToolFormat` or its name; its `diagnose` reads a block of that form). The line never holds a
+    placeholder such as a NAME the model could copy into its next call."""
     s = inner.strip()
     if not s:
         return "the tool call block is empty"
@@ -425,13 +435,16 @@ def diagnose(inner: str) -> str:
         except ValueError as exc:
             return f"the JSON in the tool call does not parse ({exc})"
         return "the JSON in the tool call is not a call: it needs a name and its arguments"
+    own = _format(fmt).diagnose(inner) if fmt else None
+    if own:
+        return own
     m = _FUNC_OPEN.search(inner)
     if m is None:
         if "<function" in inner:
-            return "the <function=NAME> opener is malformed"
-        return "the block has no <function=NAME> opener"
+            return "the function opener is malformed"
+        return "the block has no function opener"
     if not _tag_name(m):
-        return "the <function=...> opener has no name"
+        return "the function opener has no tool name"
     rest = inner[m.end():]
     for pm in _PARAM_OPEN.finditer(rest):
         if rest.find(PARAM_CLOSE, pm.end()) < 0:
@@ -623,8 +636,19 @@ class ToolCallBuffer:
     """
 
     def __init__(self, names=None, max_calls: int | None = None, types: dict | None = None,
-                 hold: bool = False, live: bool = True):
+                 hold: bool = False, live: bool = True, fmt: str | None = None,
+                 schemas: dict | None = None):
         self.calls: list[dict] = []
+        # SRV-691: the offered tools' parameters ({name: schema}); a call's argument names are matched to
+        # them (server/callrepair.py), on the stream as each key is decided and at the block's closer;
+        # `repairs` collects (tool, from, to)
+        self.schemas = schemas or {}
+        self.repairs: list = []
+        self._used: set = set()
+        # the model's own form (a `ToolFormat`, server/toolformats): its reader reads and streams a
+        # block of that form in place (`_parse`, `_stream_open`)
+        self.fmt = _format(fmt) if fmt is not None else None
+        self._reader = self.fmt.buffer_reader() if self.fmt is not None else None
         self.hold = bool(hold)
         # `live=False`: no call streams its arguments as they are written; each goes out whole
         # when its block closes (the end-of-stream sweep). The server passes it for a request
@@ -673,9 +697,28 @@ class ToolCallBuffer:
         self._pending_ws = ""
         self._first_param = True
         self._done_params = False
+        self._native: bool | None = None  # the open block is read by the format's reader (None: not yet)
+        self._exact = False               # the open block's values stream exactly as written
         # `(perf_counter, kind, name)` at a block's open, a function's name and a block's
         # close -- once per call, never per piece -- for the live view; the newest 16 are kept
         self.events: list[tuple] = []
+
+    def _parse(self, inner: str) -> list[dict] | None:
+        """A closed block's calls: the format's own reading first (`fmt`), then `_parse_one` (a
+        JSON or XML block still parses as one)."""
+        got = self._reader.parse(inner, self.types) if self._reader is not None else None
+        if got is None:
+            got = _parse_one(inner, self.types)
+        if got and self.schemas:
+            # SRV-691: a call that streamed live keeps the names it streamed (the same rule decided them)
+            fixed = []
+            for c in got:
+                c2, r = callrepair.repair_call(c, self.schemas, gate=not self._block_streamed, types=self.types)
+                fixed.append(c2)
+                if not self._block_streamed:
+                    self.repairs += r
+            got = fixed
+        return got
 
     def _event(self, kind: str, name) -> None:
         self.events.append((time.perf_counter(), kind, name))
@@ -821,8 +864,81 @@ class ToolCallBuffer:
         self._first_param = True
         self._kinds, self._tval = None, ""
 
+    def _start_function(self, name: str) -> bool:
+        """A function's name is complete: its first delta (id, name), or False when it is not
+        streamed (over the cap, or an echo) and goes out at closure instead."""
+        if self.max_calls is not None and self._next_index >= self.max_calls:
+            self._hold = True                            # over the cap: never streamed
+            return False
+        if self.schemas and name not in self.schemas:
+            # SRV-693: a tool the request did not offer is mapped on the whole call, at its closer
+            self._hold = True
+            return False
+        if name == self._previous_name():
+            # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
+            # repeat -- but a repeat already streamed cannot be taken back, so streaming
+            # delivered two and JSON one. A function whose name repeats the call before it
+            # is not streamed live: it goes out at closure, through the end-of-stream
+            # sweep, if `_add` keeps it at all.
+            self._hold = True
+            return False
+        self._stream_name = name
+        self._used = set()
+        self._event("name", name)
+        self._stream_index = self.take_index()
+        self._block_streamed = True
+        self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
+                               "name": name, "args": ""})
+        self._deltas.append({"index": self._stream_index,
+                             "id": self._streamed[-1]["id"], "type": "function",
+                             "function": {"name": name, "arguments": ""}})
+        return True
+
+    def _open_param(self, key: str) -> None:
+        """A parameter's opener: the key's delta. A typed value is short (a number, a flag, a
+        small list) and must be read whole before it can be written as JSON: it is held to its
+        closer. A string value streams as it is written (a whole-file `content` is thousands of
+        tokens)."""
+        self._in_param = True
+        self._value_started = False
+        self._pending_ws = ""
+        to = (callrepair.rename_key(key, self.schemas.get(self._stream_name), self._used)
+              if self.schemas else None)
+        if to is not None:
+            self.repairs.append({"kind": "argument", "tool": self._stream_name, "from": key, "to": to})  # SRV-691
+            key = to
+        self._used.add(key)
+        self._kinds = _kinds_of(self.types, self._stream_name).get(key)
+        self._tval = ""
+        lead_sep = "{" if self._first_param else ", "
+        self._first_param = False
+        self._delta_args(lead_sep + json.dumps(key)
+                         + (": " if self._kinds is not None else ': "'))
+
+    def _close_param(self, exact: bool = False) -> None:
+        """A parameter's closer: a typed value as the JSON value `_typed` makes of it (trimmed as
+        the collector trims, or `exact` as the arg-key form reads it), a string's closing quote."""
+        self._pending_ws = ""
+        if self._kinds is not None:
+            raw = self._tval if exact else _TRIM.match(self._tval).group(1)
+            self._delta_args(json.dumps(convert(raw, self._kinds)))
+            self._kinds, self._tval = None, ""
+        else:
+            self._delta_args('"')
+        self._in_param = False
+
     def _stream_open(self, limit: int) -> None:
         """Consume the open block as far as it is safe, vending argument deltas."""
+        if self._reader is not None and self._native is None and not self._hold:
+            head = self._buf[self._pos:limit].lstrip(_WS)
+            if not head:
+                return
+            # the model's own form, read by its format (server/toolformats); a block it does not take is
+            # read by the machine below as in the default form
+            self._native = self._reader.takes(head)
+        if self._native:
+            self._reader.stream(self, limit)
+            return
         while True:
             if self._hold:
                 return
@@ -846,26 +962,8 @@ class ToolCallBuffer:
                 if not name:
                     self._done_params = True
                     return
-                if self.max_calls is not None and self._next_index >= self.max_calls:
-                    self._hold = True                            # over the cap: never streamed
+                if not self._start_function(name):
                     return
-                if name == self._previous_name():
-                    # The model echoes a call twice (measured 2026-09-19) and `_add` drops the
-                    # repeat -- but a repeat already streamed cannot be taken back, so streaming
-                    # delivered two and JSON one. A function whose name repeats the call before it
-                    # is not streamed live: it goes out at closure, through the end-of-stream
-                    # sweep, if `_add` keeps it at all.
-                    self._hold = True
-                    return
-                self._stream_name = name
-                self._event("name", name)
-                self._stream_index = self.take_index()
-                self._block_streamed = True
-                self._streamed.append({"id": "call_" + uuid.uuid4().hex[:24],
-                                       "name": name, "args": ""})
-                self._deltas.append({"index": self._stream_index,
-                                     "id": self._streamed[-1]["id"], "type": "function",
-                                     "function": {"name": name, "arguments": ""}})
                 continue
             if self._done_params:
                 return
@@ -881,18 +979,7 @@ class ToolCallBuffer:
                 if tag is not None:
                     key, k = tag
                     self._pos += lead + k
-                    self._in_param = True
-                    self._value_started = False
-                    self._pending_ws = ""
-                    # A typed value is short (a number, a flag, a small list) and must be read whole
-                    # before it can be written as JSON: it is held to its closer. A string value
-                    # streams as it is written (a whole-file `content` is thousands of tokens).
-                    self._kinds = _kinds_of(self.types, self._stream_name).get(key)
-                    self._tval = ""
-                    lead_sep = "{" if self._first_param else ", "
-                    self._first_param = False
-                    self._delta_args(lead_sep + json.dumps(key)
-                                     + (": " if self._kinds is not None else ': "'))
+                    self._open_param(key)
                     continue
                 if stripped.startswith("</function>"):
                     self._pos += lead + len("</function>")
@@ -931,15 +1018,7 @@ class ToolCallBuffer:
                 return
             if tail.startswith("</parameter>"):
                 self._value(rest[:lt])
-                self._pending_ws = ""
-                if self._kinds is not None:
-                    # the collector's trim, then the same conversion `_typed` applies
-                    self._delta_args(json.dumps(convert(_TRIM.match(self._tval).group(1),
-                                                        self._kinds)))
-                    self._kinds, self._tval = None, ""
-                else:
-                    self._delta_args('"')
-                self._in_param = False
+                self._close_param()          # the collector's trim, then `_typed`'s conversion
                 self._pos += lt + len("</parameter>")
                 continue
             self._pos += lt + 1
@@ -954,6 +1033,9 @@ class ToolCallBuffer:
 
     def _emit_value(self, text: str) -> None:
         if not text:
+            return
+        if self._exact:
+            self._delta_args(_esc(text))              # a form whose values are exact, as written
             return
         out = []
         for ch in text:
@@ -1071,6 +1153,9 @@ class ToolCallBuffer:
                 self._pending_ws = ""
                 self._first_param = True
                 self._done_params = False
+                self._native, self._exact = None, False
+                if self._reader is not None:
+                    self._reader.reset()
                 self._kinds, self._tval = None, ""
                 if not self.live:
                     self._hold = True        # this block goes out at closure, whole, or as text
@@ -1084,7 +1169,7 @@ class ToolCallBuffer:
             inner = self._buf[:j]
             self._buf = self._buf[j + len(CLOSE):]
             self._open = False
-            parsed = _parse_one(inner, self.types)
+            parsed = self._parse(inner)
             self._event("close", [c["function"]["name"] for c in parsed] if parsed else None)
             if parsed:
                 self._credit_streamed(parsed)
@@ -1144,7 +1229,7 @@ class ToolCallBuffer:
             if not self.hold:
                 self._stream_open(len(self._buf))
                 self._block_ends()
-            parsed = _parse_one(self._buf, self.types)
+            parsed = self._parse(self._buf)
             if parsed:
                 self._buf, self._open = "", False
                 self._event("close", [c["function"]["name"] for c in parsed])
@@ -1177,136 +1262,20 @@ class ToolCallBuffer:
         return left, deltas
 
 
-# ------------------------------------------------------------------------- Pythonic tool calls (SRV-425)
-# LiquidAI's LFM2 models write their calls as a Python list of calls between two tokens of their own:
-#
-#     <|tool_call_start|>[get_weather(city='Berlin', days=3), search(q="a, b")]<|tool_call_end|>
-#
-# `PythonicCalls` turns each such block into this module's own JSON tier, `<tool_call>[{"name": ...,
-# "arguments": {...}}, ...]</tool_call>`, as the text arrives, so everything above (the stream machine,
-# the holds of the conductor's checks, `answer_items`, `parse_tool_calls`) reads it as it reads any call.
-# A value is a Python literal (`ast.literal_eval`: strings, numbers, lists, dicts, tuples, True / False /
-# None, and the JSON spellings true / false / null), never evaluated code; a block that is not a list of
-# calls with keyword arguments only goes out as the text it was (the honest fallback, as for XML).
-PY_OPEN = "<|tool_call_start|>"
-PY_CLOSE = "<|tool_call_end|>"
-_PY_NAMES = {"true": True, "false": False, "null": None, "none": None}
+def _format(fmt):
+    """A tool-call format, its name or None (the default form), as a `ToolFormat` (server/toolformats)."""
+    from server import toolformats
+    return toolformats.resolve(fmt)
 
 
-def _py_value(node):
-    import ast
-    if isinstance(node, ast.Name) and node.id.lower() in _PY_NAMES:
-        return _PY_NAMES[node.id.lower()]
-    if isinstance(node, (ast.List, ast.Tuple)):
-        return [_py_value(x) for x in node.elts]
-    if isinstance(node, ast.Dict):
-        if any(k is None for k in node.keys):
-            raise ValueError("a ** inside a dict")
-        return {_py_value(k): _py_value(v) for k, v in zip(node.keys, node.values)}
-    v = ast.literal_eval(node)
-    if isinstance(v, (set, bytes, complex)):
-        raise ValueError(f"{type(v).__name__} is not a JSON value")
-    return v
+def call_format(fmt, name: str, key: str | None = None) -> str:
+    """How one call is written in the model's own form (`fmt`: a `ToolFormat`, its name, or None for the
+    default), shown with a tool the request offers (`name`) and one of its arguments (`key`): the hidden
+    reminder's format line. It holds no placeholder the model could copy as a name or a key."""
+    return _format(fmt).example(name, key)
 
 
-def _py_name(node) -> str:
-    import ast
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return _py_name(node.value) + "." + node.attr
-    raise ValueError("a call's name must be a name")
-
-
-def pythonic_calls(inner: str) -> list[dict] | None:
-    """The calls of one block's inner text, [{"name", "arguments"}], or None if it is not a list of
-    calls (or one call) with keyword arguments only."""
-    import ast
-    s = inner.strip()
-    if not s:
-        return None
-    try:
-        node = ast.parse(s, mode="eval").body
-    except SyntaxError:
-        return None
-    items = node.elts if isinstance(node, (ast.List, ast.Tuple)) else [node]
-    out = []
-    try:
-        for it in items:
-            if not isinstance(it, ast.Call) or it.args or any(k.arg is None for k in it.keywords):
-                return None
-            out.append({"name": _py_name(it.func), "arguments": {k.arg: _py_value(k.value) for k in it.keywords}})
-    except (ValueError, TypeError, SyntaxError):
-        return None
-    return out or None
-
-
-def pythonic_block(inner: str) -> str | None:
-    """One Pythonic block as this module's JSON tier, or None when it does not parse."""
-    calls = pythonic_calls(inner)
-    if calls is None:
-        return None
-    return OPEN + json.dumps(calls, ensure_ascii=False) + CLOSE
-
-
-class PythonicCalls:
-    """The stream's rewrite of Pythonic blocks (above): `feed(piece)` returns the text to pass on, a
-    block's opener and what follows it held until its closer; `finish(eos)` the rest -- an open block
-    that parses is a call when the generation ended (EOS), and text otherwise (a block the token limit
-    or a stop string cut stays content, as for XML)."""
-
-    def __init__(self):
-        self._buf = ""
-        self._open = False
-        self.blocks = 0          # blocks rewritten
-        self.bad = 0             # blocks released as text
-
-    def feed(self, piece: str) -> str:
-        self._buf += piece
-        out = ""
-        while True:
-            if not self._open:
-                i = self._buf.find(PY_OPEN)
-                if i < 0:
-                    k = len(self._buf)
-                    # keep a tail that could still become the opener
-                    for n in range(min(len(PY_OPEN) - 1, len(self._buf)), 0, -1):
-                        if PY_OPEN.startswith(self._buf[-n:]):
-                            k = len(self._buf) - n
-                            break
-                    out += self._buf[:k]
-                    self._buf = self._buf[k:]
-                    return out
-                out += self._buf[:i]
-                self._buf = self._buf[i + len(PY_OPEN):]
-                self._open = True
-            j = self._buf.find(PY_CLOSE)
-            if j < 0:
-                return out
-            out += self._close(self._buf[:j], closed=True)
-            self._buf = self._buf[j + len(PY_CLOSE):]
-            self._open = False
-
-    def _close(self, inner: str, closed: bool) -> str:
-        got = pythonic_block(inner)
-        if got is None:
-            self.bad += 1
-            return PY_OPEN + inner + (PY_CLOSE if closed else "")
-        self.blocks += 1
-        return got
-
-    def finish(self, eos: bool = False) -> str:
-        buf, self._buf = self._buf, ""
-        if not self._open:
-            return buf
-        self._open = False
-        if eos:
-            return self._close(buf, closed=False)
-        self.bad += 1
-        return PY_OPEN + buf
-
-
-def rewrite_pythonic(text: str, eos: bool = False) -> str:
-    """A whole answer with its Pythonic blocks rewritten (the non-streamed path)."""
-    p = PythonicCalls()
-    return p.feed(text) + p.finish(eos=eos)
+def rewrite_native(text: str, fmt, eos: bool = False) -> str:
+    """`text` with the blocks of the model's own form (`fmt`) in this module's JSON tier, as the stream's
+    rewrite and the final parse read them; the text as it is for the default form."""
+    return _format(fmt).rewrite(text, eos=eos)

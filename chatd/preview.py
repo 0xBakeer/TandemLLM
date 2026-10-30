@@ -34,6 +34,7 @@ import re
 import shlex
 import threading
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from chatd.workspace import PathError
 
@@ -43,6 +44,9 @@ BUNDLERS = ("vite", "next", "react-scripts", "@sveltejs/kit", "astro", "nuxt", "
 SCRIPT_EXTS = (".ts", ".tsx", ".jsx", ".vue", ".svelte", ".mts")
 REPORT_WAIT_S = 15.0
 PAGE_LIMIT = 512 * 1024
+#: a port lookup or probe (relay.py ports / probe): its longest run and its largest output
+RELAY_OUT_S = 60.0
+RELAY_OUT_LIMIT = 4 * 1024 * 1024
 
 _MODULE = re.compile(rb"<script\b([^>]*)>(.*?)</script>", re.I | re.S)
 _SRC = re.compile(rb"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
@@ -52,6 +56,7 @@ _IMPORTMAP = re.compile(rb"""<script\b[^>]*\btype\s*=\s*["']?importmap""", re.I)
 #: import map resolves it
 _BARE = re.compile(rb"""(?:^|[;\s}])(?:import\s*(?:[\w*{}\s,$]+\s*from\s*)?|export\s*[\w*{}\s,$]+"""
                    rb"""\s*from\s*)["'](?![./]|https?:|data:|blob:)([^"']+)["']""", re.M)
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
 _HEAD = re.compile(rb"<head\b[^>]*>", re.I)
 _HTML = re.compile(rb"<html\b[^>]*>", re.I)
 _ATTR_ABS = re.compile(rb"""(\s(?:src|href|action|poster))=(["'])/(?![/\\])""", re.I)
@@ -145,6 +150,32 @@ def rewrite_script(payload: bytes, prefix: str, path: str = "") -> bytes:
 def rewrite_css(payload: bytes, prefix: str) -> bytes:
     pre = prefix.rstrip("/").encode() + b"/"
     return _CSS_ABS.sub(lambda m: m.group(1) + pre, payload)
+
+
+def rewrite_location(value: str, prefix: str, port: int) -> str:
+    """A `Location` or `Content-Location` from the app on `port` (SRV-631): an absolute path
+    (`/login`) or a URL on the app's own address (`http://127.0.0.1:<port>/login`, localhost, [::1],
+    or `//` before one of them) becomes `prefix` + its path, query and fragment. A browser follows
+    `/login` to chatd's origin, out of the preview, and cannot reach 127.0.0.1 at all. An external
+    URL, another port, a relative value (it resolves inside the prefix) and one already under
+    `prefix` stay as they are."""
+    v = value.strip()
+    pre = prefix.rstrip("/")
+    if v.startswith("/") and not v.startswith("//"):
+        rest = v
+    else:
+        try:
+            u = urlsplit(v)
+            own = (u.scheme in ("http", "") and bool(u.netloc) and u.hostname in _LOOPBACK
+                   and (u.port or 80) == port)
+        except ValueError:                                     # a port that is not a number
+            return value
+        if not own:
+            return value
+        rest = urlunsplit(("", "", u.path or "/", u.query, u.fragment))
+    if rest == pre or rest.startswith((pre + "/", pre + "?", pre + "#")):
+        return rest
+    return pre + rest
 
 
 # ---------------------------------------------------------------------- the target
@@ -299,20 +330,33 @@ class PreviewMixin:
 
     # ------------------------------------------------------------------ what listens
     def _relay_out(self, cid: str, *args: str) -> bytes:
-        from chatd.sandbox import demux, relay_cmd
+        """What `relay.py <args>` (ports, probe) writes, within RELAY_OUT_S and RELAY_OUT_LIMIT
+        (#86); past either the exec is ended and OSError says why."""
+        from chatd.sandbox import ExecReader, relay_cmd
         box = self.sandboxes.box(cid)
-        _, sock, first = self.sandboxes.open_exec(cid, relay_cmd(*args))
-        box.busy += 1
+        exec_id, sock, first = self.sandboxes.open_exec(cid, relay_cmd(*args))
+        with box.lock:
+            box.busy += 1
+        reader = ExecReader(sock, first)
         try:
-            chunks: list[bytes] = []
-            demux(sock, first, lambda s, d: chunks.append(d) if s == 1 else None)
+            out = bytearray()
+            deadline = time.monotonic() + RELAY_OUT_S
+            while True:
+                d = reader.read(max(0.0, deadline - time.monotonic()))
+                if not d:
+                    return bytes(out)
+                out += d
+                if len(out) > RELAY_OUT_LIMIT:
+                    raise OSError(f"relay.py {args[0]} wrote over {RELAY_OUT_LIMIT >> 20} MiB")
         finally:
-            box.busy -= 1
+            if not reader.ended:
+                self.sandboxes.end_exec(exec_id)
+            with box.lock:
+                box.busy -= 1
             try:
                 sock.close()
             except OSError:
                 pass
-        return b"".join(chunks)
 
     def listening(self, cid: str, http: bool = False) -> list[dict] | None:
         """What listens in the chat's sandbox ([] when it is not running; None when it could not

@@ -45,6 +45,37 @@ from chatd.tools import Result, Tool, ToolError
 PROTOCOL = "2025-06-18"
 CLIENT = {"name": "tandemllm-chatd", "version": "0.1"}
 DEFAULT_TIMEOUT_S = 120.0
+MAX_BODY = 64 << 20       # one JSON answer over this is refused BY NAME, never truncated
+                         # into a json.loads failure: a screenshot result is a few MB,
+                         # the cap has to clear the work, not just the hostility
+MAX_SSE_LINE = 64 << 20   # the same cap per SSE line — one line IS one answer there
+
+class OverCap(ValueError):
+    """A response over the named cap: reported as 'answer over N MiB', not as
+    'cannot reach the server' — the server was reached, the answer is too big."""
+
+
+def _sse_line(r, cap: int) -> bytes | None:
+    """One COMPLETE SSE line, at most `cap` bytes (None at a clean EOF). readline(amt)
+    returns a chunk, not a line: a 1.5 MB data line read once comes back as its first
+    megabyte, which parses as no field at all while the remainder reads as a second
+    half-line and drops as junk — the answer is lost and the caller waits out its
+    timeout for nothing. So: keep reading to the newline, and fail by name at the cap."""
+    parts: list[bytes] = []
+    got = 0
+    while True:
+        chunk = r.readline(cap + 1 - got)
+        if not chunk:
+            break
+        parts.append(chunk)
+        got += len(chunk)
+        if got > cap:
+            raise OverCap(f"answer over {cap >> 20} MiB")
+        if chunk.endswith(b"\n"):
+            return b"".join(parts)
+    if not parts:
+        return None
+    return b"".join(parts)
 
 class McpError(Exception):
     pass
@@ -254,12 +285,18 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
                     on_line(ln)
 
         def reader():
-            box = sandboxes.box(cid)
-            box.busy += 1
+            # box() may raise (a chat gone mid-connect): even then on_line(None) must run, or
+            # the pending request hangs until timeout and the socket leaks
             try:
-                demux(sock, first, data)
+                box = sandboxes.box(cid)
+                with box.lock:               # run threads vs reader threads: keep the count exact
+                    box.busy += 1
+                try:
+                    demux(sock, first, data)
+                finally:
+                    with box.lock:
+                        box.busy -= 1
             finally:
-                box.busy -= 1
                 on_line(None)
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),
                 lambda: sock.close())
@@ -324,7 +361,7 @@ class HttpTransport:
                 self.session_id = sid
             ctype = (r.getheader("Content-Type") or "").lower()
             if r.status in (202, 204):
-                r.read()
+                r.read(MAX_BODY)
                 return
             if r.status >= 400:
                 body = r.read(2000).decode("utf-8", "replace")
@@ -335,8 +372,8 @@ class HttpTransport:
             if "text/event-stream" in ctype:
                 data: list[str] = []
                 while True:
-                    raw = r.readline()
-                    if not raw:
+                    raw = _sse_line(r, MAX_SSE_LINE)
+                    if raw is None:
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if line == "":
@@ -349,11 +386,18 @@ class HttpTransport:
                     elif line.startswith("data:"):
                         data.append(line[5:].lstrip(" "))
             else:
-                raw = r.read()
+                raw = r.read(MAX_BODY + 1)
+                # r.read(amt) truncates silently: a json.loads failure was the silence
+                if len(raw) > MAX_BODY:
+                    raise OverCap(f"answer over {MAX_BODY >> 20} MiB")
                 if raw.strip() and self.on_message:
                     obj = json.loads(raw)
                     for m in obj if isinstance(obj, list) else [obj]:
                         self.on_message(m)
+        except OverCap as exc:
+            if "id" in msg and self.on_message:
+                self.on_message({"jsonrpc": "2.0", "id": msg["id"],
+                                 "error": {"code": -32000, "message": str(exc)}})
         except (OSError, http.client.HTTPException, ValueError) as exc:
             if "id" in msg and self.on_message:
                 self.on_message({"jsonrpc": "2.0", "id": msg["id"],

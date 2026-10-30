@@ -47,6 +47,11 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  neither the task nor `toolgate.sequence` (both absent: no one
                                  chose): shadow in coding, chat-app, hermes and chat, act in
                                  tools, as shipped
+    2026-10-20-packages-deliverable  SRV-615: the shipped `deliverable` of write-message,
+                                 formal-letter (send), event-plan, weekly-schedule,
+                                 checklist-builder (schedule) and social-post (post) on a stored
+                                 packages document, for each package it has without one, unless
+                                 a stored version gave that package one (someone took it out)
 """
 
 from __future__ import annotations
@@ -204,6 +209,30 @@ def _c5(mode: str):
     return change
 
 
+# SRV-615: the packages whose result a tool can deliver, as packages/seed.json ships them
+DELIVERABLE = {"write-message": "send", "formal-letter": "send", "event-plan": "schedule",
+               "weekly-schedule": "schedule", "checklist-builder": "schedule",
+               "social-post": "post"}
+
+
+def _deliverable(doc: dict, past: list):
+    """SRV-615: `deliverable` on the stored packages that have none and never had one."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("packages"), dict):
+        return None
+
+    def had(name):
+        return lambda d: "deliverable" in ((d.get("packages") or {}).get(name) or {})
+    pkgs, changes = dict(doc["packages"]), []
+    for name, want in DELIVERABLE.items():
+        p = pkgs.get(name)
+        if isinstance(p, dict) and "deliverable" not in p and True not in _ever(past, had(name)):
+            pkgs[name] = dict(p, deliverable=want)
+            changes.append(f"packages.{name}.deliverable={want}")
+    return (dict(doc, packages=pkgs), changes) if changes else None
+
+
+_deliverable.history = True
+
 # SRV-534: FX6's core on the coding classes of a router stored without it
 _coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
 
@@ -239,6 +268,7 @@ MIGRATIONS = [
     ("2026-10-19-hermes-c5", "profiles", "hermes", _c5("shadow")),
     ("2026-10-19-chat-c5", "profiles", "chat", _c5("shadow")),
     ("2026-10-19-tools-c5", "profiles", "tools", _c5("act")),
+    ("2026-10-20-packages-deliverable", "packages", None, _deliverable),
 ]
 
 

@@ -156,6 +156,56 @@ def test_lightning_real_headers_audit():
     assert 6.0e9 < db["total"] < 7.5e9, db["total"]
 
 
+def test_community_flat_pack_headers_audit():
+    """ENG-377: a community EXL3 pack of Super VL (PR #63) with a flat config remapped from the Omni wrapper:
+    `backbone.*` keys, no tower, `tie_word_embeddings` true beside a stored fp16 `lm_head.weight` (the original
+    head is untied), experts at 3.5 bits, the dense projections at 5, the MTP head at 4 / 5 / 6. Its real headers
+    (one expert a layer stored here, the other 511 alike) audit clean, the stored head is the one read."""
+    with open(os.path.join(FIX, "super-vl-exl3-3.5-community.json")) as f:
+        raw = json.load(f)
+    cfg = config_from_dict(raw, "community")
+    assert cfg.tie_word_embeddings and not cfg.omni and len(cfg.layer_types) == 88
+    with gzip.open(os.path.join(FIX, "super-vl-exl3-3.5-community-headers.json.gz"), "rt") as f:
+        hdr = json.load(f)
+    DS = {"BF16": 2, "F16": 2, "F32": 4, "I16": 2, "I32": 4}
+    tensors = {}
+    for k, (dt, shape) in hdr.items():
+        keys = [k] if ".experts.0." not in k else [k.replace(".experts.0.", f".experts.{e}.") for e in range(512)]
+        for key in keys:
+            n = canonical(key)
+            assert n is not None and not n.startswith("backbone."), key
+            nb = DS[dt]
+            for s in shape:
+                nb *= s
+            tensors[n] = TensorInfo(n, key, "", dt, tuple(shape), 0, nb)
+    assert len(tensors) == 169478 and tensors["lm_head.weight"].dtype == "F16"
+    idx = PackIndex("community", cfg, tensors, {}, quant=raw["quantization_config"])
+    idx.has_mtp = True
+    assert idx.stored_head and not idx.cfg.tie_word_embeddings
+    notes = idx.audit()
+    assert any("stored head is read" in n for n in notes), notes
+    assert idx.is_exl3 and idx.formats["lm_head"] == "f16" and idx.formats["layers.1.mixer.gate"] == "f16"
+    rates = {}
+    for base, f in idx.formats.items():
+        if f == "exl3":
+            kind = "mtp-" if base.startswith("mtp.") else ""
+            kind += "expert" if ".experts." in base else base.rsplit(".", 1)[-1]
+            rates.setdefault(kind, set()).add(tensors[base + ".trellis"].k)
+    assert rates["expert"] == {3.5} and rates["mtp-expert"] == {4.0}, rates
+    assert all(v == {5.0} for k, v in rates.items() if not k.startswith("mtp-") and k != "expert"), rates
+    assert rates["mtp-eh_proj"] == {5.0} and rates["mtp-q_proj"] == {6.0}, rates
+    assert {n for n, _ in expected(idx.cfg)} | {n for n in tensors if n.rsplit(".", 1)[-1] in
+                                                 ("trellis", "suh", "svh", "mul1")} >= set(tensors)
+    db = idx.decode_bytes()
+    assert db["parts"]["head"] == 131072 * 4096 * 2          # the stored fp16 head, not the embedding
+    # without the stored head the tie stands and the embedding is the head
+    no_head = {n: t for n, t in tensors.items() if n != "lm_head.weight"}
+    idx2 = PackIndex("community", config_from_dict(raw, "community"), no_head, {}, quant=raw["quantization_config"])
+    idx2.has_mtp = True
+    idx2.audit()
+    assert not idx2.stored_head and idx2.cfg.tie_word_embeddings and "lm_head" not in idx2.formats
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -578,13 +578,14 @@
     "rule": "malformed_call",
     "mode": "act",
     "texts": [
-     "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: <tool_call>, <function=NAME>, one <parameter=KEY>value</parameter> per argument, </function>, </tool_call>.",
-     "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: <tool_call>, <function=NAME>, <parameter=KEY>value</parameter> for every argument, </function>, </tool_call>."
+     "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: {format}.",
+     "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: {format}."
     ],
     "regenerations": 2,
     "repair": true,
     "schema": "shadow",
     "schema_text": "Your call to {name} was not run: {problem}. Write it again with the arguments its schema asks for.",
+    "unknown_text": "Your call to {name} was not run: this request offers no tool by that name. Use one of these tools: {tools}.",
     "cut": "give_up"
    },
    "C3": {
@@ -3469,6 +3470,43 @@
        "note_write": {
         "type": "string",
         "maxLength": 2000
+       },
+       "deliverable": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "deliverable_question": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 600
+       },
+       "deliverable_options": {
+        "type": "object",
+        "properties": {
+         "tool": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 300
+         },
+         "text": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 300
+         }
+        },
+        "required": [
+         "tool",
+         "text"
+        ],
+        "additionalProperties": false
+       },
+       "deliverable_accept": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
        }
       },
       "required": [],
@@ -3672,6 +3710,13 @@
          "type": "string",
          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
          "maxLength": 80
+        },
+        "deliverable": {
+         "enum": [
+          "send",
+          "schedule",
+          "post"
+         ]
         }
        },
        "required": [
@@ -4919,7 +4964,8 @@
       "enum": [
        "off",
        "shadow",
-       "on"
+       "on",
+       "none"
       ]
      },
      "prompt": {
@@ -5548,7 +5594,7 @@
             "minLength": 1
            },
            "minItems": 1,
-           "description": "the reminder after a block that does not parse; {error} is the parser's reason"
+           "description": "the reminder after a block that does not parse; {error} is the parser's reason, {format} how a call is written in the model's own format, shown with a tool the request offers (toolcall.call_format)"
           },
           "regenerations": {
            "type": "integer",
@@ -5571,6 +5617,11 @@
            "type": "string",
            "minLength": 1,
            "description": "the reminder for a schema problem: {name}, {problem}"
+          },
+          "unknown_text": {
+           "type": "string",
+           "minLength": 1,
+           "description": "SRV-693: the reminder for a call to a tool the request did not offer (and the server could not map): {name}, {tools} (the offered ones); absent: such a call goes out as written"
           },
           "cut": {
            "enum": [

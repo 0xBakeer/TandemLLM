@@ -1685,6 +1685,15 @@ textarea.pk-body {
 .notes-stats {
   margin-bottom: 16px;
 }
+/* SRV-703: where memory is on, one profile a line */
+.notes-where {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
 .notes-browser {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);

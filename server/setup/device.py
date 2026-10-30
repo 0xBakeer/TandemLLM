@@ -157,7 +157,7 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
     repo = next((v["repo"] for v in out.values() if v["repo"]), None)
     for c in registry.community_packs(m):
         d = {"dir": community_mod.pack_dir(c["id"]), "files": []}
-        missing = [a for a in registry.community_assets(c)
+        missing = [a for a in registry.community_assets(c, m)
                    if not registry.asset_present(registry.asset(m, a), repo, m)]
         out[c["profile"]] = {"weights": weights_present(d), "dir": d["dir"],
                              "assets_missing": missing, "repo": repo}

@@ -13,7 +13,9 @@ module is the engine server's side of that: the auth check, then a byte forward.
                 dropped) and the body, to chatd with `X-Tandem-Forward: <key>`,
                 `X-Tandem-Principal: owner`, `X-Tandem-Password-Set` and `X-Tandem-Signed-In`;
                 the answer goes back as chatd wrote it, unbuffered (an SSE frame reaches the
-                browser as soon as chatd writes it)
+                browser as soon as chatd writes it); while it waits for chatd, a browser that
+                closes its connection closes the one to chatd (a held long-poll or a quiet
+                stream ends in chatd and in the sandbox at once, #86)
     websocket   `Upgrade: websocket` gets chatd's 101 and the two sockets are spliced, one thread
                 each way, until either side closes
     chatd down  502 `chat_unavailable` with a JSON body; the engine's other routes are untouched
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import socket
 import threading
 import urllib.parse
@@ -193,14 +196,47 @@ def forward(handler, method: str, extra: list[tuple[str, str]],
             pass
 
 
+class _BrowserGone(ConnectionAbortedError):
+    """The browser closed its connection while the forward waited for chatd."""
+
+
+def _recv(sock: socket.socket, conn) -> bytes:
+    """chatd's next bytes. While none come, the browser's socket (its request already read) is
+    watched: its end raises _BrowserGone. A byte from it (a next request) ends the watch."""
+    watch = conn is not None and not hasattr(conn, "pending")      # an SSLSocket cannot peek
+    if not watch:
+        return sock.recv(CHUNK)
+    p = select.poll()
+    p.register(sock, select.POLLIN)
+    p.register(conn, select.POLLIN)
+    while True:
+        for fd, _ in p.poll():
+            if fd == sock.fileno():
+                return sock.recv(CHUNK)
+            try:
+                peek = conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                peek = b""
+            if not peek:
+                raise _BrowserGone("the browser closed its connection")
+            p.unregister(conn)
+            return sock.recv(CHUNK)
+
+
 def _relay(handler, sock: socket.socket, upgrade: bool) -> None:
     """chatd's answer to the browser as it comes; the status and headers are read on the way to
     know how the browser's connection goes on (kept alive after a sized answer, closed after a
     stream, spliced after a 101)."""
+    conn = getattr(handler, "connection", None)
     head = b""
     while b"\r\n\r\n" not in head:
         try:
-            chunk = sock.recv(CHUNK)
+            chunk = _recv(sock, conn) if not upgrade else sock.recv(CHUNK)
+        except _BrowserGone:
+            handler.close_connection = True
+            return
         except OSError:
             chunk = b""
         if not chunk:
@@ -224,7 +260,7 @@ def _relay(handler, sock: socket.socket, upgrade: bool) -> None:
             handler.close_connection = True
             return _splice(handler, sock)
         while True:
-            chunk = sock.recv(CHUNK)
+            chunk = _recv(sock, conn)
             if not chunk:
                 break
             out.write(chunk)

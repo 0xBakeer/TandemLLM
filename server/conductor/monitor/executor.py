@@ -541,13 +541,40 @@ class Supervisor:
         if (not ev.inside and ev.answer and self._at["SP3"] and self.req.tools_offered
                 and self.req.n == 1):
             from server.toolcall import answer_items
-            items = answer_items(ev.answer, self.tool_names or None, eos=True,
-                                 types=self.tool_types)
+            items = self.as_sent(answer_items(ev.answer, self.tool_names or None, eos=True,
+                                              types=self.tool_types))
             if items:
                 act = self.check_answer(items, room=room, pos=ev.pos)
                 if act is not None:
                     return act
         return self._decide("SP2", ev, room)
+
+    def as_sent(self, items: list, events: list | None = None) -> list:
+        """SRV-691: the calls of `items` as the server sends them, their tools and argument names matched to
+        the offered ones (server/callrepair.py), so the checks judge what the client gets; the changes are
+        added to `events` when given (the release journals them)."""
+        from server import callrepair
+        schemas = self._tool_meta()[2]
+        if not schemas:
+            return items
+        out = []
+        for it in items:
+            if "function" in it:
+                it, ev = callrepair.repair_call(it, schemas, types=self.tool_types)
+                if events is not None:
+                    events += ev
+            out.append(it)
+        return out
+
+    def note_repairs(self, renamed: list) -> None:
+        """SRV-691, SRV-693: the tools and argument names the server matched to the offered tools, one
+        journal row each: {kind, tool, from, to}."""
+        for e in renamed:
+            tool_map = e.get("kind") == "tool"
+            self.journal.write(dict(self._base("SP3"), task="ARGS", rule="tool_names" if tool_map else "argument_names",
+                                    tier=0, mode="act", decision="MAP" if tool_map else "RENAME",
+                                    reason=f"{'map' if tool_map else 'rename'}({e['from']}->{e['to']})",
+                                    detail=dict(e), client=self.req.client, profile=self.req.profile))
 
     def check_answer(self, items: list[dict], final: bool = False, room=None,
                      pos: int | None = None) -> Action | None:
@@ -577,7 +604,7 @@ class Supervisor:
                                    schema=schemas.get(fn["name"]), final=final)
             else:
                 blk = it["bad"] if "bad" in it else it.get("cut", "")
-                ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk), cut="cut" in it,
+                ev = ToolCallEvent("", "", i, block=blk, error=diagnose(blk, self.req.tool_format or None), cut="cut" in it,
                                    stopped=bool(it.get("stop")), final=final)
             i += 1
             for task in tasks:

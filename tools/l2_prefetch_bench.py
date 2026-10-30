@@ -26,36 +26,19 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine import native_build as nb  # noqa: E402
 
-_PF = r"""
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <stdint.h>
-
-__global__ void l2_prefetch(const uint8_t* __restrict__ p, size_t n) {
-    size_t step = (size_t)gridDim.x * blockDim.x * 128;
-    for (size_t o = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 128; o < n; o += step)
-        asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(p + o));
-}
-
-void prefetch(torch::Tensor t, int64_t ctas) {
-    l2_prefetch<<<(int)ctas, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const uint8_t*>(t.data_ptr()), (size_t)t.numel() * t.element_size());
-}
-"""
+_PF = nb.source(__file__, "prefetch.cu")
+_PF_CPP = nb.source(__file__, "prefetch.cpp")
 _MOD = None
 
 
 def _prefetch_mod():
     global _MOD
     if _MOD is None:
-        from torch.utils.cpp_extension import load_inline
-        venv_bin = os.path.dirname(sys.executable)                # ninja lives there, as in nvfp4_skinny
-        if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        _MOD = load_inline(name="qwen38_l2_prefetch", cpp_sources=["void prefetch(torch::Tensor t, int64_t ctas);"],
-                           cuda_sources=[_PF], functions=["prefetch"],
-                           extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
+        _MOD = nb.load("qwen38_l2_prefetch", cpp_sources=[_PF_CPP],
+                       cuda_sources=[_PF], functions=["prefetch"],
+                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
     return _MOD
 
 

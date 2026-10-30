@@ -1,0 +1,112 @@
+# Area labels by changed path, for actions/labeler (.github/workflows/labeler.yml). docs/labels.md
+# lists the labels. Entries under one label are alternatives; all-globs-to-any-file with `!` globs
+# means "a changed file inside the first glob and outside the rest". The labeler only adds labels.
+
+engine/core:
+  - changed-files:
+      # a changed file under engine/ that no other engine label covers
+      - all-globs-to-any-file:
+          - 'engine/**'
+          - '!engine/drafters/**'
+          - '!engine/methods/**'
+          - '!engine/{spec,tree,router,lenrouter,verify_graph}.py'
+          - '!engine/{cache,disk_cache,kvpool,spill}.py'
+          - '!engine/**/kernels.py'
+          - '!engine/{linear,gdn}.py'
+engine/kernels:
+  - changed-files:
+      - any-glob-to-any-file: ['engine/**/kernels.py', 'engine/linear.py', 'engine/gdn.py']
+engine/drafting:
+  - changed-files:
+      - any-glob-to-any-file: ['engine/drafters/**', 'engine/methods/**', 'engine/{spec,tree,router,lenrouter,verify_graph}.py']
+engine/cache:
+  - changed-files:
+      - any-glob-to-any-file: ['engine/{cache,disk_cache,kvpool,spill}.py', 'server/{diskcache,cache_peek}.py']
+
+server/api:
+  - changed-files:
+      - all-globs-to-any-file: ['server/**', '!server/conductor/**', '!server/setup/**', '!server/setup_api.py', '!server/{diskcache,cache_peek}.py']
+server/conductor:
+  - changed-files:
+      - any-glob-to-any-file: ['server/conductor/**', 'packages/**']
+server/proxy:
+  - changed-files:
+      - any-glob-to-any-file: ['proxy/**', 'plugins/**']
+
+chat:
+  - changed-files:
+      - any-glob-to-any-file: ['chatd/**', 'ops/sandbox/**', 'ops/chatd.*']
+
+dash/setup:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/setup/**', 'server/setup/**', 'server/setup_api.py']
+dash/chat:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/chat/**']
+dash/usage:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/usage.ts']
+dash/performance:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/performance.ts', 'dashboard/src/views/parallel.ts', 'dashboard/src/views/live-panel.ts']
+dash/dev:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/dev.ts']
+dash/playground:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/playground.ts', 'dashboard/src/playground/**']
+dash/conductor:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/conductor.ts', 'dashboard/src/views/conductor/**']
+dash/memory:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/conductor/memory.ts', 'dashboard/src/views/conductor/disk.ts', 'dashboard/src/lib/memory.ts']
+dash/backends:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/backends.ts', 'dashboard/src/views/engines.ts']
+dash/system:
+  - changed-files:
+      - any-glob-to-any-file: ['dashboard/src/views/system.ts', 'dashboard/src/views/hosts.ts']
+
+models/flint:
+  - changed-files:
+      - any-glob-to-any-file: ['models/flint/**', 'engine/models/flint/**', 'ops/profiles/*flint*']
+models/qwen3.8:
+  - changed-files:
+      - any-glob-to-any-file: ['models/qwen3.8-*/**', 'engine/models/qwen3_5/**', 'engine/models/flashnext/**', 'ops/profiles/exl3-*', 'ops/profiles/nvfp4*', 'ops/profiles/*flashnext*']
+models/lfm2.5:
+  - changed-files:
+      - any-glob-to-any-file: ['models/lfm2.5-*/**', 'engine/models/lfm2_moe/**', 'ops/profiles/*lfm25*']
+models/nemotron:
+  - changed-files:
+      - any-glob-to-any-file: ['models/nemotron-*/**', 'engine/models/nemotron_h/**', 'ops/profiles/*nemotron*']
+models/ornith:
+  - changed-files:
+      - any-glob-to-any-file: ['models/ornith-*/**', 'engine/models/qwen3_5_moe/**', 'ops/profiles/*ornith*']
+
+quant/community:
+  - changed-files:
+      - any-glob-to-any-file: ['models/*/community/**', 'models/community-*.json']
+
+install:
+  - changed-files:
+      - any-glob-to-any-file: ['install.sh']
+ops:
+  - changed-files:
+      - any-glob-to-any-file: ['tools/release*.sh', 'tools/gh_labels.sh']
+      - all-globs-to-any-file: ['ops/**', '!ops/sandbox/**', '!ops/chatd.*', '!ops/profiles/**']
+docs/manual:
+  - changed-files:
+      - any-glob-to-any-file: ['manual/**']
+docs:
+  - changed-files:
+      - all-globs-to-all-files: ['{docs/**,manual/**,*.md}']
+test:
+  - changed-files:
+      - all-globs-to-all-files: ['tests/**']
+bench:
+  - changed-files:
+      - any-glob-to-any-file: ['bench/**', 'tools/bench_*.py', 'tools/row3.py', 'tools/block_ab.py']
+ci:
+  - changed-files:
+      - any-glob-to-any-file: ['.github/**']

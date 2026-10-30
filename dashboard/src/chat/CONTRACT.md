@@ -337,7 +337,7 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/conversations/{id}/sandbox/upload` | `?dir=`, multipart | `SandboxFile[]` | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox/diff` | `?run_id=` | `{files: {path, status, additions, deletions, patch}[]}` | (v0.2, diff pane) | v2 |
 | POST | `/conversations/{id}/sandbox/undo` | `{run_id}` | 202 | (v0.2) | v2 |
-| GET | `/conversations/{id}/sandbox/ports/{port}/...` | | reverse proxy into the sandbox (preview pane); `Access-Control-Allow-Origin: null` for the preview's opaque origin, a page with the preview's shim (SRV-511) | (v0.2) | v2 |
+| GET | `/conversations/{id}/sandbox/ports/{port}/...` | | reverse proxy into the sandbox (preview pane); `Access-Control-Allow-Origin: null` for the preview's opaque origin, a page with the preview's shim (SRV-511); the answer streams as the app sends it (SSE, long-poll), a page, script or style sheet over 8 MiB passes unrewritten with `X-Tandem-Rewrite: skipped` (#86) | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox/ports` | | `{ports: {port, addresses, command, cwd, started, http}[]}`: what listens in the sandbox, `[]` when it is stopped (SRV-511) | `sandboxPorts()` | v2 |
 | POST | `/conversations/{id}/sandbox/serve` | `{dir}` | 202 `{dir, command, log}`: the project's dev server started in the background (the command from its package.json; `npm install` first without node_modules); 400 `no_dev_server` | `serve()` | v2 |
 | POST | `/conversations/{id}/preview/report` | `{ref, url, title, errors, failed, elements, text, canvas}` | 204: what the preview pane's page loaded; `present` waits up to 15 s for it | `previewReport()` | v2 |
@@ -440,10 +440,22 @@ asks for: the model's output limit, or the window's room when less is left.
   dashboard after load and on later errors. The pane shows "2 errors" and the like and passes the
   report to chatd. With an admin password set, a module request from the opaque origin carries no
   session: the preview's modules need the dashboard without a password (AU1's default).
+- The port proxy passes an answer on as the app sends it (#86): an `EventSource` gets each event
+  when it is written, a long-poll its answer when the app gives it (the app has 300 s to start its
+  answer, else 504). Only a page, script or style sheet up to 8 MiB is held for its rewrite; a
+  bigger one comes unrewritten with `X-Tandem-Rewrite: skipped`. A streamed answer has no
+  Content-Length and closes the connection at its end. A client that closes its connection ends the
+  request inside the sandbox.
 - A video, audio file, PDF or binary from the view route carries `default-src 'none'; media-src 'self'`
   (a PDF: `script-src 'none'; object-src 'self'`): it plays or downloads, it never runs a script.
 - Tool output in events and parts is capped (30,000 characters per call); the full output is a file at
   `/workspace/.tandem/outputs/<call_id>.txt`.
+- What the model reads of one result is capped by the room its step has left (SRV-639): `read_file`
+  stops at whole lines and ends with `[truncated at <n> characters: lines <a>-<b> of <total> shown,
+  <bytes> more bytes; read on with offset=<b+1>]`, or `[<k> more lines; read on with offset=<b+1>]`
+  at its `limit`; a line longer than one read ends with `[line <i> goes on: <bytes> more bytes of it;
+  read on with offset=<i>, column=<c>]`. `column` (1-based, a character of line `offset`) is a
+  read_file argument.
 - MCP secrets never come back from the server (values are "").
 - The pane layout (`Conversation.ui`) is shared across devices; scroll positions and editor cursors stay
   on the device.

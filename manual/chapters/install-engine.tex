@@ -45,11 +45,11 @@ Run one engine per board\index{one engine per board}. Two engines loading side b
 Since 0.8.1 a new DGX Spark needs two commands and no Hugging Face token. Every file a profile reads is public on Hugging Face: our own packs, the vendors' releases, and turboderp's Flash-Next packs (Chapter~\ref{ch:flashnext}).
 
 \begin{shell}
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.12.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh
 bash install.sh --setup --yes
 \end{shell}
 
-The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model loaded.
+The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant, and the two Wikipedia shards of the lookup corpus (1.2~GB). The corpus itself needs the model's tokenizer, so \code{ops/use-profile.sh} builds it once the model is on the disk. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model loaded.
 
 Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; it walks through the model, the weights, the tools and the parallel slots in eight steps. \code{docs/setup.md} describes the page.
 
@@ -88,7 +88,7 @@ bash ~/TandemLLM/run/ops/use-profile.sh <profile>
 
 A folder appears only when all its files are there. If a download stops, run the same command again: it keeps the files that finished and continues. The engine then needs about 80~GiB of free memory for a 27B profile and 70~GiB for \code{flashnext-3.05}. If the profile does not come up, the script brings setup mode back.
 
-The installer checks out the tag \code{v0.12.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.12.0'}. \code{--ref} picks another release, and \code{--repo} another repository.
+The installer checks out the tag \code{v0.15.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.15.0'}. \code{--ref} picks another release, and \code{--repo} another repository.
 
 \section{Updating a box in setup mode}\label{sec:update-setup}\index{upgrade}
 
@@ -104,17 +104,17 @@ bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 Without \code{--setup}, one command sets up the NVFP4 profile, StairCut included:
 
 \begin{shell}
-curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.12.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh | bash
 \end{shell}
 
 The installer works in seven steps, and each step is skipped when it is already done, so running it again updates an install and resumes a download that stopped.
 
 \begin{enumerate}
 \item Checks. The GPU needs its driver and the CUDA compiler, the disk and the memory need room, and Hugging Face must answer.
-\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.12.0}.
+\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.15.0}.
 \item A Python venv in \code{~/TandemLLM/venv} with the pinned packages; torch and torchvision come from the CUDA 13.0 index. If neither \code{uv} nor Python 3.11 is on the machine, the installer fetches \code{uv} first.
 \item The weights, into the normal Hugging Face cache: the vendor's FP8 checkpoint (it supplies the tensors the NVFP4 overlays do not replace, and the tokenizer), the four NVFP4 files and both fine-tuned drafters. With \code{--setup}, only Wren's model; \code{use-profile.sh} fetches the rest later.
-\item A lookup corpus built from public text (one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens). \code{--no-corpus} skips it.
+\item A lookup corpus built from public text (one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens). \code{--no-corpus} skips it. With \code{--setup}, only the two shards: \code{use-profile.sh} builds the corpus for the model it installs, under \code{corpus/tokenizers/}, with no network.
 \item The configuration: \code{~/TandemLLM/run/ops/serve.env}, the release's \code{ops/serve.env}\index{ops/serve.env@\texttt{ops/serve.env}} with this machine's paths, and a control script, \code{~/TandemLLM/bin/tandem}.
 \item The start: the engine starts, the script waits for \code{/health}, and a smoke test prints tokens a second. \code{--no-start} stops after step 6.
 \end{enumerate}

@@ -119,6 +119,38 @@ def test_flag_off_reads_nothing():
     return "QWEN38_EXL3 unset by default"
 
 
+def test_the_oracle_shares_no_code_with_the_product():
+    """`reference_matmul` gates the kernels from outside: it must not touch exl3_ada's probed
+    paths (rot_ok/rot_in/rot_out/try_gemv/try_gemv_rot/decode_trellis_triton) or EXL3Block.inner.
+    Single member and a two-member group, bf16 and fp32 outputs, on the CPU."""
+    import types as _t
+    from unittest import mock
+
+    ada = _t.ModuleType("tools.exl3_ada")
+    def banned(*a, **kw):
+        raise AssertionError("the oracle called the accelerated path")
+    for n in ("rot_ok", "rot_in", "rot_out", "try_gemv", "try_gemv_rot", "decode_trellis_triton"):
+        setattr(ada, n, banned)
+
+    def blk(N, K, kb, **kw):
+        w = X.random_block(N, K, kb, seed=N + K + kb, device="cpu")
+        return X.EXL3Block(w.t, torch.ones(K), torch.ones(N) * 0.5, **kw)
+
+    members = [blk(128, 128, 3), blk(128, 256, 2, out_fp32=True)]
+    grp = X.EXL3Block.group([blk(128, 128, 4), blk(128, 128, 4)], ["a", "b"])
+    with mock.patch.dict("sys.modules", {"tools.exl3_ada": ada}), \
+         mock.patch.object(__import__("tools"), "exl3_ada", ada, create=True), \
+         mock.patch.object(X.EXL3Block, "inner", banned):
+        for w in members:
+            x = torch.randn(3, w.K, dtype=torch.bfloat16)
+            y = X.reference_matmul(x, w)
+            assert y.shape == (3, w.N) and y.dtype == (torch.float32 if w.out_fp32 else torch.bfloat16)
+        x = torch.randn(3, 128, dtype=torch.bfloat16)
+        y = X.reference_matmul(x, grp)
+        assert torch.equal(y[:, :128], X.reference_matmul(x, X.EXL3Block(grp.t[:, :8], grp.suh[:1], grp.svh[:128])))
+        assert torch.equal(y[:, 128:], X.reference_matmul(x, X.EXL3Block(grp.t[:, 8:], grp.suh[1:], grp.svh[128:])))
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
@@ -130,3 +162,4 @@ if __name__ == "__main__":
             print(f"  {name:<44} FAIL {e}")
     print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
     sys.exit(1 if fails else 0)
+

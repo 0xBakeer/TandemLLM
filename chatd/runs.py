@@ -21,8 +21,9 @@ THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
    run that built or changed a web page or app checks it first (chatd/verify.py): the check is a
    call of the harness's own in that step, and the model reads its result in the next one.
 Limits: `max_steps` model calls (100; the run ends `interrupted` with a notice and Continue goes
-on), the same call with the same arguments three times in a row ends the run with a notice, and
-so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
+on), the same call with the same arguments three times in a row ends the run with a notice; many
+steps on the same few files whose checks show no change get one steering note, then end the run
+`interrupted` (chatd/stall.py, SRV-677); so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
 whatever the calls were (live 2026-10-16: 28 calls with other arguments each answered
 `exec failed (404)`).
 
@@ -46,7 +47,10 @@ and the Now line says the engine has no memory for the chat's context. A 400 tha
 is over the model's context window (a tool result can grow the prompt past the guard's estimate,
 GitHub issue #18) compacts the conversation and sends the call once more when the compaction made
 it smaller; when it cut nothing, or the smaller call is refused too, the run fails with the
-engine's message.
+engine's message. An answer our engine stopped at its memory floor (SRV-709: the `memory_full`
+error beside finish_reason "error", or a 503 with that code before the stream) is no failure: the
+text so far stays, the Now line says the chat waits for memory, and the call goes again as its
+continuation with backoff 1, 2, 4 ... 60 s; the engine's admission holds it until memory is free.
 
 WORKERS (VIS-E15). A worker is a run like any other on a task conversation (chatd/tasks.py): its
 `parent` is the run whose task call started it, it runs in that run's slot (`slot_owner`), its
@@ -61,7 +65,7 @@ import re
 import threading
 import time
 
-from chatd import verify
+from chatd import stall as stall_mod, verify
 from chatd.engine import EngineError
 from chatd.ids import iso, now_ms, ulid
 
@@ -99,6 +103,19 @@ def cached_of(u: dict) -> int:
     return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
 
+#: SRV-709: the Now line while a chat waits because the engine's memory is full
+MEMORY_PAUSE = ("Memory is full: this chat pauses until a running chat frees memory, then "
+                "continues (next try in {s} s)")
+
+
+def memory_full(err) -> bool:
+    """SRV-709: the engine stopped or refused the call because its memory is full (`memory_full`:
+    a streamed answer's error beside finish_reason "error", or a 503 before the stream). The text
+    so far is good: the call is sent again as a continuation once memory is free."""
+    code = getattr(err, "code", None) if not isinstance(err, dict) else err.get("code")
+    return code == "memory_full"
+
+
 def memory_words(exc: EngineError) -> str | None:
     """The engine's memory refusal in plain words; None for any other refusal."""
     m = _MEMORY.search(exc.args[0]) if exc.status == 503 else None
@@ -106,6 +123,23 @@ def memory_words(exc: EngineError) -> str | None:
         return None
     return (f"The engine has no memory for this chat's context right now "
             f"({int(m.group(1)) // 1000}k tokens, needs {m.group(2)} GiB of {m.group(3)})")
+
+
+#: SRV-671: the driver's text of a lost CUDA context, as an engine before the fix answered it
+_CUDA = re.compile(r"CUDA error|device-side assert|AcceleratorError|cudaError")
+
+
+def engine_words(exc: EngineError) -> str:
+    """The engine's refusal in words for the Chat tab: a failed engine's own sentence
+    (`engine_failed`), else the message's first line, the driver's text of a lost CUDA context
+    named for a person (live 2026-10-21 the Now line read "Waiting for the engine (CUDA error:
+    device-side assert triggered Search for `cudaErrorAssert' in ...")."""
+    msg = str(exc.args[0]) if exc.args else ""
+    if getattr(exc, "kind", None) == "engine_failed":
+        return msg
+    if _CUDA.search(msg):
+        return "its GPU stopped working; the engine needs a restart"
+    return next((ln.strip() for ln in msg.splitlines() if ln.strip()), msg)[:200]
 
 
 def over_window(exc: EngineError) -> bool:
@@ -190,10 +224,14 @@ class Run:
         # the sandbox's own failures in a row (not the command's): three alike end the run
         self.sandbox_errors: collections.deque = collections.deque(maxlen=3)
         self.sandbox_stuck = False
-        self.interrupt: str | None = None      # why it ends `interrupted`: limit, sandbox (else engine)
+        # SRV-677: the stall rule (chatd/stall.py): the same few files edited, the same outcome
+        self.stall = stall_mod.Watch()
+        self.interrupt: str | None = None      # why it ends `interrupted`: limit, sandbox, stall (else engine)
         self.request_chars = 0
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
+        self.request_counted: int | None = None  # the engine's exact count of it, at the edge
+        self.result_cap: int | None = None      # one tool result's characters, this step (SRV-639)
         self.compacted = 0                      # the step a compaction last ran before
         self.compact_next = False               # the next request compacts first (memory, window)
         self.compact_cut = False                # the last request_for compacted the chat
@@ -329,13 +367,17 @@ class Run:
                 self.svc.finish_guard(self, outcome, exc)
 
     def _slot(self) -> bool:
-        """One of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one),
-        before each model call: a run that waits for the user's permission gives its slot back
+        """One of the run slots (as many as the engine has lanes, SRV-707; QSE_CHAT_MAX_RUNS fixes
+        them), before each model call: a run that waits for the user's permission gives its slot back
         (agent.py `_permit`). A cloud model's call takes none (`takes_slot`) and gives back the one
         an earlier call on our engine held. False when the run is stopped meanwhile."""
         if not self.svc.takes_slot(self):
             self.svc.slots.release_if(self)
             return True
+        try:
+            self.svc._refresh()          # the engine's lanes (SRV-707), at most CAPS_TTL_S old
+        except Exception:                                           # noqa: BLE001
+            pass
         while not self.svc.slots.acquire(self, timeout=1.0):
             if self.stop_mode:
                 return False
@@ -421,6 +463,9 @@ class Run:
         if self.sandbox_stuck:                      # Continue goes on once the sandbox is back
             self.interrupt = "sandbox"
             return "interrupted"
+        if self.stall.stop:                         # the run monitor: Continue goes on
+            self.interrupt = "stall"
+            return "interrupted"
         if self.notice:                             # the same call three times in a row
             return "completed"
         if self.svc.queued(self.conv):              # a steer: the next run carries it
@@ -476,6 +521,17 @@ class Run:
                 if not exc.retryable:
                     self.error = exc.args[0]
                     return "failed"
+                if memory_full(exc):
+                    # SRV-709: refused for memory before the stream: wait and send it again
+                    if time.monotonic() + backoff > deadline:
+                        self.error = exc.args[0]
+                        self.notice = "The engine's memory stayed full. Continue goes on from here."
+                        return "interrupted"
+                    wait = max(backoff, min(exc.retry_after or backoff, BACKOFF_MAX_S))
+                    self.set_phase("queued", MEMORY_PAUSE.format(s=int(wait)))
+                    self.wake.wait(wait)
+                    backoff = min(BACKOFF_MAX_S, backoff * 2)
+                    continue
                 memory = memory_words(exc)
                 if memory and refused == 0:
                     # the chat on the engine's other slot holds memory too: one retry once it may
@@ -494,12 +550,15 @@ class Run:
                     deadline = time.monotonic() + self.svc.retry_window_s
                     continue
                 if time.monotonic() + backoff > deadline:
-                    self.error = exc.args[0]
+                    self.error = exc.args[0] if memory else engine_words(exc)
                     if memory:                       # the card under the answer says why
                         self.notice = f"{memory}. Continue goes on from here."
                     return "interrupted"
+                failed = getattr(exc, "kind", None) == "engine_failed"
                 self.set_phase("queued", f"{memory}: retry in {int(backoff)} s" if memory else
-                               f"Waiting for the engine ({exc.args[0]}), retry in {int(backoff)} s")
+                               f"{engine_words(exc)} Retry in {int(backoff)} s." if failed else
+                               f"Waiting for the engine ({engine_words(exc)}), retry in "
+                               f"{int(backoff)} s")
                 self.wake.wait(backoff)
                 backoff = min(BACKOFF_MAX_S, backoff * 2)
                 continue
@@ -514,6 +573,23 @@ class Run:
                 return outcome
             if self.stop_mode:
                 return self._stopped()
+            if outcome == "memory":
+                # SRV-709: the engine stopped this answer at its memory floor; the text so far
+                # stays and the call goes again as its continuation, which waits for memory there
+                if time.monotonic() + backoff > deadline:
+                    self.error = "the engine's memory stayed full"
+                    self.notice = "The engine's memory stayed full. Continue goes on from here."
+                    return "interrupted"
+                self.svc.flush(self)
+                if self.step_parts:                  # a half-written call is not continued
+                    self.svc.drop_step(self)
+                else:
+                    self.continue_final = True
+                self.finish_reason = None
+                self.set_phase("queued", MEMORY_PAUSE.format(s=int(backoff)))
+                self.wake.wait(backoff)
+                backoff = min(BACKOFF_MAX_S, backoff * 2)
+                continue
             # the stream broke with no finish: the engine went away. Retry, continuing the text.
             if time.monotonic() + backoff > deadline:
                 self.error = "the engine stream ended early"
@@ -547,6 +623,8 @@ class Run:
                 return "broken"
             if kind != "data" or not isinstance(obj, dict):
                 continue
+            if memory_full(obj.get("error") if isinstance(obj.get("error"), dict) else {}):
+                return "memory"                      # SRV-709: paused, continued by `_call`
             if obj.get("error") and not obj.get("choices"):
                 err = obj["error"]
                 self.error = str(err.get("message") if isinstance(err, dict) else err)[:300]

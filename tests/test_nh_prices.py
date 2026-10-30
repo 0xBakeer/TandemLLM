@@ -101,6 +101,26 @@ def test_every_lilicorr_profile_ships_its_price_file():
     return f"{len(seen)} profiles"
 
 
+def test_every_nemotron_community_pack_ships_its_price_file():
+    # ENG-377: a community pack on a NemotronH base drafts with LiLiCorr like its nearest profile; its price file
+    # is ops/prices/<base>/community/<id>.dgx-spark.json (serving.py: the profile's name is community/<id>)
+    from server.setup import registry
+    seen = []
+    for p in sorted(glob.glob(os.path.join(ROOT, "models", "*", "community", "*.json"))):
+        e = json.load(open(p))
+        if registry.community_serves(e) != "profile":
+            continue
+        pf = os.path.join(ROOT, "ops", "prices", e["base_model"], "community", f"{e['id']}.dgx-spark.json")
+        assert os.path.isfile(pf), f"{e['id']}: no price file {pf}"
+        doc = json.load(open(pf))
+        for c in (k for k in doc if k.lstrip("-").isdigit()):
+            assert set(doc[c]["chain"]) >= {str(r) for r in range(1, 17)}, f"{e['id']}[{c}] chain"
+            assert float(doc[c]["plain"]["1"]) > 0.0 and "spec" in doc[c], f"{e['id']}[{c}]"
+        seen.append(e["id"])
+    assert seen, "no NemotronH community pack"
+    return f"{len(seen)} packs"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

@@ -40,7 +40,7 @@ The drafter's head gives the top 16 candidates per slot, and a small bigram sele
 `engine/drafters/ngram.py` copies text instead of predicting it. It looks for the longest match of the last few tokens in three places:
 
 - the request itself, prompt and output so far (orders 2 to 8);
-- a corpus of about 38 million tokens of public text, memory-mapped with a suffix array;
+- a corpus of public text, memory-mapped with a suffix array: 38 million tokens on my box, 31 million on an install (below);
 - the persistent suffix store, a log of what this engine has read and written before ([caches.md](caches.md)).
 
 ![A verbatim quotation, where the lookup drafter carries long lines](media/quote_speed.gif)
@@ -52,6 +52,25 @@ Every continuation found is a vote, and the votes form a tree whose node scores 
 It fires only when the tree it would propose is worth its verify cost. A drafter that proposes on every step and is usually wrong costs the round, because the alternative on a declined step is the block drafter.
 
 After two wide rounds in a row that commit their whole width, the lookup drafter may propose one deep chain of up to 32 rows (`QWEN38_DEEP`). On an editing workload that raised the accepted tokens per round from 12.6 to 15.75.
+
+### The corpus of each tokenizer
+
+A corpus holds token ids, so it serves only the tokenizer that wrote it. Its `meta.json` records the sha256 of that tokenizer's `tokenizer.json`, and the engine refuses a store that records another one. Qwen3.8 and Flash-Next share one tokenizer; Ornith, Flint, LFM2.5 and the Nemotron models use others.
+
+The corpus I serve with has 38 million tokens and is not published. `install.sh` builds a public one with the same recipe: one English and one German Wikipedia shard (CC BY-SA 4.0) and the Python sources of transformers, torch, triton and this repository, about 31 million tokens. It builds it for the 27B, at `~/TandemLLM/corpus`.
+
+One `CORPUS` folder holds one store a tokenizer (`server/setup/corpus.py`):
+
+| path | what it holds |
+|-|-|
+| `CORPUS/` | the store `install.sh` builds for the 27B, or a store built by hand |
+| `CORPUS/tokenizers/<16 hex>/` | the store of one tokenizer, named by the first 16 hex digits of its fingerprint |
+
+`ops/use-profile.sh` builds the profile's store once its weights are complete, when neither folder serves its tokenizer. The Setup Guide's install runs it, so a box that `install.sh --setup` set up drafts from a corpus too. `install.sh --setup` downloads the two Wikipedia shards, and the build reads them from the Hugging Face cache, so it needs no network. A shard that is missing there is fetched, and without the network the store is built from the local sources alone. The build runs on the CPU and takes a few minutes. It changes speed only: if it fails, the switch goes on and the lookup reads the conversation and the suffix store. `QSE_CORPUS_BUILD=off` skips it.
+
+`ops/start.sh` then passes the engine the store of the served model's tokenizer: `CORPUS` when it records that tokenizer, else that tokenizer's folder. A `CORPUS` that records no tokenizer, as one built before the fingerprint existed, is read as every model's, with a warning, as before. No folder is built beside it.
+
+The card rows of Ornith and Flint do not record which corpus they ran with. I have not yet measured decode with no corpus, the public corpus and the served one on the same prompts, greedy and at the card's sampling. That measurement goes here, with its build and date.
 
 ## StairCut: the node count, calculated each round
 
@@ -107,6 +126,7 @@ At long context a drafted round can cost more a token than the plain step. On th
 - `turn`: a turn drafts only when what speculation saves over the expected answer pays for the draft head's backlog, the prompt rows it has not read yet (0.28 ms a row at 260,800 tokens). A turn that does not draft takes the plain step throughout and never reads the backlog.
 - What a class learned of its drafted rounds ages back to the file's prior while its turns take the plain step, so one slow request does not keep a class plain for good.
 - While the server is idle (one second after the last request), it captures the verify, commit and draft graphs the current context class lacks, 25 to 30 graphs in about 4.3 s a class. A drafted turn is charged for graphs its class still lacks. Before this, the first drafted request in a new class paid 3.4 to 5.1 s of captures inside its answer.
+- The idle window also captures the classes ahead of the current length (the next one, and each further one that starts within 6,144 tokens of it; from an empty state the 1,024 class, from 2,051 tokens, and the 2,048 class, from 4,096) and every class a turn found without its graphs, whatever length the state was left at. The warm-up captures class 0 only. Every request through the conductor starts in the 2,048 class (its plan's prompt is 4.1k to 4.8k tokens), so before this such turns took the plain step until an idle window found the state in that class (SRV-713).
 
 Measured on 3.05 on 2026-10-12: one fresh server, two rounds at each length of one greedy request and the same request again (its prompt then from the caches), and plain decode from a `--drafter none` server. Each cell is the first request and its repeat:
 

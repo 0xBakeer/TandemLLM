@@ -20,6 +20,11 @@ keys changed (`DEFAULTS` is what a model without the field gets, the router as b
                        thinking switch and the budget alone
     memory             the memory card and index go in under a profile with memory on
     rules              the class's rules and note go in
+    notes              the model's prompt has a place for the router's notes: the end of the last
+                       message, before its `<|im_end|>` (inject.insertion_point); False (SRV-703: a
+                       template that ends no message with a token, Flint's) holds none, so the
+                       router asks for none: no packages, no effort sentence, no rules, no memory,
+                       each journaled as off for the model
 
 `QWEN38_CONDUCTOR_FIT`: `model` (the default) the adapter's fit, `off` the router as written,
 `k=v,k=v` the adapter's fit with these keys replaced (an A/B without a code change).
@@ -29,11 +34,13 @@ from __future__ import annotations
 
 import copy
 
-from engine.settings import SETTINGS as _S
+from server.knobs import SETTINGS as _S
 
 DEFAULTS: dict = {"served_classifier": True, "fallback": "class", "packages": "all",
                   "no_package_classes": (), "effort_notes": True, "memory": True,
-            "rules": True}
+            "rules": True, "notes": True}
+#: what `notes: False` sets: every key that would put a note into the prompt
+NO_NOTES = {"packages": "none", "effort_notes": False, "memory": False, "rules": False}
 CHOICES = {"fallback": ("class", "lean"), "packages": ("all", "core", "none")}
 
 #: the fit the router reads (`resolve` at the server's start; DEFAULTS until then)
@@ -76,6 +83,8 @@ def resolve(adapter_fit: dict | None, setting: str | None = None) -> tuple[dict,
                                  f"{', '.join(DEFAULTS)}")
             fit[k] = _value(k, v.strip())
         source = f"{source}+{setting}"
+    if not fit["notes"]:
+        fit.update(NO_NOTES)
     for k, ok in CHOICES.items():
         if fit[k] not in ok:
             raise ValueError(f"{k}: {fit[k]!r} is not one of {', '.join(ok)}")

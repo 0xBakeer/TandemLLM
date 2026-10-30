@@ -2,11 +2,13 @@
 
 A selection is what the wizard's steps chose (dashboard/src/api/types.ts `SetupSelection`):
 
-    {model, profile, components: {id: bool}, slots, window, side_window?, kv_pool, floor_gb,
+    {model, profile, components: {id: bool}, slots, window, kv_pool, floor_gb,
      methods: {id: value}, advanced: {id: value}, device?}
 
+`slots` is the parallel lanes, `window` every lane's context window (SRV-707: one window for all;
+a body from an older page may still carry `side_window`, which is read as nothing).
 `check(m, body)` validates one against the model's registry entry and returns it complete (every key
-the body left out at the registry's default; the side window at the window); the estimate, the plan,
+the body left out at the registry's default); the estimate, the plan,
 the apply job and Wren's tool calls all go through it. A body that names anything else (`steps`,
 `cmd`, `env`, a path) is refused: nothing a client sends becomes a command or a file name.
 
@@ -20,16 +22,23 @@ them on the reference box:
     per window  the registry's per-window parts: bytes a token x the window (a prefill's score buffer)
     side_slots  (slots - 1) x side_slot_const_gib     (their verify graphs off)
     a tool      its memory_gib, for every tool that is on (worst_gb: its memory_max_gib)
-    kv          KV pool on: (min(window, fill) + (slots - 1) x min(side_window, fill)) x bytes a token,
-                fill = typical_fill_tokens (32,768); the pool commits pages as conversations
-                write them. Pool off: every window at load, (window + (slots - 1) x side_window) x
-                bytes a token. worst_gb: every slot at its full window.
+    kv          KV pool on: slots x min(window, fill) x bytes a token, fill = typical_fill_tokens
+                (32,768); the pool commits pages as conversations write them. Pool off: every
+                window at load, slots x window x bytes a token. worst_gb: every lane at its full
+                window.
 
     budget      = device total - floor                (what may be used with MemAvailable at the floor)
     total       = the sum of the parts                fits       = total <= budget
     room        = budget - every part but the KV      fits_worst = room >= worst KV
     context_tokens_fit = floor(room / bytes a token), over all slots (0 when room < 0), at most the
                  profile's max_window a slot; a profile with none fits no window
+    lane_full_gb = window x bytes a token             (one lane at its full window)
+    lanes_full  = min(slots, floor(room / lane_full_gb)), 0 when room < 0: the lanes that can all
+                 hold the full window at once (SRV-707). Pool off it is `slots` exactly when the
+                 selection fits (every window is memory at load). Past it the lanes share what is
+                 left: a request waits for memory before its prefill (its stream says so), idle
+                 conversations give their pages back first, and a lane whose next pages would take
+                 the box under the pool's hard floor stops with `memory_full` (SRV-709)
 
 Rounded to 0.01 at the output only; `fits` compares the rounded figures, so a total equal to the
 budget to the cent fits. The live MemAvailable (`available_gb`) is information beside it, never part
@@ -128,23 +137,19 @@ def check(m: dict, body) -> dict:
     p = m["parallelism"]
     # the card's slots.max is how far it was measured; the engine's own limit is the cap
     slots = body.get("slots", p["slots"]["default"])
-    if isinstance(slots, int) and not isinstance(slots, bool) and slots > registry.ENGINE_MAX_SLOTS:
-        raise SelectionError(422, "out_of_range", f"slots: {slots} is above {registry.ENGINE_MAX_SLOTS}, "
-                             "the most chats the engine verifies in one pass",
-                             [{"field": "slots", "reason": f"at most {registry.ENGINE_MAX_SLOTS}"}])
-    slots = _int_in("slots", slots, p["slots"]["min"], registry.ENGINE_MAX_SLOTS)
+    top = registry.slots_max(m)
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots > top:
+        why = p["slots"].get("engine_max_reason") or "the most lanes the setup takes"
+        raise SelectionError(422, "out_of_range", f"slots: {slots} is above {top}, {why[0].lower() + why[1:]}",
+                             [{"field": "slots", "reason": f"at most {top}"}])
+    slots = _int_in("slots", slots, p["slots"]["min"], top)
     window = _on_step("window", _int_in("window", body.get("window", p["window"]["default"]),
                                         p["window"]["min"], p["window"]["max"]), p["window"]["step"])
     mw = registry.profile(m, pid).get("max_window")
     if mw and window > mw:
         raise SelectionError(422, "out_of_range", f"window: {window:,} is above {pid}'s largest window, {mw:,}",
                              [{"field": "window", "reason": f"at most {mw} with {pid}"}])
-    side = body.get("side_window")
-    side = window if side is None else side
-    side = _on_step("side_window", _int_in("side_window", side, p["side_window"]["min"],
-                                           p["side_window"]["max"]), p["side_window"]["step"])
-    # a side slot never holds more than slot 0 (server/app.py: min(side_max_len, max_len))
-    side = min(side, window)
+    # SRV-707: every lane has the window; an older page's `side_window` is read as nothing
     pool = body.get("kv_pool", p["kv_pool"]["default"])
     if not isinstance(pool, bool):
         raise SelectionError(422, "invalid_selection", "kv_pool: true or false",
@@ -155,7 +160,7 @@ def check(m: dict, body) -> dict:
         raise SelectionError(422, "out_of_range", f"floor_gb: a number from {lo:g} to {hi:g}",
                              [{"field": "floor_gb", "reason": f"from {lo:g} to {hi:g}"}])
     out = {"model": m["id"], "profile": pid, "components": comps, "slots": slots, "window": window,
-           "side_window": side, "kv_pool": pool, "floor_gb": float(floor)}
+           "kv_pool": pool, "floor_gb": float(floor)}
     for group in ("methods", "advanced"):
         vals = {f["id"]: f["default"] for f in m[group]}
         given = body.get(group) or {}
@@ -188,14 +193,23 @@ def _r(x: float) -> float:
     return round(x, 2) + 0.0          # never -0.0
 
 
+def kv_bytes(m: dict, sel: dict) -> int:
+    """The KV bytes a token: a component that is on and keeps the cache in fewer bytes says how many
+    (Flint's e4m3 cache), else the model's."""
+    for c in m["components"]:
+        if c.get("kv_bytes_per_token") and sel["components"].get(c["id"]):
+            return int(c["kv_bytes_per_token"])
+    return int(m["parallelism"]["kv_bytes_per_token"])
+
+
 def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
     """The estimate of a checked selection (`check`), in the shape of `SetupEstimate`."""
     p = m["parallelism"]
     prof = registry.profile(m, sel["profile"])
     dev = next(d for d in m["devices"] if d["id"] == sel["device"])
-    kvb = int(p["kv_bytes_per_token"])
+    kvb = kv_bytes(m, sel)
     fill = int(p["typical_fill_tokens"])
-    slots, window, side = sel["slots"], sel["window"], sel["side_window"]
+    slots, window = sel["slots"], sel["window"]
     parts = [{"id": "os", "label": "The OS and other programs", "gb": dev["reserved_gib"],
               "kind": "fixed"},
              {"id": "weights", "label": f"Weights ({prof['label']})", "gb": prof["weights_gib"],
@@ -228,8 +242,8 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
         if c["memory_max_gib"] is not None:
             part.update(kind="reserve", worst_gb=c["memory_max_gib"])
         parts.append(part)
-    worst_rows = window + (slots - 1) * side
-    typical_rows = min(window, fill) + (slots - 1) * min(side, fill)
+    worst_rows = slots * window
+    typical_rows = slots * min(window, fill)
     kv_worst = worst_rows * kvb / GIB
     kv = (typical_rows if sel["kv_pool"] else worst_rows) * kvb / GIB
     fixed = sum(x["gb"] for x in parts)
@@ -248,6 +262,10 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
         ctx = 0
     elif mw:
         ctx = min(ctx, mw * slots)
+    lane_full = window * kvb / GIB
+    unit = _r(lane_full)
+    full = (0 if room <= 0 or mw is None else
+            slots if unit <= 0 else min(slots, math.floor(_r(room) / unit)))
     notes = []
     if mw is None:
         notes.append(f"{prof['label']} does not fit {dev['label']} at any window: it is "
@@ -262,12 +280,19 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
         notes.append("Fewer slots, a shorter window, a smaller weight profile or fewer tools "
                      "bring it down.")
     elif not fits_worst:
-        notes.append(f"With every slot at its full window the conversations would need "
-                     f"{_r(kv_worst - room):.2f} GiB more than there is. When memory runs short, "
-                     f"a new request waits for room instead of the engine running out of memory.")
+        notes.append(f"{full} of {slots} lanes can hold the full {window:,}-token window at once "
+                     f"({_r(lane_full):.2f} GiB each); every lane at it would need "
+                     f"{_r(kv_worst - room):.2f} GiB more than there is. Past that the lanes share "
+                     f"what is left: a new request waits for memory before it starts, idle "
+                     f"conversations give their memory back first, and a lane that would take the "
+                     f"box under its floor stops with memory_full; the Chat tab continues it once "
+                     f"memory is free.")
+    elif slots > 1:
+        notes.append(f"All {slots} lanes can hold the full {window:,}-token window at once "
+                     f"({_r(lane_full):.2f} GiB each).")
     if room > 0:
         per = min(window, ctx // slots) if slots else 0
-        notes.append(f"About {ctx:,} tokens of conversation fit in all, {per:,} a slot when all "
+        notes.append(f"About {ctx:,} tokens of conversation fit in all, {per:,} a lane when all "
                      f"{slots} are full (the window is {window:,}).")
     return {"contract_version": "1.0", "total_gb": _r(total), "available_gb": available_gb,
             "device_gb": _r(dev["total_gib"]), "floor_gb": _r(sel["floor_gb"]),
@@ -276,4 +301,4 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
                                                   if "worst_gb" in x else {})) for x in parts],
             "fits": fits, "fits_worst": fits_worst, "context_tokens_fit": ctx,
             "kv_bytes_per_token": kvb, "typical_fill_tokens": fill, "kv_worst_gb": _r(kv_worst),
-            "room_gb": _r(room), "notes": notes}
+            "room_gb": _r(room), "lane_full_gb": _r(lane_full), "lanes_full": full, "notes": notes}

@@ -4,6 +4,7 @@ tolerance of the fp32 e4m3 decode, and the M > 33 prompt path still correct."""
 
 import os
 import sys
+import unittest
 
 import torch
 
@@ -24,7 +25,7 @@ def _linear(N, K, seed=0):
 
 def test_fp8_row_invariance():
     if not KERNELS:
-        return
+        raise unittest.SkipTest("no triton/gpu")
     for N, K in SHAPES:
         lin = _linear(N, K, N + K)
         for f32 in (False, True):
@@ -38,7 +39,7 @@ def test_fp8_row_invariance():
 
 def test_fp8_matches_dequant():
     if not KERNELS:
-        return
+        raise unittest.SkipTest("no triton/gpu")
     for N, K in SHAPES:
         lin = _linear(N, K, N * 3 + K)
         x = torch.randn(9, K, dtype=torch.bfloat16, device=DEV)
@@ -50,7 +51,7 @@ def test_fp8_matches_dequant():
 
 def test_fp8_prompt_path():
     if not KERNELS:
-        return
+        raise unittest.SkipTest("no triton/gpu")
     for N, K in SHAPES:
         lin = _linear(N, K, N * 5 + K)
         x = torch.randn(70, K, dtype=torch.bfloat16, device=DEV)
@@ -63,6 +64,5 @@ def test_fp8_prompt_path():
 
 
 if __name__ == "__main__":
-    for n in sorted(dir()):
-        if n.startswith("test_"):
-            print(n, globals()[n]() or "PASS")
+    from scriptmode import run
+    run(globals())

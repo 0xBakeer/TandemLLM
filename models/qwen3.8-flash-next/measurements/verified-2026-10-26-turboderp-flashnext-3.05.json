@@ -1,0 +1,34 @@
+{
+ "label": "fnx-verified",
+ "version": "0.14.2+flashnext-3.05",
+ "drafters": "mtp (the pack's own layer)",
+ "answers": {
+  "prose": {
+   "tok_s": 56.38,
+   "per_block": 2.45,
+   "n": 337,
+   "prompt": 4129,
+   "text_sha256": "5162dc66552fc9fd"
+  },
+  "code": {
+   "tok_s": 60.24,
+   "per_block": 2.63,
+   "n": 512,
+   "prompt": 688,
+   "text_sha256": "9589b627c4984f04"
+  },
+  "chat": {
+   "tok_s": 55.75,
+   "per_block": 2.56,
+   "n": 323,
+   "prompt": 4550,
+   "text_sha256": "ddfb3bbd35866691"
+  }
+ },
+ "tool": "tools/q35m_ab.py --only prose,code,chat",
+ "setup": "v3-fn-3.05: 8 lanes of 262,144, suffix store and response cache off",
+ "build": "0.14.2",
+ "commit": "bebc4583",
+ "date": "2026-10-26",
+ "device": "dgx-spark"
+}

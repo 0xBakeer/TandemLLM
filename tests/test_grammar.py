@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from engine import grammar as G  # noqa: E402
 from server import app  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 import test_compat as C  # noqa: E402
 
 PATTERNS = [
@@ -289,7 +290,7 @@ def test_the_handler_refuses_what_it_cannot_serve():
     assert head.startswith("HTTP/1.1 200"), "tool_choice none takes the tools out of the request"
     # SRV-619: a model whose calls are not the XML format keeps the 400 with tools
     C.serve()
-    app.STATE["tool_format"] = "pythonic"
+    app.STATE["spec"] = ServeSpec(tool_format="pythonic")
     head, raw = C.Req("/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}],
                                               "response_format": {"type": "json_object"},
                                               "tools": tools}).response()
@@ -330,13 +331,58 @@ def test_the_mask_cache_is_bounded_and_forgets_dropped_grammars():
         G._GRAMMARS.clear()
         for i in range(3):
             G.grammar_for(f"x{i}", v, keep=2).mask(0, frozenset(), "cpu")
-        live = {id(x) for x in G._GRAMMARS.values()}
-        assert {k[0] for k in G._MASKS} - {id(g)} <= live, "a dropped grammar leaves no masks"
+        live = {x.serial for x in G._GRAMMARS.values()}
+        assert {k[0] for k in G._MASKS} - {g.serial} <= live, "a dropped grammar leaves no masks"
     finally:
         G.MASK_CACHE = old
         G._MASKS.clear()
         G._GRAMMARS.clear()
     return "5 masks kept of 8, LRU order; a grammar dropped from the cache takes its masks along"
+
+
+def test_a_new_grammar_never_reads_a_freed_grammars_masks():
+    """The masks were keyed by `id(grammar)`, and CPython hands a freed object's id to the next
+    one: a grammar built after another was freed read its masks (a mask for a 97-token
+    vocabulary on a 99-token one: `test_the_handler_forces_the_call` and two more failed in
+    most runs on 0.12.2). Built and dropped in a loop, the ids repeat; the keys must not."""
+    import gc
+    G._MASKS.clear()
+    G._GRAMMARS.clear()
+    try:
+        v, _ = _toy_vocab()
+        seen_ids, serials = set(), set()
+        reused = False
+        for i in range(50):
+            g = G.Grammar(r"[a-c]{4}" if i % 2 else r"[ab]{3}", v)
+            reused |= id(g) in seen_ids
+            seen_ids.add(id(g))
+            assert g.serial not in serials
+            serials.add(g.serial)
+            want = g.vocab.mask(g.dfa, g.dfa.start)
+            got = g.mask(g.dfa.start, frozenset(), "cpu").numpy()
+            assert (got == want).all(), f"grammar {i} read another grammar's mask"
+            del g
+            gc.collect()
+        return f"50 grammars, ids reused: {reused}, every mask its own"
+    finally:
+        G._MASKS.clear()
+        G._GRAMMARS.clear()
+
+
+def test_the_same_pattern_on_another_vocabulary_drops_the_old_masks():
+    G._MASKS.clear()
+    G._GRAMMARS.clear()
+    try:
+        v1, _ = _toy_vocab()
+        v2, _ = _toy_vocab()
+        g1 = G.grammar_for(r"[a-c]{4}", v1)
+        g1.mask(g1.dfa.start, frozenset(), "cpu")
+        g2 = G.grammar_for(r"[a-c]{4}", v2)
+        assert g2 is not g1 and g2.vocab is v2
+        assert not any(k[0] == g1.serial for k in G._MASKS), "the replaced grammar's masks left"
+    finally:
+        G._MASKS.clear()
+        G._GRAMMARS.clear()
 
 
 # ------------------------------------------------------------------ tool_choice as a mask
@@ -399,6 +445,44 @@ def test_the_tool_call_language():
     return (f"{len(ok)} calls in; prose first, an unknown function, a missing required parameter, "
             f"a mistyped integer, an undeclared parameter, trailing text and nothing at all out; "
             f"many=False: one call")
+
+
+def test_the_tool_call_language_in_the_argkey_form():
+    """SRV-689: tool_choice's calls in Flint's arg-key form, the values exactly as written; the
+    form's tags may be the model's own ids, and the calls parse back to the arguments."""
+    from server.toolcall import ToolCallBuffer
+    from server.toolformats import argkey
+    from server.toolformats.argkey import argkey_calls
+    pat, typed = argkey.forced_regex(TOOLS, ["read_file", "set", "now"])
+    assert typed == {"set": {"n", "tags"}}
+    d = G.compile_regex(pat)
+    ok = ["<tool_call>read_file<arg_key>path</arg_key><arg_value> /etc/hosts\n</arg_value></tool_call>",
+          "<tool_call>set<arg_key>n</arg_key><arg_value>3</arg_value><arg_key>mode</arg_key>"
+          "<arg_value>b</arg_value></tool_call>\n<tool_call>now</tool_call>",
+          '<tool_call>set\n<arg_key>n</arg_key>\n<arg_value>-2</arg_value>\n<arg_key>tags</arg_key>'
+          '<arg_value>["x", "y"]</arg_value>\n</tool_call>',
+          "<tool_call>read_file<arg_key>path</arg_key><arg_value>a </arg b</arg_value></tool_call>"]
+    bad = ["I will.<tool_call>read_file<arg_key>path</arg_key><arg_value>/x</arg_value></tool_call>",
+           "<tool_call>write_file</tool_call>",
+           "<tool_call>set<arg_key>mode</arg_key><arg_value>a</arg_value></tool_call>",
+           "<tool_call>set<arg_key>n</arg_key><arg_value>three</arg_value></tool_call>",
+           "<tool_call>read_file<arg_key>path</arg_key><arg_value>/x</arg_value><arg_key>mode"
+           "</arg_key><arg_value>a</arg_value></tool_call>",
+           "<tool_call>\n<function=read_file>\n<parameter=path>\n/x\n</parameter>\n</function>\n"
+           "</tool_call>", ""]
+    for t in ok:
+        assert d.accept[d.walk(0, t.encode())], t
+    for t in bad:
+        assert not d.accept[d.walk(0, t.encode())], t
+    b = ToolCallBuffer(types={"set": {"n": frozenset({"integer"})}}, fmt="argkey")
+    b.feed(ok[0] + ok[1])
+    b.finish(eos=True)
+    got = [(x["function"]["name"], json.loads(x["function"]["arguments"])) for x in b.calls]
+    assert got == [("read_file", {"path": " /etc/hosts\n"}), ("set", {"n": 3, "mode": "b"}),
+                   ("now", {})], got
+    assert argkey_calls("now") == [{"name": "now", "arguments": {}}]
+    assert set(argkey.MARKERS) >= {"<tool_call>", "</tool_call>", "<arg_key>", "</arg_value>"}
+    return f"{len(ok)} calls in, {len(bad)} out (the XML form among them); values exact"
 
 
 # an enum only: the random model, free to add digits to an integer, never stops writing one

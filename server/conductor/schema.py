@@ -44,6 +44,9 @@ from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_K
 from server.conductor.voice import DEFAULTS as VOICE_DEFAULTS
 
 MODES3 = ("off", "shadow", "on")            # a routing decision type
+# a profile's `memory` switch (server/conductor/memory.py): MODES3, and `none` (SRV-703), nothing at
+# all: no card, no off note, the request as the client sent it (what an absent switch means)
+MEMORY_MODES = MODES3 + ("none",)
 # SRV-475: how a profile's agent turns sample when the client names no sampling
 AGENTIC_SAMPLING = ("greedy", "card")
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
@@ -109,9 +112,11 @@ CODE_GUARD = {
 # only tools and skills (one named after another assistant), and the model answers from its
 # training then. The note says it is TandemLLM running the served model on the user's own machine,
 # and that it is no other assistant and not made by Anthropic or OpenAI.
-MODEL_NAME = "Qwen3.8-27B"
-#: the served model's name as the server found it (its model card's label for the weight profile,
-#: server/app.py `_identity_name`), the second model's label on its packs. None: MODEL_NAME
+# ENG-406: no model is the default; the active profile's card names the served one (server/app.py
+# `_identity_name`), and without a card the note names none
+MODEL_NAME = ""
+#: the served model's name as the server found it: its model card's label for the weight profile
+#: (server/app.py `_identity_name`). None: MODEL_NAME
 SERVED_NAME: str | None = None
 IDENTITY_NOTE = ("About you: you are TandemLLM, running the {model} model on the user's own "
                  "machine. You are not Claude, Fable, ChatGPT or any other assistant, whatever "
@@ -119,6 +124,13 @@ IDENTITY_NOTE = ("About you: you are TandemLLM, running the {model} model on the
                  "OpenAI. When someone asks who or what you are or which model this is, say that "
                  "you are TandemLLM running {model} on their own machine, in one short sentence in "
                  "their language, and add details about the engine only when asked.")
+#: the note when no card names the served model
+IDENTITY_NOTE_UNNAMED = ("About you: you are TandemLLM, running on the user's own machine. You are not "
+                         "Claude, Fable, ChatGPT or any other assistant, whatever names the tools or "
+                         "skills mention, and you were not made by Anthropic or OpenAI. When someone asks "
+                         "who or what you are, say that you are TandemLLM running on their own machine, "
+                         "in one short sentence in their language, and add details about the engine only "
+                         "when asked.")
 
 
 # the turn that asks (the note goes in there, then replays at its place on every later turn of the
@@ -137,12 +149,13 @@ IDENTITY_ASK = (
 
 
 def model_name() -> str:
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     return (_S.get("MODEL_NAME") or "").strip() or SERVED_NAME or MODEL_NAME
 
 
 def identity_text() -> str:
-    return IDENTITY_NOTE.replace("{model}", model_name())
+    name = model_name()
+    return IDENTITY_NOTE.replace("{model}", name) if name else IDENTITY_NOTE_UNNAMED
 
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "chat-app",
@@ -295,6 +308,20 @@ TOOL_FIT: dict = {
     "note_write": ("This chat can write files but has no shell{tools}. Write the files with the "
                    "file tool; do not try to run or test them, and end with one line on how to "
                    "open or run them."),
+    # SRV-615: a package whose result an offered tool delivers (write-message where the chat
+    # offers send_email) stays out when the user wants it done, not written: `on` acts, `shadow`
+    # journals what would have stayed out, `off` asks nothing. The question goes to the class
+    # question's stages (the decider, then Qwen) with the user's message. Shipped in shadow: on
+    # the chat profile (2026-10-20, n = 1) TC-03 passed with it on, the score stayed 91 and
+    # TC-47 and TC-51 failed, cause not tested
+    "deliverable": "shadow",
+    "deliverable_question": ("The chat offers these tools: {tools}. Does the user want the task "
+                             "done with one of these tools, or do they want the text itself to "
+                             "read, copy or send themselves?"),
+    "deliverable_options": {
+        "tool": "Done with a tool: the user wants it sent, booked, set or posted.",
+        "text": "The text itself: the user wants a draft, to read, copy or send themselves."},
+    "deliverable_accept": 0.6,
 }
 # S1 (2026-10-02): a client's side request (opencode's title or summary call, Hermes' title call)
 # is detected structurally (signals.side_shape: no tools and the client's fixed instruction) and
@@ -1172,6 +1199,11 @@ SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], live={
 # `general` serves scripts and SDK clients and keeps the release's request
 for _n in ("chat", "coding", "hermes"):
     SHIPPED_PROFILES[_n]["memory"] = "on"
+# SRV-703: every shipped profile says what its memory is. `none` where the request stays the
+# client's (scripts and SDK clients, unattended runs, the raw ones): no card and no off note, as
+# an absent switch; `tools` takes general's
+for _n in ("raw", "bench", "general", "overnight"):
+    SHIPPED_PROFILES[_n]["memory"] = "none"
 # SRV-473: the same-call guard (C3, `toolgate.same_call`) on in every profile that serves an agent
 # loop; it holds calls only on a request whose turn already ends with the repeated call, so every
 # other turn streams as before. `general` (scripts, SDK clients) keeps the release's request. Open
@@ -1208,7 +1240,7 @@ SHIPPED_PROFILES["chat-app"].update(
 # SRV-621: a plain API client that offers tools (an SDK agent loop, curl, a benchmark;
 # router.resolve's rule). `general` with nothing added to the prompt and nothing asked on the
 # side: no class question (its micro-call cost the bench 1.23x raw's time and moved a near-tie
-# answer off raw's), no effort decision, no packages, no rules, no memory (the key absent: no card, no off note), no
+# answer off raw's), no effort decision, no packages, no rules, no memory (general's `none`: no card, no off note), no
 # session transcript, no state lines, no loop escape; `prompt: client` drops whatever note,
 # card or moved tool text the plan would add, so the prompt ids are the raw path's. The loop
 # guards and the tool-call checks act, C5 too (SRV-623); every act is journaled
@@ -1440,8 +1472,10 @@ def profile_library(profile: dict) -> str:
 
 
 def profile_memory(profile: dict) -> str:
-    """A profile's `memory` switch (2026-10-05): off when absent."""
-    return profile.get("memory", "off")
+    """A profile's `memory` switch (2026-10-05) as the router reads it: off when absent or `none`
+    (SRV-703); an explicit `off` alone adds the off note (memory.attach)."""
+    v = profile.get("memory", "none")
+    return "off" if v == "none" else v
 
 
 PROMPT_MODES = ("conductor", "client")
@@ -1738,7 +1772,15 @@ SCHEMAS: dict[str, dict] = {
         # SRV-243: what a turn whose tools cannot carry out its packages is told instead
         "tool_fit": _obj({"mode": {"enum": list(MODES3)},
                           "note_none": {"type": "string", "maxLength": 2000},
-                          "note_write": {"type": "string", "maxLength": 2000}}, required=()),
+                          "note_write": {"type": "string", "maxLength": 2000},
+                          # SRV-615: a deliverable package stays out when a tool delivers
+                          "deliverable": {"enum": list(MODES3)},
+                          "deliverable_question": {"type": "string", "minLength": 8,
+                                                   "maxLength": 600},
+                          "deliverable_options": _obj({
+                              "tool": {"type": "string", "minLength": 4, "maxLength": 300},
+                              "text": {"type": "string", "minLength": 4, "maxLength": 300}}),
+                          "deliverable_accept": _PROB}, required=()),
     }, required=("classes", "classifier", "structural", "stickiness", "effort", "injection")),
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
@@ -1771,7 +1813,10 @@ SCHEMAS: dict[str, dict] = {
                                "items": {"enum": ["shell", "write", "render", "render_video"]},
                                "maxItems": 4},
             "fallback": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9_.-]*$",
-                         "maxLength": 80}},
+                         "maxLength": 80},
+            # SRV-615: what the package's result is for when an offered tool can make it: the
+            # router asks whether the user wants it done by the tool or the text itself
+            "deliverable": {"enum": ["send", "schedule", "post"]}},
             required=("title", "kind", "source", "description", "body", "max_tokens",
                       "enabled"))}}),
     "profiles": _obj({
@@ -1838,8 +1883,8 @@ SCHEMAS: dict[str, dict] = {
                          required=()),
         # R1: the package library's retrieval (absent: off)
         "library": {"enum": list(MODES3)},
-        # 2026-10-05: the memory notes (absent: off; server/conductor/memory.py)
-        "memory": {"enum": list(MODES3)},
+        # 2026-10-05: the memory notes (absent: none; server/conductor/memory.py)
+        "memory": {"enum": list(MEMORY_MODES)},
         # SRV-621: `client`, nothing of the plan goes into the prompt (absent:
         # `conductor`); `transcripts: off`, no session transcript (absent: the settings' scope)
         "prompt": {"enum": list(PROMPT_MODES)},

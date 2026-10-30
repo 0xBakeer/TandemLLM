@@ -853,7 +853,7 @@ class TasksMixin:
         user = path[0] if path and path[0].get("role") == "user" else {}
         worker.ctx_est = {"system": est["system"], "tools": est["tools"],
                           "brief": ctx_mod.estimate_tokens(render.text_of(user.get("parts") or [])),
-                          "files": ctx_mod.file_tokens(path, worker=True)}
+                          "files": ctx_mod.file_tokens(path)}
 
     def running_workers(self, run) -> list:
         """A run's workers in flight, by task: one at a time today (SRV-589 runs more)."""

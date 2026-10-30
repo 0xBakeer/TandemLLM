@@ -302,11 +302,36 @@ def _nth(texts: list, n: int) -> str:
     return texts[min(n, len(texts) - 1)]
 
 
+def _call_format(sup, block: str) -> str:
+    """C4's format line: a call in the model's own format, shown with a tool the request offers
+    -- the one the block names, else the first -- and one of its arguments (a required one
+    first). Never a placeholder name the model could copy into its next call."""
+    fmt = getattr(sup.req, "tool_format", None) or None
+    # a supervisor, or a reader of its parts (proxy/harness.py `_Sup`): the request's tools
+    fns = [t.get("function") for t in getattr(sup.req, "tools", None) or () if isinstance(t, dict)]
+    schemas = {f["name"]: f.get("parameters") for f in fns
+               if isinstance(f, dict) and isinstance(f.get("name"), str)}
+    names = list(getattr(sup, "tool_names", None) or schemas)
+    if not names:
+        return toolcall.call_format(fmt, "the tool's name")
+    name = next((n for n in sorted(names, key=len, reverse=True)
+                 if re.search(r"(?<![\w.-])" + re.escape(n) + r"(?![\w.-])", block or "")),
+                names[0])
+    schema = schemas.get(name) or {}
+    schema = schema if isinstance(schema, dict) else {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    req = [k for k in schema.get("required") or () if isinstance(k, str) and k in props]
+    keys = req + [k for k in props if k not in req]
+    return toolcall.call_format(fmt, name, keys[0] if keys else None)
+
+
 # ------------------------------------------------------------------ C4: malformed
 
 @register("malformed_call", "SP3", params={
     "texts": dict(_TEXTS, description="the reminder after a block that does not parse; {error} "
-                                      "is the parser's reason"),
+                                      "is the parser's reason, {format} how a call is written in "
+                                      "the model's own format, shown with a tool the request "
+                                      "offers (toolcall.call_format)"),
     "regenerations": dict(_COUNT, description="regenerations a request may spend on unreadable "
                                               "calls; then the block goes out as content, as "
                                               "without the checks"),
@@ -316,6 +341,9 @@ def _nth(texts: list, n: int) -> str:
     "schema": dict(_MODE, description="the arguments against the tool's JSON schema (required "
                                       "keys, types): at most this mode"),
     "schema_text": dict(_TEXT, description="the reminder for a schema problem: {name}, {problem}"),
+    "unknown_text": dict(_TEXT, description="SRV-693: the reminder for a call to a tool the request did not "
+                                            "offer (and the server could not map): {name}, {tools} (the "
+                                            "offered ones); absent: such a call goes out as written"),
     "cut": {"enum": ["content", "give_up"],
             "description": "a call the token limit cut: content (as without the checks) or "
                            "GIVE_UP (nothing of half a call goes out); a call the client's own "
@@ -344,7 +372,8 @@ def malformed_call(ev, task, sup):
             return Action(PASS, reason=f"fallback(regenerations={done})",
                           detail={"error": ev.error})
         return Action(REGENERATE_CALL, reason=f"unreadable({ev.error})",
-                      text=_nth(task["texts"], done).replace("{error}", ev.error),
+                      text=_nth(task["texts"], done).replace("{error}", ev.error)
+                      .replace("{format}", _call_format(sup, ev.block)),
                       detail={"error": ev.error, "act": done + 1})
     if ev.block and task["repair"]:
         # it parsed, but without a parameter whose closer never came: close it and keep it
@@ -354,6 +383,15 @@ def malformed_call(ev, task, sup):
             return Action(REPAIR_CALL, reason=f"repair({', '.join(got[1])})",
                           detail={"arguments": same[0]["function"]["arguments"],
                                   "fixed": got[1]})
+    names = list(getattr(sup, "tool_names", None) or ())
+    if ev.name and names and ev.name not in names and task.get("unknown_text"):
+        # SRV-693: a tool the request did not offer, which the server could not map to an offered one
+        if done >= task["regenerations"]:
+            return Action(PASS, reason=f"fallback(regenerations={done})", detail={"name": ev.name})
+        return Action(REGENERATE_CALL, reason=f"unknown_tool({ev.name})",
+                      text=task["unknown_text"].replace("{name}", ev.name)
+                      .replace("{tools}", ", ".join(names[:24])),
+                      detail={"name": ev.name, "act": done + 1})
     if task["schema"] == "off" or ev.schema is None:
         return None
     problems = schema_problems(ev.arguments, ev.schema)

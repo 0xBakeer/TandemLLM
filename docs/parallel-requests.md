@@ -1,6 +1,6 @@
 # Parallel requests
 
-The engine serves one request at a time unless it is told otherwise. With `--parallel N` it holds N sequences over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. It is off by default, because the gain is modest at today's kernels and every slot costs memory.
+With `--parallel N` the engine holds N sequences (lanes) over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. The flag's own default is 1; the shipped `ops/serve.env`, the profiles of every family with side slots and the Setup Guide run 8 lanes (SRV-707), every lane with the same window.
 
 How it works inside (slots, the GPU turn, lockstep rounds, admission) is in [server.md](server.md), section Parallel requests. This page is about using it.
 
@@ -9,8 +9,9 @@ How it works inside (slots, the GPU turn, lockstep rounds, admission) is in [ser
 In `ops/serve.env` (or `local.env`):
 
 ```bash
-QSE_PARALLEL=2            # 1 (the default) is one sequence; N builds N - 1 side slots
-QSE_SIDE_MAX_LEN=65536    # a side slot's window in tokens; slot 0 keeps the full 262,144
+QSE_PARALLEL=8            # lanes: slot 0 and N - 1 side slots; 1 is one sequence
+QSE_SIDE_MAX_LEN=0        # 0: every side slot has MAX_LEN, slot 0's window (a shorter value is kept)
+QSE_KV_POOL=on            # windows are addresses, pages are committed as conversations grow
 QSE_PARALLEL_FLOOR_GB=15  # admission keeps MemAvailable at or above this
 ```
 
@@ -18,20 +19,71 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 
 | flag | default | what it does |
 |-|-|-|
-| `--parallel N` | 1 | sequence slots; N - 1 side slots beside the engine |
-| `--side-max-len` | 65,536 | a side slot's window; a request whose prompt plus `max_tokens` does not fit waits for slot 0 |
+| `--parallel N` | 1 (serve.env: 8) | sequence slots; N - 1 side slots beside the engine |
+| `--side-max-len` | 0 | a side slot's window; 0 is `--max-len`, every lane the same window (SRV-707). A shorter one is kept for old setups; a request whose prompt plus `max_tokens` does not fit it waits for slot 0 |
 | `--parallel-floor-gb` | 15 | a request in flight beside others waits while its own prefill workspace, the others' and what the caches may still grow into (together at most the engine's room to `--mem-peak-gib`) would push MemAvailable under this; a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
-| `--parallel-cut` | share | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first |
-| `--parallel-max-rows` | 32 | rows of a joint pass at most, the row-invariant kernels' range |
+| `--parallel-cut` | the family's | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first; `auto` (SPD-155): `joint` from `QSE_PARALLEL_AUTO_N` (3) decoding slots, `share` below. Unset, the model family's `joint_policy` decides (the 27B: `auto`), else `share` |
+| `--parallel-draft-rows` | 128 | rows of a packed draft pass (SPD-157): eight slots' 16-row draft blocks in one pass; drafting decides speed only |
+| `--parallel-max-rows` | the family's | rows of a joint pass at most (`QSE_PARALLEL_MAX_ROWS`; 0 or unset: the model family's `joint_policy`, else 32). SPD-159: the 27B on EXL3 weights takes 64, each engine's rows in an 8 x 8-row joint pass bit for bit its own eager verify; on NVFP4 and FP8 it keeps 32, since NVFP4 sends 33-64 rows to another tile; past `max_rows // 2` decoding lanes (2 rows each) a round runs more passes |
 | `--side-precapture` | off | capture a side slot's verify graphs at start (about a minute a slot) instead of at first use |
 | `--side-graphs` | on | `off`: a side slot holds no verify graphs and verifies eager when it decodes alone (about 1.5 GiB instead of 7.5 beyond its window) |
 | `--side-slot-const-gb` | 7.5, or 1.5 with side graphs off | a side slot's bytes beyond its window in the build's estimate (`QSE_SIDE_SLOT_CONST_GB`) |
 
-Tested up to 4 slots.
+8 lanes are measured on the 27B, Flash-Next, Ornith and Flint (SRV-711, 2026-10-24, 1/2/4/8 requests at once, total tok/s, 3-round medians, N decoding at once: the 27B ThinkingCap EXL3 4.0 38.3 / 67.6 / 100.1 / 154.5, Flash-Next 3.05 36.5 / 45.6 / 57.5 / 71.3, Ornith EXL3 4.0 37.7 / 47.0 / 58.4 / 69.8, Flint EXL3 4.0 111.7 / 154.9 / 193.3 / 232.3). Every weight card has a speed row with 1, 2, 4 and 8 requests at once on the current build ([measurement.md](measurement.md#the-weight-cards-speed-rows)); a card's lanes default is never above the lanes its row measured.
 
-The shipped `ops/serve.env` keeps one sequence (`QSE_PARALLEL=1`). The box the measurements on these pages come from runs two (`QSE_PARALLEL=2`) with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`; every cache and memory setting it uses is the shipped one.
+The shipped `ops/serve.env` runs 8 lanes on the pool with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`, the values the Setup Guide writes for the 27B. Until SRV-707 it kept one sequence, and the box the older measurements come from ran two with a 65,536-token side window.
+
+## One window for every lane (SRV-707)
+
+Every lane has the window the setup names (`MAX_LEN`); the Setup Guide has no side window of its own any more, and writes `QSE_SIDE_MAX_LEN` equal to the window. With the KV pool on a lane's window is addresses: a side slot built at 262,144 tokens takes its constant part and nothing of its window at load (engine/models/*/serving.py `side_slot_bytes`: no bytes a token when paged), and its pages come from the one pool as its conversation grows. With the pool off (the families whose pool is not verified yet: NemotronH, LFM2.5, Flint, Ornith) every lane's window is memory at load, and a lane is built only while the floor holds.
+
+The guide counts how many lanes can all hold the full window at once, the guarantee (`lanes_full` in the estimate): `min(lanes, floor(room / (window x KV bytes a token)))`, where room is what the budget leaves after the weights, the tools and every lane's constant part. With the pool off it is every lane whenever the selection fits. Past the guarantee the lanes share what is left, in this order:
+
+1. A new request waits for memory before its prefill (the admission reserves its prompt and up to `QSE_KV_ADMIT_ROWS` of its `max_tokens` in pages): its stream says "waiting: memory is almost full", the Lanes view shows it as `waiting_memory`, a streamed request waits up to `--request-timeout`.
+2. Before anyone waits, idle conversations give their pages back: the caches' levels, the small models, idle side slots' conversations (oldest first), slot 0's idle conversation (to the NVMe first with the spill on).
+3. A running lane whose next pages would take the box under `QSE_KV_HARD_FLOOR_GB` while other lanes run gives way (SRV-709, `QSE_KV_RECOMPUTE=on`): it gives every page back, waits at the head of the line for memory (before any request that has not started) and goes on in the same stream by reading its prompt and the text it wrote again. A streamed client sees an SSE comment (`: paused: waiting for memory`) meanwhile, no token. `/health` `parallel.recompute` counts the lanes that gave way, resumed and gave up. Reading again costs a prefill; the text goes on where it stopped, and a sampled or near-tie token after the resume may differ from the one an uninterrupted run would write.
+4. A lane alone, or one that gave way `KV_RECOMPUTE_MAX` (16) times, stops with `memory_full` instead of a bare error; the Chat tab keeps its text and continues it once memory is free.
+
+Admission reserves KV pages for the prompt and at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens` (0: all of it), so more lanes start than the worst case allows; a lane that writes past its reservation and finds the pool full gives way as above.
+
+A round with more than 16 decoding lanes verifies in more than one pass of 32 rows (2 rows a lane), so each lane gets less speculation; the guide says so above 16 and takes up to 64.
+
+## How a round runs
+
+One thread runs every decoding lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the lanes' proposals, one packed draft, one joint verify pass, the walks and the tails (commits, penalties, stop strings, the stream). `/health` `parallel.round_runner` has its host and GPU milliseconds by phase. A lane of a family without a draft head joins the pass with its plain step as a one-row block (ENG-241). The 27B's joint pass runs from CUDA graphs once a pass shape has come `QWEN38_JOINT_GRAPHS_AFTER` times; a graphed pass gives each lane's logits, state and KV bit for bit what the eager pass gives (`tools/joint_graph_check.py`).
+
+| knob | default | what it does |
+|-|-|-|
+| `QSE_ROUND_RUNNER` | 1 | one runner thread for every lane's round (0: each slot runs its own loop) |
+| `QSE_RUNNER_MTP_PACK` | 1 | the lanes' MTP drafts in one packed pass (Flash-Next, Ornith; SPD-235) |
+| `QSE_RUNNER_COMMIT_MULTI` | 1 | a joint round's commits in one call where the family has `commit_tree_multi` (SPD-239) |
+| `QWEN38_JOINT_GRAPHS` | 1 | the 27B's joint verify pass from CUDA graphs (0: eager) |
+| `QWEN38_JOINT_GRAPHS_MAX` | 24 | joint graphs kept; a full set is reset whole and captured again into a new pool |
+| `QWEN38_JOINT_GRAPHS_AFTER` | 4 | times a pass shape comes before it is captured (16 before SPD-245) |
+| `QWEN38_JOINT_ATTN_GROUP` | 1 | a graphed pass runs every lane's attention of a layer in one scatter, one split and one combine launch, every row the lone launch's bits (0: a lane at a time) |
+| `QWEN38_JOINT_ROWS_AT_LANES` | `4:8` | rows a block keeps at exactly that many lanes, `lanes:rows` pairs: 8 rows a lane at 4 lanes (32-row pass) instead of 16 |
+| `QSE_RUNNER_LANE_PLAIN` | `auto` | at each lane count, the drafted round or the joint plain step, whichever makes more tokens a GPU ms; `auto` for the families that opt in (NemotronH), `1` for every family that joins a plain step, `0` off |
+| `QSE_NH_LILICORR_PACK` | `on` | NemotronH: the lanes' LiLiCorr drafts in one packed pass |
+| `QSE_NH_JOINT_ROWS8` | 16 | NemotronH: rows of a joint pass at 8 lanes (0: the 32-row cap) |
+
+NemotronH reads its routed experts once for the union a pass's rows pick, so its joint pass costs more with every row than a dense model's; at 8 lanes it keeps 16 rows (SPD-233). Where drafts do not pay, the runner takes the joint plain step: it learns at each lane count the tokens a GPU ms of its drafted rounds and of its plain rounds, decided on live rounds only (a round that captures a graph enters no rate), takes the better with a 3 % margin (`QSE_RUNNER_LANE_MARGIN`) and runs the other mode every 16th round (`QSE_RUNNER_LANE_PROBE`); a workload whose drafts pay keeps drafting. `/health` `parallel.round_runner.lane_plain` has the rates. [nemotron-h.md](nemotron-h.md#how-the-engine-runs-it) has the family's numbers.
+
+Each graph owner captures on a stream of its own (SPD-223): `engine/capture_lock.py` `lease_stream` hands out a driver-created stream to one owner at a time (a lone draft graph, a packed draft set, the joint set, a slot's verify graphs) and takes it back only after the owner's graphs are reset. A graph's reset frees the cuBLAS workspace torch keeps for its capture stream, and every graph captured on that stream bakes the workspace into its GEMM nodes. With the streams of torch's shared pool, one owner's eviction freed the workspace of another owner's kept graph, and that graph's next replay wrote into freed memory: an illegal memory access at 4 and 8 greedy lanes. The same kernels are captured into the same pools, so every replay keeps its bits.
+
+## Prompts that arrive together (SPD-245)
+
+Requests bound to lanes while no lane decodes form a burst (`QSE_PREFILL_BURST`, `server/prefill_burst.py`). Every member prefills before any of them decodes, so the lanes decode in joint rounds of all of them from the first round on instead of beside the prefills still waiting. With `joint`, the default, the members' prompts run in one layer-major forward (`engine/model.py` `prefill_joint`): each EXL3 projection is one call over every member's rows on a slab decoded once a layer, the row-wise kernels run once over all rows, and the mixers run one sequence at a time on its own engine. Every row is bit for bit what its own prefill gives (`tests/gpu/test_prefill_joint_gpu.py`); 8 prompts of 512 tokens took 3.55 s in one forward against 4.43 s one after another, in process. The joint forward takes a prompt of up to `EXL3_CHUNK_UNTIL` rows (512 on the 27B's EXL3 profiles) on a plain text forward; a longer prompt, an image or another weight format joins the burst with no job and prefills alone.
+
+A member that would run the joint forward alone while another request is still on its way to a lane gives the turn back and waits for it, up to `QSE_PREFILL_BURST_WAIT_S`. A request with none on its way starts at once, so a lone request never waits. `/health` `parallel.prefill_burst` has the bursts, their members, the joint forwards and their rows, `incoming` and `held`.
+
+| knob | default | what it does |
+|-|-|-|
+| `QSE_PREFILL_BURST` | `joint` | `joint`: a burst's prompts in one forward; `wait` (or `on`): each prompt alone, the decodes after every member's prefill; `off`: no burst |
+| `QSE_PREFILL_BURST_WAIT_S` | 10 | how long a member waits for the others, then it goes on (counted as a timeout) |
+
+Only the order of the work moves, so a burst changes no token. It changes time to first token: a member's first token comes after every member's prefill.
 
 ## What a slot costs
 
@@ -124,7 +176,9 @@ recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
 
 ## Which request goes where
 
-Slot 0 is the engine as it always was: the full window, the resident conversation, the disk tier and the side lane. A request takes a side slot only when slot 0 is busy, its prompt plus `max_tokens` fits the side window, it has no images, and it does not continue slot 0's resident conversation (that turn waits for slot 0 up to `QWEN38_SIDE_SLOT0_WAIT_S`, 3 s, and resumes in place; after that it takes a free side slot, below). One kind of request takes an idle side slot even when slot 0 is free (0.3.47-test, SRV-207): a guest of slot 0's conversation, that is, a short request (at most `--resident-guest-max` tokens and under a quarter of the conversation) that shares less than one prefill chunk with it, while slot 0 holds at least two chunks. The router's own questions before a new user message (the class, the package: 150 to 450 tokens) and a client's title, tags and follow-up tasks are such requests. On slot 0 a guest writes over the rows the conversation's next turn resumes from and only the guest stash puts them back; on a side slot it costs the same prefill and touches nothing of slot 0. A guest short enough for the side lane takes the idle side slot too; a side-lane request that is no guest is still served at slot 0's safe points. With every side slot busy it runs on slot 0 with the stash, as before (`QWEN38_SIDE_GUESTS=off` restores that for every guest). Everything else about the request is served by the same code: the conductor, the monitor, tool calls, structured outputs, streaming.
+Slot 0 is the engine as it always was: the full window, the resident conversation, the disk tier and the side lane. A request takes a side slot only when slot 0 is busy, its prompt plus `max_tokens` fits the side window, and it does not continue slot 0's resident conversation (that turn waits for slot 0 up to `QWEN38_SIDE_SLOT0_WAIT_S`, 3 s, and resumes in place; after that it takes a free side slot, below). One kind of request takes an idle side slot even when slot 0 is free (0.3.47-test, SRV-207): a guest of slot 0's conversation, that is, a short request (at most `--resident-guest-max` tokens and under a quarter of the conversation) that shares less than one prefill chunk with it, while slot 0 holds at least two chunks. The router's own questions before a new user message (the class, the package: 150 to 450 tokens) and a client's title, tags and follow-up tasks are such requests. On slot 0 a guest writes over the rows the conversation's next turn resumes from and only the guest stash puts them back; on a side slot it costs the same prefill and touches nothing of slot 0. A guest short enough for the side lane takes the idle side slot too; a side-lane request that is no guest is still served at slot 0's safe points. With every side slot busy it runs on slot 0 with the stash, as before (`QWEN38_SIDE_GUESTS=off` restores that for every guest). Everything else about the request is served by the same code: the conductor, the monitor, tool calls, structured outputs, streaming.
+
+A request with images takes a side slot the way a text request does (SRV-629). On 2026-10-19 two Chat-tab agent runs called `render_page`, and every later request carried 3 to 8 screenshots. The router sent each of them to slot 0, so all 31 requests of both chats ran there: 56.6 min of wall time for 18.9 min of decoding, with slot 1 idle. Nothing in the engine needed slot 0. Each side slot is its own engine over the same weights, with its own image context and rotary offset, and the vision tower runs inside the slot's prefill. Now the router expands each image to its rows on the host and gives them the image's key, as the caches do (`_mm_keys`). Window, output cut and memory admission count those rows: a screenshot of 1,280 by 800 pixels is 1,000 rows, not one placeholder. Every continuation test reads the same keys. A turn with the same screenshots resumes on the slot that holds its rows, and another screenshot in the same place starts a new conversation. An end kept after images and carried into slot 0 keeps its rotary offset. A request with images is never a guest of slot 0. The `[parallel]` line says `images=N rows=R`. `QWEN38_SIDE_IMAGES=off` sends images to slot 0 only, as 0.12.0 did. Super VL's RADIO tower builds its own context and stays on slot 0.
 
 "Continues slot 0's conversation" is judged on the client's tokens (0.3.46-test, SRV-197): at the end of every request on slot 0 whose rows stay resident, the server keeps that prompt as the client's messages render it (no router note, no replayed span, no generated row). A new request whose rendered prompt starts with all of it, within one prefill chunk, and which is at least a chunk long, waits for slot 0, also when slot 0 is held only for a moment by TandemLLM's own work (the shadow reader, a summary being prepared), which gives way to it. Until 0.3.45-test the test compared the request with the resident rows themselves; under a conductor plan those rows also hold the router's notes and the end of the last generation, so no agent turn ever counted as a continuation, and a turn that met slot 0 held by the shadow reader took the side slot and read its whole conversation again (an opencode session's cached share fell from about 0.97 to 0.4-0.68). `QWEN38_SIDE_CONTINUE=resident` restores the old test, for an A/B. And TandemLLM's own work never sends a client's request to a side slot: while slot 0 is held only by it (the shadow reader, a summary being prepared, the memory writer, the router's question), a request keeps waiting for slot 0, which that work gives up at its next safe point, for up to 15 s; a side slot is for a second client's request. Two long agent sessions at once mostly take turns on slot 0, each resuming its own conversation (the resident one in place, the other from the park or the disk): a side slot keeps no conversation, so a long agent turn there reads its whole prompt again, and the GPU it shares slows slot 0 too. Measured with two opencode sessions started together (n = 1 each, needs verification): taking turns on slot 0, both done in 301 s with cached shares 0.90 and 1.00; with one session sent to the side slot whenever slot 0 was busy, 490 s, that session at 0.26 (17 of 18 turns on the side slot, 379 s of prefill); one after the other, 193 s. A side slot pays off for requests slot 0 holds nothing for: a new conversation, a short chat, a script. The `[parallel]` log line names the slot, the numbers it was chosen on and who held slot 0; the `[req]` line and the usage ledger (schema 7, `slot`) record the slot of every request.
 
@@ -159,6 +213,36 @@ Every two- and four-request window showed that many slots decoding at once and j
 
 After the merge into 0.4.0 (2026-10-06), one check per shape (single runs, `--parallel 4 --side-max-len 8192`, the same four prompts): one at a time 48.35 tok/s (median), two at once 65.83 in total (1.36x; 59 and 80 two-way joint rounds, 2 slots decoding at once in both pairs), four at once 67.00 (1.39x; 45 four-way and 55 three-way rounds, 4 slots decoding at once), no round timed out. With the flag off, one request at a time: 49.96 tok/s before the merge and 50.39 after (93.4 and 93.5 ms a block; the atlas row, `--no-learn-cost`, one run each).
 
+## SPD-E5 (2026-10-23)
+
+On the ThinkingCap EXL3 4.0 pack, 8 slots (side window 65,536, KV pool on, side graphs off), suffix store off, temperature 1.0, prose prompt, 512 tokens a request, one round a level, N decoding at once proven from `/health` at 5 Hz:
+
+| rules | C1 | C2 | C4 | C8 (total tok/s) | 8-slot round |
+|-|-:|-:|-:|-:|-:|
+| before (chains alone, draft packs of 2, share cut) | 37.4 | 47.1 | 56.2 | 37.7 | 426 ms |
+| chains join the joint pass (SPD-153) | 35.0 | 48.7 | 57.3 | 43.2 | 379 ms |
+| and draft packs of 8 (SPD-157) | 35.8 | 49.0 | 60.8 | 49.9 | 326 ms |
+| and the auto cut (SPD-155) | 34.4 | 48.4 | 56.3 | 55.2 | 294 ms |
+| and waiters asleep while the turn is busy (SPD-161) | | | 60.4 | 60.9 | 268 ms |
+| and packed drafts in slot order (SPD-157) | 32.4 | 46.8 | 61.8 | 68.4 | 236 ms |
+| and the joint pass's row-wise steps once for all engines (SPD-163) | | 54.5, 53.5 | 68.8, 70.0 | 73.7, 71.7 | |
+| and a 64-row joint pass (SPD-159) | | 53.7, 53.5 | 69.0, 70.2 | 79.8, 79.2 | |
+
+Single runs; three repeats of the old rules spread 33.1 to 37.7 at C8, so a difference under about 10 % is noise. In an 8-slot round the joint verify pass is still about 210 ms against 77 ms for one block: the per-state parts (GDN, attention, norms, the gate inputs) run once per engine, eagerly, and the pass issues about 7,500 kernels (SPD-163).
+
+## SPD-245 (2026-10-26)
+
+The 27B ThinkingCap EXL3 4.0 pack on one DGX Spark: 8 lanes, every lane the 262,144-token window, KV pool on, side graphs off, suffix store off, `--sampled-tree det`, `X-Tandem: raw`. N requests of 512 prompt tokens each sent at once, 512 tokens each; temperature 0 (greedy) or temperature 1.0 alone (the card's top_k 20 and top_p 0.95 then apply, and an unseeded request draws its own seed). Wall is all completion tokens over the time from the first send to the last end; the decode window leaves out each request's first token and the time before the first one. Medians of the last two of three rounds, every round with N decoding at once and no fault. The greedy rows and C4 sampled ran on a3dc1e45, the other sampled rows on 345ab0fa (two rounds), the same day.
+
+| N at once | greedy, wall tok/s | sampled, wall tok/s | sampled, decode window |
+|-:|-:|-:|-:|
+| 1 | 42.5 | 36.5 | 38.1 |
+| 2 | 73.5 | 62.9 | 67.9 |
+| 4 | 108.9 | 99.2 | 105.7 |
+| 8 | 155.9 | 146.2 | 168.4 |
+
+One prompt alone, greedy, time to first token: 2,048 tokens 1.90 s, 8,192 tokens 6.76 s, 32,768 tokens 29.4 s. At 8,192 tokens, four arms in one session: the chunk-64 GDN prefill on and the joint burst on 6.76 s, the GDN prefill off 6.97 s, the burst off 6.72 s, both off 6.95 s; the burst does not change a lone prompt. A/Bs on the way, each in one session: `QWEN38_JOINT_GRAPHS_AFTER` 4 against 16 gave C4 99 to 101 against 96 tok/s; `QWEN38_JOINT_ROWS_AT_LANES` 4:8 took the 4-lane round from 106 to 91 ms for one token less a round (steady C4 112 to 117 sampled, 124 to 131 greedy, three rounds on two servers each). Before the SPD-223 stream lease every full bench order faulted in its second or third C8 greedy batch; after it, none did.
+
 ## The text
 
 Beside other requests, a request writes what it writes alone up to a near tie. A joint round verifies the request's tree cut to its share, a different tree shape than alone, and the shape of the verified tree can move a token whose two best candidates score almost the same ([exactness.md](exactness.md)). On 30 prompts (prose, code, chat, 256 tokens), 17 of 30 were identical to their alone text at two requests and 15 of 30 at four, every first difference at a top-2 gap of 0.0019 to 0.118 nats. Two runs of one request alone can also part at a near tie, for the same reason ([exactness.md](exactness.md#two-runs-of-the-same-request)). The rows of a joint projection are the bits they are alone (`tools/parallel_verify_check.py`).
@@ -171,8 +255,8 @@ The limits, the serve.env defaults unless the profile sets them:
 
 | setting | value |
 |-|-|
-| sequence slots (`QSE_PARALLEL`) | 3 |
-| side window (`QSE_SIDE_MAX_LEN`) | 65,536, capped by `MAX_LEN` (40,960 on the reference box's :8000) |
+| sequence slots (`QSE_PARALLEL`) | 8 (3 measured) |
+| side window (`QSE_SIDE_MAX_LEN`) | 0: `MAX_LEN`, every lane the same window (65,536 before SRV-707) |
 | admission floor (`QSE_PARALLEL_FLOOR_GB`) | 15 GiB |
 | joint verify | up to 32 rows |
 | turn quantum, batch timeout | 50 ms, 2 ms |
@@ -193,4 +277,4 @@ Measured on 3.05 with `--parallel 3 --kv-pool on` (2026-10-12, one run): three d
 
 ## Not yet
 
-Side slots take no images, do not resume slot 0's resident prefix, and have none of slot 0's caches in memory (they read its disk tier, nothing else). A conversation's turns that stay on a side slot read their prompt again each turn from the disk tier's head; only the move to slot 0 carries the rows (SRV-201 is the side slot keeping its own conversation). Two requests reach about 1.4x, not 2x: a joint pass of 32 rows costs more than one of 16 at today's kernels.
+Side slots do not resume slot 0's resident prefix, and have none of slot 0's caches in memory (they read its disk tier, nothing else). A conversation's turns that stay on a side slot read their prompt again each turn from the disk tier's head; only the move to slot 0 carries the rows (SRV-201 is the side slot keeping its own conversation). Two requests reach about 1.4x, not 2x: a joint pass of 32 rows costs more than one of 16 at today's kernels.

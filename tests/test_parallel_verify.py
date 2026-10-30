@@ -28,6 +28,8 @@ import threading
 for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK", "GDNTREE", "GDNPRE"):
     os.environ.setdefault(f"QWEN38_FUSED_{_k}", "0")
 os.environ.setdefault("QWEN38_TREE_CHAIN_DELEGATE", "0")
+# the slot loop's meeting (server/slots.py); the round runner, on by default since SPD-201, has tests/test_round_runner.py
+os.environ.setdefault("QSE_ROUND_RUNNER", "0")
 
 import torch  # noqa: E402
 
@@ -93,13 +95,39 @@ def _state(eng):
 
 
 def test_forward_tree_multi_equals_each_engines_own_verify():
+    _joint_rounds()
+
+
+def test_forward_tree_multi_keeps_each_engines_rotary_offset():
+    """SRV-629: a request with images on a side slot verifies beside a text request on slot 0.
+    Every row after its prompt reads the rotary at index + `pos_delta` (engine/vision.py: 8
+    screenshots, about -1,080), slot 0's at its index: the joint round gives each engine the
+    bits its own verify gives it, and the offset is not lost (its logits are not the text
+    rows')."""
+    _joint_rounds(delta1=-1080, rows1=1100)
+
+
+def _joint_rounds(delta1: int = 0, rows1: int = 9):
     cfg = tiny_config()
     w = FakeWeights(cfg, seed=3)
-    alone = [_engine(cfg, w), _engine(cfg, w)]
-    joint = [_engine(cfg, w), _engine(cfg, w)]
+    L = 256 if rows1 + 64 <= 256 else rows1 + 128
+    alone = [_engine(cfg, w, L), _engine(cfg, w, L)]
+    joint = [_engine(cfg, w, L), _engine(cfg, w, L)]
     n0 = [_prefill(e, 11, 14) for e in (alone[0], joint[0])][0]
-    n1 = [_prefill(e, 12, 9) for e in (alone[1], joint[1])][0]
+    n1 = [_prefill(e, 12, rows1) for e in (alone[1], joint[1])][0]
     pos = [len(n0), len(n1)]
+    if delta1:
+        # not vacuous: the same block after the same rows, with and without the offset
+        flat, off = _engine(cfg, w, L), _engine(cfg, w, L)
+        for e in (flat, off):
+            _prefill(e, 12, len(n1))
+        off.pos_delta = delta1
+        t = _tree(99, 4, 2, 7)
+        with torch.no_grad():
+            a = flat.forward_tree(torch.tensor(t.tokens), t.parents, start=pos[1])
+            b = off.forward_tree(torch.tensor(t.tokens), t.parents, start=pos[1])
+        assert not torch.equal(a, b), "the offset changed no logit"
+        alone[1].pos_delta = joint[1].pos_delta = delta1
     shapes = [((5, 3), (3, 2)), ((7, 0), (2, 4)), ((1, 1), (6, 3))]
     for rnd, ((m0, s0), (m1, s1)) in enumerate(shapes):
         trees = [_tree(100 + rnd, m0, s0, 5), _tree(200 + rnd, m1, s1, 7)]
@@ -130,20 +158,70 @@ def test_forward_tree_multi_equals_each_engines_own_verify():
 
 
 def test_a_chain_block_is_not_batchable_while_chains_take_their_own_kernel():
+    """With SPD-153's rule off (QWEN38_JOINT_CHAINS=0): a chain delegates and verifies alone."""
+    import engine.model as m
+    from engine.models.qwen3_5 import adapter
     cfg = tiny_config()
     eng = _engine(cfg, FakeWeights(cfg))
     chain = DraftTree.chain(3, [4, 5, 6])
-    import engine.model as m
-    saved = m.TREE_CHAIN_DELEGATE
+    saved, saved_j = m.TREE_CHAIN_DELEGATE, adapter.JOINT_CHAINS
     try:
+        adapter.JOINT_CHAINS = False
         m.TREE_CHAIN_DELEGATE = True
         assert not eng.tree_batchable(chain.parents)
         assert eng.tree_batchable(_tree(1, 3, 2, 3).parents)
         m.TREE_CHAIN_DELEGATE = False
         assert eng.tree_batchable(chain.parents)
     finally:
-        m.TREE_CHAIN_DELEGATE = saved
+        m.TREE_CHAIN_DELEGATE, adapter.JOINT_CHAINS = saved, saved_j
     assert not eng.tree_batchable([-1]), "an anchor alone is no block"
+
+
+def test_spd153_a_chain_joins_the_joint_pass():
+    """SPD-153 (the default): a chain-shaped block is batchable whatever the chain kernel's rule, and
+    a block over VERIFY_ROWS or an anchor alone is not."""
+    import engine.model as m
+    cfg = tiny_config()
+    eng = _engine(cfg, FakeWeights(cfg))
+    saved = m.TREE_CHAIN_DELEGATE
+    try:
+        m.TREE_CHAIN_DELEGATE = True
+        assert eng.tree_batchable(DraftTree.chain(3, [4, 5, 6]).parents)
+        assert eng.tree_batchable(_tree(1, 3, 2, 3).parents)
+        assert not eng.tree_batchable([-1])
+        assert not eng.tree_batchable([-1] + list(range(m.VERIFY_ROWS)))
+    finally:
+        m.TREE_CHAIN_DELEGATE = saved
+
+
+def test_spd153_a_chain_in_the_joint_pass_is_its_tree_verify_bit_for_bit():
+    """In the joint pass a chain is verified on the tree path: its logits and its committed state are
+    the bits of its own tree-path verify alone (the chain kernel's delegation off), beside a tree."""
+    import engine.model as m
+    cfg = tiny_config()
+    w = FakeWeights(cfg, seed=5)
+    alone = [_engine(cfg, w), _engine(cfg, w)]
+    joint = [_engine(cfg, w), _engine(cfg, w)]
+    n0 = [_prefill(e, 21, 12) for e in (alone[0], joint[0])][0]
+    n1 = [_prefill(e, 22, 9) for e in (alone[1], joint[1])][0]
+    pos = [len(n0), len(n1)]
+    trees = [DraftTree.chain(5, [11, 12, 13, 14]), _tree(300, 3, 2, 7)]
+    blocks = [torch.tensor(t.tokens) for t in trees]
+    saved = m.TREE_CHAIN_DELEGATE
+    try:
+        m.TREE_CHAIN_DELEGATE = False        # the lone reference on the tree path, as the joint pass
+        with torch.no_grad():
+            lone = [alone[i].forward_tree(blocks[i], trees[i].parents, start=pos[i]) for i in (0, 1)]
+            multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i]) for i in (0, 1)])
+        for i in (0, 1):
+            assert torch.equal(multi[i], lone[i]), f"slot {i}: max diff {(multi[i] - lone[i]).abs().max()}"
+            path = [0, 1, 2]
+            alone[i].commit_tree(path)
+            joint[i].commit_tree(path)
+            for a, b in zip(_state(alone[i]), _state(joint[i])):
+                assert (a == b) if not torch.is_tensor(a) else torch.equal(a, b)
+    finally:
+        m.TREE_CHAIN_DELEGATE = saved
 
 
 # ------------------------------------------------------------------ the served loop
@@ -226,17 +304,20 @@ def _greedy(cfg, w, prompt, n):
     return out
 
 
-def _alone(cfg, w, prompt, full, n):
+def _alone(cfg, w, prompt, full, n, think=None, sampler=None, sampled_tree=False):
     eng = _engine(cfg, w)
     _setup([eng], [OracleTree(full)])
     _teardown()                     # one slot: no pool, the loop as it always ran
+    app.STATE["sampled_tree"] = sampled_tree
     with torch.no_grad():
-        return list(app.generate_stream(torch.tensor(prompt), n, set()))
+        return list(app.generate_stream(torch.tensor(prompt), n, set(), think=think, sampler=sampler))
 
 
-def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32):
+def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32, thinks=None, samplers=None,
+              sampled_tree=False):
     engines = [_engine(cfg, w) for _ in prompts]
     pool = _setup(engines, [OracleTree(f) for f in fulls], cut=cut, max_rows=max_rows)
+    app.STATE["sampled_tree"] = sampled_tree
     outs: dict = {}
     errs: list = []
     go = threading.Barrier(len(prompts))
@@ -247,7 +328,9 @@ def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32):
             if i == 0:
                 with app.LOCK:
                     with torch.no_grad():
-                        outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set()))
+                        outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set(),
+                                                           think=thinks[i] if thinks else None,
+                                                           sampler=samplers[i] if samplers else None))
             else:
                 s = pool.slots[i]
                 slots.bind(s)
@@ -255,7 +338,9 @@ def _together(cfg, w, prompts, fulls, n, cut="share", max_rows=32):
                 pool.turn.acquire(i)
                 try:
                     with torch.no_grad():
-                        outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set()))
+                        outs[i] = list(app.generate_stream(torch.tensor(prompts[i]), n, set(),
+                                                           think=thinks[i] if thinks else None,
+                                                           sampler=samplers[i] if samplers else None))
                     ctx = app.STATE["last_ctx"]
                     assert ctx[-len(outs[i]):] == outs[i], "the slot's own published context"
                 finally:
@@ -383,6 +468,86 @@ def test_a_joint_cut_shares_one_row_budget_and_keeps_the_text():
     assert max(int(r) for r in stats["rows_hist"]) <= 12, stats["rows_hist"]
     for i in range(2):
         assert together[i] == alone[i], (i, alone[i], together[i])
+
+
+
+def test_spd187_a_planned_round_keeps_each_requests_text():
+    """The round planner acting (QWEN38_ROUND_PLAN=on's path): each round's bucket T from the planner,
+    every tree cut to T rows; the texts are each request's alone text (a plan changes which rows are
+    verified, never what a row computes), and no pass exceeds E x T rows."""
+    from engine.methods.roundplan import RoundPlanner
+    from engine.methods.staircut import PriceModel
+    plans = []
+
+    class Planned(slots.Meeting):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            rp = RoundPlanner(PriceModel({1024: {"joint2": {4: 30.0, 8: 31.0, 16: 60.0}}}), buckets=(2, 4, 8),
+                              cap=lambda E: 16)
+            rp.mode = "on"
+            rp.force = lambda T: plans.append(T)
+            self.planner, self.ctx_class = rp, (lambda n: 1024)
+            self.plan_keys, self.plan_last = [], None
+    keep = slots.Meeting
+    slots.Meeting = Planned
+    try:
+        cfg = tiny_config()
+        w = FakeWeights(cfg, seed=6)
+        n = 30
+        prompts = [[(5 + 7 * i + 13 * j) % 96 + 1 for j in range(9 + 4 * i)] for i in range(2)]
+        refs = [_greedy(cfg, w, p, n) for p in prompts]
+        fulls = [p + r for p, r in zip(prompts, refs)]
+        alone = [_alone(cfg, w, p, f, n) for p, f in zip(prompts, fulls)]
+        together, stats, _ = _together(cfg, w, prompts, fulls, n, cut="joint", max_rows=16)
+    finally:
+        slots.Meeting = keep
+    assert plans and all(T is None or T in (2, 4, 8) for T in plans), plans
+    forced = [T for T in plans if T is not None]
+    assert forced and max(int(r) for r in stats["rows_hist"]) <= 2 * max(forced), (stats["rows_hist"], forced)
+    for i in range(2):
+        assert together[i] == alone[i], (i, alone[i], together[i])
+
+
+def test_spd187_the_online_planner_keeps_each_requests_text():
+    """The online planner (warm-up, measured periods, the prequential acceptance model, the hold zone's
+    accounting) choosing every round's bucket: the texts are each request's alone text, the model has learned
+    from the verified blocks and the report names the rows chosen."""
+    from engine.methods.accept_model import AcceptModel
+    from engine.methods.roundplan import RoundPlanner
+    from engine.methods.staircut import PriceModel
+    planners = []
+
+    class Planned(slots.Meeting):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            rp = RoundPlanner(PriceModel({1024: {"joint2": {4: 30.0, 8: 31.0, 16: 60.0}}}), buckets=(2, 4, 8),
+                              cap=lambda E: 16)
+            rp.mode, rp.explore, rp.nmin = "on", True, 2
+            rp.accept, rp.ref_T = AcceptModel(background=False), (lambda E: 4)
+            rp.snap = rp._freeze()
+            rp.force = lambda T: None
+            planners.append(rp)
+            self.planner, self.ctx_class = rp, (lambda n: 1024)
+            self.plan_keys, self.plan_last = [], None
+    keep = slots.Meeting
+    slots.Meeting = Planned
+    try:
+        cfg = tiny_config()
+        w = FakeWeights(cfg, seed=6)
+        n = 30
+        prompts = [[(5 + 7 * i + 13 * j) % 96 + 1 for j in range(9 + 4 * i)] for i in range(2)]
+        refs = [_greedy(cfg, w, p, n) for p in prompts]
+        fulls = [p + r for p, r in zip(prompts, refs)]
+        alone = [_alone(cfg, w, p, f, n) for p, f in zip(prompts, fulls)]
+        together, stats, _ = _together(cfg, w, prompts, fulls, n, cut="joint", max_rows=16)
+    finally:
+        slots.Meeting = keep
+    for i in range(2):
+        assert together[i] == alone[i], (i, alone[i], together[i])
+    rep = planners[-1].report()
+    # the periods come from the passes' CUDA events: on the CPU there are none, so the warm-up never ends here
+    assert rep["accept"]["blocks"] > 0 and rep["explore"], rep
+    return f"alone texts through the warm-up; the model learned {rep['accept']['blocks']} blocks"
 
 
 if __name__ == "__main__":

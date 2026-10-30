@@ -8,10 +8,11 @@ also came as its own user message, six user turns in all, and the model wrote "T
 repeating the same message for the 4th time". No compaction: the one user turn left nothing before
 the last two turns to summarize.
 
-  1  a tool's image rides in its tool message (one user turn). Images are append-only (SRV-546):
-     all of them up to TOOL_IMAGES_KEPT, then the first ones and the newest, so a new screenshot
-     never changes the prompt before the newest-but-one; that one becomes a line saying a newer
-     screenshot follows. Other backends get the images in a user message after the results
+  1  a tool's image rides in its tool message (one user turn). Images are append-only between
+     fold points (SRV-546, SRV-676): all of them while they fit the image cap; the one that would
+     pass it turns the kept ones after the cap's first half into a line saying a newer screenshot
+     follows, once per half a cap. Other backends get the images in a user message after the
+     results
   2  the estimate counts an image by its pixels (32 x 32 a token), never by its base64, and the
      tokens-per-character ratio is learned on the text alone
   3  a long run compacts its earlier steps between two steps, keeps its user message and goes on
@@ -107,44 +108,52 @@ def test_tool_screenshots_ride_in_their_tool_message_and_stay_where_they_are():
 
 def test_srv546_a_new_screenshot_only_appends_to_the_prompt():
     """SRV-546 (live 2026-10-17 10:18:36): with only the newest screenshot kept, each new one turned
-    the previous into a line and the engine read 90,186 tokens again. Every step's request now
-    starts with the previous step's request, byte for byte, up to the cap; past it only the
-    newest-but-one changes, and everything before it stays."""
-    # the pagoda run's seven screenshots: every request starts with the one before it
-    branch7, blob7 = run_with_screenshots(7, pad=10)
-    msgs = [render.body("m", {}, [branch7[0], {"id": "a", "role": "assistant", "parts": [
-        p for p in branch7[1]["parts"] if p["step"] <= step]}], system="s", vision=True,
-        blob=blob7)["messages"] for step in range(1, 15)]
-    for step in range(1, 14):
-        assert msgs[step][:len(msgs[step - 1])] == msgs[step - 1], f"step {step + 1} rewrote it"
-    k = render.TOOL_IMAGES_KEPT
-    n = k + 3
+    the previous into a line and the engine read 90,186 tokens again. SRV-676 (live 2026-10-21):
+    with the first 7 and the newest kept, every screenshot past the 8th still turned the one
+    before into a line (7-11k tokens read again, 17-30 s, 19 times in 27 screenshots). Now every
+    request starts with the one before it, byte for byte, except at a fold point: the screenshot
+    that would pass the cap, where the kept ones after the cap's first half become lines at once."""
+    cap = 6
+    n = 3 * cap
     branch, blob = run_with_screenshots(n, pad=10)
     full = branch[1]["parts"]
 
-    def at(step):                       # the request after `step` model calls
+    def at(step, cap=cap):              # the request after `step` model calls
         b = [branch[0], {"id": "a", "role": "assistant",
                          "parts": [p for p in full if p["step"] <= step]}]
-        return render.body("m", {}, b, system="s", vision=True, blob=blob)["messages"]
+        return render.body("m", {}, b, system="s", vision=True, blob=blob,
+                           max_images=cap)["messages"]
 
-    prev = None
+    folds, prev = [], None
     for step in range(1, 2 * n + 1):
         cur = at(step)
-        if prev is not None:
-            shots_now = (step + 1) // 2         # odd steps add a screenshot
-            if shots_now <= k or step % 2 == 0:
-                assert cur[:len(prev)] == prev, f"step {step} rewrote the prompt"
-            else:
-                # past the cap: the messages before the newest-but-one's result stay as they were
-                ids = [m.get("tool_call_id") for m in prev]
-                cut = ids.index(f"call_{shots_now - 2}")
-                assert cur[:cut] == prev[:cut], f"step {step} changed an earlier image"
-                assert cur[cut] != prev[cut] and render.LEFT_OUT in cur[cut]["content"]
+        shots = _shots({"messages": cur})
+        assert len(_images(shots)) <= cap
+        if prev is not None and cur[:len(prev)] != prev:
+            folds.append((step + 1) // 2)       # the screenshot that made the fold
+            # the first change is an image that became its line: every image of the first half
+            # and everything before the oldest folded image stay as they were
+            cut = next(i for i, (x, y) in enumerate(zip(prev, cur)) if x != y)
+            assert isinstance(prev[cut]["content"], list), f"step {step} changed a text"
+            assert render.LEFT_OUT in cur[cut]["content"]
+            assert prev[cut]["tool_call_id"] not in {f"call_{i}" for i in range(cap // 2)}
+            assert all(isinstance(m["content"], list) for m in _shots({"messages": cur})[:cap // 2])
         prev = cur
+    # a cap of 6: folds at the 7th, 10th, 13th and 16th screenshot, never between
+    assert folds == [cap + 1, cap + 1 + cap // 2, cap + 1 + 2 * (cap // 2),
+                     cap + 1 + 3 * (cap // 2)], folds
     shots = _shots({"messages": at(2 * n)})
     kept = [m["tool_call_id"] for m in shots if isinstance(m["content"], list)]
-    assert kept == [f"call_{i}" for i in range(k - 1)] + [f"call_{n - 1}"]
+    assert kept == [f"call_{i}" for i in range(cap // 2)] + [f"call_{i}" for i in range(n - 3, n)]
     assert all(render.LEFT_OUT in m["content"] for m in shots if not isinstance(m["content"], list))
+    # the default cap is the engine's --max-images default; the user's own images count against it
+    assert render.TOOL_IMAGES_CAP == 16
+    assert render.kept_tool_images(branch) == {f"img{i}" for i in (*range(8), 16, 17)}
+    with_user = [{**branch[0], "attachments": [{"kind": "image", "id": "u1"},
+                                               {"kind": "image", "id": "u2"}]}, branch[1]]
+    assert render.kept_tool_images(with_user) == {f"img{i}" for i in (*range(7), 14, 15, 16, 17)}
+    # an in-run compaction: the steps before it carry nothing and count for nothing
+    assert render.kept_tool_images(branch, cap, step_from=(1, 2 * (n - 2) + 1)) == {"img16", "img17"}
 
 
 def test_srv546_the_now_line_names_a_re_read_and_its_reason():
@@ -173,12 +182,8 @@ def test_the_estimate_counts_an_image_by_its_pixels_not_its_base64():
     est = comp.estimate(body, 0.15)
     assert est < 6_000, est
     # the old count: every image's base64 as text, all five kept
-    real = render.TOOL_IMAGES_KEPT
-    render.TOOL_IMAGES_KEPT = 99
-    try:
-        old = render.body("m", {}, branch, system="s", vision=True, blob=blob, inline_images=False)
-    finally:
-        render.TOOL_IMAGES_KEPT = real
+    old = render.body("m", {}, branch, system="s", vision=True, blob=blob, inline_images=False,
+                      max_images=99)
     old_chars = len(json.dumps(old["messages"], ensure_ascii=False))
     assert old_chars * 0.15 > 50 * est
     # the ratio is learned on text: the engine's count less the images' tokens
@@ -305,47 +310,49 @@ def _prefix_kept(prev: dict, cur: dict) -> bool:
             render.encode(cur.get("tools") or []) == render.encode(prev.get("tools") or []))
 
 
-def test_a_finished_write_is_a_stub_from_the_next_request_on_and_the_store_keeps_the_text():
+def test_a_write_stays_whole_in_the_next_request_and_a_note_sent_as_content_is_refused():
+    """The live case (2026-10-20, chat 01M5DEZ7BKRZJH3T2JJ2AG4H2W): a stub in place of the
+    content made the model write effects.js three times and copy the stub as new files. A write
+    stays whole in the requests after it (they only append), and a stub or a folded call's note
+    sent as a file's text is refused with what is on disk."""
     c = Chat()
     try:
         cid = c.new()
         page = "".join(f"const wave{i} = Math.sin({i} * t) * 0.25;\n" for i in range(150))
         assert len(page) > render.FOLD_ARG_CHARS
         c.send(cid, calls(("write_file", {"path": "ocean.js", "content": page})))
-        s = c.wait_idle(cid, 20)
+        c.wait_idle(cid, 20)
+        note = render.folded_note({"name": "write_file", "status": "done", "input": json.dumps(
+            {"path": "sky.js", "content": page})}).strip()
+        c.send(cid, calls(("write_file", {"path": "ocean.js",
+                                          "content": render.wrote_stub("ocean.js", page)}),
+                          ("write_file", {"path": "sky.js", "content": note})))
+        c.wait_idle(cid, 20)
         c.send(cid, calls(("edit_file", {"path": "ocean.js", "old": page[:2500],
-                                         "new": page[:2500].replace("0.25", "0.5")}),
-                          ("write_file", {"path": "ocean.js", "content": render.wrote_stub(
-                              "ocean.js", page)})))
+                                         "new": page[:2500].replace("0.25", "0.5")})))
         s = c.wait_idle(cid, 20)
         reqs = requests(c)
-        # the request after the write: its call reads as the stub, the text is not in it
-        after = reqs[1]
-        call = next(tc for m in after["messages"] if m.get("tool_calls")
-                    for tc in m["tool_calls"])
-        args = json.loads(call["function"]["arguments"])
-        assert args["path"] == "ocean.js" and args["content"].startswith(
-            "[wrote /workspace/ocean.js: 150 lines, ") and \
-            'read_file {"path": "/workspace/ocean.js"} shows it]' in args["content"], args
-        # (the fake's user message carries the calls it makes: the text is in that one only)
-        assert not any("wave149" in json.dumps(m) for b in (after, reqs[-1])
-                       for m in b["messages"] if m["role"] != "user")
-        assert _prefix_kept(reqs[0], reqs[1])
-        # the store and the thread keep the whole text
+        # every request after the write carries it as the model sent it, and starts with the
+        # request before it (the engine's prefix cache and end anchor hold the turn)
+        for b in reqs[1:]:
+            call = next(tc for m in b["messages"] if m.get("tool_calls")
+                        for tc in m["tool_calls"])
+            assert json.loads(call["function"]["arguments"]) == {"path": "ocean.js",
+                                                                 "content": page}
+        for prev, cur in zip(reqs, reqs[1:]):
+            assert _prefix_kept(prev, cur)
         made = [p for m in s["messages"] if m["role"] == "assistant" for p in m["parts"]
                 if p["type"] == "tool_call"]
         assert json.loads(made[0]["input"])["content"] == page
+        stub, noted = made[1], made[2]
+        assert stub["status"] == "failed" and noted["status"] == "failed"
+        out = stub["output"]["content"]
+        assert "nothing was written" in out and "/workspace/ocean.js is on disk" in out and \
+            "correct as it is, so there is nothing to write again" in out, out
+        out = noted["output"]["content"]
+        assert "There is no file at /workspace/sky.js yet" in out, out
+        assert "sky.js" not in os.listdir(c.svc.workspace(cid).root)
         assert c.svc.workspace(cid).read("ocean.js").decode().count("0.5") > 0
-        # an edit's long old and new text are stubs too; a write of a stub is refused
-        edit = json.loads(next(tc for m in reqs[-1]["messages"] if m.get("tool_calls")
-                               for tc in m["tool_calls"]
-                               if tc["function"]["name"] == "edit_file")["function"]["arguments"])
-        assert edit["old"].startswith("[the old text of this edit: ") and \
-            edit["new"].startswith("[the new text of this edit: "), edit
-        stubbed = next(p for p in made if p["name"] == "write_file" and p is not made[0])
-        assert stubbed["status"] == "failed" and "stub of an earlier write" in \
-            stubbed["output"]["content"], stubbed["output"]
-        assert "wave149" in c.svc.workspace(cid).read("ocean.js").decode()
     finally:
         c.close()
 
@@ -408,50 +415,123 @@ def test_long_reads_stay_whole_until_a_compaction_and_are_stubs_after_it():
     assert not render.WROTE_STUB.fullmatch("[wrote the intro] and more text")
 
 
-def test_a_workers_write_and_edit_stay_whole_until_a_compaction():
-    """SRV-593: a worker's write_file and edit_file arguments are stubs at a compaction only; the
-    chat's are stubs from the next request on, as before; short ones never change."""
+def test_writes_and_edits_leave_the_request_only_at_a_fold_point(monkeypatch=None):
+    """A write's content and an edit's long texts stay whole while the rendered calls' whole
+    texts stay under FILES_HIGH_CHARS (chat and worker alike); past it the oldest leave until
+    FILES_KEEP_CHARS remain, and at a compaction the calls before it are cut down to it. A folded
+    call keeps its path, its result says what left; between fold points the request only
+    appends."""
     page = "".join(f"const wave{i} = Math.sin({i} * t) * 0.25;\n" for i in range(150))
     old, new = page[:2500], page[:2500].replace("0.25", "0.5")
     short = {"path": "a.txt", "content": "hi"}
+    assert len(page) > 5000
 
     def call(k, name, args, ended):
         return {"type": "tool_call", "id": f"w{k}", "name": name, "step": k, "status": "done",
-                "input": json.dumps(args), "ended_at": ended, "output": {"content": "ok"}}
-    branch = [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "an ocean"}]},
-              {"id": "a", "role": "assistant", "parts": [
-                  call(1, "write_file", {"path": "ocean.js", "content": page},
-                       "2026-10-18T10:00:00.000Z"),
-                  call(2, "edit_file", {"path": "ocean.js", "old": old, "new": new},
-                       "2026-10-18T10:01:00.000Z"),
-                  call(3, "write_file", short, "2026-10-18T10:02:00.000Z")]}]
+                "input": json.dumps(args), "ended_at": ended,
+                "output": {"content": f"wrote {args['path']}"}}
+    calls_ = [call(1, "write_file", {"path": "ocean.js", "content": page},
+                   "2026-10-18T10:00:00.000Z"),
+              call(2, "edit_file", {"path": "ocean.js", "old": old, "new": new},
+                   "2026-10-18T10:01:00.000Z"),
+              call(3, "write_file", short, "2026-10-18T10:02:00.000Z")]
+    calls_ += [call(k, "write_file", {"path": f"p{k}.js", "content": page.replace("wave", f"w{k}")},
+                    f"2026-10-18T10:0{k}:00.000Z") for k in range(4, 8)]
 
-    def args(fold, worker):
-        body = render.body("m", {}, branch, system="s", fold_before=fold, worker=worker)
-        return [json.loads(tc["function"]["arguments"]) for m in body["messages"]
-                for tc in m.get("tool_calls") or []]
-    # a worker: whole with no compaction, the request byte for byte the calls as written
-    assert args(None, True) == [{"path": "ocean.js", "content": page},
-                                {"path": "ocean.js", "old": old, "new": new}, short]
-    # a compaction at 10:00:30: the write before it is a stub, the edit after it stays whole
-    w, e, s = args("2026-10-18T10:00:30.000Z", True)
-    assert w["content"] == render.wrote_stub("ocean.js", page) and e == {
-        "path": "ocean.js", "old": old, "new": new} and s == short, (w, e)
-    w, e, s = args("2026-10-18T10:05:00.000Z", True)
-    assert w["content"].startswith("[wrote /workspace/ocean.js: 150 lines, ") and \
-        e["old"].startswith("[the old text of this edit: ") and \
-        e["new"].startswith("[the new text of this edit: ") and s == short, (w, e)
-    # the chat: stubs from the next request on, with or without a compaction
-    for fold in (None, "2026-10-18T10:00:30.000Z"):
-        w, e, s = args(fold, False)
-        assert w["content"] == render.wrote_stub("ocean.js", page) and \
-            e["old"].startswith("[the old text of this edit: ") and s == short, (fold, w, e)
-    # the Context panel counts what the request carries
-    whole = ctx_mod.file_tokens(branch, worker=True)
-    assert whole > ctx_mod.file_tokens(branch) and whole == sum(
-        ctx_mod.estimate_tokens(t) for t in (page, old, new, "hi"))
-    assert ctx_mod.file_tokens(branch, fold_before="2026-10-18T10:05:00.000Z", worker=True) == \
-        ctx_mod.file_tokens(branch)
+    def branch(n):
+        return [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "an ocean"}]},
+                {"id": "a", "role": "assistant", "parts": calls_[:n]}]
+    high, keep, share = render.FILES_HIGH_CHARS, render.FILES_KEEP_CHARS, render.FILES_KEEP_SHARE
+    render.FILES_HIGH_CHARS, render.FILES_KEEP_CHARS = 3 * len(page) + 100, len(page) + 100
+    render.FILES_KEEP_SHARE = 1.0
+    try:
+        def body(n, fold=None):
+            return render.body("m", {}, branch(n), system="s", fold_before=fold)
+
+        def args(b):
+            return [json.loads(tc["function"]["arguments"]) for m in b["messages"]
+                    for tc in m.get("tool_calls") or []]
+        # nothing leaves while the whole texts stay under the high mark: the calls as written
+        assert args(body(3)) == [{"path": "ocean.js", "content": page},
+                                 {"path": "ocean.js", "old": old, "new": new}, short]
+        assert render.folded_calls(branch(4)) == set()
+        # the fifth write passes it: the oldest leave until the keep mark, the newest stays
+        assert render.folded_calls(branch(5)) == {"w1", "w2", "w4"}
+        a = args(body(5))
+        assert a == [{"path": "ocean.js"}, {"path": "ocean.js"}, short, {"path": "p4.js"},
+                     json.loads(calls_[4]["input"])], a
+        tool = [m["content"] for m in body(5)["messages"] if m["role"] == "tool"]
+        assert tool[0] == ("wrote ocean.js\n[the content of this call (150 lines, "
+                           f"{len(page.encode()):,} bytes, sha256 {render._sha(page)}) is left out "
+                           "of this conversation to save room; the file was written with it as "
+                           'sent. read_file {"path": "/workspace/ocean.js"} shows the file as it '
+                           "is now]"), tool[0]
+        assert tool[1].startswith("wrote ocean.js\n[the old and new text of this call (2,500 and "
+                                  f"{len(new):,} bytes) are left out"), tool[1]
+        assert tool[2] == "wrote a.txt" and tool[4] == "wrote p5.js"
+        # between fold points the request only appends; a fold point rewrites it once
+        changed = []
+        for n in range(1, len(calls_) + 1):
+            prev, cur = body(n - 1), body(n)
+            k = len(prev["messages"])
+            if render.encode(cur["messages"][:k]) != render.encode(prev["messages"]):
+                changed.append(n)
+        assert changed == [5], changed
+        # a compaction is a fold point: the calls before it go down to the keep mark, newest kept
+        assert render.folded_calls(branch(4), "2026-10-18T10:05:00.000Z") == {"w1", "w2"}
+        assert render.folded_calls(branch(2), "2026-10-18T10:05:00.000Z") == {"w1"}
+        assert render.folded_calls(branch(2), "2026-10-18T10:00:30.000Z") == set()
+        # the same branch folds the same calls on every render (no clock, no state)
+        assert render.encode(body(7)) == render.encode(body(7))
+        # the Context panel counts what the request carries
+        whole = ctx_mod.file_tokens(branch(4))
+        assert whole == sum(ctx_mod.estimate_tokens(t) for t in
+                            (page, old, new, "hi", json.loads(calls_[3]["input"])["content"]))
+        assert ctx_mod.file_tokens(branch(4), fold_before="2026-10-18T10:05:00.000Z") == \
+            ctx_mod.estimate_tokens("hi") + ctx_mod.estimate_tokens(
+                json.loads(calls_[3]["input"])["content"])
+    finally:
+        render.FILES_HIGH_CHARS, render.FILES_KEEP_CHARS = high, keep
+        render.FILES_KEEP_SHARE = share
+    # a small window lowers the marks: 4 characters a token, FILES_WINDOW_SHARE of it
+    assert render.files_marks(None) == (render.FILES_HIGH_CHARS, render.FILES_KEEP_CHARS)
+    assert render.files_marks(262_144)[0] <= render.FILES_HIGH_CHARS
+    assert render.files_marks(32_768) == (19_660, 5_898)
+
+
+def _first_call(body: dict) -> str | None:
+    """The id of a request's first tool call: a compaction inside the run moves it."""
+    return next((tc["id"] for m in body["messages"] for tc in m.get("tool_calls") or []), None)
+
+
+def test_a_long_command_folds_like_a_write_and_keeps_its_output():
+    """A heredoc that writes a file is a write in a bash call (the reef run wrote its first page in
+    six of them): past the high mark its command leaves the call too, its output and exit code
+    stay, and a failed command folds as well (it ran); a refused write does not (nothing was
+    written, the note would say it was)."""
+    page = "".join(f"const reef{i} = Math.cos({i} * t);\n" for i in range(160))
+    cmd = f"cat > /workspace/reef.js <<'EOF'\n{page}EOF\nnode --check /workspace/reef.js"
+
+    def call(k, name, args, status="done", out="ok"):
+        return {"type": "tool_call", "id": f"c{k}", "name": name, "step": k, "status": status,
+                "input": json.dumps(args), "ended_at": f"2026-10-20T21:0{k}:00.000Z",
+                "output": {"content": out, "exit_code": 1 if status == "failed" else 0}}
+    parts = [call(1, "bash", {"command": cmd}, "failed", "SyntaxError\n[exit code 1]"),
+             call(2, "write_file", {"path": "a.js", "content": page}, "failed", "refused"),
+             call(3, "write_file", {"path": "b.js", "content": page})]
+    branch = [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "a reef"}]},
+              {"id": "a", "role": "assistant", "parts": parts}]
+    assert render.folded_calls(branch, "2026-10-20T21:02:30.000Z", window=20_000) == {"c1"}
+    body = render.body("m", {}, branch, system="s", fold_before="2026-10-20T21:02:30.000Z",
+                       window=20_000)
+    args = [json.loads(tc["function"]["arguments"]) for m in body["messages"]
+            for tc in m.get("tool_calls") or []]
+    assert args[0] == {} and args[1]["content"] == page and args[2]["content"] == page, args
+    tool = [m["content"] for m in body["messages"] if m["role"] == "tool"]
+    assert tool[0] == ("SyntaxError\n[exit code 1]\n[the command of this call (163 lines, "
+                       f"{len(cmd.encode()):,} bytes) is left out of this conversation to save "
+                       "room; it ran as sent, its output is above]"), tool[0]
+    assert tool[1] == "refused"
 
 
 def _ocean_run(c, window: int, max_steps: int = 10):
@@ -493,8 +573,15 @@ def test_a_compaction_lands_under_half_its_trigger_with_big_kept_steps():
         # request starts with the one before, byte for byte
         kept = [m["content"] for m in reqs[first]["messages"] if m["role"] == "tool"]
         assert kept and all(not k.startswith("     1\t") for k in kept), kept
+        # (the writes stay whole, so this small window compacts again later, and a fold point of
+        # the written files rewrites it once: each is a new start)
+        def notes(b):
+            return sum("is left out of this conversation" in (m.get("content") or "")
+                       for m in b["messages"] if m["role"] == "tool")
         for k in range(first + 1, len(reqs)):
-            assert _prefix_kept(reqs[k - 1], reqs[k]), f"request {k} rewrote the prompt"
+            again = _first_call(reqs[k]) != _first_call(reqs[k - 1])
+            assert again or _prefix_kept(reqs[k - 1], reqs[k]) or \
+                notes(reqs[k]) > notes(reqs[k - 1]), f"request {k} rewrote the prompt"
         line = next(ln for ln in c.lines if ln.startswith("[compact]"))
         assert line.startswith(f"[compact] {cid} {cp['before_tokens']} -> {cp['after_tokens']} "
                                f"(summary call ") and line.endswith(" ms"), line
@@ -531,3 +618,8 @@ def test_a_run_whose_kept_steps_have_no_stubs_keeps_fewer_steps():
         assert comp.estimate(reqs[first], 0.5) <= at * comp.TARGET_SHARE
     finally:
         c.close()
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

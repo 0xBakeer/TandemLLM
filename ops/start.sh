@@ -142,7 +142,7 @@ if [ "$SETUP" = "1" ]; then
     status failed --reason "the setup guide did not answer /health within 120 s"
     echo "[start] setup mode did not answer /health in 120 s; tail of $LOG:"; tail -20 "$LOG"; exit 1
 fi
-status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
+status starting --reason "${START_REASON:-$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")}"
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And
@@ -193,6 +193,8 @@ done
 # The vision tower, on unless serve.env says off, and the response cache, off unless it says on
 # (the setup guide's two switches for them, docs/setup.md)
 [ "${VISION:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --vision off"
+[ "${QSE_PACK_VISION:-}" = "off" ] && [ "${QSE_VISION_ASKED:-on}" = "on" ] && \
+    echo "[start] vision off: ${QSE_PROFILE_NAME:-the profile} serves text only (its entry), whatever setup.env asks"
 [ "${RESPONSE_CACHE:-off}" = "on" ] && MEM_FLAGS="$MEM_FLAGS --response-cache"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
@@ -205,6 +207,13 @@ case "${SAMPLED_TREE:-}" in
     1|det) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=det" ;;
     mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
 esac
+# #97: the lookup corpus of the served model's tokenizer, CORPUS/tokenizers/<its fingerprint> once
+# ops/use-profile.sh has built it (server/setup/corpus.py); without that folder CORPUS goes as it is
+if [ -n "${CORPUS:-}" ] && [ -d "$CORPUS/tokenizers" ]; then
+    PICKED="$(timeout 60 "$PY" -m server.setup.corpus pick --corpus "$CORPUS" \
+              --engine-flags "${QSE_ENGINE_FLAGS:-}" 2>/dev/null | tail -n 1)"
+    [ -n "$PICKED" ] && CORPUS="$PICKED"
+fi
 # OPS-99: a profile of another model names its own model and drafter flags (QSE_ENGINE_FLAGS; a
 # Flash-Next pack: --model <pack> --drafter mtp) in place of the 27B's, with the lookup's corpus (the
 # tokenizer's, shared; ENG-229); unset, the 27B's, in their places

@@ -130,7 +130,7 @@ Half of it is built. Since 2026-10-12 the adapters, the state, the shared method
 
 ### Model adapters
 
-`engine/models/__init__.py` keeps a registry of architectures. An entry names the `architectures` strings and `model_type`s that select it, its config reader, its engine class and, when the model brings one, its server builder, all by import path. `architecture(config)` returns the entry, or fails naming every registered one.
+`engine/models/__init__.py` keeps a registry of architectures, each registered by its own package's `arch.py`. An entry names the `architectures` strings and `model_type`s that select it, its config reader, its engine class, its server builder and its manifest, all by import path, and what the shared code needs to know about the model as data (its tool-call form and reasoning, the files it shares with other families, the kernel options it turns on; [adding-a-model.md](adding-a-model.md#what-a-family-declares)). `architecture(config)` returns the entry, or fails naming every registered one.
 
 | name | model | engine | server builder |
 |-|-|-|-|
@@ -230,6 +230,7 @@ flowchart TB
 | the model registry, adapters and state | `engine/models/` | [adding-a-model.md](adding-a-model.md) |
 | the quantiser and its gate | `tools/quant_nvfp4.py`, `tools/quant_head.py`, `tools/quality_gate.py` | [quantisation.md](quantisation.md) |
 | matrix-product kernels | `tools/nvfp4_*.py`, `tools/fp8_linear.py`, `tools/exl3_linear.py`, `tools/head_gemv.py`; Flash-Next `tools/fn_kernels.py` | [kernels.md](kernels.md) |
+| C++ and CUDA sources | `tools/csrc/`, `engine/csrc/`, a family's `engine/models/<family>/csrc/`, read and built by `engine/native_build.py` | [kernels.md](kernels.md#where-the-source-lives) |
 | recurrent-layer kernels | `tools/gdn_*_kernels.py`, `engine/gdn.py`; Flash-Next `tools/fn_seq_kernels.py`, `tools/fn_prefill_kernels.py` | [kernels.md](kernels.md) |
 | the 27B, verify and commit | `engine/model.py`, `engine/tree.py` | [speculative-decoding.md](speculative-decoding.md) |
 | Flash-Next, verify and commit | `engine/models/flashnext/engine.py`, `serving.py`, `mtp.py` | [speculative-decoding.md](speculative-decoding.md) |

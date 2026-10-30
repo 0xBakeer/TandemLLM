@@ -46,6 +46,7 @@ import glob
 import hashlib
 import http.client
 import json
+import re
 import os
 import shlex
 import shutil
@@ -321,9 +322,16 @@ def _spawn_kw() -> dict:
     return kw
 
 
-def _end_group(p, grace: float = 5.0) -> None:
+def _end_group(p, grace: float = 5.0, leader_first: bool = False) -> None:
     """SIGTERM to the child's whole group (its own, `_spawn_kw`), SIGKILL to what is left after
-    `grace` s; the group is ended even when its first process is gone already."""
+    `grace` s; the group is ended even when its first process is gone already.
+
+    `leader_first`: the SIGTERM goes to the first process alone, which ends its own children, and
+    to the rest of the group only once it is gone. Chrome needs this (#131): given the group's
+    SIGTERM, its helpers died at once and the browser process, waiting for them in its shutdown,
+    sometimes stayed up with every child already exited, until the SIGKILL. On fresh CI runners
+    that was 3 closes in 200, and 17 in 200 with the CPUs busy; signalled alone, 0 in 400, at most
+    0.16 s."""
     if p is None:
         return
     pg = p.pid
@@ -335,15 +343,25 @@ def _end_group(p, grace: float = 5.0) -> None:
             return True
         except OSError:
             return False
+    rest = not (leader_first and p.poll() is None)    # the group's turn has come
     try:
-        os.killpg(pg, signal.SIGTERM)
+        if rest:
+            os.killpg(pg, signal.SIGTERM)
+        else:
+            os.kill(pg, signal.SIGTERM)
     except OSError:
         return
     end = time.monotonic() + grace
     while time.monotonic() < end:
         if not alive():
             return
-        time.sleep(0.05)
+        if not rest and p.returncode is not None:
+            rest = True                    # the first process is gone: the rest of its group too
+            try:
+                os.killpg(pg, signal.SIGTERM)
+            except OSError:
+                return
+        time.sleep(0.02)
     try:
         os.killpg(pg, signal.SIGKILL)
     except OSError:
@@ -549,12 +567,11 @@ class Browser:
             if chrome is None:
                 raise SystemExit("no Chrome or Chromium found (set CHROME=...); or start one with "
                                  "--remote-debugging-port=9222 and pass --cdp http://127.0.0.1:9222")
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
             self.tmp = tempfile.mkdtemp(prefix="laya-drive-chrome-")
+            # OPS-231: Chrome picks its own debugging port (0) and writes it to DevToolsActivePort; a
+            # port picked here first and bound by Chrome later could be taken in between by another process
             self.proc = subprocess.Popen(
-                [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={self.tmp}",
+                [chrome, "--remote-debugging-port=0", f"--user-data-dir={self.tmp}",
                  "--no-first-run", "--no-default-browser-check", f"--window-size={width},{height}",
                  # Linux without unprivileged user namespaces (Ubuntu 23.10+) has no sandbox for
                  # it; Playwright starts Chromium the same way there
@@ -569,12 +586,29 @@ class Browser:
                  "--password-store=basic", "--use-mock-keychain",
                  *(["--headless=new"] if headless else []), "about:blank"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_spawn_kw())
-            cdp = f"http://127.0.0.1:{port}"
         try:
+            if cdp is None:
+                cdp = f"http://127.0.0.1:{self._active_port(chrome)}"
             self._attach(cdp, url, keys, chrome if self.proc is not None else None)
         except BaseException:
             self.close()                   # a page that never came up: its Chrome goes too
             raise
+
+    def _active_port(self, chrome: str) -> int:
+        """The debugging port the Chrome this started chose, from DevToolsActivePort in its profile."""
+        f = os.path.join(self.tmp, "DevToolsActivePort")
+        for _ in range(300):
+            try:
+                with open(f) as fh:
+                    first = fh.readline().strip()
+                if first.isdigit():
+                    return int(first)
+            except OSError:
+                pass
+            if self.proc.poll() is not None:
+                raise SystemExit(f"Chrome exited at its start ({self.proc.returncode}): {chrome}")
+            time.sleep(0.1)
+        raise SystemExit(f"Chrome wrote no debugging port in 30 s: {chrome}")
 
     def _attach(self, cdp: str, url: str, keys, chrome) -> None:
         target = None
@@ -660,7 +694,7 @@ class Browser:
         except (OSError, RuntimeError, AttributeError):
             pass
         if self.proc is not None:
-            _end_group(self.proc)          # Chrome and every process it started
+            _end_group(self.proc, leader_first=True)    # Chrome ends what it started (#131)
             self.proc = None
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -713,6 +747,30 @@ def _short(v, n: int = 300):
     return t if len(t) <= n else t[:n] + "..."
 
 
+#: a GLSL compiler's error line (`ERROR: 0:1768: 'vReefW' : undeclared identifier`), and the
+#: marked source line three.js prints after the log (`> 1768: ...`)
+_GLSL_ERROR = re.compile(r"^\s*(ERROR: \d+:\d+: .*|>\s*\d+: .*)$", re.M)
+
+
+def _error_line(x: str, n: int = 240) -> str:
+    """One console error as the report carries it: clipped at `n`, but a shader compile or link
+    error keeps its first line and every compiler error line and marked source line, the source
+    dump left out. Live (2026-10-21, Ornith's reef replay) the clip ended right after the first
+    `ERROR: 0:1768:`, and the model spent 14 of its 100 calls reading three.js's WebGLProgram to
+    find what the compiler had already said."""
+    lines = _GLSL_ERROR.findall(x)
+    if not lines:
+        return _short(x, n)
+    head = x.strip().split("\n")[0][:n]
+    keep, seen = [], set()
+    for ln in (ln.strip() for ln in lines):
+        if ln not in seen:
+            seen.add(ln)
+            keep.append(_short(ln, 200))
+    more = len(keep) - 12
+    return "\n".join([head] + keep[:12] + ([f"({more} more compiler lines)"] if more > 0 else []))
+
+
 def _problems(events: list[dict]) -> tuple[list[str], int]:
     """(console errors, uncaught exceptions and failed loads; the number of warnings). A missing
     favicon is not the page's fault."""
@@ -746,7 +804,7 @@ def _problems(events: list[dict]) -> tuple[list[str], int]:
     seen: dict = {}
     for x in errs:
         seen[x] = seen.get(x, 0) + 1
-    return [_short(x, 240) for x, n in seen.items()], warns
+    return [_error_line(x) for x, n in seen.items()], warns
 
 
 class PageCheck:
@@ -755,9 +813,12 @@ class PageCheck:
 
     def __init__(self, url: str, widths: list[int], shots: str, cdp: str | None = None):
         self.url, self.widths, self.shots = url, widths, shots
+        t0 = time.monotonic()
         self.b = Browser(url, cdp, headless=True, width=widths[0], height=900,
                          watch=True, need_state=False)
         self.cdp = self.b.cdp
+        # Chrome's start and the first load: where a wait at the first network request shows
+        self.start_seconds = round(time.monotonic() - t0, 1)
 
     def size(self, width: int) -> None:
         mobile = width < 600
@@ -836,7 +897,7 @@ class PageCheck:
         return out
 
     def run(self, steps: list[str]) -> dict:
-        rep: dict = {"url": self.url, "steps": [], "widths": []}
+        rep: dict = {"url": self.url, "steps": [], "widths": [], "start_seconds": self.start_seconds}
         t0 = time.monotonic()
         self.size(self.widths[0])
         self.cdp.call("Page.reload")

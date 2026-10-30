@@ -49,9 +49,8 @@ def test_the_window_range_follows_the_checkpoint_on_the_box():
     m = registry.get("nemotron-3.5-bolt-74b-a9b")
     assert registry.with_config_window(m, []) is m                        # no weights here: the card's
     big = registry.with_config_window(m, [None, _ckpt({"max_position_embeddings": 1_048_576})])
-    for k in ("window", "side_window"):
-        assert big["parallelism"][k]["max"] == 1_048_576
-        assert big["parallelism"][k]["default"] == m["parallelism"][k]["default"]
+    assert big["parallelism"]["window"]["max"] == 1_048_576            # every lane's (SRV-707)
+    assert big["parallelism"]["window"]["default"] == m["parallelism"]["window"]["default"]
     assert m["parallelism"]["window"]["max"] == 262_144                   # the card itself is untouched
     small = registry.with_config_window(m, [_ckpt({"max_position_embeddings": 100_000})])
     assert small["parallelism"]["window"]["max"] == 98_304                # on the 4,096 step
@@ -65,7 +64,7 @@ def test_every_card_names_its_checkpoints_maximum():
     assert set(CHECKPOINT_MAX) <= set(models), sorted(models)
     for mid, n in CHECKPOINT_MAX.items():
         par = models[mid]["parallelism"]
-        assert par["window"]["max"] == n and par["side_window"]["max"] == n, (mid, par["window"], par["side_window"])
+        assert par["window"]["max"] == n and "side_window" not in par, (mid, par)     # SRV-707: one window
     sv = models["nemotron-3.5-super-vl-120b-a12b"]
     assert sv["parallelism"]["window"]["default"] == 262_144
     assert all(p["max_window"] == 1_048_576 for p in sv["profiles"])

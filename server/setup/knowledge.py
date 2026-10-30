@@ -171,14 +171,24 @@ def model_sections(m: dict) -> list[dict]:
                         "text": f"{f['label']}: {f['what']}{opts} Default {f['default']}"
                                 f"{rng}; recommended {f['recommended']}."})
     p = m["parallelism"]
+    kvb = p["kv_bytes_per_token"]
+    lane = kvb * p["window"]["default"] / 2**30
     out.append({"path": path, "title": "Parallel requests and memory",
-                "text": f"Up to {registry.ENGINE_MAX_SLOTS} requests at once (slots; measured up to "
-                        f"{p['slots']['max']} on this model, as many as the memory holds), each with a context "
-                        f"window of up to {p['window']['max']:,} tokens. A token of window costs "
-                        f"{p['kv_bytes_per_token']:,} bytes ({p['kv_bytes_per_token'] / 1024:g} "
-                        f"KiB). With the shared KV pool, memory is taken only as conversations grow. "
-                        f"The engine keeps {p['floor_gb']['default']:g} GiB free (the floor) and a "
-                        f"new request waits when memory runs short."})
+                "text": (f"{p['slots']['engine_max_reason']} " if p["slots"].get("engine_max_reason") else
+                         f"{p['slots']['default']} lanes (requests at once) by default, up to "
+                         f"{registry.slots_max(m)} (measured up to {p['slots']['max']} on this model; "
+                         f"past {registry.JOINT_PASS_LANES} a round verifies in more than one pass). ")
+                        + f"Every lane has the same context window, up to {p['window']['max']:,} "
+                        f"tokens. A token of window costs {kvb:,} bytes ({kvb / 1024:g} KiB), so one "
+                        f"lane at the full {p['window']['default']:,}-token window holds {lane:.2f} GiB. "
+                        f"With the shared KV pool, memory is taken only as conversations grow: the "
+                        f"memory step shows how many lanes can all hold the full window at once (the "
+                        f"guarantee) beside the lanes chosen. Past the guarantee the lanes share what "
+                        f"is left: a new request waits for memory before it starts, idle conversations "
+                        f"give their memory back first, and a lane that would take the box under its "
+                        f"floor stops with memory_full (the Chat tab continues it once memory is free). "
+                        f"Without the pool every lane's window is memory at load. The engine keeps "
+                        f"{p['floor_gb']['default']:g} GiB free (the floor)."})
     return out
 
 

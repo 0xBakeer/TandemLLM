@@ -8,7 +8,7 @@ drives every model through (the Flash-Next adapter's, engine/models/flashnext/se
   forward_block           a chain verify whose commit waits for `rollback_to` or the next call
 
 so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
-the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
+the reasoning split, the tool-call form the model writes (its `ServeSpec`), the live view -- is the
 server's code. A verified row is the decode step's row bit for bit (ENG-287), so greedy speculation
 writes the plain greedy text. `caps` says what is on.
 """
@@ -174,8 +174,19 @@ class Lfm2MoeServing:
         if self._graphs is None:
             ok = _sm_supported(self.fn.device)
             if not ok and self.fn.device.type == "cuda":
-                from tools import exl3_ada, moe_ada
-                ok = bool(exl3_ada._GEMV_OK and moe_ada._OK)
+                # the eager fallbacks can be captured only where the Triton kernels have actually
+                # probed true: the rotation probe, the gemv probe at every rate this model loads,
+                # and the MoE probe when the model has expert banks
+                try:
+                    from tools import exl3_ada, moe_ada
+                    from tools.exl3_linear import EXL3Block
+                except ImportError:
+                    ok = False
+                else:
+                    kbs = {w.kb for w in self.fn.W.values() if isinstance(w, EXL3Block)}
+                    ok = (bool(kbs) and exl3_ada._ROT_OK is True
+                          and all(exl3_ada._GEMV_OK.get(kb) is True for kb in kbs)
+                          and (not getattr(self.fn, "banks", None) or moe_ada._OK is True))
             self._graphs = ok
         return self._graphs
 
@@ -537,7 +548,6 @@ def serve(a, ctx) -> dict:
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "tool_format": "pythonic",
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),

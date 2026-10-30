@@ -18,7 +18,7 @@ import { describeError } from '../../api/client';
 import { conductor, type NoteFull, type NoteHit, type NoteInjectedRow, type NoteKind, type NoteMeta, type NoteOne, type NotesList, type NoteWriteRow, type SettingsDoc } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
 import { dateTimeShort, exact } from '../../lib/format';
-import { filterNotes, KIND_WORDS, KINDS, lineDiff, NO_FILTER, nodeLabel, notesSettings, usesLine, WRITER_WORDS, writeLine, writerRun, type NoteFilter } from '../../lib/notes';
+import { filterNotes, KIND_WORDS, KINDS, lineDiff, memoryWhere, NO_FILTER, nodeLabel, notesSettings, usesLine, WRITER_WORDS, writeLine, writerRun, type NoteFilter } from '../../lib/notes';
 import { setParams } from '../../lib/router';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton, statTile } from '../../ui/bits';
@@ -143,6 +143,7 @@ export class QseCondNotes extends LightElement {
     const l = this.list;
     return html`
       ${this.renderTiles(l)}
+      ${this.renderWhere(l)}
       ${this.flash ? html`<p class="ok-ink small" role="status" data-notes-flash>${icon('check')} ${this.flash}</p>` : nothing}
       ${this.selected ? this.renderOne() : nothing}
       ${this.renderSearch()}
@@ -153,6 +154,20 @@ export class QseCondNotes extends LightElement {
       ${this.renderSettings()}
       ${this.renderDanger(l)}
     `;
+  }
+
+  // ---------------------------------------------------------------- where memory is on (SRV-703)
+  private renderWhere(l: NotesList): TemplateResult | typeof nothing {
+    const w = memoryWhere(l.where);
+    if (!w) return nothing;
+    return panel(
+      'Where memory is on',
+      html`${w.model ? html`<p class="warn-ink small" role="status" data-memory-model-off>${icon('warn')} ${w.model}</p>` : nothing}
+        <ul class="notes-where small" data-memory-where>${w.lines.map(
+          (r) => html`<li data-memory-profile=${r.name}><span class="badge ${r.on ? 'badge-on' : ''}">${r.on ? 'on' : 'off'}</span> <span class="mono">${r.name}</span>: memory ${r.state}${r.who ? html` <span class="muted">· ${r.who}</span>` : nothing}</li>`,
+        )}</ul>`,
+      { sub: "A profile's memory switch decides it, and the served model must have a place for the notes in its prompt.", id: 'notes-where' },
+    );
   }
 
   // ---------------------------------------------------------------- tiles

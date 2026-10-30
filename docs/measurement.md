@@ -12,6 +12,8 @@ Each request's speed is computed from its own record:
 
 The first token belongs to the prefill, so it is subtracted, and the decode time is the request's wall clock after its first token. A row reports the mean, p50, p90 and max over the 50 requests, with the median time to first token.
 
+The client measures the row's speed and time to first token itself. The server's own numbers come with every response, in `timings` and `metrics` ([server.md](server.md#speed-and-draft-fields-timings-and-metrics) lists them), and its `[req]` log line holds the same record. The Setup Guide's card cells take two of them from that line: `tok_round` is `tokens_per_block`, the mean accepted length, and `ms_round` is the decode time over `blocks` (`tools/exl3_fastrun.py`). No row reports `draft_acceptance_rate`. It depends on how many tokens a round drafts, and StairCut sets that number again every round.
+
 Two readings of a row are easy to get wrong.
 
 - The gaps between tokens. A verified round writes several tokens into the socket at once, so half the gaps are microseconds and the other half a whole round. The median inter-token latency therefore says nothing about round time.
@@ -74,6 +76,17 @@ A change of the verified tree's shape moves near ties ([exactness.md](exactness.
 
 The paper's run covers 25 workloads: prose, chat, code, a 48-token answer and a prose-then-code prompt; twelve prompts of the benchmark row; three edit tasks; a 256-token quotation and a 1,024-token copy; and, at 32k tokens of context, fresh text, a copy and a code edit. A workload's rate is the mean of three measured repeats after a warm-up. StairCut averages 90.45 tok/s against 81.95 for the fixed block 16 and 59.31 for the fixed block 8. It is above block 16 on 23 of the 25 workloads and above block 8 on 22. One router served every workload and repeat in that run; in a second run with a new router before every request, StairCut averages 89.88 tok/s against 91.16 for the kept router in that run.
 
+## The weight cards' speed rows
+
+Each weight card in the setup guide carries one speed row of the current build (SPD-245): the `parallel` rows of `models/<id>/model.yaml`. `tools/parallel_card.py` measures a row against the server running the profile and writes its raw file to `models/<id>/measurements/`. The file holds every request's record, the `/health` samples of every round, the server's limit knobs and the row itself. The registry refuses a row that differs from its raw file's `row`.
+
+- Prompts: `bench/card-prompts-v1.json`, a code and a prose workload of about 190 to 250 tokens. The prefill filler is `bench/heldout_prose.txt`, repeated to the length. Every request starts with a nonce line and sends `cache_prompt: false` and `X-Tandem: raw`, with thinking off and a seed of its own. The row records the prompt set's version and hash, and the prompt tokens of each workload.
+- Decode: each workload alone, three runs after one warm-up each. A run's rate is (completion tokens - 1) / (last token - first token), and the row gives the median per workload.
+- Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, counted with `/v1/tokenize` and checked against the request's own `prompt_tokens`, three runs each, one token out. The row gives the median time to first token and prompt tokens over that time.
+- At once: 1, 2, 4 and 8 prose requests released together, one discarded warm-up round and three measured rounds a level, 512 tokens a request. The wall rate is all completion tokens over the time from the send to the last end, so it includes the first tokens. The decode rate counts the tokens after each request's first one, over the time from the first first token to the last token. The row gives the median of each over the rounds, and the median time to first token.
+- Proof: `/health` every 0.2 s during every round. A round counts only when the most slots decoding at once equal N and no more than N requests ran (none came from elsewhere). An invalid round is run again. A level's `at_once` is the smallest maximum over its rounds, and the registry refuses a level whose `at_once` is not N or whose valid rounds are fewer than the row's. Before the levels the tool reads the server's live slot limit (`parallel.max_running`) and refuses to start when it is below the largest N.
+- Setup: the row names the setup file, the lanes, the window, the tokens a request, the sampling, the suffix store and the response cache (both off for a card row), the build and the commit.
+
 ## Baselines
 
 The paper compares StairCut with the same engine in two other configurations, on the same weights and the same box: plain greedy decoding (speculation off), and one drafter at a fixed block width (8 or 16) with its released tree budgets ([speculative-decoding.md](speculative-decoding.md)). On the benchmark row with the store off that is 49.89 tok/s for StairCut, 47.13 for block 8, 44.80 for block 16 and 13.69 for plain greedy decoding.
@@ -93,4 +106,4 @@ Each of these cost a wrong number once.
 
 ## Limits
 
-The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)), and parallel requests are not measured. The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
+The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)). Parallel requests are measured on the weight cards only (above). The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.

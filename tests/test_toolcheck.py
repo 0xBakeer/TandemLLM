@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 import yaml  # noqa: E402
 
 from server import app, fake_engine  # noqa: E402
+from engine.models.adapter import ServeSpec  # noqa: E402
 from server.conductor.monitor import Journal, Monitor, Policy, RequestEvent  # noqa: E402
 from server.conductor.monitor import policy as policy_mod  # noqa: E402
 from server.conductor.monitor.toolcheck import schema_problems, tool_history  # noqa: E402
@@ -205,8 +206,12 @@ def test_2_an_unrepairable_call_is_regenerated():
         assert list(got["calls"]) == [0] and got["calls"][0]["name"] == "read", got
         assert got["calls"][0]["id"].startswith("call_") and got["finish"] == "tool_calls"
         seen = ctx_text()
-        assert "<tool_response>\nYour tool call was not run: the <function=NAME> opener is " \
-               "malformed." in seen, seen[-600:]
+        assert "<tool_response>\nYour tool call was not run: the function opener is malformed. " \
+               "Write the tool call again, complete, in the same format: <tool_call>, " \
+               "<function=read>, each argument as <parameter=filePath>" in seen, seen[-600:]
+        # SRV-688: the format line shows an offered tool and its argument, no placeholder to copy
+        note = seen[seen.rfind("Your tool call was not run"):]
+        assert "NAME" not in note and "KEY" not in note, note[:400]
         act = rows(mon, task="C4", decision="REGENERATE_CALL", mode="act")
         assert len(act) == 1 and act[0]["hidden_tokens"] > 0 and "malformed" in act[0]["text"]
         assert '"broken"' not in got["raw"], "the discarded block never went out"
@@ -530,8 +535,8 @@ def test_the_schema_check_journals_in_shadow_while_c4_acts():
 
 
 def test_diagnose_and_repair():
-    assert diagnose("<function>\nx") == "the <function=NAME> opener is malformed"
-    assert diagnose("hello") == "the block has no <function=NAME> opener"
+    assert diagnose("<function>\nx") == "the function opener is malformed"
+    assert diagnose("hello") == "the block has no function opener"
     assert diagnose('{"name": "x",}').startswith("the JSON in the tool call does not parse")
     assert diagnose("<function=x>\n<parameter=a>\nv") == "parameter 'a' has no </parameter>"
     calls, fixed = repair('{"name": "read", "arguments": {"filePath": "a",},}')
@@ -582,6 +587,52 @@ def test_the_buffer_cut_drops_what_it_held():
     assert [h["function"]["name"] for h in held] == ["read"]
     buf.release(held[0])
     assert [d["index"] for d in buf.drain_deltas()] == [0], "indexes start at 0 after a cut"
+
+
+def _argkey(mon_mode: str = "on") -> Monitor:
+    mon = serve(mon_mode)
+    app.STATE["spec"] = ServeSpec(tool_format="argkey")   # Flint's adapter names it (engine/models/flint)
+    return mon
+
+
+def test_argkey_calls_are_calls_at_the_end_token():
+    """SRV-687: with the checks acting, a call in the arg-key form is read as a call where the
+    end token is checked (SP2) and where it is released (SP3): no hidden regeneration, one call
+    with its arguments exact, held whole in a stream."""
+    for stream in (True, False):
+        mon = _argkey()
+        got = ask("write it FAKE_ARGKEY", stream=stream, tools=[WRITE, READ])
+        assert list(got["calls"]) == [0] and got["calls"][0]["name"] == "write", got
+        assert json.loads(got["calls"][0]["args"]) == {
+            "filePath": "/tmp/notes.txt", "content": "line one\nline two\nline three\n"}, got
+        assert got["finish"] == "tool_calls" and "<tool_call>" not in got["content"], got
+        assert not rows(mon, task="C4"), mon.journal.events()
+        assert not rows(mon, decision="REGENERATE_CALL", mode="act"), mon.journal.events()
+        assert "Your tool call was not run" not in ctx_text()
+        if stream:
+            assert got["deltas"] == 1, "a held call goes out whole, in one delta"
+
+
+def test_argkey_string_arguments_stream_without_the_checks():
+    """SRV-687: without held calls, an arg-key call's string argument streams as it is written,
+    in many deltas, and the client assembles the exact arguments."""
+    _argkey("raw")
+    got = ask("write it FAKE_ARGKEY", stream=True, tools=[WRITE, READ])
+    assert got["calls"][0]["name"] == "write" and got["deltas"] > 5, got
+    assert json.loads(got["calls"][0]["args"])["content"] == "line one\nline two\nline three\n"
+
+
+def test_argkey_unreadable_call_gets_its_own_format_back():
+    """SRV-688: C4's note for an arg-key block that does not parse names the reason in that form
+    and shows the format with the tool the block named and one of its arguments."""
+    mon = _argkey()
+    ask("write it FAKE_ARGKEY FAKE_ARGKEY_BAD", stream=False, tools=[WRITE, READ])
+    act = rows(mon, task="C4", decision="REGENERATE_CALL", mode="act")
+    assert act, mon.journal.events()
+    text = act[0]["text"]
+    assert "argument 'filePath' has no <arg_value> after its </arg_key>" in text, text
+    assert "<tool_call>write, then each argument as <arg_key>filePath</arg_key>" in text, text
+    assert "NAME" not in text and "KEY" not in text and "<function=" not in text, text
 
 
 def test_the_policy_file_has_the_four_checks_and_the_profiles_reach_them():

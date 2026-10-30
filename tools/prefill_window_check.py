@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
 from engine.config import load_config  # noqa: E402
 from engine.loader import Weights  # noqa: E402
+import engine.models.qwen3_5.adapter  # noqa: E402,F401  (SPD-183: the cold verbs, `cache_state`)
 from engine.model import Qwen38Engine  # noqa: E402
 from tools.verify_spec import tree_router  # noqa: E402
 
@@ -40,6 +41,9 @@ def prompt_ids(tok, repo: Path, n: int) -> list[int]:
             ids += tok.encode(p.read_text())
         if len(ids) >= n:
             break
+    if not ids:
+        # SPD-183: an empty source doubled forever; the tool now says what it needs
+        raise SystemExit(f"no prompt text under {repo / 'bench'} (heldout_prose.txt, heldout_code.txt, calib.txt)")
     while len(ids) < n:
         ids += ids
     return ids[:n]
@@ -90,12 +94,15 @@ def run(eng, lr, ids, chunk: int, cached: bool):
         got[f"cv{j}"] = digest(h._cv[:, :, :h.ctx_len])
         got[f"ctx{j}"] = h.ctx_len
     if res is not None:
-        for b, (S, conv) in res.anchors.items():
-            got[f"anchor{b}.S"], got[f"anchor{b}.conv"] = digest(S), digest(conv)
+        for b, st in res.anchors.items():
+            for j, t in enumerate(st):
+                got[f"anchor{b}.{j}"] = digest(t)
     if store is not None:
         for key, e in store._d.items():
             s = e.snap
-            got[f"snap{s.length}.S"], got[f"snap{s.length}.k"] = digest(s.S), digest(s.k)
+            # the snapshot's sections and views (cache.StateSnapshot, ENG-E8), each digested
+            for j, t in enumerate(tuple(s.state) + tuple(s.views)):
+                got[f"snap{s.length}.{j}"] = digest(t)
             if s.drafter is not None:
                 got[f"snap{s.length}.d"] = _tree_digest(s.drafter)
     return got, dt, peak

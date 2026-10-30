@@ -13,9 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from chatd import compaction as comp
 from chatd import egress, render
+from chatd import stall as stall_mod
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
-from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
+from chatd.plans import PLAN_REFUSAL, PLAN_TOOLS
 from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
 from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note, ws_digest
@@ -24,6 +25,7 @@ from chatd.tools import PathError, Result, ToolError
 
 EVENT_OUTPUT_CAP = 64 * 1024        # tool.output per call in events (CONTRACT section 3)
 READ_PARALLEL = 4
+RESULT_SLACK = 512                  # over a result's cap: a read's marker, a sandbox note
 #: SRV-583: the main agent's reads in Agents mode answered from its context when nothing changed
 READ_CACHED = ("read_file", "grep", "glob")
 
@@ -48,12 +50,14 @@ class ApiConflict(Exception):
     pass
 
 
-def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio) -> str:
+def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio,
+                   counted: int | None = None) -> str:
     """The request does not fit: say which part is the cause (SRV-487, VIS-169). Live
     (2026-10-15) one 9.5 MB HTML attachment made a request of 2,875,364 tokens, and the error
-    told the user to start a new chat."""
-    head = (f"This request is about {est:,} tokens and the model's window is {window:,}: there "
-            f"is no room left for an answer. ")
+    told the user to start a new chat. `counted`: the engine's exact count (SRV-639)."""
+    size = f"{counted:,} tokens (the engine's count)" if counted else f"about {est:,} tokens"
+    head = (f"This request is {size} and the model's window is {window:,}: there is no room "
+            f"left for an answer. ")
     atts = [(int(a.get("tokens") or 0), a, m) for m in path if m.get("role") == "user"
             for a in m.get("attachments") or [] if a.get("kind") == "text" and render.inlined(a)]
     big = max(atts, key=lambda x: x[0], default=None)
@@ -71,6 +75,30 @@ def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio) -
             else "an answer")
     return head + (f"The largest part is {what}, about {n:,} tokens. Edit an earlier message to "
                    f"branch off before it, or start a new chat.")
+
+
+#: plan mode's reasoning cap where the model card names none (the router's `high` level)
+PLAN_BUDGET = 16384
+
+
+def plan_effort(settings: dict, info: dict) -> dict:
+    """The settings a plan-mode call is built with: it thinks at `high` at least.
+
+    On our engine as a reasoning budget (`plan_budget`, the card's `high` cap), never as a new
+    effort word: the Qwen3.8 template renders the word as the system turn's first sentence, so
+    a word that changed with the mode changed the prompt's head and the turn into plan mode and
+    the one after Approve read the whole conversation again (SRV-663's open item). The chat's own
+    word stays as it is. Another backend gets the word `high` as before (its own cache, its own
+    template). A chat at `high` or more, or with thinking off, is left as it is."""
+    if not settings.get("plan_mode") or not settings.get("thinking", True):
+        return settings
+    effort = settings.get("effort") or "auto"
+    if render.EFFORT_RANK.get(effort, 0) >= render.EFFORT_RANK["high"]:
+        return settings
+    if (info.get("backend") or "engine") != "engine":
+        return {**settings, "effort": "high"}
+    cap = (info.get("effort_budgets") or {}).get("high")
+    return {**settings, "plan_budget": int(cap) if cap else PLAN_BUDGET}
 
 
 def st_is_result(status: str | None) -> bool:
@@ -94,6 +122,8 @@ class ToolCtx:
         self.note: str | None = None         # for the result: the sandbox restarted
         self.phase, self.words = "tool", None    # the run's phase while it runs (verify: its own)
         self.agents = bool(getattr(run, "agents", False))  # a main agent in Agents mode (SRV-583)
+        # SRV-639: this call's share of the room the step's results may take, in characters
+        self.cap: int | None = getattr(run, "result_cap", None)
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
@@ -333,9 +363,10 @@ class AgentMixin:
             out = [t for t in out if t.needs != "web_search"]
         if cid and self.root_cid(cid) != cid:
             return [t for t in out if t.name in tools_mod.WORKER_TOOLS]
-        if settings.get("plan_mode"):
-            # SRV-363: the read tools and the todo list, nothing that changes the world
-            return [t for t in out if t.name in PLAN_TOOLS]
+        # SRV-363: plan mode runs the read tools and the todo list only; since SRV-663 the request
+        # keeps every tool (the run refuses the others, `PLAN_REFUSAL`): a tool list that changed
+        # with the mode changed the prompt's head, and the turn into plan mode and the turn out
+        # of it read the whole conversation again (84,423 tokens cold, live 2026-10-21 03:31)
         if agents:
             # SRV-583: no bash, write_file or edit_file; the todo list and task
             out = [t for t in out if t.name in tools_mod.AGENTS_TOOLS] + [tools_mod.BY_NAME["task"]]
@@ -530,7 +561,8 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
-            if tool is None and settings.get("plan_mode") and self.tool(part.get("name") or ""):
+            if settings.get("plan_mode") and part.get("name") not in PLAN_TOOLS and (
+                    tool is not None or self.tool(part.get("name") or "")):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
             if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
@@ -555,6 +587,7 @@ class AgentMixin:
                                                     is_error=True))
                 continue
             jobs.append((part, tool, args))
+        run.result_cap = self._result_cap(run, info, len(jobs))
         i = 0
         while i < len(jobs):
             if run.cancel.is_set():
@@ -591,6 +624,20 @@ class AgentMixin:
                 self._exec_call(run, *j)
             i += len(group)
         return "cancelled" if run.cancel.is_set() and run.stop_mode else "ok"
+
+    @staticmethod
+    def _result_cap(run, info: dict, calls: int) -> int | None:
+        """SRV-639: one call's share of what the step's results may add to the next request
+        (chatd/compaction.py `step_budget`), in characters. That request holds the last one (the
+        engine's count when its usage came) and this call's answer."""
+        window = int(info.get("max_len") or 0)
+        if not window or not calls:
+            return None
+        u = (run.usage or {}).get("usage") or {}
+        used = int(u.get("prompt_tokens") or 0) or run.request_counted or run.request_est
+        used += max(0, run.tokens - run.call_base[0])
+        budget = comp.step_budget(window, used, run.conv.memory_limit)
+        return comp.result_chars(budget, calls, run.conv.tok_ratio)
 
     def _exec_call(self, run, part: dict, tool, args: dict) -> None:
         conv = run.conv
@@ -636,8 +683,28 @@ class AgentMixin:
             res.content = f"{ctx.note}\n{res.content}"
         if tool.sandbox:
             self._sandbox_streak(run, failure, res.content)
+        self._stall(run, tool.name, args, res)
         status = res.status or ("cancelled" if run.cancel.is_set() and run.stop_mode else None)
         self._finish_call(run, part, res, status=status, ctx=ctx)
+
+    def _stall(self, run, name: str, args: dict, res: Result) -> None:
+        """SRV-677: the run monitor's stall rule (chatd/stall.py). Its note goes into the result
+        as stored (the later requests render the same bytes); at its second level the run ends
+        after this step, resumable."""
+        try:
+            note = run.stall.observe(run.step, name, args, res.content, bool(res.is_error),
+                                     res.images)
+        except Exception as exc:                                    # noqa: BLE001
+            self.log(f"[stall] {run.conv.id} observe failed: {type(exc).__name__}")
+            return
+        if not note:
+            return
+        res.content += note
+        ev = run.stall.events[-1]
+        self.log(f"[stall] {run.conv.id} step {run.step}: {ev['level']} after {ev['steps']} "
+                 f"steps, {ev['checks']} checks, {len(ev['files'])} files (span {ev['span']})")
+        if run.stall.stop and not run.notice:
+            run.notice = stall_mod.stop_notice(ev)
 
     def _sandbox_streak(self, run, failure: str | None, words: str) -> None:
         """The same sandbox failure three calls in a row ends the run, whatever the calls were
@@ -677,10 +744,14 @@ class AgentMixin:
             if st in ("denied", "cancelled") and not res.content:
                 out = None
             part["output"] = out
-            limit = (tools_mod.AGENTS_LIMIT_CHARS, tools_mod.AGENTS_EDGE_CHARS) if run.agents \
-                else (tools_mod.MODEL_LIMIT_CHARS, tools_mod.MODEL_EDGE_CHARS)
+            limit, edge = (tools_mod.AGENTS_LIMIT_CHARS, tools_mod.AGENTS_EDGE_CHARS) \
+                if run.agents else (tools_mod.MODEL_LIMIT_CHARS, tools_mod.MODEL_EDGE_CHARS)
+            if run.result_cap and run.result_cap < limit:
+                # SRV-639: the step's share of the room left; a read cuts itself to it at whole
+                # lines, its marker and a sandbox note go on top
+                limit, edge = run.result_cap, run.result_cap // 4
             part["model_content"] = tools_mod.for_model(ctx or ToolCtx(self, run, part), part["id"],
-                                                        res.content, *limit)
+                                                        res.content, limit + RESULT_SLACK, edge)
             part["status"], part["ended_at"] = st, iso(now_ms())
             if res.pane:
                 part["pane"] = res.pane
@@ -737,17 +808,16 @@ class AgentMixin:
             prompt = r["template"] if r else None
         skills = self.skill_index(settings) if hasattr(self, "skill_index") else None
         today = _dt.date.today().isoformat() if tools else None
+        # the plan rule rides on the plan turn's user message (`plans.plan_onto`), not here: the
+        # system block is the prompt's head, the same in and out of plan mode (SRV-663)
         return render.system_block(today=today, tools=bool(tools), summary=summary,
-                                   skills=skills, prompt=prompt,
-                                   plan=PLAN_RULE if settings.get("plan_mode") and not worker
-                                   else None, worker=worker, agents=agents)
+                                   skills=skills, prompt=prompt, worker=worker, agents=agents)
 
     def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c,
                  head: dict | None = None, **kw) -> dict:
         """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
         None): the system block with its summary, the messages from its first kept one on, its
-        steps and its stubs. `head`: who asks (`_head`: a worker's block; a worker's write_file
-        and edit_file arguments stay whole until a compaction, chatd/render.py `call_arguments`)."""
+        steps and its stubs. `head`: who asks (`_head`: a worker's block)."""
         b = c[1] if c else 0
         ours = info.get("backend") == "engine"
         if "keep_reasoning_from" in kw:
@@ -759,7 +829,8 @@ class AgentMixin:
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
                            inline_images=ours, step_from=self._step_from(c),
-                           fold_before=c[3] if c else None, worker="worker" in (head or {}),
+                           fold_before=c[3] if c else None, window=int(info.get("max_len") or 0),
+                           max_images=info.get("max_images"),
                            levels=info.get("effort_levels"),
                            effort_off=info.get("effort_off"), **kw)
 
@@ -767,9 +838,8 @@ class AgentMixin:
         """The body of the chat's next call as `request_for` builds it (the system block, the
         tools, the effort, the skills field), over the branch as it is: what the engine's cache
         peek renders (SRV-349). The head must be the next request's, or the peek finds nothing."""
-        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
-            settings = {**settings, "effort": "high"}
         info = self.model_info(settings.get("model"))
+        settings = plan_effort(settings, info)
         tools = self.tools_for(settings, info, conv.id, listing=False,
                                agents=bool(settings.get("agents")))
         return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch),
@@ -791,8 +861,6 @@ class AgentMixin:
                              "parts": [dict(p) for p in live["parts"]
                                                              if p.get("step", 1) < run.step or
                                                              run.continue_final]})
-        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
-            settings = {**settings, "effort": "high"}           # a plan turn thinks hard
         user = next((m for m in reversed(path) if m.get("role") == "user"), None)
         if user is not None and not render.text_of(user.get("parts") or []).strip() and \
                 not user.get("attachments"):
@@ -800,6 +868,7 @@ class AgentMixin:
             raise GuardError("The message is empty: nothing was sent to the model. Write the "
                              "message again, or attach a file.")
         info = self.model_info(settings.get("model"))
+        settings = plan_effort(settings, info)                  # a plan turn thinks hard
         tools = self.tools_for(settings, info, conv.id, agents=run.agents)
         head = self._head(conv, run, settings)
         schemas = [t.openai() for t in tools]
@@ -831,16 +900,31 @@ class AgentMixin:
                 run.compact_cut = True
                 body = build()
                 est = comp.estimate(body, conv.tok_ratio)
-        if window and est + comp.MIN_ANSWER > window:
+        # SRV-639: the estimate holds what the engine counted last at its ratio, and what came
+        # since (a tool result) at the same ratio: `margin` is room for that part reading denser
+        # (#18: 4,612 tokens over the estimate, with 256 left for it)
+        margin = comp.margin(comp.measure(body)[0], conv.tok_counted, conv.tok_ratio)
+        if window and est + margin + comp.MIN_ANSWER > window:
             body = build(keep_from=user_i)
             est = comp.estimate(body, conv.tok_ratio)
-        if window and est + comp.MIN_ANSWER > window:
-            raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio))
+            margin = comp.margin(comp.measure(body)[0], conv.tok_counted, conv.tok_ratio)
+        need, run.request_counted = est + margin, None
+        if window and ours and need + comp.MIN_ANSWER > window:
+            # at the edge our engine counts the request exactly, with the model's template
+            run.request_counted = self.count_tokens(body)
+            if run.request_counted:
+                need = run.request_counted + comp.MIN_MARGIN
+        # refused here: a request the engine counted over, or one whose estimate alone is over;
+        # one that only may be over (a backend that cannot count it) goes with max_tokens below
+        # its margin, and an over-window 400 then compacts (runs.py `_call`)
+        if window and (need if run.request_counted else est) + comp.MIN_ANSWER > window:
+            raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio,
+                                            counted=run.request_counted))
         cap = int(info.get("max_output") or 0)
         if window and (ours or cap):
             # a backend's model without a known output limit gets none: its window is no limit
             # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
-            room = window - est - 256
+            room = window - need - 256
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
         elif cap:
             # VIS-227: a relay that lists no window (llama.cpp, Ollama, a manual model) still gets
@@ -863,6 +947,16 @@ class AgentMixin:
                                "continue": run.continue_final, "estimate": est}),
                         run.step, run.id))
         return render.encode(body), self.headers_of(conv)
+
+    def count_tokens(self, body: dict) -> int | None:
+        """The engine's exact count of a request's prompt (`POST /v1/tokenize`, SRV-347: the
+        prompt the same request gets, rendered with the model's template), or None when it cannot
+        tell (an older engine, a body its template refuses)."""
+        q = {k: body[k] for k in ("model", "messages", "tools", "chat_template_kwargs")
+             if body.get(k)}
+        st, obj = self.engine.post_json("/v1/tokenize", q, timeout=60.0)
+        n = obj.get("tokens") if st == 200 and isinstance(obj, dict) else None
+        return n if isinstance(n, int) and n > 0 else None
 
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False,
@@ -915,15 +1009,18 @@ class AgentMixin:
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
         fold = prior[3] if prior else None
         end = b if sb is None else sb[0]
+        gone = render.all_folded(path[start:end + 1])     # file texts: on disk, not summarized
         for k in range(start, end):
             msgs.extend(render.message(path[k], False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == k else 0))
+                                       from_step=done[1] if done and done[0] == k else 0,
+                                       folded=gone))
         if sb is not None:
             i, keep_step = sb
             run_msg = dict(path[i], parts=[p for p in path[i].get("parts") or []
                                            if int(p.get("step") or 1) < keep_step])
             msgs.extend(render.message(run_msg, False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == i else 0))
+                                       from_step=done[1] if done and done[0] == i else 0,
+                                       folded=gone))
         asked = comp.estimate({"messages": msgs}, ratio)
         # a chat the engine refused for memory: the summary's request stays under the guard's
         # share of the refused one, or the engine refuses it too

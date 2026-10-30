@@ -2,7 +2,7 @@
 and `NVFP4.dequantize_blocks` bit for bit on random blocks (every bit pattern of a block is a valid
 block), Q8_0 likewise; the on-the-fly GEMMs against the twins' fp32 matmul, and their rows invariant to
 the row count up to 33 (bit for bit). The GEMMs run on the GPU or under TRITON_INTERPRET=1; the twins
-anywhere. NVFP4 needs a gguf-py with the type (llama.cpp after GGML_TYPE_NVFP4 = 40)."""
+anywhere. NVFP4 needs a gguf-py with the type (GGUF type 40)."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def test_nvfp4_repack_keeps_every_value():
     N, K = 6, 256
     raw = random_nvfp4(N, K, seed=9)
     raw.reshape(-1, 36)[:, :4][raw.reshape(-1, 36)[:, :4] == 0xFF] = 0x80
-    raw.reshape(-1, 36)[0, 0] = 0x7F                                   # ggml: zero
+    raw.reshape(-1, 36)[0, 0] = 0x7F                                   # the format: zero
     blk = Q.repack_nvfp4(torch.from_numpy(raw), N, K, 0.5)
     c = torch.stack([blk.w & 0x0F, blk.w >> 4], -1).reshape(N, K).long()
     v = FP4_GRID[c & 7] * torch.where(c >= 8, -1.0, 1.0) * blk.s.float().repeat_interleave(16, 1)

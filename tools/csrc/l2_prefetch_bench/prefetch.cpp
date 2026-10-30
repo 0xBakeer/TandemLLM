@@ -1,0 +1,1 @@
+void prefetch(torch::Tensor t, int64_t ctas);

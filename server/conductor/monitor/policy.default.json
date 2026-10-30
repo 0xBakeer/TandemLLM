@@ -150,13 +150,14 @@
    "rule": "malformed_call",
    "mode": "act",
    "texts": [
-    "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: <tool_call>, <function=NAME>, one <parameter=KEY>value</parameter> per argument, </function>, </tool_call>.",
-    "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: <tool_call>, <function=NAME>, <parameter=KEY>value</parameter> for every argument, </function>, </tool_call>."
+    "Your tool call was not run: {error}. Write the tool call again, complete, in the same format: {format}.",
+    "The tool call still could not be read ({error}) and nothing was run. Write each call of this step again exactly in the format: {format}."
    ],
    "regenerations": 2,
    "repair": true,
    "schema": "shadow",
    "schema_text": "Your call to {name} was not run: {problem}. Write it again with the arguments its schema asks for.",
+   "unknown_text": "Your call to {name} was not run: this request offers no tool by that name. Use one of these tools: {tools}.",
    "cut": "give_up"
   },
   "C3": {

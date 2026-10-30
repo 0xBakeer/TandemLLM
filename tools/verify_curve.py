@@ -128,7 +128,17 @@ def main() -> None:
                          "with --stair-out the per-class staircase (chain, tree = the spine shape) "
                          "the lenrouter reads as QWEN38_STAIR_TABLES")
     ap.add_argument("--stair-out", default="")
+    ap.add_argument("--joint", default="",
+                    help="SPD-187: the joint pass instead, for these block counts (e.g. 2,4,8): E engines over "
+                         "the weights at each --contexts length, T rows a block (--joint-rows), joint pass + "
+                         "commit, from the joint graphs (QWEN38_JOINT_GRAPHS) and eager; --joint-out writes "
+                         "the price rows joint{E} (rows = E * T) per context class")
+    ap.add_argument("--joint-rows", default="4,8,16,32")
+    ap.add_argument("--joint-cap", type=int, default=128, help="the most rows a joint pass takes")
+    ap.add_argument("--joint-out", default="")
     a = ap.parse_args()
+    if a.joint:
+        return _joint(a)
 
     import engine.model as M
     cfg = load_config(a.model)
@@ -157,6 +167,70 @@ def main() -> None:
     if a.stair_out:
         json.dump(stair, open(a.stair_out, "w"), indent=1)
         print(f"[curve] staircase -> {a.stair_out}")
+
+
+def _joint(a) -> None:
+    """SPD-187: the joint pass's staircase, joint{E} by rows E * T, per context class."""
+    import engine.model as M
+    from engine.models.qwen3_5 import joint_graphs as JG
+    from engine.models.qwen3_5.adapter import Qwen38Engine as Eng
+    cfg = load_config(a.model)
+    w = Weights(cfg.path, device="cuda", skip_mtp=True)
+    Es = [int(x) for x in a.joint.split(",")]
+    Ts = [int(x) for x in a.joint_rows.split(",")]
+    ctxs = [int(c) for c in a.contexts.split(",") if c] or [a.prompt]
+    engs = [Eng(cfg, w, max_len=max(ctxs) + 256, device="cuda") for _ in range(max(Es))]
+    JG.AFTER = 1                                   # every shape from a graph at once
+    rng = random.Random(11)
+    out: dict = {}
+    for ctx in ctxs:
+        ids = torch.randint(1000, 100000, (ctx,), generator=torch.Generator().manual_seed(ctx)).cuda()
+        with torch.no_grad():
+            for e in engs:
+                e.reset()
+                e.forward(ids, start=0, last_only=True)
+        start = ctx
+        for E in Es:
+            for T in Ts:
+                if E * T > a.joint_cap:
+                    continue
+                for mode in ("graph", "eager"):
+                    trees = [spine_tree(1000, T - 1, rng) for _ in range(E)]
+                    items = [(engs[i], torch.tensor(trees[i].tokens, device="cuda"), trees[i].parents, start)
+                             for i in range(E)]
+                    paths = [accepted_path(t, rng) for t in trees]
+                    jg = JG.graphs_for(engs[0])
+                    fn = JG.forward_tree_multi if mode == "graph" else M.forward_tree_multi
+                    JG.FORCE_T = T if mode == "graph" else None      # the graph at this bucket, not t_pad's
+                    ts = []
+                    r0 = jg.stats["replayed"]
+                    for rep in range(3 + a.reps):
+                        torch.cuda.synchronize()
+                        t0 = time.perf_counter()
+                        with torch.no_grad():
+                            fn(items)
+                            for e, pth in zip(engs, paths):
+                                e.commit_tree(pth)
+                        torch.cuda.synchronize()
+                        if rep >= 3:
+                            ts.append((time.perf_counter() - t0) * 1e3)
+                        for e in engs[:E]:
+                            e.kv.length = start
+                    graphed = jg.stats["replayed"] > r0
+                    JG.FORCE_T = None
+                    if mode == "graph" and not graphed:
+                        continue                       # this shape has no graph (T past the grouped tile)
+                    ms = statistics.median(ts)
+                    kind = f"joint{E}" + ("" if mode == "graph" else "-eager")
+                    out.setdefault(str(ctx), {}).setdefault(kind, {})[str(E * T)] = round(ms, 3)
+                    print(f"ctx {ctx:6d} E={E} T={T:2d} rows {E * T:3d} {mode:5s}: {ms:7.2f} ms", flush=True)
+    doc = dict(out, measured=time.strftime("%Y-%m-%d %H:%M"), how="tools/verify_curve.py --joint: joint pass + "
+               "commit of E spine trees of T rows at the context, median", graphs=JG.ON,
+               flags={"JOINT_GDN": M.JOINT_GDN, "GDN_AB": M.GDN_AB})
+    if a.joint_out:
+        os.makedirs(os.path.dirname(a.joint_out) or ".", exist_ok=True)
+        json.dump(doc, open(a.joint_out, "w"), indent=1)
+        print(f"[curve] joint staircase -> {a.joint_out}")
 
 
 def _one(a, eng, ids_all, M) -> dict:

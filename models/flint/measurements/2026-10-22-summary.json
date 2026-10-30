@@ -1,0 +1,240 @@
+{
+ "build": "0.14.0 (the flint branch's measurements, SPD-144/145 decode and prefill)",
+ "date": "2026-10-22",
+ "device": "dgx-spark",
+ "method": "tools/q35m_ab.py --model flint, one fresh raw server a row (:8121), greedy, thinking off (an empty think block, SRV-685), 512 new tokens (the game ask 2,048), one request at a time; price file per pack and FLINT_ANCHOR_BACKOFF=8 and FLINT_LOOK_BACKOFF=8; the first class's verify graphs captured at start; every drafted text the plain run's",
+ "configs": {
+  "plain": "plain decode (--drafter none)",
+  "lookup": "the lookup cut by StairCut (--drafter mtp, no head)"
+ },
+ "rows": {
+  "flint-exl3-4.0:plain": {
+   "prose": {
+    "tok_s": 136.55,
+    "per_block": 1.0,
+    "n": 341,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 133.17,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 133.34,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 128.24,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 128.25,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 129.34,
+    "per_block": 1.0,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-4.0:lookup": {
+   "prose": {
+    "tok_s": 135.44,
+    "per_block": 1.01,
+    "n": 341,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 139.76,
+    "per_block": 1.11,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 133.98,
+    "per_block": 1.05,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 142.28,
+    "per_block": 1.24,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 480.01,
+    "per_block": 10.43,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 149.48,
+    "per_block": 1.41,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-6.0:plain": {
+   "prose": {
+    "tok_s": 98.38,
+    "per_block": 1.0,
+    "n": 384,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 97.2,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 97.12,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 94.3,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 94.26,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 94.96,
+    "per_block": 1.0,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-exl3-6.0:lookup": {
+   "prose": {
+    "tok_s": 97.14,
+    "per_block": 1.01,
+    "n": 384,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 103.18,
+    "per_block": 1.14,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 98.5,
+    "per_block": 1.07,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 107.27,
+    "per_block": 1.27,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 353.42,
+    "per_block": 11.88,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 114.12,
+    "per_block": 1.44,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-bf16:plain": {
+   "prose": {
+    "tok_s": 42.61,
+    "per_block": 1.0,
+    "n": 417,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 42.43,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 42.43,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 41.85,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 41.86,
+    "per_block": 1.0,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 41.93,
+    "per_block": 1.0,
+    "n": 2048,
+    "prompt": 48
+   }
+  },
+  "flint-bf16:lookup": {
+   "prose": {
+    "tok_s": 42.19,
+    "per_block": 1.01,
+    "n": 417,
+    "prompt": 34
+   },
+   "code": {
+    "tok_s": 50.86,
+    "per_block": 1.32,
+    "n": 512,
+    "prompt": 51
+   },
+   "chat": {
+    "tok_s": 42.91,
+    "per_block": 1.07,
+    "n": 512,
+    "prompt": 40
+   },
+   "edit": {
+    "tok_s": 48.36,
+    "per_block": 1.35,
+    "n": 512,
+    "prompt": 1026
+   },
+   "copy": {
+    "tok_s": 144.1,
+    "per_block": 11.61,
+    "n": 512,
+    "prompt": 658
+   },
+   "game": {
+    "tok_s": 42.46,
+    "per_block": 1.1,
+    "n": 2048,
+    "prompt": 48
+   }
+  }
+ }
+}

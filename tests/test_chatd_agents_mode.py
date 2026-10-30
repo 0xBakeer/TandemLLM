@@ -77,7 +77,8 @@ def test_the_tool_lists_per_mode():
         assert got[-2:] == ["task", "mcp__notes__find"] and "bash" not in got
         plan = [t.name for t in c.svc.tools_for({**settings, "plan_mode": True}, info, on,
                                                 agents=True)]
-        assert set(plan) <= set(PLAN_TOOLS) and "task" not in plan and "todo_write" in plan
+        # SRV-663: plan mode keeps the list (the prompt's head); the run refuses all but these
+        assert plan == got and {"read_file", "todo_write"} <= set(PLAN_TOOLS)
     finally:
         c.close()
 

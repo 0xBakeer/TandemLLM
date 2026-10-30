@@ -18,23 +18,24 @@
                                                                    agreement a depth, the accepted length
                                                                    of a greedy speculative run, draft ms
     $PY tools/nh_check.py prices --stair s.json --bench b.json --out <price file> [--lilicorr l.json]
-    $PY tools/nh_check.py llamacpp --model <dir> --url <llama-server> --out ref.pt
-                                                                   llama.cpp's greedy text on the same
-                                                                   token ids, its top 10 log-probs a step
+    $PY tools/nh_check.py gguf-ref --model <dir> --url <server> --out ref.pt
+                                                                   a GGUF reference server's greedy text on
+                                                                   the same token ids, its top 10 log-probs
+                                                                   a step
     $PY tools/nh_check.py engine --model <dir> --force ref.pt --out forced.pt
-    $PY tools/nh_check.py llamacmp --ref ref.pt --a forced.pt [--free run.pt]
-                                                                   the engine teacher-forced on llama.cpp's
-                                                                   tokens against llama.cpp's choices
+    $PY tools/nh_check.py gguf-cmp --ref ref.pt --a forced.pt [--free run.pt]
+                                                                   the engine teacher-forced on the
+                                                                   reference's tokens against its choices
 
 A comparison reports, over every decode position: the argmax agreement, the positions where the two
 disagree and whether each is a near tie (the reference's margin between the two tokens under 8 bf16
 steps of its largest logit), and the logit difference (max and mean |diff|, relative to the largest
 logit). The reference runs in its own process because only one large model is on the board at a time.
 
-llama.cpp (a GGUF's same-weights reference) answers through llama-server's /completion with the prompt
-as token ids, greedy, `ignore_eos`, `n_probs` 10: its greedy tokens and each step's top 10 log-probs.
-Teacher-forced on those tokens the engine's argmax is compared with llama.cpp's; a disagreement is a near
-tie when llama.cpp's own log-prob margin between the two tokens (its logit margin) is under 8 bf16 steps
+The GGUF reference (a same-weights server with a `/completion` endpoint) is asked with the prompt as
+token ids, greedy, `ignore_eos`, `n_probs` 10: its greedy tokens and each step's top 10 log-probs.
+Teacher-forced on those tokens the engine's argmax is compared with the reference's; a disagreement is
+a near tie when the reference's own log-prob margin between the two tokens (its logit margin) is under 8 bf16 steps
 of the engine's largest logit at that step, and the log-probs of the 10 tokens are compared.
 """
 
@@ -277,7 +278,7 @@ def cmd_lilicorr(a) -> None:
     position (the context the committed rows give it). Reported: the agreement of the draft with the
     trunk's next tokens at each depth, the mean run of agreeing tokens, the accepted length a greedy
     speculative run of these drafts would have (blocks of 1 + the run, from the first token on: the
-    figure llama.cpp and vLLM report), and the draft's ms (CUDA events, eager)."""
+    usual accepted-length figure), and the draft's ms (CUDA events, eager)."""
     from types import SimpleNamespace
 
     from transformers import AutoTokenizer
@@ -369,8 +370,9 @@ def cmd_cmp(a) -> None:
         json.dump(res, open(a.json, "w"), indent=1)
 
 
-def cmd_llamacpp(a) -> None:
-    """llama.cpp's greedy run on the prompts (token ids from this checkpoint's chat template)."""
+def cmd_gguf_ref(a) -> None:
+    """The GGUF reference server's greedy run on the prompts (token ids from this checkpoint's chat
+    template)."""
     import urllib.request
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.model)
@@ -396,9 +398,9 @@ def cmd_llamacpp(a) -> None:
     torch.save(out, a.out)
 
 
-def cmd_llamacmp(a) -> None:
-    """The engine teacher-forced on llama.cpp's tokens (`engine --force ref.pt`) against llama.cpp's
-    choices; `--free`: the engine's own greedy run, its first token that differs from llama.cpp's."""
+def cmd_gguf_cmp(a) -> None:
+    """The engine teacher-forced on the reference's tokens (`engine --force ref.pt`) against its
+    choices; `--free`: the engine's own greedy run, its first token that differs from the reference's."""
     ref = torch.load(a.ref, weights_only=False)["runs"]
     run = torch.load(a.a, weights_only=False)["runs"]
     tot = agree = near = 0
@@ -422,7 +424,7 @@ def cmd_llamacmp(a) -> None:
             tie = ours in have and margin < 8 * 2 ** -7 * float(row.abs().max())
             near += tie
             if len(bad) < 16:
-                bad.append({"prompt": r["prompt"][:40], "pos": i, "llama_margin": round(margin, 4), "near_tie": bool(tie),
+                bad.append({"prompt": r["prompt"][:40], "pos": i, "ref_margin": round(margin, 4), "near_tie": bool(tie),
                             "engine_margin": round(float(row[ours] - row[theirs]), 4)})
     res = {"positions": tot, "argmax_agree": agree, "agree_pct": round(100 * agree / max(tot, 1), 2), "near_tie": near,
            "other": tot - agree - near, "top10_logprob_mean_abs_diff": round(sum(lpd) / max(len(lpd), 1), 5),
@@ -688,19 +690,19 @@ def main() -> None:
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
     pr.add_argument("--lilicorr", help="a `lilicorr --json` run: the file gets its spec prior")
-    lc = sub.add_parser("llamacpp")
+    lc = sub.add_parser("gguf-ref")
     lc.add_argument("--model", required=True, help="the checkpoint directory (its tokenizer and chat template)")
-    lc.add_argument("--url", required=True, help="llama-server on the same GGUF")
+    lc.add_argument("--url", required=True, help="a reference server on the same GGUF (`/completion`)")
     lc.add_argument("--out", required=True)
     lc.add_argument("--tokens", type=int, default=128)
     lc.add_argument("--prompts", type=int, default=8)
-    lm = sub.add_parser("llamacmp")
+    lm = sub.add_parser("gguf-cmp")
     lm.add_argument("--ref", required=True)
     lm.add_argument("--a", required=True, help="engine --force <ref>")
     lm.add_argument("--free", help="the engine's own greedy run")
     lm.add_argument("--json")
     a = ap.parse_args()
-    {"llamacpp": cmd_llamacpp, "llamacmp": cmd_llamacmp, "cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "config": cmd_config, "mtp": cmd_mtp,
+    {"gguf-ref": cmd_gguf_ref, "gguf-cmp": cmd_gguf_cmp, "cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "config": cmd_config, "mtp": cmd_mtp,
      "lilicorr": cmd_lilicorr,
      "bench": cmd_bench, "staircase": cmd_staircase}[a.cmd](a)
 

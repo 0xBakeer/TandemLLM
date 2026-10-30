@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { notesRoute, notesSeed } from '../mock/notes.ts';
 import type { NoteMeta, NoteWriteRow } from '../src/api/conductor';
-import { filterNotes, lineDiff, NO_FILTER, nodeLabel, NOTES_DEFAULTS, notesSettings, usesLine, writeLine } from '../src/lib/notes';
+import { filterNotes, lineDiff, memoryWhere, NO_FILTER, nodeLabel, NOTES_DEFAULTS, notesSettings, usesLine, writeLine } from '../src/lib/notes';
 
 const note = (o: Partial<NoteMeta>): NoteMeta => ({ id: '0123456789ab', title: 't', kind: 'gotcha', scope: 'user', project: null, session: null, status: 'provisional', writer: 'qwen-inline', confidence: null, tags: [], created: '2026-10-05T01:00:00Z', updated: '2026-10-05T01:00:00Z', verify_by: null, pinned: false, sources: [], revisions: 0, node: 'user', ...o });
 
@@ -120,5 +120,41 @@ describe('the package proposals (mock routes)', async () => {
     expect((proposalsRoute(list, 'POST', ['ui-design', '2', 'apply'], {}, live, apply).body as { error: { type: string } }).error.type).toBe('stale');
     expect(proposalsRoute(list, 'POST', ['ui-design', '2', 'reject'], { reason: 'no' }, live, apply).status).toBe(200);
     expect(list.find((p) => p.n === 2)!.status).toBe('rejected');
+  });
+});
+
+// SRV-703 (QA SRV-704): the Notes tab says where memory is on, the served model first
+describe('where memory is on', () => {
+  const profiles = [
+    { name: 'chat', memory: 'on' as const, set: true, mode: 'on', clients: ['open-webui', 'dashboard'], default: false },
+    { name: 'general', memory: 'none' as const, set: true, mode: 'on', clients: [], default: true },
+    { name: 'chat-app', memory: 'off' as const, set: true, mode: 'on', clients: ['chat-app'], default: false },
+    { name: 'bench-pk', memory: 'none' as const, set: false, mode: 'on', clients: [], default: false },
+    { name: 'raw', memory: 'none' as const, set: true, mode: 'raw', clients: [], default: false },
+  ];
+  it('names each profile with memory off, and the clients it serves', () => {
+    const w = memoryWhere({ model: { memory: true, why: null, words: null }, profiles })!;
+    expect(w.model).toBeNull();
+    expect(w.lines.map((l) => [l.name, l.on, l.state, l.who])).toEqual([
+      ['chat', true, 'on', 'open-webui, dashboard'],
+      ['bench-pk', false, 'off (not set)', ''],
+      ['chat-app', false, 'off, and the model is told', 'chat-app'],
+      ['general', false, 'off', 'any other client'],
+    ]);
+  });
+  it('says when the served model reads no note, on every profile', () => {
+    const w = memoryWhere({ model: { memory: false, why: 'model_notes', words: "the model's prompt has no place for the conductor's notes" }, profiles })!;
+    expect(w.model).toBe("Memory is off for the served model: the model's prompt has no place for the conductor's notes. No profile reads or writes notes while it serves.");
+    expect(w.lines.find((l) => l.name === 'chat')).toEqual({ name: 'chat', on: false, state: 'on in the profile, off for this model', who: 'open-webui, dashboard' });
+    expect(w.lines.every((l) => !l.on)).toBe(true);
+  });
+  it('shows nothing for an engine before it', () => {
+    expect(memoryWhere(undefined)).toBeNull();
+  });
+  it('the mock engine answers with the shipped switches', () => {
+    const r = notesRoute(notesSeed(Date.now()), 'GET', [], new URLSearchParams(), {}, {});
+    const where = (r.body as { where: Parameters<typeof memoryWhere>[0] }).where;
+    const w = memoryWhere(where)!;
+    expect(w.lines.filter((l) => l.on).map((l) => l.name)).toEqual(['chat', 'chat-app', 'coding', 'hermes']);
   });
 });

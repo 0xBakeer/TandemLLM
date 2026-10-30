@@ -1,0 +1,1 @@
+    const int M = xh.size(1), Kin = xh.size(2), N = t.size(1) * 16;

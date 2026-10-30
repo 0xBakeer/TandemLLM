@@ -396,6 +396,37 @@ def test_a_response_cache_hit_is_a_replay():
     assert again["usage"]["completion_tokens"] == first["usage"]["completion_tokens"]
 
 
+def _replays(bodies: list[dict]) -> list[str]:
+    """The cache source of each request, in order, through one response cache."""
+    serve()
+    real = app.generate_stream
+    app.generate_stream = _script(_ids("thought</think>same answer"))
+    app.STATE["tok"] = UTok()
+    app.STATE["response_cache"] = cache.ResponseCache(1 << 20, 3600.0)
+    out = []
+    try:
+        for body in bodies:
+            with contextlib.redirect_stdout(io.StringIO()):
+                head, raw = Req("/v1/chat/completions", body).response()
+            out.append(json.loads(raw)["timings"]["cache_source"])
+    finally:
+        app.generate_stream = real
+    return out
+
+
+def test_the_response_cache_keys_on_the_effort_level():
+    """`high` and `xhigh` render one prompt (the template has one sentence for both) and, at a
+    16,384-token limit, one cap after the answer reserve: before the key named the level, a run
+    at `xhigh` replayed a `high` run's answers. The same level still replays."""
+    def body(effort):
+        return {"messages": [{"role": "user", "content": "q"}], "stream": False,
+                "max_tokens": 16384, "reasoning_effort": effort}
+
+    assert _replays([body("high"), body("xhigh")]) == ["none", "none"]
+    assert _replays([body("xhigh"), body("xhigh")]) == ["none", "response"]
+    assert _replays([body("medium"), body("high"), body("high")]) == ["none", "none", "response"]
+
+
 # ------------------------------------------------------------------ failures and bodies
 
 def test_a_failed_stream_carries_its_partial_counts():

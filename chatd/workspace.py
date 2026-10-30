@@ -386,11 +386,31 @@ class Workspace:
         return out
 
     def grep(self, pattern: str, start: str = MOUNT, include: str | None = None,
-             ignore_case: bool = False, limit: int = 200) -> list[str]:
+             ignore_case: bool = False, limit: int = 200,
+             skipped: list | None = None) -> list[str]:
+        """`file:line: text` of the lines that match, at most `limit`. `start` is a folder (every
+        file under it, a file over MAX_READ left out and named in `skipped` when given) or one
+        file, searched whole, line by line, whatever its size."""
         try:
             rx = re.compile(pattern, re.I if ignore_case else 0)
         except re.error as exc:
             raise PathError(f"bad pattern: {exc}") from None
+        if stat.S_ISREG(self.stat(start).st_mode):
+            # one file: the path the caller named, not a folder to walk (it said "is not a
+            # directory" before)
+            fh, _ = self.open(start)
+            out: list[str] = []
+            with fh:
+                if b"\0" in fh.read(4096):
+                    return out
+                fh.seek(0)
+                for n, raw in enumerate(fh, 1):
+                    line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    if rx.search(line):
+                        out.append(f"{self.show(self.resolve(start))}:{n}: {line[:300]}")
+                        if len(out) >= limit:
+                            break
+            return out
         out = []
         for p in self.walk(start):
             if include and not fnmatch.fnmatch(os.path.basename(p), include):
@@ -399,6 +419,8 @@ class Workspace:
                 fh, st = self.dir.open(os.path.relpath(p, self.root))
                 with fh:
                     if st.st_size > MAX_READ:
+                        if skipped is not None:
+                            skipped.append((self.show(p), st.st_size))
                         continue
                     data = fh.read(MAX_READ + 1)
             except (PathError, OSError):

@@ -247,7 +247,9 @@ class Handler(BaseHTTPRequestHandler):
         split = urlsplit(self.path)
         path = split.path
         if path in ("/health", "/healthz") and method == "GET":
-            return self._json(200, {"status": "ok", "service": "chatd", "version": __version__})
+            # SRV-707: the run slots (how many, from the engine or QSE_CHAT_MAX_RUNS, how many held)
+            return self._json(200, {"status": "ok", "service": "chatd", "version": __version__,
+                                    "runs": self.svc.slots.report()})
         if not self._authorized():
             self.close_connection = True
             return self._json(403, {"error": {"type": "forbidden",
@@ -600,8 +602,8 @@ class Handler(BaseHTTPRequestHandler):
     def r_artifact(self, cid, ref):
         self._json(200, self.svc.artifact(cid, ref))
 
-    def r_port(self, cid, port, rest):
-        self.svc.proxy_port(self, cid, int(port), rest or "/")
+    def r_port(self, cid, port, _rest):
+        self.svc.proxy_port(self, cid, int(port))   # the path the app gets: port_target(self.path)
 
     def r_sandbox_ports(self, cid):
         self._json(200, self.svc.sandbox_ports(cid))

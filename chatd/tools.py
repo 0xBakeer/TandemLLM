@@ -37,7 +37,7 @@ import time
 import urllib.parse
 
 from chatd import render, sandbox as sandbox_mod
-from chatd.workspace import ChangedError, PathError
+from chatd.workspace import MAX_READ, ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
 MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
@@ -46,6 +46,9 @@ MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
 AGENTS_LIMIT_CHARS = 12_000
 AGENTS_EDGE_CHARS = 4_000
 AGENTS_READ_LINES = 200
+#: what read_file decodes of a file at once, from the line it starts at: a larger file is paged
+#: through by `offset` (whole lines, the marker says how many bytes are left), never cut unsaid
+READ_WINDOW = 4 * 1024 * 1024
 UI_LIMIT_CHARS = 30_000
 BASH_TIMEOUT_S = 600
 OUTPUTS_DIR = ".tandem/outputs"
@@ -147,50 +150,202 @@ def _read(ctx, a):
     st = ctx.ws.stat(path)
     if stat.S_ISDIR(st.st_mode):
         raise ToolError(f"{path} is a directory; use glob to list it")
-    data = ctx.ws.read(path, limit=4 * 1024 * 1024)
-    if path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+    image = path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+    if st.st_size > READ_WINDOW and not image:
+        return _read_large(ctx, path, a)
+    data = ctx.ws.read(path, limit=READ_WINDOW)
+    if image:
         mime = "image/" + path.lower().rsplit(".", 1)[1].replace("jpg", "jpeg")
         return Result(f"{path}: an image, {st.st_size:,} bytes", images=[(mime, data)])
     if b"\0" in data[:4096]:
         return Result(f"{path}: a binary file, {st.st_size:,} bytes; not shown")
     lines = data.decode("utf-8", "replace").splitlines()
     off = max(1, int(a.get("offset") or 1))
-    lim = int(a.get("limit") or 2000)
+    col = max(1, int(a.get("column") or 1))
+    lim = max(1, min(2000, int(a.get("limit") or 2000)))  # no limit or 0: 2,000 lines; a negative one: 1
+    # SRV-639: at most the call's share of the room the model has left (chatd/agent.py run_tools),
+    # never more than the result caps; `limit` counts lines, and a line can be long (#18)
+    cap = getattr(ctx, "cap", None)
     if getattr(ctx, "agents", False):
-        return _read_capped(lines, off, min(lim, AGENTS_READ_LINES))
-    chunk = lines[off - 1:off - 1 + lim]
-    body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(chunk, off))
-    more = f"\n[{len(lines) - (off - 1 + len(chunk))} more lines]" if off - 1 + len(chunk) < \
-        len(lines) else ""
+        return _read_capped(lines, off, min(lim, AGENTS_READ_LINES), col,
+                            min(cap or AGENTS_LIMIT_CHARS, AGENTS_LIMIT_CHARS))
+    cap = min(cap or MODEL_LIMIT_CHARS, MODEL_LIMIT_CHARS)
+    rows, end, cut = _page(lines, off, lim, col, cap)
+    body = "\n".join(rows)
+    if cut:
+        return Result(body + _goes_on(cut))
+    # an offset past EOF leaves nothing: only promise more lines when some remain, or the model
+    # reads on forever
+    rest = len(lines) - end
+    if rest > 0 and end - off + 1 < lim:
+        after = sum(len(ln.encode()) + 1 for ln in lines[end:])
+        return Result(body + f"\n[truncated at {cap:,} characters: lines {off}-{end} of "
+                             f"{len(lines):,} shown, {after:,} more bytes; read on with "
+                             f"offset={end + 1}]")
+    more = f"\n[{rest} more lines; read on with offset={end + 1}]" if rest > 0 else ""
     return Result(body + more)
 
 
-def _read_capped(lines: list[str], off: int, lim: int) -> Result:
+def _page(lines: list[str], off: int, lim: int, col: int, cap: int,
+          first: int = 1) -> tuple[list, int, tuple]:
+    """Whole numbered lines from line `off` (from its character `col`), at most `lim` lines and
+    `cap` characters: (the rows, the last line shown whole, None); a first line longer than `cap`
+    comes in part: (its row, off - 1, (the line, the column to read on from, the bytes left of
+    it)). `first`: the file's line number of `lines[0]` (a window of a large file); the rows and
+    the cut name the file's numbers, `off` and the line returned count in `lines`."""
+    out, n = [], 0
+    for i in range(off, min(len(lines), off - 1 + lim) + 1):
+        text = lines[i - 1][col - 1:] if i == off else lines[i - 1]
+        no = i + first - 1
+        row = f"{no:6d}\t{text}"
+        if n + len(row) + 1 > cap:
+            if out:
+                break
+            take = max(1, cap - 8)
+            start = col if i == off else 1
+            return [f"{no:6d}\t{text[:take]}"], off - 1, (no, start + take,
+                                                          len(text[take:].encode()))
+        out.append(row)
+        n += len(row) + 1
+    return out, off - 1 + len(out), None
+
+
+def _line_start(fh, line: int, size: int) -> int | None:
+    """The byte offset where line `line` (1-based, lines end with a newline) starts, or None past
+    the end; counted a mebibyte at a time."""
+    if line <= 1:
+        return 0 if size > 0 else None
+    need, pos = line - 1, 0
+    fh.seek(0)
+    while True:
+        chunk = fh.read(1 << 20)
+        if not chunk:
+            return None
+        c = chunk.count(b"\n")
+        if c >= need:
+            idx = -1
+            for _ in range(need):
+                idx = chunk.index(b"\n", idx + 1)
+            start = pos + idx + 1
+            return start if start < size else None
+        need -= c
+        pos += len(chunk)
+
+
+def _read_large(ctx, path: str, a: dict) -> Result:
+    """read_file of a file over READ_WINDOW: READ_WINDOW bytes from the line `offset` starts at,
+    whole lines only, numbered as in the file. The marker names the bytes left and the offset to
+    read on from, so no part of the file is left out unsaid (read_file read the first 4 MiB of
+    any file and paged inside them as if the file ended there)."""
+    fh, st = ctx.ws.open(path)
+    size = st.st_size
+    off = max(1, int(a.get("offset") or 1))
+    col = max(1, int(a.get("column") or 1))
+    lim = max(1, min(2000, int(a.get("limit") or 2000)))
+    with fh:
+        if b"\0" in fh.read(4096):
+            return Result(f"{path}: a binary file, {size:,} bytes; not shown")
+        start = _line_start(fh, off, size)
+        if start is None:
+            return Result("")
+        fh.seek(start)
+        data = fh.read(READ_WINDOW)
+    end_byte = start + len(data)
+    whole = True                       # the window ends at a line's end (or the file's)
+    if end_byte < size:
+        nl = data.rfind(b"\n")
+        if nl >= 0:
+            data = data[:nl + 1]
+        else:
+            whole = False              # one line longer than the window
+    lines = data.decode("utf-8", "replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    cap = getattr(ctx, "cap", None)
+    agents = getattr(ctx, "agents", False)
+    if agents:
+        lim = min(lim, AGENTS_READ_LINES)
+        cap = min(cap or AGENTS_LIMIT_CHARS, AGENTS_LIMIT_CHARS)
+    else:
+        cap = min(cap or MODEL_LIMIT_CHARS, MODEL_LIMIT_CHARS)
+    rows, end, cut = _page(lines, 1, lim, col, cap, first=off)
+    body = "\n".join(rows)
+    if cut:
+        if not whole and len(lines) == 1:
+            return Result(body + f"\n[line {off} goes on past the {READ_WINDOW >> 20} MiB "
+                                 f"read_file reads at once: more than {size - end_byte:,} bytes "
+                                 f"of it are not shown; read on with offset={off}, "
+                                 f"column={cut[1]} up to that point, or read it with bash]")
+        return Result(body + _goes_on(cut))
+    last = off - 1 + end                               # the file's number of the last line shown
+    shown = sum(len(ln.encode()) + 1 for ln in lines[:end])
+    after = max(0, size - start - shown)
+    if after == 0:
+        return Result(body)
+    if agents:
+        return Result(body + f"\nShowing lines {off}-{last} of a {size:,}-byte file, "
+                             f"{after:,} bytes after them. Read a range with offset and limit, "
+                             f"or give the reading to a worker.")
+    if end < lim and end < len(lines):
+        return Result(body + f"\n[truncated at {cap:,} characters: lines {off}-{last} shown, "
+                             f"{after:,} more bytes of {size:,}; read on with offset={last + 1}]")
+    return Result(body + f"\n[lines {off}-{last} shown of a {size:,}-byte file, {after:,} more "
+                         f"bytes after them; read on with offset={last + 1}]")
+
+
+def _goes_on(cut: tuple) -> str:
+    i, col, rest = cut
+    return f"\n[line {i} goes on: {rest:,} more bytes of it; read on with offset={i}, column={col}]"
+
+
+def _read_capped(lines: list[str], off: int, lim: int, col: int = 1,
+                 cap: int = AGENTS_LIMIT_CHARS) -> Result:
     """A main agent's read in Agents mode: at most `lim` lines and AGENTS_LIMIT_CHARS characters,
     whole lines, and where it stopped when the file goes on."""
-    out, n = [], 0
-    for i, ln in enumerate(lines[off - 1:off - 1 + lim], off):
-        row = f"{i:6d}\t{ln}"
-        if out and n + len(row) + 1 > AGENTS_LIMIT_CHARS:
-            break
-        out.append(row[:AGENTS_LIMIT_CHARS])
-        n += len(row) + 1
-    end = off - 1 + len(out)
+    out, end, cut = _page(lines, off, lim, col, cap)
     body = "\n".join(out)
+    if cut:
+        return Result(body + _goes_on(cut))
     if end < len(lines):
         body += (f"\nShowing lines {off}-{end} of {len(lines):,}. Read a range with offset and "
                  f"limit, or give the reading to a worker.")
     return Result(body)
 
 
+def _note_as_content(ctx, path: str, note: str) -> str:
+    """The write guard's answer to a history note sent as a file's text: whether the file is on
+    disk, and as written (the note's sha256 against the file's), so the model does not write it
+    again; how to change it if it must."""
+    head = ("content is the note the conversation shows for an earlier write, not file text; "
+            "nothing was written. ")
+    try:
+        where = ctx.ws.show(ctx.ws.resolve(path))
+    except Exception:                                              # noqa: BLE001
+        where = path
+    try:
+        data = ctx.ws.read(path)
+    except Exception:                                              # noqa: BLE001
+        return head + (f"There is no file at {where} yet: write it with its whole text as the "
+                       f"content.")
+    sha = hashlib.sha256(data).hexdigest()[:8]
+    noted = re.search(r"sha256 ([0-9a-f]{8})", note)
+    same = noted is not None and noted.group(1) == sha
+    return head + (f"{where} is on disk ({len(data):,} bytes, sha256 {sha})"
+                   + (": it is the text that write sent, correct as it is, so there is nothing to "
+                      "write again. " if same else ". ")
+                   + "Use read_file to see it and edit_file to change part of it; a new "
+                     "write_file needs the file's whole text.")
+
+
 def _write(ctx, a):
     path, content = str(a.get("path") or ""), a.get("content")
     if not isinstance(content, str):
         raise ToolError("content must be a string")
-    if render.WROTE_STUB.match(content.strip()):
-        # an earlier write's content reads as this stub in the request (chatd/render.py)
-        raise ToolError("content is the stub of an earlier write, not the file's text; send the "
-                        "whole text, or use edit_file for a change")
+    c = content.strip()
+    if render.WROTE_STUB.match(c) or render.FOLDED_NOTE.match(c):
+        # a note the history shows for an earlier write (chatd/render.py), copied as the text:
+        # refused with what is on disk, so the model does not write it again (SRV-659)
+        raise ToolError(_note_as_content(ctx, path, c))
     ctx.ws.write(path, content.encode())
     ctx.changed(path)
     return Result(f"wrote {ctx.ws.show(ctx.ws.resolve(path))} ({len(content.encode()):,} bytes)")
@@ -205,7 +360,8 @@ def _edit(ctx, a):
     if n == 0:
         # the request shows an earlier write's or read's text as a stub (chatd/render.py)
         raise ToolError("old was not found in the file; read it again with read_file and copy it "
-                        "exactly (an earlier write or read of it may show only a stub)")
+                        "exactly (an earlier read of it may show only a stub, an earlier write's "
+                        "text may be left out of the conversation)")
     if n > 1 and not a.get("replace_all"):
         raise ToolError(f"old occurs {n} times; give more context to make it unique, or set "
                         f"replace_all")
@@ -223,9 +379,18 @@ def _glob(ctx, a):
 
 
 def _grep(ctx, a):
+    skipped: list = []
     hits = ctx.ws.grep(str(a.get("pattern") or ""), str(a.get("path") or "/workspace"),
-                       a.get("include") or None, bool(a.get("ignore_case")))
-    return Result("\n".join(hits) if hits else "no matches")
+                       a.get("include") or None, bool(a.get("ignore_case")), skipped=skipped)
+    text = "\n".join(hits) if hits else "no matches"
+    if skipped:
+        # a folder's large files are not read; say which, so "no matches" is not read as their
+        # answer (a file named by its path is searched whole)
+        names = ", ".join(f"{p} ({n:,} bytes)" for p, n in skipped[:5])
+        more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
+        text += (f"\n[not searched: {len(skipped)} file(s) over {MAX_READ // (1 << 20)} MiB: "
+                 f"{names}{more}; grep one of them by its path to search it whole]")
+    return Result(text)
 
 
 def _fetch(ctx, a):
@@ -602,8 +767,9 @@ BUILTINS = [
          _obj({"command": _S, "timeout_s": _I, "background": _B}, ["command"]),
          risk="exec", default="ask", sandbox=True, executor=_bash),
     Tool("read_file", "Read a file in /workspace, with line numbers. offset and limit are line "
-         "numbers (default: the first 2,000 lines). Images come back as images.",
-         _obj({"path": _S, "offset": _I, "limit": _I}, ["path"]), executor=_read),
+         "numbers (default: the first 2,000 lines); column, a character in line offset to start "
+         "at. A cut result says where to read on. Images come back as images.",
+         _obj({"path": _S, "offset": _I, "limit": _I, "column": _I}, ["path"]), executor=_read),
     Tool("write_file", "Create or replace a file in /workspace with the given content.",
          _obj({"path": _S, "content": _S}, ["path", "content"]), risk="write",
          executor=_write),

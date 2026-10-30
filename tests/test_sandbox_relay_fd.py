@@ -94,3 +94,8 @@ def test_a_refused_round_trip_closes_its_upstream_socket():
         time.sleep(0.1)                                         # a leak; a held socket is
     assert spy.opened == 20 and spy.closed == 20, \
         f"upstream sockets opened {spy.opened}, closed {spy.closed}"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

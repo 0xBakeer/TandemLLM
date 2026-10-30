@@ -18,8 +18,11 @@ engines before.
 
 from __future__ import annotations
 
+import atexit
 import os
+import random
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -44,7 +47,8 @@ FAKE_CURL = """#!/bin/bash
 # curl still prints 000 and exits 7; `-sf` asks for an exit status.
 case " $* " in
   *" -w "*) printf '%s' "${FAKE_HTTP_CODE:-000}"; [ "${FAKE_HTTP_CODE:-000}" = "000" ] && exit 7;;
-  *) [ "${FAKE_HEALTHY:-0}" = "1" ] || exit 22;;
+  *) [ -n "${FAKE_HTTP_BODY:-}" ] && printf '%s' "$FAKE_HTTP_BODY"
+     [ "${FAKE_HEALTHY:-0}" = "1" ] || exit 22;;
 esac
 exit 0
 """
@@ -70,9 +74,45 @@ echo "$(basename "$0") $*" >> "$MARKERS"
 """
 
 
+#: OPS-217: every sandbox repo this run made, and every held command's sleep tag, for `_reap`
+_BOXES: list[str] = []
+_TAGS: list[str] = []
+
+
+def _tag() -> str:
+    """A held command's sleep: unique to this run, and over in two minutes whatever happens to the
+    test (`sleep <pid>.25` slept for the pid in seconds: a hold whose test was killed waited on it
+    for days, and four of them were found on the box 4 to 11 hours after their runs)."""
+    t = f"{60 + random.randrange(60)}.{os.getpid()}{random.randrange(10 ** 6):06d}"
+    _TAGS.append(t)
+    return t
+
+
+def _reap(*repos: str) -> None:
+    """OPS-217: every process a test started in a sandbox repo (a hold, its keeper, the held
+    command) and every held sleep, killed. Each hold test calls it on its way out, and the module
+    on its exit and on SIGTERM, SIGHUP and SIGINT (a tool's timeout, a dropped ssh session):
+    the holds run in sessions of their own and no signal to this process reaches them."""
+    for repo in repos or tuple(_BOXES):
+        subprocess.run(["pkill", "-KILL", "-f", repo + "/"], capture_output=True)
+    for t in _TAGS:
+        subprocess.run(["pkill", "-KILL", "-f", f"sleep {t}"], capture_output=True)
+
+
+def _reap_and_exit(signum, _frame):
+    _reap()
+    sys.exit(128 + signum)
+
+
+atexit.register(_reap)
+for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(_sig, _reap_and_exit)
+
+
 def _box(scripts: list[str]) -> str:
     """A temporary repo with the real scripts, a serve.env pointing at it, and fakes on the PATH."""
     repo = tempfile.mkdtemp(prefix="opsbox-")
+    _BOXES.append(repo)
     ops = os.path.join(repo, "ops")
     os.makedirs(os.path.join(repo, "logs"))
     os.makedirs(ops)
@@ -138,6 +178,16 @@ def _sleeper() -> int:
     `kill -0` in stop.sh would call it alive."""
     return int(subprocess.run(["bash", "-c", "sleep 300 >/dev/null 2>&1 & echo $!"],
                               capture_output=True, text=True).stdout)
+
+
+def _until(cond, seconds: float) -> None:
+    """Wait for `cond()` at most `seconds`; the held command running is what a signal test needs
+    before it signals (a fixed 1.5 s raced a loaded box)."""
+    end = time.monotonic() + seconds
+    while not cond():
+        if time.monotonic() > end:
+            raise AssertionError(f"not within {seconds} s")
+        time.sleep(0.1)
 
 
 def _alive(pid: int) -> bool:
@@ -459,7 +509,7 @@ def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
         return
     import signal
     repo = _box(["hold.sh"])
-    tag = f"{os.getpid()}.25"                              # a sleep only this test runs
+    tag = _tag()                                           # a sleep only this test runs
     with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
         fh.write(f"#!/bin/bash\n/usr/bin/pgrep -f 'sleep {tag}' >/dev/null "
                  f"&& echo 'start.sh BESIDE-THE-COMMAND' >> $MARKERS "
@@ -468,22 +518,26 @@ def test_a_killed_hold_stops_its_command_before_it_restarts_the_service():
     with open(held, "w") as fh:                            # a command with a child, like row3
         fh.write(f"#!/bin/bash\nsleep {tag} &\nwait\n")
     e = _env(repo)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        if os.path.exists(e["MARKERS"]):
-            os.remove(e["MARKERS"])
-        hold = subprocess.Popen(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
-                                 "bash", held], env=e, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
-        time.sleep(1.5)
-        hold.send_signal(sig)
-        hold.wait(timeout=30)
-        time.sleep(0.5)
-        left = subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"], capture_output=True)
-        subprocess.run(["/usr/bin/pkill", "-f", f"sleep {tag}"])
-        markers = open(e["MARKERS"]).read()
-        assert "start.sh alone" in markers, f"{sig.name}: {markers}"
-        assert left.returncode != 0, f"{sig.name}: the held command outlived its hold"
-        assert not os.path.exists(os.path.join(repo, ".watchdog.off"))
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            if os.path.exists(e["MARKERS"]):
+                os.remove(e["MARKERS"])
+            hold = subprocess.Popen(["bash", os.path.join(repo, "ops", "hold.sh"), "1", "--",
+                                     "bash", held], env=e, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+            _until(lambda: subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"],
+                                          capture_output=True).returncode == 0, 30)
+            hold.send_signal(sig)
+            hold.wait(timeout=30)
+            time.sleep(0.5)
+            left = subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"], capture_output=True)
+            subprocess.run(["/usr/bin/pkill", "-f", f"sleep {tag}"])
+            markers = open(e["MARKERS"]).read()
+            assert "start.sh alone" in markers, f"{sig.name}: {markers}"
+            assert left.returncode != 0, f"{sig.name}: the held command outlived its hold"
+            assert not os.path.exists(os.path.join(repo, ".watchdog.off"))
+    finally:
+        _reap(repo)
 
 
 def test_the_restarted_service_does_not_inherit_the_holds_descriptors():
@@ -522,7 +576,7 @@ def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
     import signal
     repo = _box(["hold.sh"])
     lock = os.path.join(repo, "box.flock")
-    tag = f"{os.getpid()}.35"
+    tag = _tag()
     with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
         fh.write(f"#!/bin/bash\n/usr/bin/pgrep -f 'sleep {tag}' >/dev/null "
                  f"&& echo 'start.sh BESIDE-THE-COMMAND' >> $MARKERS "
@@ -537,7 +591,8 @@ def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
                            "--", "bash", held], env=e, stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        time.sleep(1.5)
+        _until(lambda: subprocess.run(["/usr/bin/pgrep", "-f", f"sleep {tag}"],
+                                      capture_output=True).returncode == 0, 30)
         hold = subprocess.run(["/usr/bin/pgrep", "-P", str(fl.pid)], capture_output=True, text=True)
         assert hold.stdout.split(), "hold.sh is not running under flock"
         os.kill(int(hold.stdout.split()[0]), signal.SIGTERM)
@@ -551,6 +606,7 @@ def test_a_signalled_hold_under_flock_o_restores_alone_and_inside_the_lock():
         assert subprocess.run(["flock", "-n", lock, "true"], timeout=10).returncode == 0
     finally:
         subprocess.run(["/usr/bin/pkill", "-f", f"sleep {tag}"])
+        _reap(repo)
 
 
 def test_a_plain_flock_hold_frees_the_lock_when_it_returns():
@@ -823,6 +879,45 @@ def test_the_watchdog_restarts_inside_the_box_lock():
     assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
     assert "start.sh lock held" in open(os.path.join(repo, "markers")).read()
     assert subprocess.run(["flock", "-n", lock, "true"]).returncode == 0
+
+
+FAILED_BODY = ('{"status": "failed", "failed": "CUDA error: device-side assert triggered", '
+               '"error": "The engine needs a restart: its GPU stopped working (CUDA error: '
+               'device-side assert triggered). No request can be served until it restarts.", '
+               '"gpu": {"error": "CUDA error: device-side assert triggered"}}')
+
+
+def test_a_failed_engine_is_restarted_without_a_loading_grace():
+    """SRV-671: /health answers 500 with `status: failed` (a CUDA context lost to a device-side
+    assert, 2026-10-21: 30 minutes of 500s and logs/watchdog.fails at 0). The engine process is
+    alive and answers, so it is not loading: two checks, then a restart, and the status page's
+    reason says why. A 500 without `failed` keeps the loader's grace as before."""
+    repo = _box(["watchdog.sh"])
+    _proc(repo, 4343, _engine_argv())                 # the engine, alive and answering
+    with open(os.path.join(repo, "ops", "stop.sh"), "w") as fh:
+        fh.write('#!/bin/bash\necho "stop.sh $* reason=$STATUS_REASON" >> "$MARKERS"\n')
+    with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
+        fh.write('#!/bin/bash\necho "start.sh reason=$START_REASON" >> "$MARKERS"\n')
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500", FAKE_HTTP_BODY=FAILED_BODY)
+    assert r.returncode == 0, r.stderr
+    assert _fails(repo) == "1" and not os.path.exists(os.path.join(repo, "markers"))
+    log = _wd_log(repo)
+    assert "the engine failed (code 500): CUDA error: device-side assert triggered, 1/2" in log, log
+    assert "loading" not in log, log
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500",
+                FAKE_HTTP_BODY=FAILED_BODY).returncode == 0
+    marks = open(os.path.join(repo, "markers")).read().splitlines()
+    assert marks == ["stop.sh 30 reason=the engine failed: CUDA error: device-side assert "
+                     "triggered",
+                     "start.sh reason=restarting after a failure: CUDA error: device-side "
+                     "assert triggered"], marks
+    assert _fails(repo) == "0" and "restarted" in _wd_log(repo)
+    # a 500 that says nothing of a failure, with the engine alive: the loader's grace, as before
+    repo = _box(["watchdog.sh"])
+    _proc(repo, 4343, _engine_argv())
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500", FAKE_HTTP_BODY='{"error": "x"}')
+    assert r.returncode == 0 and "loading (code 500" in _wd_log(repo), _wd_log(repo)
+    assert _fails(repo) == "0"
 
 
 def test_a_cold_boot_is_left_to_load():

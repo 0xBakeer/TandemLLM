@@ -4,6 +4,8 @@ and the NemotronH engine's prefill with image rows.
 On the host, with tiny random weights:
   1  `target_patches`: the reference processor's grid for a table of sizes (tiny, wide, tall, huge), recorded
      from the checkpoint's own `_compute_target_patches` on the Spark          test_target_patches_follow_the_reference
+     and a very long, thin image (a side the reference floors to 0) at least one shuffle cell a side
+                     test_a_very_long_thin_image_gets_a_grid_of_at_least_one_shuffle_cell_a_side
   2  `pixels`: no resize at the grid's size, the CLIP normalisation            test_pixels_normalise_and_keep_the_grid
   3  `patchify`: RADIO's `_image_to_patches` order                             test_patchify_is_radios_order
   4  `positions`: the reference's square-then-crop up to a 247-patch side; past it the separable form, equal to
@@ -129,6 +131,21 @@ def test_target_patches_follow_the_reference():
         assert w % 2 == 0 and h % 2 == 0 and w * h <= b, (wh, w, h)
     assert NV.image_budget(c, max_pixels=1024 * 1024) == 4096
     return f"{len(REFERENCE_GRIDS)} sizes, the reference's grids; 1280x800 -> 80x50 (1,000 rows)"
+
+
+def test_a_very_long_thin_image_gets_a_grid_of_at_least_one_shuffle_cell_a_side():
+    c = super_vl()
+    # 16 x 40,000: the reference floors the width to 0 patches -- a division by zero above the minimum
+    # budget, a 0-pixel resize at it
+    for wh, b in (((16, 40000), 1100), ((16, 40000), 1024), ((40000, 16), 1100), ((1, 300000), 13312)):
+        w, h = NV.target_patches(*wh, c, b)
+        assert w >= c.downsample and h >= c.downsample and w % 2 == 0 and h % 2 == 0, (wh, b, w, h)
+    from PIL import Image as PILImage
+    small = cfg(patch_size=4, min_patches=16, max_patches=64)
+    px = NV.pixels(PILImage.new("RGB", (1, 400)), small, NV.image_budget(small))
+    wp, hp = NV.target_patches(1, 400, small, NV.image_budget(small))
+    assert px.shape == (3, hp * 4, wp * 4) and wp == 2, (px.shape, wp, hp)
+    return f"16x40000 at 1,100 patches -> {NV.target_patches(16, 40000, c, 1100)}; 1x400 -> {wp}x{hp}"
 
 
 def test_pixels_normalise_and_keep_the_grid():

@@ -12,6 +12,7 @@ schema: 1
 id: lfm2.5-24b-a2b
 name: LFM2.5-24B-A2B
 family: LFM2.5
+engine: lfm2_moe
 params: ~24B, ~2B active a token
 recommended: false
 # after the two Qwen3.8 models on the models step
@@ -305,6 +306,30 @@ measurements:
     ttft_s: {}
     lossless: null
 
+# SPD-245: the weight cards' speed rows on the current build (docs/measurement.md, "The weight cards' speed
+# rows"). Each row is its raw file's `row` (models/<id>/measurements/parallel-*.json, tools/parallel_card.py).
+parallel:
+  method: >-
+    tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts
+    bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its
+    own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512
+    tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the
+    median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1
+    warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the
+    decode window; a round counts only when /health shows N decoding at once and no other request running.
+    Suffix store and response cache off.
+  rows:
+    - profile: "lfm25-exl3-4.0"
+      build: "0.14.2"
+      commit: "05fce721"
+      date: "2026-10-26"
+      raw: "models/lfm2.5-24b-a2b/measurements/parallel-2026-10-26-lfm25-exl3-4.0-srv723.json"
+      setup: {env: "v3-lfm-4.0", lanes: 8, window: 131072, max_tokens: 512, suffix_store: false, response_cache: false, thinking: false, sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.0, seed: "one per request"}, prompts: {set: "card-v1", sha256: "eb44b3d5e32e2b9c", prompt_tokens: {code: 240, prose: 181}}}
+      rounds: 3
+      decode: {code: 130.8, prose: 129.9}
+      prefill: {"2048": {ttft_s: 0.37, tok_s: 5600.0, prompt_tokens: 2055}, "8192": {ttft_s: 1.41, tok_s: 5798.0, prompt_tokens: 8200}, "32768": {ttft_s: 5.67, tok_s: 5782.0, prompt_tokens: 32775}}
+      levels: {"1": {wall_tok_s: 122.8, decode_tok_s: 125.9, ttft_s: 0.11, at_once: 1, rounds: 3}, "2": {wall_tok_s: 164.8, decode_tok_s: 171.1, ttft_s: 0.22, at_once: 2, rounds: 3}, "4": {wall_tok_s: 202.7, decode_tok_s: 212.2, ttft_s: 0.48, at_once: 4, rounds: 3}, "8": {wall_tok_s: 238.6, decode_tok_s: 252.3, ttft_s: 0.98, at_once: 8, rounds: 3}}
+
 memory:
   parts:
   - id: engine
@@ -485,17 +510,13 @@ components:
   note: null
 parallelism:
   # three sequence slots (SPD-107, measured on 4.0, 2026-10-14): 1, 2 and 3 requests at once decoded 139.9, 169.1
-  # and 177.8 tok/s in total, each text its request's alone
+  # and 177.8 tok/s in total, each text its request's alone; eight lanes of 131,072 tokens (SPD-245, 4.0, 0.14.2,
+  # 2026-10-26): 1/2/4/8 at once 122.5 / 163.1 / 202.6 / 233.2 tok/s, N decoding at once in every round (`parallel`)
   slots:
     min: 1
-    max: 3
-    default: 3
+    max: 8
+    default: 8
   window:
-    min: 8192
-    max: 131072
-    default: 131072
-    step: 4096
-  side_window:
     min: 8192
     max: 131072
     default: 131072
@@ -548,6 +569,21 @@ methods:
   recommended: 1.05
   knob: REP_PENALTY
   docs: docs/lfm2.5-24b-a2b.md
+- id: reasoning_effort
+  label: Thinking effort
+  what: How long the model may think before it answers, when a client does not say.
+  type: enum
+  options:
+  - value: low
+    label: low
+  - value: medium
+    label: medium
+  - value: xhigh
+    label: extra high
+  default: medium
+  recommended: medium
+  knob: REASONING_EFFORT
+  docs: docs/server.md
 - id: default_max_tokens
   label: Default answer length
   what: The longest answer, in tokens, when a client does not set max_tokens.

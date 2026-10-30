@@ -177,6 +177,12 @@ class StairCut:
     OUTLIER = 4.0         # a plain step or draft this many times its price is not learned
     AGE = 0.2             # a plain turn moves what a class learned of its drafted rounds this far to the prior
     FORGET = 8            # plain turns after which a class with no `spec` prior forgets its drafted rounds
+    #: SPD-237: a turn takes the plain step only when a drafted round's MEASURED price a token (not the price
+    #: file's prior) is this much above the plain step's. The two are measured as wall time between proposals, which under the round runner's
+    #: pipelined rounds overstates a drafted round: served 2026-10-25, Flash-Next 3.05 at C1, priced drafted
+    #: 29.9 ms a token against plain 26.1 while the drafted request ran at 24.4 ms a token and the plain turns
+    #: that followed at 27.2 (41.0 vs 36.7 tok/s): the class flipped to plain turns on a measurement artefact
+    TURN_MARGIN = 0.2
 
     def __init__(self, prices: PriceModel, calibrator: ProbDeciles | None = None, siblings: bool = True,
                  max_rows: int = 32, kind: str = "chain"):
@@ -284,6 +290,8 @@ class StairCut:
         if plain is None or spec is None or prime is None:
             return True
         n = self.plain_turns.get(ctx_class, 0)
+        if ctx_class in self.rounds:
+            spec = spec / (1.0 + self.TURN_MARGIN)       # SPD-237: a measured drafted price, not a prior's
         if (plain - spec) * answer > backlog * prime + extra_ms:
             if n == 0:
                 self.age[ctx_class] = self.AGE              # drafted on from a drafting turn: the full rate
@@ -352,18 +360,23 @@ class StairCut:
         _, n, sibs = best
         # DFS pre-order: a depth's sibling leaf before the spine child that continues the chain
         tokens, parents, kind = [anchor], [-1], [None]
+        scores = [1.0]
         spine_row = 0
         for k in range(n + 1):
             if k in sibs:
                 tokens.append(tok[k][1])
                 parents.append(spine_row)
                 kind.append(("sib", k))
+                scores.append(sib_q[k])
             if k < n:
                 tokens.append(tok[k][0])
                 parents.append(spine_row)
                 kind.append(("spine", k))
+                scores.append(spine_q[k])
                 spine_row = len(tokens) - 1
         self.last = (kind, prob, len(tokens), self.cls)
+        # SPD-225: each row's calibrated path probability (its expected acceptance), the tree's scores
+        self.last_scores = scores
         return tokens, parents
 
     def _merged(self, anchor: int, tok: list, prob: list, look: list, conf: float) -> tuple[list[int], list[int]]:
@@ -421,10 +434,13 @@ class StairCut:
                 tokens.append(nodes[i][0])
                 parents.append(prow)
                 kind.append(nodes[i][3])
+                scores.append(nodes[i][2])
                 row[i] = len(tokens) - 1
                 emit(i, row[i])
+        scores = [1.0]
         emit(-1, 0)
         self.last = ("merged", kind, prob, len(tokens), conf, parents, self.cls)
+        self.last_scores = scores
         return tokens, parents
 
     def observe(self, path: list[int], round_ms: float, draft_ms: float) -> None:

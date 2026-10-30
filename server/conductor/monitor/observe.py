@@ -35,6 +35,8 @@ class RequestEvent:
                                                    # the grammar writes the calls, SP3 never acts
     profile: str = ""                              # the conductor's profile, when one resolved
     cls: str = ""                                  # the router's class for the turn (E2 reads it)
+    tool_format: str = ""                          # the model's own call format (the server's
+                                                   # tool_format: argkey, pythonic; "" the default)
 
     @property
     def tools_offered(self) -> bool:

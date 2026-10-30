@@ -54,6 +54,9 @@ The test matrix:
                                                          test_an_install_sh_box
  14  a benchmark's --env-file (tools/exl3_fastrun.py) reads serve.env without the overlay
                                                          test_benchmarks_ignore_the_overlay
+ 15  SPD-150, Flint's e4m3 cache as a tool: off by default and then written nowhere (the engine's default);
+     on, the overlay sets QWEN38_FLINT_KV_FP8=1, serve.env resolves it, the box's seed reads it back on, and
+     the estimate counts 14,784 KV bytes a token instead of 28,672        test_flints_fp8_cache_switch
 
 Run: python tests/test_setup_apply.py
 """
@@ -239,10 +242,11 @@ def _plan(sel=None, **kw):
 
 def test_the_plan():
     with Box():
-        p = _plan()
+        p = _plan(_sel(slots=4))
         assert p["ok"], p["errors"]
         keys = {c["key"]: c for c in p["changes"]}
-        assert keys["QSE_PARALLEL"]["current"] == "1" and keys["QSE_PARALLEL"]["next"] == "4"
+        # SRV-707: serve.env runs 8 lanes
+        assert keys["QSE_PARALLEL"]["current"] == "8" and keys["QSE_PARALLEL"]["next"] == "4"
         assert keys["QSE_PARALLEL"]["from"] == "parallelism.slots"
         assert keys["QWEN38_NARRATOR_MODEL"]["next"] == "qwen3.5-2b"
         assert "PORT" not in keys                              # unchanged keys are not listed
@@ -251,7 +255,7 @@ def test_the_plan():
         assert any("use-profile.sh exl3-4.5" in c for c in p["commands"])
         assert not any("--fetch-only" in c for c in p["commands"])
         assert any("No admin password" in w for w in p["warnings"])
-        assert any("full window" in w for w in p["warnings"])
+        assert any("lanes can hold the full" in w for w in p["warnings"]), p["warnings"]
         assert p["estimate"]["fits"] is True and p["restart"] is True
         p = _plan(_sel(kv_pool=False))
         assert not p["ok"] and p["error_codes"][0] == "over_budget", p
@@ -796,6 +800,34 @@ class FakeWren:
         return {"name": "Wren", "state": "not_loaded"}
 
 
+def test_flints_fp8_cache_switch():
+    fl = registry.get("flint")
+    key = "QWEN38_FLINT_KV_FP8"
+    c = next(x for x in fl["components"] if x["id"] == "kv_fp8")
+    assert c["default"] is False and c["knobs"] == {key: {"on": "1", "off": "0"}}, c
+    off = estimate.check(fl, {"model": "flint", "profile": "flint-exl3-4.0"})
+    assert off["components"]["kv_fp8"] is False
+    on = estimate.check(fl, {"model": "flint", "profile": "flint-exl3-4.0",
+                             "components": dict(off["components"], kv_fp8=True)})
+    with Box(on_disk=("flint-exl3-4.0",)):
+        # off is the engine's own default: the overlay leaves the key out, the environment stays as it was
+        assert apply.overlay_values(fl, off)[key] == "0"
+        assert f"\n{key}=" not in apply.render_overlay(fl, off)
+        apply.write_overlay(fl, on)
+        assert f"\n{key}='1'" in open(apply.overlay_path()).read()
+        assert apply.resolve_env([key])[key] == "1"
+        assert apply.current_selection(fl)["selection"]["components"]["kv_fp8"] is True
+        os.unlink(apply.overlay_path())
+    e_off, e_on = estimate.estimate(fl, off), estimate.estimate(fl, on)
+    assert (e_off["kv_bytes_per_token"], e_on["kv_bytes_per_token"]) == (28672, 14784)
+    kv = {e["kv_bytes_per_token"]: next(x for x in e["parts"] if x["id"] == "kv")["gb"] for e in (e_off, e_on)}
+    assert abs(kv[14784] / kv[28672] - 14784 / 28672) < 0.01, kv
+    assert e_on["context_tokens_fit"] >= e_off["context_tokens_fit"]
+    # every other model's estimate is its own: no component of theirs changes the bytes a token
+    assert all(not x.get("kv_bytes_per_token") for x in M["components"])
+    return f"KV {kv[28672]:.2f} -> {kv[14784]:.2f} GiB at the default window"
+
+
 def test_the_routes():
     with Box():
         app.STATE.clear()
@@ -825,10 +857,10 @@ def test_the_routes():
             app.INFLIGHT["running"] = 0
             code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, kv_pool=False)})
             assert code == 409 and b["error"]["code"] == "over_budget" and "plan" in b
-            # VIS-199: the engine's limit, 16 parallel chats, whatever the card measured
-            code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, slots=17)})
+            # VIS-199, SRV-707: the setup's limit, 64 lanes, whatever the card measured
+            code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, slots=65)})
             assert code == 422 and b["error"]["code"] == "out_of_range", b
-            assert "above 16" in b["error"]["message"], b
+            assert "above 64" in b["error"]["message"], b
             code, b = _api("POST", "/v1/setup/apply", {"selection": sel})
             assert code == 202 and b["job"]["state"] == "queued", b
             assert spawned == [b["job"]["id"]] and w.unloads == ["apply"]

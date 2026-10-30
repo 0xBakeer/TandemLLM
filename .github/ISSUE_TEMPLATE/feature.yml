@@ -1,0 +1,48 @@
+name: Feature request
+description: A new capability, or a change to how something works.
+labels: [feature, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you try to do today, and where TandemLLM stops you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: How it should work for you, as a request or a command.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine
+        - Drafting and speculation
+        - Caches
+        - OpenAI API, tool calls, streaming
+        - Conductor
+        - Proxy
+        - Chat service
+        - Dashboard
+        - Setup Guide and install
+        - Docs or manual
+        - I do not know
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+
+  - type: checkboxes
+    id: pr
+    attributes:
+      label: A pull request
+      options:
+        - label: I would like to send a pull request for this.

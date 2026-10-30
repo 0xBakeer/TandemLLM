@@ -6,7 +6,9 @@ with thinking, a tool run (a long write, a long read, a command, an edit, a todo
 compacted inside, a chat with a system prompt, an effort and thinking off, and a run in the middle of
 its steps. `build(svc)` writes them and answers {name: {"body", "headers"}} for one request each,
 the date frozen. The fixture tests/fixtures/chatd_replay_main.json holds what origin/main
-(ca07b67c) answers; write it again from a checkout of that tree:
+(ca07b67c) answers, with read_file's `column` argument (SRV-639) in its tool list and a write's
+content whole in the requests after it (SRV-659: no stub in its place); write it again from a
+checkout of that tree:
 
     PYTHONPATH=.:tests python3 tests/chatd_replay.py --write <checkout>/../chatd_replay_main.json
 

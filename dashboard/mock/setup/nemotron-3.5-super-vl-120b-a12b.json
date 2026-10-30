@@ -3,6 +3,7 @@
  "id": "nemotron-3.5-super-vl-120b-a12b",
  "name": "Nemotron 3.5 Super VL 120B-A12B",
  "family": "Nemotron 3.5",
+ "engine": "nemotron_h",
  "params": "~120B, ~12B active a token",
  "recommended": false,
  "order": 6,
@@ -552,15 +553,11 @@
   "slots": {
    "min": 1,
    "max": 3,
-   "default": 3
+   "default": 3,
+   "engine_max": 64,
+   "engine_max_reason": null
   },
   "window": {
-   "min": 8192,
-   "max": 1048576,
-   "default": 262144,
-   "step": 4096
-  },
-  "side_window": {
    "min": 8192,
    "max": 1048576,
    "default": 262144,
@@ -611,6 +608,30 @@
    "recommended": 0.95,
    "knob": "TOP_P",
    "docs": "docs/nemotron-h.md"
+  },
+  {
+   "id": "reasoning_effort",
+   "label": "Thinking effort",
+   "what": "How long the model may think before it answers, when a client does not say.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "low",
+     "label": "low"
+    },
+    {
+     "value": "medium",
+     "label": "medium"
+    },
+    {
+     "value": "xhigh",
+     "label": "extra high"
+    }
+   ],
+   "default": "medium",
+   "recommended": "medium",
+   "knob": "REASONING_EFFORT",
+   "docs": "docs/server.md"
   },
   {
    "id": "default_max_tokens",
@@ -831,21 +852,14 @@
    "fields": [
     {
      "field": "slots",
-     "label": "Parallel requests",
+     "label": "Parallel lanes",
      "type": "int",
      "min": 1,
-     "max": 16
+     "max": 64
     },
     {
      "field": "window",
-     "label": "Context window, first slot",
-     "type": "int",
-     "min": 8192,
-     "max": 1048576
-    },
-    {
-     "field": "side_window",
-     "label": "Context window, other slots",
+     "label": "Context window, every lane",
      "type": "int",
      "min": 8192,
      "max": 1048576
@@ -882,6 +896,16 @@
      "type": "number",
      "min": 0,
      "max": 1
+    },
+    {
+     "field": "reasoning_effort",
+     "label": "Thinking effort",
+     "type": "enum",
+     "options": [
+      "low",
+      "medium",
+      "xhigh"
+     ]
     },
     {
      "field": "default_max_tokens",

@@ -16,14 +16,15 @@ The test matrix:
      profiles, an unknown dependency, a cycle, a default whose dependency is off, a conflict on by
      default, YAML's on/off booleans as knob keys, an unknown asset, a docs file that is not there,
      a default out of range, a row of another build marked comparable, a non-comparable row without
-     its reason, a quality value without date, an unknown key   test_the_validator_rules
+     its reason, a quality value without date, an unknown key, a lanes default past the card's
+     measured max (SPD-245)                                  test_the_validator_rules
   6  a second folder lists with no code change; a broken file is reported while the others still
      list; a folder without model.yaml is skipped; a folder named after another id is refused
                                                             test_more_models
   7  models/schema/model.schema.json is the schema the code checks   test_the_schema_file
   8  the CLI: exit 0 on the seed, 1 and the YAML path on a bad file  test_the_cli
   9  the step schema: the eight steps in order, a field per tool, the profile and enum options, slots
-     up to the engine's 16 (a joint pass of 32 rows, 2 a chat at least)   test_wizard_fields, test_engine_max_slots
+     up to the setup's 64 (16 lanes a joint pass of 32 rows, 2 a lane; more lanes, more passes)   test_wizard_fields, test_engine_max_slots
                                                             test_wizard_fields
  10  a string a client sends is a plain value or nothing: newlines, $(...), quotes and spaces are
      refused, and numbers keep their range                  test_field_values
@@ -221,6 +222,43 @@ def test_the_nemotron_tables_are_the_raw_data():
         assert registry.tile(m)["best_speed"] == {"tok_s": best[0], "task": best[1], "profile": rec}, mid
 
 
+
+def test_the_ornith_card_is_the_raw_data():
+    """OPS-215: Ornith-1.5-122B's card, profile and pin against measurements/0.13.0-summary.json and the raw runs."""
+    mid, pid = "ornith-1.5-122b", "ornith-1.5-122b-exl3-4.0"
+    m = registry.load(os.path.join(ROOT, "models", mid, "model.yaml"))
+    meas_dir = os.path.join(ROOT, "models", mid, "measurements")
+    with open(os.path.join(meas_dir, "0.13.0-summary.json")) as fh:
+        raw = json.load(fh)
+    with open(os.path.join(meas_dir, "0.12.2-drafters.json")) as fh:
+        runs = json.load(fh)
+    assert m["measurements"]["build"] == raw["build"] == "0.13.0"
+    assert m["measurements"]["source"] == f"models/{mid}/measurements/0.13.0-summary.json"
+    p = registry.profile(m, pid)
+    # the public repository at the card's commit; the weights are the measured commit's
+    assert p["hf_revision"] == raw["pack"]["revision"] and len(p["hf_revision"]) == 40 and not p["hf_private"]
+    assert p["disk_gb"] == raw["pack"]["disk_gb"]
+    env = open(os.path.join(ROOT, "ops", "profiles", f"{pid}.env")).read()
+    assert f"QSE_WEIGHTS_REVISION={p['hf_revision']}\n" in env and f"QSE_WEIGHTS_GB={p['disk_gb']}\n" in env
+    q = raw["quality_vs_bf16"]
+    assert p["quality"]["kl_vs_bf16"] == round(q["kl"], 4) and p["quality"]["top1_pct"] == q["top1_pct"]
+    assert p["quality"]["ppl"] == round(q["engine_ppl"], 3)
+    # exllamav3's forward on the same pack: not exact, and the summary says so
+    x = raw["vs_exllamav3_forward"]
+    assert x["exact_agreement"] is False and x["top1_agree"] < x["positions"]
+    (row,) = m["measurements"]["rows"]
+    assert row["profile"] == pid and row["build"] == "0.13.0" and row["comparable"]
+    for task, c in row["cells"]["greedy_512"].items():
+        r = raw["rows"]["profile"][task]
+        assert r == runs["rows"]["e"][task], task              # the summary copies the raw run
+        assert c == {"tok_s": r["tok_s"], "min": r["tok_s"], "ms_round": round(1000 * r["per_block"] / r["tok_s"], 2),
+                     "tok_round": r["per_block"], "n": 1}, (task, c)
+        assert raw["same_text_as_plain"][task], task
+        assert c["tok_s"] > raw["rows"]["plain"][task]["tok_s"], task
+    assert raw["rows"]["plain"]["long_code_2048"] == runs["long"]["plain"]
+    assert raw["rows"]["profile"]["long_code_2048"] == runs["long"]["e"]
+    assert raw["rows"]["dflash2"]["long_code_2048"] == runs["long"]["c"]
+
 def test_every_knob_is_registered():
     m = registry.load(SEED)
     assert registry.unregistered_keys(m) == [], registry.unregistered_keys(m)
@@ -283,7 +321,7 @@ def test_every_pack_names_its_maker():
     turboderp's Flash-Next packs are a community author's; the weights' repository is hf_repo except
     Bolt's IQ2, whose weights are NVIDIA's GGUF repository"""
     kinds = {"0xBakeer": ("ours", "0xBakeer"), "nvidia": ("vendor", "NVIDIA"), "LiquidAI": ("vendor", "LiquidAI"),
-             "turboderp": ("community", "turboderp")}
+             "turboderp": ("community", "turboderp"), "RecursiveSI": ("vendor", "Recursive")}
     seen = set()
     for m in registry.load_all()[0].values():
         for p in m["profiles"]:
@@ -363,8 +401,11 @@ def test_the_validator_rules():
     x["profiles"][0]["made_by"]["repo"] = "not a repo"
     _refused(x, "made_by.repo")
     x = copy.deepcopy(d)
-    x["parallelism"]["slots"]["default"] = 9
-    _refused(x, "$.parallelism.slots: the default is outside min..max")
+    x["parallelism"]["slots"]["default"] = 65             # SRV-707: never past the engine's lanes
+    _refused(x, "$.parallelism.slots: the default is outside min..64")
+    x = copy.deepcopy(d)
+    x["parallelism"]["slots"]["max"] = 3                  # SPD-245: nor past the lanes the card measured
+    _refused(x, "$.parallelism.slots: the default 8 is past the max 3")
     x = copy.deepcopy(d)
     x["parallelism"]["fixed"]["QSE_X"] = "a b"
     _refused(x, "$.parallelism.fixed.QSE_X")
@@ -376,8 +417,11 @@ def test_more_models():
         shutil.copytree(os.path.join(ROOT, "docs"), os.path.join(root, "docs"))
         os.makedirs(os.path.join(md, "qwen3.8-27b"))
         shutil.copy(SEED, os.path.join(md, "qwen3.8-27b", "model.yaml"))
+        for sub in ("measurements", "community"):          # SPD-245: a speed row's raw file and its pack
+            shutil.copytree(os.path.join(ROOT, "models", "qwen3.8-27b", sub), os.path.join(md, "qwen3.8-27b", sub))
         d = _seed()
         d["id"], d["name"] = "other-9b", "Other-9B"
+        d.pop("parallel", None)                               # its rows name the 27B's files
         os.makedirs(os.path.join(md, "other-9b"))
         with open(os.path.join(md, "other-9b", "model.yaml"), "w") as fh:
             yaml.safe_dump(d, fh)
@@ -437,20 +481,69 @@ def test_wizard_fields():
     assert steps[2]["fields"][0]["options"] == [p["id"] for p in m["profiles"]]
     assert {f["field"] for f in steps[3]["fields"]} == {c["id"] for c in m["components"]}
     assert registry.step_field(m, "parallelism", "slots") == \
-        {"field": "slots", "label": "Parallel requests", "type": "int", "min": 1, "max": 16}
+        {"field": "slots", "label": "Parallel lanes", "type": "int", "min": 1, "max": 64}
     assert registry.step_field(m, 5, "reasoning_effort")["options"] == ["low", "medium", "xhigh"]
     assert registry.step_field(m, "methods", "nope") is None
     assert registry.step_field(m, "review", "slots") is None
 
 
 def test_engine_max_slots():
-    """The guide's cap on parallel chats is the engine's: a joint pass of 32 rows, 2 a chat at least."""
+    """SRV-707: a joint pass of 32 rows verifies 16 lanes at 2 rows each (JOINT_PASS_LANES); past it a
+    round runs more passes, so the guide's cap (64) is a sane typed count, not the engine's."""
     from server import slots
     meet = slots.Meeting()
-    assert registry.ENGINE_MAX_SLOTS == meet.max_rows // 2 == 16
-    n = registry.ENGINE_MAX_SLOTS
+    assert registry.JOINT_PASS_LANES == meet.max_rows // 2 == meet.per_pass() == 16
+    n = registry.JOINT_PASS_LANES
     assert slots.share(n, meet.max_rows) * n <= meet.max_rows
     assert slots.share(n + 1, meet.max_rows) * (n + 1) > meet.max_rows
+    assert registry.ENGINE_MAX_SLOTS == 64 > n
+    meet.pending = {i: slots.VerifyReq(i, None, None, [0, 0], 0) for i in range(registry.ENGINE_MAX_SLOTS)}
+    assert all(sum(r.rows for r in g) <= meet.max_rows for g in meet.batches())
+
+
+def test_slots_follow_the_engine_family():
+    """#104: every model names its engine family; a family without side slots (Ornith's, qwen3_5_moe) caps
+    the guide's parallel chats at one with the reason, in the payload, the step field and the selection
+    check; every other family keeps the engine's 16."""
+    from engine.models import REGISTRY
+    from server.setup import estimate
+    models, errs = registry.load_all()
+    assert not errs, errs
+    for mid, m in models.items():
+        assert m.get("engine") in REGISTRY, (mid, m.get("engine"))
+        s = m["parallelism"]["slots"]
+        side = REGISTRY[m["engine"]].spec.side_slots
+        assert s["engine_max"] == (registry.ENGINE_MAX_SLOTS if side else 1), (mid, s)
+        assert (s["engine_max_reason"] is None) == side, (mid, s)
+        assert registry.step_field(m, "parallelism", "slots")["max"] == s["engine_max"], mid
+    # SPD-217: Ornith's engine has side slots now (`Qwen35MoeEngine.verify_multi`)
+    orn = models["ornith-1.5-122b"]
+    assert orn["parallelism"]["slots"]["engine_max_reason"] is None
+    assert estimate.check(orn, {"model": orn["id"], "slots": 2})["slots"] == 2
+    one = [m for m in models.values() if not REGISTRY[m["engine"]].spec.side_slots]
+    for m in one:
+        try:
+            estimate.check(m, {"model": m["id"], "slots": 2})
+        except estimate.SelectionError as exc:
+            assert exc.status == 422 and exc.code == "out_of_range" and "one chat at a time" in str(exc.args[0]), exc
+        else:
+            raise AssertionError(f"two chats on {m['id']}, whose engine has no side slots")
+    fl = models["flint"]
+    assert estimate.check(fl, {"model": fl["id"], "slots": 4})["slots"] == 4
+    # a file that names no family is refused by name, not read as the 27B's
+    import copy
+    import yaml
+    with open(os.path.join(ROOT, "models", "flint", "model.yaml")) as fh:
+        data = yaml.safe_load(fh)
+    bad = copy.deepcopy(data)
+    bad["engine"] = "nope"
+    try:
+        registry.parse(bad)
+    except registry.RegistryError as exc:
+        assert "$.engine" in str(exc), exc
+    else:
+        raise AssertionError("an unknown engine family was read")
+    return "ornith: 1 (no side slots); the rest: 16"
 
 
 def test_field_values():

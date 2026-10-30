@@ -95,7 +95,7 @@ def owui_replay(chunks) -> dict:
     u = None
     for data in chunks:
         raw = dict(data.get("usage", {}) or {})
-        raw.update(data.get("timings", {}))                # llama.cpp
+        raw.update(data.get("timings", {}))                # the timings object
         if raw:
             u = owui_merge(u, raw)
     return u or {}

@@ -283,10 +283,11 @@ def _exl3_gemv_combine_kernel(P_OUT, OUT, NB16, KS: tl.constexpr):
     m = tl.program_id(0)
     nb = tl.program_id(1)
     off = nb * 256 + tl.arange(0, 256)
+    valid = off < NB16
     acc = tl.zeros([256], dtype=tl.float32)
     for ks in tl.static_range(KS):
-        acc += tl.load(P_OUT + (m * KS + ks) * NB16 + off)
-    tl.store(OUT + m * NB16 + off, acc)
+        acc += tl.load(P_OUT + (m * KS + ks) * NB16 + off, mask=valid, other=0.0)
+    tl.store(OUT + m * NB16 + off, acc, mask=valid)
 
 
 @triton.jit
@@ -298,10 +299,11 @@ def _exl3_gemv_combine_rot_kernel(P_OUT, SVH, OUT, NB16,
     m = tl.program_id(0)
     nb = tl.program_id(1)
     off = nb * 256 + tl.arange(0, 256)
+    valid = off < NB16
     acc = tl.zeros([256], dtype=tl.float32)
     for ks in tl.static_range(KS):
-        acc += tl.load(P_OUT + (m * KS + ks) * NB16 + off)
-    svh = tl.load(SVH + off).to(tl.float32)
+        acc += tl.load(P_OUT + (m * KS + ks) * NB16 + off, mask=valid, other=0.0)
+    svh = tl.load(SVH + off, mask=valid, other=0.0).to(tl.float32)
     h2 = tl.reshape(acc, (2, 128))
     s2 = tl.reshape(svh, (2, 128))
     a, b = tl.split(tl.trans(h2, 1, 0))
@@ -310,9 +312,9 @@ def _exl3_gemv_combine_rot_kernel(P_OUT, SVH, OUT, NB16,
     y1 = _fwht(b) * RSQRT128 * sb
     y = tl.reshape(tl.trans(tl.join(y0, y1), 1, 0), (256,))
     if BF16:
-        tl.store(OUT + m * NB16 + off, y.to(tl.bfloat16))
+        tl.store(OUT + m * NB16 + off, y.to(tl.bfloat16), mask=valid)
     else:
-        tl.store(OUT + m * NB16 + off, y)
+        tl.store(OUT + m * NB16 + off, y, mask=valid)
 
 
 _END_S: dict = {}

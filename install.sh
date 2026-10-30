@@ -9,7 +9,9 @@
 #   2. the engine: clones (or updates) the repository into DIR/src at a pinned release
 #   3. a Python venv in DIR/venv with the pinned dependencies (torch for CUDA 13.0, Triton, ...)
 #   4. the weights from Hugging Face, into the normal Hugging Face cache
-#   5. a lookup corpus built from public text (tools/build_corpus.py); --no-corpus skips it
+#   5. a lookup corpus built from public text (tools/build_corpus.py); --no-corpus skips it. With
+#      --setup only its Wikipedia shards: the corpus needs the model's tokenizer, so ops/use-profile.sh
+#      builds it for the model the setup guide installs (server/setup/corpus.py)
 #   6. the config: DIR/run/ops/serve.env (the served profile with this machine's paths) and the
 #      control script DIR/bin/tandem (start | stop | status | smoke | logs)
 #   7. start, wait for /health, a smoke test; --no-start stops after step 6
@@ -31,7 +33,19 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.12.0 gives API clients that offer tools the tools profile, structured outputs with tools,
+# The engine release. v0.15.0 runs 8 lanes by default, each with the full window, one round runner
+# with joint verify passes (CUDA graphs on the 27B), the burst prefill and the card's sampling filters;
+# v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
+# card's answer limit and the plain step at long context, and builds the lookup corpus for each tokenizer;
+# v0.14.1 matches a tool call's argument names to the offered tool's schema, has Flint
+# answer directly with thinking off and puts the model families behind adapters;
+# v0.14.0 adds Recursive's Flint from our EXL3 4.0 and 6.0 packs and the BF16 checkpoint,
+# drafting with the lookup; v0.13.0 adds Ornith-1.5-122B from our EXL3 4.0 pack, drafting with its MTP layer;
+# v0.12.2 fits a Chat-tab run's tool results to the window, streams the port preview and
+# lets LFM2.5 adopt its 0.9.x to 0.11.1 conversations again;
+# v0.12.1 serves the first community pack on Nemotron 3.5 Super VL and takes a request with
+# images on a side slot;
+# v0.12.0 gives API clients that offer tools the tools profile, structured outputs with tools,
 # one mutation per turn and the secret echo mask;
 # v0.11.4 adds Agents mode to the Chat tab and keeps a worker's and its parent's cache rows;
 # v0.11.3 hardens the Setup Guide (tandem doctor, a check before the restart, scripts through bash, Retry);
@@ -49,7 +63,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.12.0}"
+TANDEM_REF="${TANDEM_REF:-v0.15.0}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -238,7 +252,9 @@ HF_HUB_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 WREN_REPO="Qwen/Qwen3.5-2B"
 WREN_DIR="$HOME/.qwen38-spark-engine/models/qwen3.5-2b"
 if [ "$SETUP" = 1 ]; then
-    CORPUS_MODE=none        # the corpus needs the base checkpoint, which the setup guide fetches later
+    # the corpus needs the model's tokenizer, which the setup guide fetches later: here its Wikipedia
+    # shards alone, so the build after the model's download needs no network (#97)
+    [ "$CORPUS_MODE" = none ] || CORPUS_MODE=shards
     if [ -f "$RUN/ops/serve.env" ] && [ ! -f "$SRC/run/setup-pending" ] && [ "$FORCE_SETUP" != 1 ]; then
         die "$DIR already has a configured engine; --setup would stop it. Add --force-setup to set it up again in the browser"
     fi
@@ -414,8 +430,8 @@ still_to_get() {
 }
 TO_GET=$(( $(still_to_get "$(hf_repo_dir "$BASE_REPO")" "$BASE_GIB") + $(still_to_get "$(hf_repo_dir "$NVFP4_REPO")" "$NVFP4_GIB")
          + $(still_to_get "$(hf_repo_dir "$B8_REPO")" "$DRAFTER_GIB") + $(still_to_get "$(hf_repo_dir "$B16_REPO")" "$DRAFTER_GIB") ))
-[ "$SETUP" = 1 ] && TO_GET=5           # Wren's model alone; the setup guide checks the weights' room
-[ "$CORPUS_MODE" = build ] && [ ! -f "$CORPUS_DIR/meta.json" ] \
+[ "$SETUP" = 1 ] && TO_GET=5           # Wren's model (and the corpus' shards); the setup guide checks the weights' room
+[ "$CORPUS_MODE" != none ] && [ ! -f "$CORPUS_DIR/meta.json" ] \
     && TO_GET=$((TO_GET + $(still_to_get "$HF_HUB_DIR/datasets--wikimedia--wikipedia" "$WIKI_GIB")))
 NEED_HF=$((TO_GET + 1))
 NEED_DIR=$LOCAL_GIB
@@ -503,7 +519,7 @@ unset HF_AUTH
 cat <<EOF
 
     The plan: engine $TANDEM_REF into $SRC, a venv, about $TO_GET GiB of
-    downloads into $HF_HUB_DIR, $([ "$CORPUS_MODE" = build ] && echo "a public lookup corpus," || echo "no corpus,") the config$([ "$START" = 1 ] && echo ", then start on port $PORT" || echo " (no start)").
+    downloads into $HF_HUB_DIR, $(case "$CORPUS_MODE" in build) echo "a public lookup corpus,";; shards) echo "the lookup corpus' public text,";; *) echo "no corpus,";; esac) the config$([ "$START" = 1 ] && echo ", then start on port $PORT" || echo " (no start)").
 EOF
 confirm "Go ahead?" || die "cancelled"
 # a chatd running now keeps the code it started with: the last message says how to restart it
@@ -703,6 +719,16 @@ step "Lookup corpus"
 if [ "$CORPUS_MODE" = none ]; then
     info "skipped (--no-corpus): the lookup drafter copies from the conversation only"
     CORPUS_VALUE=""
+elif [ "$CORPUS_MODE" = shards ]; then
+    # #97: ops/use-profile.sh builds $CORPUS_DIR/tokenizers/<the model's tokenizer> after the model's download
+    CORPUS_VALUE="$CORPUS_DIR"
+    if [ "$DRY" = 1 ]; then
+        note "python -m server.setup.corpus fetch: $WIKI_REPO $WIKI_EN and $WIKI_DE (public, CC BY-SA 4.0, 1.2 GB)"
+    elif (cd "$SRC" && "$PY" -m server.setup.corpus fetch) 2>&1 | sed 's/^/    | /'; then
+        ok "the corpus' Wikipedia shards are in $HF_HUB_DIR; the setup guide builds the corpus for the model it installs"
+    else
+        warn "the Wikipedia shards did not download: the corpus is built from the local sources alone, or fetches them with the model"
+    fi
 elif [ -f "$CORPUS_DIR/meta.json" ]; then
     ok "already built: $CORPUS_DIR ($(sed -n 's/.*"n_tokens": \([0-9]*\).*/\1/p' "$CORPUS_DIR/meta.json") tokens)"
     CORPUS_VALUE="$CORPUS_DIR"

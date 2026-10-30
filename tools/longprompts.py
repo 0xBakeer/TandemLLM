@@ -12,14 +12,15 @@ this repository has read:
   prose    English Wikipedia, `/tmp/wt2.parquet` from row 3000 -- the drafter's suffix store took
            rows 0..2554 of that same file (`corpus/meta.json`), so the offset is the split
   german   German Wikipedia, `/tmp/de0.parquet` from row 1000 -- the store took rows 0..539
-  code     C and C++ from a checkout of llama.cpp. Every line of code in the store and in
+  code     C and C++ from a source checkout (`--code`). Every line of code in the store and in
            `bench/calib.txt` is Python, and the quantiser was calibrated on Python; C++ is the
            domain none of that has seen
 
 Documents are concatenated only until a prompt is full, so a prompt is one or two articles rather
 than a hundred fragments, and no token is used by two prompts or by two lengths.
 
-    python tools/longprompts.py --out bench/longprompts --lens 2048,8192,16384 --per-domain 7
+    python tools/longprompts.py --out bench/longprompts --lens 2048,8192,16384 --per-domain 7 \
+        --code '<checkout>/src/*.cpp,<checkout>/src/*.c'
 
 Writes `ids-<len>.npy` of shape [N, len] int32 and `manifest.json` with the provenance, the domain
 of every row and the SHA-256 of the token bytes, which is what a later run quotes to say it used
@@ -80,8 +81,8 @@ def main() -> None:
     ap.add_argument("--prose", default="/tmp/wt2.parquet:text:3000",
                     help="PATH:COLUMN:SKIP_ROWS")
     ap.add_argument("--german", default="/tmp/de0.parquet:text:1000")
-    ap.add_argument("--code", default="~/llama.cpp/src/*.cpp,~/llama.cpp/ggml/src/*.c,"
-                                      "~/llama.cpp/common/*.cpp")
+    ap.add_argument("--code", required=True,
+                    help="comma-separated globs of C and C++ files from a source checkout")
     a = ap.parse_args()
 
     from transformers import AutoTokenizer

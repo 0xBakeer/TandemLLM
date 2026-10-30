@@ -170,7 +170,12 @@ def test_prefill_and_decode_match_transformers():
 
 
 def test_verify_tree_equals_sequential_decode():
-    cfg, W, ref = tiny()
+    """A tree block's rows equal the decode of each row's path. In fp64: in fp32 a block of 6 rows
+    sums its matmuls in another order than one row (9.8e-6 on an x86 CPU against logits up to 17),
+    in fp64 the two are equal to the fp32 logits' last bit; a row read on its sibling's path is
+    off by 20."""
+    cfg, W, _ = tiny()
+    ref = Lfm2MoeRef(cfg, {k: v.double() for k, v in W.items()}, dtype=torch.float64)
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     tokens = torch.tensor([7, 19, 23, 44, 31, 60])
@@ -183,7 +188,8 @@ def test_verify_tree_equals_sequential_decode():
         s2 = copy.deepcopy(snap)
         for r in path:
             want = ref.decode(int(tokens[r]), s2)
-        assert (lg[row] - want[0]).abs().max().item() < 1e-5, row
+        d = (lg[row] - want[0]).abs().max().item()
+        assert d < 1e-5, (row, d)
 
 
 def test_commit_of_a_path_continues_exactly():
@@ -197,10 +203,14 @@ def test_commit_of_a_path_continues_exactly():
     for t in (7, 19, 44):
         ref.decode(t, alone)
     assert st.length == alone.length
+    eps = torch.finfo(torch.float32).eps
     for li in st.conv:
-        assert torch.allclose(st.conv[li], alone.conv[li], atol=1e-6)
+        # OPS-231: the rows' conv inputs come from projections summed in another order than one row's
+        bound = 4 * eps * cfg.hidden_size * max(1.0, alone.conv[li].abs().max().item())
+        assert (st.conv[li] - alone.conv[li]).abs().max().item() <= bound, li
     a, b = ref.decode(5, st), ref.decode(5, alone)
-    assert (a - b).abs().max().item() < 1e-5
+    d = (a - b).abs().max().item()
+    assert d <= _fp32_bound(cfg, a), (d, _fp32_bound(cfg, a))
 
 
 def test_chain_kept_in_part():
@@ -214,7 +224,17 @@ def test_chain_kept_in_part():
     ref.decode(7, alone)
     ref.decode(19, alone)
     a, b = ref.decode(60, st), ref.decode(60, alone)
-    assert (a - b).abs().max().item() < 1e-5
+    d = (a - b).abs().max().item()
+    assert d <= _fp32_bound(cfg, a), (d, _fp32_bound(cfg, a))
+
+
+def _fp32_bound(cfg, a) -> float:
+    """OPS-231: how far two fp32 runs of the same rows may land apart when the matmuls sum in another order
+    (a block of 5 rows against one row at a time): a few ulps of the largest logit a reduction over the
+    hidden width and every layer. 0.0 on aarch64 (the same order); over 1e-5 on x86 CPU torch. A wrong
+    commit moves a logit by more than 0.1."""
+    eps = torch.finfo(torch.float32).eps
+    return 4 * eps * cfg.hidden_size * cfg.num_hidden_layers * max(1.0, a.abs().max().item())
 
 
 def test_commit_refuses_a_non_path():

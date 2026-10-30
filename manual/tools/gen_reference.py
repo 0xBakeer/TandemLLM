@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import glob
 import json
 import os
 import re
@@ -427,13 +428,19 @@ def gen_install_flags(root: str) -> str:
 
 
 def read_knobs(root: str) -> dict:
-    tree = parse(root, "engine/settings.py")
-    for node in tree.body:
-        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "KNOBS":
-            return ast.literal_eval(node.value)
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "KNOBS":
-            return ast.literal_eval(node.value)
-    return {}
+    """engine/settings.py's KNOBS and every family's own (engine/models/<pkg>/knobs.py, ENG-405)."""
+    def table(rel: str) -> dict:
+        for node in parse(root, rel).body:
+            if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "KNOBS":
+                return ast.literal_eval(node.value)
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "KNOBS":
+                return ast.literal_eval(node.value)
+        return {}
+
+    knobs = table("engine/settings.py")
+    for path in sorted(glob.glob(os.path.join(root, "engine", "models", "*", "knobs.py"))):
+        knobs.update(table(os.path.relpath(path, root)))
+    return knobs
 
 
 def read_serve_env(root: str) -> list:
@@ -692,7 +699,7 @@ def gen_ledger(root: str) -> str:
         names = [p.split()[0] for p in re.split(r",\s*", ev.group(1)) if p.split()]
         lines.append(r"{\hbadness=3000 \noindent The conductor's journal shares the file: \texttt{conductor\_events} has "
                      + str(len(names)) + r" columns (" + ", ".join(code(n) for n in names)
-                     + r"), and \texttt{conductor\_texts} keeps every hidden text once, by its hash.")
+                     + r"), and \texttt{conductor\_texts} keeps every hidden text once, by its hash.\par}")
     return "\n".join(lines) + "\n"
 
 

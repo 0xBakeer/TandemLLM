@@ -278,6 +278,7 @@ ERRORS = [
     ("503", ["setup_mode"], "any route but the dashboard, /health, /v1/models and /v1/setup/* on a box in setup mode (Retry-After: 60)", True),
     ("503", ["max_inflight"], "every backend for the model is at the max_inflight you set (Retry-After: 1)", True),
     ("503", ["warming", "loading", "refused", "failed", "not_loaded", "busy_decoding"], "a decision request while the model loads, was refused memory, failed, or the engine kept decoding past the deadline", True),
+    ("503", ["engine_failed"], "a completion after the engine's CUDA context was lost: the sentence says so, the watchdog restarts the engine (Retry-After: 60)", True),
     ("503", ["provider_unavailable"], "the status responder while the engine is stopped, starting or held (code engine_<state>)", True),
     ("504", ["upstream_timeout", "timeout"], "a backend that sent no first byte in time; a Laya call past its deadline", False),
     ("529", ["overloaded_error"], "a decision request the runtime could not take", False),

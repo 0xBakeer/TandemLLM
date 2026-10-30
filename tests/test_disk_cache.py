@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 
 for _k in ("NORM", "GDN", "HEAD", "ATTN", "GDNBLOCK", "GDNTREE", "GDNPRE"):
     os.environ.setdefault(f"QWEN38_FUSED_{_k}", "0")
@@ -39,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from engine import cache, disk_cache  # noqa: E402
+from disk_tier_util import waiting  # noqa: E402
 from test_cache import DEV, fresh, tokens  # noqa: E402
 from test_resident import same_state  # noqa: E402
 
@@ -84,8 +86,10 @@ def tier(d, events=None, **kw):
     kw.setdefault("head_anchors", 2)
     kw.setdefault("min_tokens", CH)
     on_event = (lambda k, det: events.append((k, det))) if events is not None else None
-    return disk_cache.DiskTier(d, chunk=CH, fingerprint=kw.pop("fp", "test"), settings=settings,
-                               on_event=on_event, **kw).open()
+    wait = kw.pop("wait", True)
+    t = disk_cache.DiskTier(d, chunk=CH, fingerprint=kw.pop("fp", "test"), settings=settings,
+                            on_event=on_event, **kw).open()
+    return waiting(t) if wait else t
 
 
 def run(eng, ids, t=None, drafter=None, res=None, **kw):
@@ -681,6 +685,29 @@ def test_the_staging_buffer_is_two_anchor_and_two_chunk_slots():
         assert t.staging_bytes <= 2 * disk_cache.align(anchor) + 2 * rows
         assert t.staging_pending() == 0 and len(t.buf_anchor) == 2 and len(t.buf_chunk) == 2
         t.close()
+
+
+def test_a_capture_with_both_slots_taken_drops_or_waits():
+    """The server's tier never waits for a slot: with both anchor slots taken the anchor is
+    dropped. The tests' tier (disk_tier_util.waiting) takes the slot the writer gives back."""
+    x, y = tokens(120, seed=34), tokens(120, seed=35)
+    with tempfile.TemporaryDirectory() as d:
+        for wait in (False, True):
+            t = tier(os.path.join(d, str(wait)), settings={"admit_after": 1}, wait=wait)
+            run(fresh(), x, t, Pos())                         # the slots exist
+            held = [t._take_anchor_slot(), t._take_anchor_slot()]
+            # the writer gives them back 0.3 s on; to the server's tier, only after the prefill
+            back = threading.Timer(0.3, lambda: [t._give_anchor_slot(i) for i in held])
+            if wait:
+                back.start()
+            run(fresh(), y, t, Pos())
+            if wait:
+                back.join()
+            else:
+                back.run()
+            dropped = t.report()["dropped"].get("staging", 0)
+            assert (dropped == 0) if wait else (dropped > 0), (wait, dropped)
+            t.close()
 
 
 def test_a_job_over_half_the_budget_is_not_admitted_and_the_estimate_is_per_kind():

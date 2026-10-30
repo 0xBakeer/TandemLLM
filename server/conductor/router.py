@@ -55,7 +55,7 @@ from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
 from server.conductor.classify import ASKING, PARENT, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
-from engine.settings import SETTINGS as _S
+from server.knobs import SETTINGS as _S
 
 #: FX5: Open WebUI's live working directory at the end of `run_command`'s description
 #: (open_webui/utils/tools.py), and what the turn's note says instead (`Router._client_cwd`)
@@ -282,6 +282,16 @@ def _qwen_prompt(router: dict, question: str | None, qid: str, about: str | None
     return f"{question} Answer with the id of the one option that fits best.\n\nOptions:\n{listing}"
 
 
+def _tool_line(t: dict) -> str:
+    """SRV-615: an offered tool for the keep-out question: its name and its description's first
+    sentence."""
+    fn = t.get("function") if isinstance(t.get("function"), dict) else t
+    name = str(fn.get("name") or "?")
+    desc = str(fn.get("description") or "").strip()
+    first = re.split(r"(?<=[.!?])\s", desc, maxsplit=1)[0][:160] if desc else ""
+    return f"{name} ({first})" if first else name
+
+
 def _about(cls: str, classes: dict) -> str:
     """The routed class as the package prompt names it: `id: label, description`."""
     c = classes.get(cls) or {}
@@ -435,10 +445,16 @@ class Plan:
         at = inject.insertion_point(ids, im_end)
         notes, adds = [], []
         marks = _marks(tok)
-        if at is None:
-            if sess.notes or self.block is not None or self.extras:
-                self.row["extra"].setdefault("errors", []).append("no_insertion_point")
-        else:
+        planned = bool(sess.notes or self.block is not None or self.extras)
+        if not modelfit.FIT["notes"]:
+            # SRV-703: the model's fit says its prompt holds no note (Flint's template ends no
+            # message with a token): nothing goes in, and the row says why instead of an error
+            if planned:
+                self.row["extra"].setdefault("notes", []).append("notes_off:model")
+            at = None
+        elif at is None and planned:
+            self.row["extra"].setdefault("errors", []).append("no_insertion_point")
+        if at is not None:
             with sess.lock:
                 live, hashes = self._live(ids, at, marks=marks, im_end=im_end)
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
@@ -1348,6 +1364,10 @@ class Router:
         libsearch.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row, dry)
         # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
         try:
+            if not modelfit.FIT["notes"]:
+                # SRV-703: the model's prompt holds no note, the off note neither
+                row["extra"]["memory"] = {"mode": "off", "why": "model_notes"}
+                raise _Skip
             if not modelfit.FIT["memory"]:
                 if schema.profile_memory(prof) != "off" and plan.res.mode != "raw" and \
                         getattr(plan, "memory_opt", None) != "off":
@@ -1598,6 +1618,8 @@ class Router:
                    or p in core or p in stand_in]
         cands = [p for p in cands if p not in general]
         if dec["packages"] != "off":
+            general = [g for g in general if g in pinned or not self._kept_out(
+                plan, body, router, roles, packages, sh, sess, cls, g, row)]
             for g in general:
                 text, err = self.library.text(packages, g)
                 if text is None:
@@ -1648,6 +1670,9 @@ class Router:
                     else:
                         sess.package_pick.pop(("class", cls), None)
             row["extra"]["package_choice"] = {"candidates": cands, "chosen": chosen, "how": how}
+            if chosen and self._kept_out(plan, body, router, roles, packages, sh, sess, cls,
+                                         chosen, row):
+                chosen = None
             if chosen:
                 text, err = self.library.text(packages, chosen)
                 if text is None:
@@ -1659,6 +1684,9 @@ class Router:
             for name in pinned:
                 if name in have or name in sh.loaded_skills:
                     continue
+                if self._deliverable_tools(plan, body, packages, name) is not None:
+                    row["extra"].setdefault("package_choice", {}).setdefault(
+                        "kept_out_skipped", []).append({"name": name, "why": "pinned"})
                 text, err = self.library.text(packages, name)
                 if text is None:
                     row["extra"].setdefault("notes", []).append(f"{err}:{name}")
@@ -1696,6 +1724,92 @@ class Router:
         plan.block = {"key": key, "text": "\n\n".join(p["text"] for _, p in on),
                       "parts": [it["part"] for it in items], "shas": [it["sha"] for it in items],
                       "kinds": {k for k, _ in on}, "reason": reason, "items": items}
+
+    def _deliverable_tools(self, plan, body, packages, name) -> tuple | None:
+        """SRV-615: (the package's deliverable, the offered tools whose declaration makes it)
+        when the package has a `deliverable` and the request offers client tools; else None.
+        The tools come from their declarations (signals.tool_effects), never from words."""
+        if TOOL_FIT == "off" or not plan.active or not signals.offers_tools(body or {}):
+            return None
+        want = packages_mod.Library.deliverable(packages, name)
+        if want is None:
+            return None
+        # a post is sent to a feed: the declarations read `post`, `publish` and `share` as `send`
+        kinds = {"post": ("send",)}.get(want, (want,))
+        effects = signals.tool_effects(body)
+        return want, sorted(n for n, e in effects.items() if set(kinds) & set(e))
+
+    def _kept_out(self, plan, body, router, roles, packages, sh, sess, cls, name, row) -> bool:
+        """SRV-615: True when the package `name`, about to go in, stays out because an offered
+        tool delivers its result (a write-message draft where send_email is offered: TC-03 of
+        tool-eval-bench, 2026-10-18, the model wrote a message to copy and called no tool).
+        Only a package with a `deliverable` on a request that offers client tools is asked
+        about: a client that forces a function decided already; otherwise, when an offered tool's
+        declaration makes the deliverable, one cascade question, the tool or the text itself,
+        decides (with no answer the package stays out, `how: schema`); without such a tool the
+        package goes in and nothing is asked (Open WebUI's search tools cost no question). A
+        follow-up of the same user message (the tool turns) keeps the first decision. The
+        router's `tool_fit.deliverable`: `on` acts, `shadow` journals, `off` asks nothing."""
+        fit = schema.tool_fit(router)
+        mode = fit.get("deliverable", "on")
+        if mode == "off":
+            return False
+        got = self._deliverable_tools(plan, body, packages, name)
+        if got is None:
+            return False
+        want, tools = got
+        key = ("kept", cls, sh.user_hash, name)
+        rec = sess.package_pick.get(key)
+        if rec is None:
+            rec = self._keep_out_question(body, router, roles, sh, want, tools, row)
+            sess.package_pick[key] = rec
+        else:
+            rec = dict(rec, held=True)
+        if not rec.get("out"):
+            if rec.get("how") not in (None, "skipped"):
+                row["extra"].setdefault("package_choice", {}).setdefault(
+                    "kept_in", []).append({"name": name, **{k: v for k, v in rec.items()
+                                                              if k != "out"}})
+            return False
+        entry = {"name": name, "why": "tool_delivers", "deliverable": want,
+                 **{k: v for k, v in rec.items() if k != "out"}}
+        if mode == "shadow":
+            sh_tools = dict((row.get("shadow") or {}).get("tools") or {})
+            sh_tools.setdefault("kept_out", []).append(entry)
+            row["shadow"] = dict(row.get("shadow") or {}, tools=sh_tools)
+            return False
+        row["extra"].setdefault("package_choice", {}).setdefault("kept_out", []).append(entry)
+        return True
+
+    def _keep_out_question(self, body, router, roles, sh, want, tools, row) -> dict:
+        """SRV-615: the decision for one deliverable package: {out, how, tools, p}."""
+        names = [t.get("function", t).get("name") for t in body.get("tools") or ()
+                 if isinstance(t, dict) and isinstance(t.get("function", t), dict)]
+        choice = body.get("tool_choice")
+        if choice == "required" or isinstance(choice, dict):
+            # the client forces a function: it decided already
+            return {"out": True, "how": "tool_choice", "tools": tools or names[:8], "p": None}
+        if not tools:
+            # no offered tool makes the deliverable: nothing to ask, the package goes in
+            return {"out": False, "how": "skipped", "tools": [], "p": None}
+        text = sh.user_text or ""
+        if not text.strip():
+            return {"out": True, "how": "schema", "tools": tools, "p": None}
+        fit = schema.tool_fit(router)
+        listing = "; ".join(_tool_line(t) for t in (body.get("tools") or ())[:12]
+                            if isinstance(t, dict)) or "none"
+        question = fit["deliverable_question"].replace("{tools}", listing)
+        ans, stages = self.cascade(text, dict(fit["deliverable_options"]), router, roles,
+                                   question=question,
+                                   accept=float(fit["deliverable_accept"]),
+                                   qid="deliverable")
+        row["extra"].setdefault("deliverable_stages", []).append(
+            {"deliverable": want, "stages": stages})
+        if ans is not None:
+            return {"out": ans.label == "tool", "how": ans.stage, "tools": tools,
+                    "p": round(float(ans.confidence), 4)}
+        # no answer at the bar: the tool whose declaration makes the deliverable decides
+        return {"out": True, "how": "schema", "tools": tools, "p": None}
 
     def fits(self, plan, packages: dict, name: str) -> bool:
         """SRV-243: the request's tools can carry out the package's steps (always with the

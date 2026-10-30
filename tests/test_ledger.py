@@ -268,7 +268,7 @@ def test_start_sh_passes_the_ledger_and_serve_env_names_it():
 
 
 _DRAIN_CHILD = r"""
-import os, sys, time, threading
+import os, signal, sys, time, threading
 sys.path.insert(0, os.path.join({root!r}, "tests"))
 import test_app_loop as t
 from http.server import ThreadingHTTPServer
@@ -289,7 +289,17 @@ app.STATE["ledger"] = led.open()
 for i in range(20):
     led.submit(dict(usage.RequestRecord("r%d" % i, "chat", False).row(), request_id="r%d" % i))
 httpd = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-print(httpd.server_address[1], flush=True)
+
+
+def ready():
+    # OPS-231: the port goes out once the drain's handler is installed; printed before
+    # serve_until_drained, a SIGTERM sent at once under load met the default handler and killed the child
+    while signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, None):
+        time.sleep(0.01)
+    print(httpd.server_address[1], flush=True)
+
+
+threading.Thread(target=ready, daemon=True).start()
 app.serve_until_drained(httpd)
 """
 

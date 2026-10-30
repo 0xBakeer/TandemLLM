@@ -67,6 +67,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import select
 import shutil
 import socket
 import secrets
@@ -224,12 +225,29 @@ class Engine:
         return s, head.split(b"\r\n\r\n", 1)[1]
 
 
+def _proc_starttime(pid: int) -> int | None:
+    """Field 22 of /proc/<pid>/stat (jiffies since boot): the cheap fingerprint that the pid
+    still names the process we read it for (it changes on every pid recycle)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return int(fh.read().rpartition(b")")[2].split()[19])   # field 22, after comm
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+FRAME_CAP = 64 << 20
+
+
 def demux(sock: socket.socket, first: bytes, on_data) -> None:
     """A non-TTY attach stream: 8-byte frames [stream, 0, 0, 0, size(4, big-endian)]."""
     buf = first
     while True:
         while len(buf) >= 8:
             stream, size = buf[0], struct.unpack(">I", buf[4:8])[0]
+            # a corrupt or hostile stream can announce a ~4GB frame and then drip bytes:
+            # one frame over 64 MiB is junk, drop the connection rather than buffer it
+            if size > FRAME_CAP:
+                raise OSError(f"an exec frame claims {size:,} bytes (over the 64 MiB cap)")
             if len(buf) < 8 + size:
                 break
             on_data(stream, buf[8:8 + size])
@@ -241,6 +259,87 @@ def demux(sock: socket.socket, first: bytes, on_data) -> None:
         if not d:
             return
         buf += d
+
+
+class ClientGone(Exception):
+    """The client a reader watches closed its connection."""
+
+
+class ExecReader:
+    """A non-TTY attach stream's stdout read as it arrives (#86): `read(wait)` gives the next
+    stdout bytes, b"" once the exec's stream ended (`ended`), and raises TimeoutError when nothing
+    came within `wait` seconds (None: no limit). With `watch` (the client's socket, its request
+    already read) it raises ClientGone when that socket reaches its end while it waits, so a
+    reader never outlives the client it serves. stderr frames are dropped; the buffer holds at
+    most one frame (FRAME_CAP)."""
+
+    def __init__(self, sock: socket.socket, first: bytes = b"", watch: socket.socket | None = None):
+        self.sock, self.buf, self.ended = sock, bytearray(first), False
+        self.watch = watch
+        self.poll = select.poll()
+        self.poll.register(sock, select.POLLIN)
+        if watch is not None:
+            self.poll.register(watch, select.POLLIN)
+
+    def _frame(self) -> bytes | None:
+        while len(self.buf) >= 8:
+            stream, size = self.buf[0], int.from_bytes(self.buf[4:8], "big")
+            if size > FRAME_CAP:
+                raise OSError(f"an exec frame claims {size:,} bytes (over the 64 MiB cap)")
+            if len(self.buf) < 8 + size:
+                return None
+            data = bytes(self.buf[8:8 + size])
+            del self.buf[:8 + size]
+            if stream == 1 and data:
+                return data
+        return None
+
+    def unwatch(self) -> None:
+        """Stop watching the client's socket: the answer is complete, and a client that leaves
+        now changes nothing."""
+        if self.watch is not None:
+            self.poll.unregister(self.watch)
+            self.watch = None
+
+    def _client_gone(self) -> bool:
+        try:
+            peek = self.watch.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        if peek:                         # a pipelined request: nothing more to learn here
+            self.poll.unregister(self.watch)
+            self.watch = None
+            return False
+        return True
+
+    def read(self, wait: float | None = None) -> bytes:
+        deadline = None if wait is None else time.monotonic() + wait
+        while True:
+            data = self._frame()
+            if data is not None:
+                return data
+            if self.ended:
+                return b""
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                raise TimeoutError("the exec sent nothing in time")
+            events = self.poll.poll(None if left is None else max(1, int(left * 1000)))
+            for fd, ev in events:
+                if self.watch is not None and fd == self.watch.fileno():
+                    if self._client_gone():
+                        raise ClientGone()
+                elif fd == self.sock.fileno():
+                    try:
+                        d = self.sock.recv(65536)
+                    except OSError:
+                        d = b""
+                    if d:
+                        self.buf += d
+                    else:
+                        self.ended = True
+                        self.poll.unregister(self.sock)
 
 
 class Box:
@@ -305,7 +404,10 @@ class Sandboxes:
 
     # ------------------------------------------------------------------ availability
     def available(self) -> bool:
-        """The image exists and the engine answers (cached for 60 s)."""
+        """The image exists and the engine answers (cached for 60 s). A check that gets no answer
+        (the Docker socket busy past 5 s, a reset) keeps the last answer: the sandbox's tools are
+        the prompt's head, and a flap would make the next request read the whole chat again
+        (SRV-663); a call while it is really gone fails as a call."""
         if self._avail is not None and self.clock() - self._avail[0] < 60:
             return self._avail[1]
         try:
@@ -313,6 +415,9 @@ class Sandboxes:
                                      f"/json", timeout=5)
             ok = st == 200
         except OSError:
+            if self._avail is not None:
+                self._avail = (self.clock(), self._avail[1])
+                return self._avail[1]
             ok = False
         self._avail = (self.clock(), ok)
         return ok
@@ -712,16 +817,20 @@ class Sandboxes:
         """Run `cmd` to its end; (exit code, timed out). Output goes to `on_output(text)`."""
         cid = container_or_cid
         b = self.box(cid)
-        b.busy += 1
+        with b.lock:                     # run threads vs reader threads: keep the count exact
+            b.busy += 1
         b.last_used = self.clock()
         try:
             exec_id, sock, first = self.open_exec(cid, ["setsid", "--wait", *cmd])
             done = threading.Event()
 
             def pump():
-                demux(sock, first, lambda s, d: on_output and on_output(
-                    d.decode("utf-8", "replace")))
-                done.set()
+                try:
+                    demux(sock, first, lambda s, d: on_output and on_output(
+                        d.decode("utf-8", "replace")))
+                finally:
+                    # a demux that drops the stream (frame cap) still ends the run
+                    done.set()
             threading.Thread(target=pump, daemon=True).start()
             t0, timed_out = time.monotonic(), False
             while not done.wait(0.2):
@@ -741,17 +850,26 @@ class Sandboxes:
                 time.sleep(0.1)
             return -1, timed_out
         finally:
-            b.busy -= 1
+            with b.lock:
+                b.busy -= 1
             b.last_used = self.clock()
 
     def _kill_exec(self, exec_id: str) -> None:
         """The exec's process group (setsid made it a leader): TERM, then KILL. Without user
-        namespaces its pid is a pid of this host, owned by chatd's user."""
-        _, _, pid = self.exit_code(exec_id)
-        if not pid:
+        namespaces its pid is a pid of this host, owned by chatd's user. Between reading the
+        exec's pid and killpg'ing it, the exec can exit and the pid be recycled into an
+        unrelated host process: /proc/<pid>'s starttime is pinned while the exec still runs
+        and re-checked before each signal, so a recycled pid is left alone."""
+        running, _, pid = self.exit_code(exec_id)
+        if not running or not pid:
             return
+        born = _proc_starttime(pid)
+        if born is None:
+            return                       # the exec already exited; nothing to signal
         import signal
         for sig in (signal.SIGTERM, signal.SIGKILL):
+            if _proc_starttime(pid) != born:
+                return                   # the pid is someone else's process now
             try:
                 os.killpg(pid, sig)
             except (ProcessLookupError, PermissionError):

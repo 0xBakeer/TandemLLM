@@ -45,9 +45,15 @@ import os
 import threading
 import time
 
-from engine import shadow as eng_shadow
+try:
+    from engine import shadow as eng_shadow
+except ModuleNotFoundError as exc:      # #108: the standalone proxy has no engine and runs no shadow reader
+    if exc.name not in ("engine", "engine.shadow", "torch"):
+        raise
+    eng_shadow = None
 
-GRID = eng_shadow.GRID
+#: the reader's anchor grid (engine/shadow.py GRID; 512 where the engine is not installed)
+GRID = eng_shadow.GRID if eng_shadow is not None else 512
 DISK_TTL_S = 48 * 3600.0
 #: the router question is asked on turns whose prompt has at least this many tokens
 ROUTER_MIN_TOKENS = 8192
@@ -68,7 +74,7 @@ JOURNAL = "shadow.jsonl"
 # the model is unloaded, which drops the pool; the next use loads it again (~13 s, beside).
 # QWEN38_SHADOW_POOL_SLACK_GIB (engine/settings.py), read at each burst
 def pool_slack_gib() -> float:
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     return float(_S.get("SHADOW_POOL_SLACK_GIB") or 2.0)
 JOURNAL_KEEP = 5000
 MODES = ("off", "on")
@@ -825,7 +831,7 @@ class ThoughtSlot:
 
 # ---------------------------------------------------------------------- the server's wiring
 def configured() -> str:
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     return (_S.get("SHADOW_MODEL") or "").strip()
 
 
@@ -833,7 +839,7 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
     """The shadow reader for this server, or None when `QWEN38_SHADOW_MODEL` is empty. It shares
     the narrator's slot when both name the same model (one copy of the weights); else it has a
     slot of its own (role `shadow` in the residency planner). Nothing loads here."""
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     name = configured()
     if not name:
         return None
@@ -882,7 +888,7 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
 # the shadow's claim when the stored residency document has none (it predates SR1): the 0.8B's
 # weights (1.6 GiB), its workspace, and QWEN38_SHADOW_GB of session states
 def claim_gib() -> float:
-    from engine.settings import SETTINGS as _S
+    from server.knobs import SETTINGS as _S
     from engine.generative.qwen35 import NAMES
     meta = NAMES.get(configured()) or {}
     return round(float(meta.get("claim_gib") or 2.5) + float(_S.get("SHADOW_GB") or 4.0), 2)

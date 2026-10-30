@@ -7,11 +7,11 @@ The dashboard's `#/setup` page walks through an install in eight steps, from pic
 A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.12.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh
 bash install.sh --setup --yes
 ```
 
-`install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB), writes the config with no weights, and starts setup mode. Then open the Setup Guide in a browser and pick a model:
+`install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB) and the two Wikipedia shards of the lookup corpus (1.2 GB), writes the config with no weights, and starts setup mode. The corpus itself needs the model's tokenizer, so the install job builds it after the model's download ([speculative-decoding.md](speculative-decoding.md#the-corpus-of-each-tokenizer)). Then open the Setup Guide in a browser and pick a model:
 
 - On the box itself: `http://127.0.0.1:8000/dashboard/#/setup`.
 - From another computer: setup mode listens on 127.0.0.1 only, so open an SSH tunnel first, `ssh -L 8000:127.0.0.1:8000 <user>@<box>`, and then open `http://127.0.0.1:8000/dashboard/#/setup` on that computer.
@@ -19,7 +19,7 @@ bash install.sh --setup --yes
 
 The installer prints the addresses when it finishes, and the dashboard opens on the Setup Guide by itself while the box is in setup mode.
 
-On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no model of Qwen's, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
+On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no served model, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
 
 The installer writes the marker `run/setup-pending` (with the host to bind). While it exists, a plain `ops/start.sh` (the reboot's, the watchdog's) starts setup mode again. The install job removes it before it starts the configured engine, and puts it back if that engine does not come up. Setup mode does not start chatd; the configured engine's start does, so the Chat tab works once the guide is done.
 
@@ -46,7 +46,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.12.0`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.12.0'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.15.0`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.15.0'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 
@@ -57,6 +57,8 @@ Each model the guide offers is a folder under `models/` with a `model.yaml` ([mo
 - The measured table is the 0.6.2 run itself; `models/qwen3.8-27b/measurements/0.6.2-summary.json` is its summary file, and a test holds the two equal. The NVFP4 row is from build 0.4.8 and is marked not comparable.
 
 Memory is in GiB (2^30 bytes) and disk in GB (10^9 bytes) everywhere in the registry and the API. `python -m server.setup.registry --check` checks a file.
+
+The Model step also shows the weight cards' speed rows of the current build (`parallel` in model.yaml, SPD-245): decode alone, the first token of a cold 2k, 8k and 32k prompt, and 1, 2, 4 and 8 requests at once, each row with its build, commit, date and setup. Each weight card, our own and a community pack's, shows its row's rate alone and with the most requests at once. [measurement.md](measurement.md#the-weight-cards-speed-rows) says how a row is measured.
 
 Every weight profile names who made it (`made_by`): TandemLLM's own packs (0xBakeer), the vendor's release (NVIDIA, LiquidAI), or a community author with a GitHub login (turboderp for Qwen3.8-Flash-Next). Each weight card shows the pack's Hugging Face repository as owner/name, linked, and its maker.
 
@@ -138,6 +140,20 @@ On a new box the fetch step downloads the 27B's K3 drafters, K4 draft head, BF16
 ## Removing a model
 
 The weights step lists the weights on the box (`GET /v1/setup/weights`): each profile's folder with its size, the running one marked, a folder two profiles share as one row; the drafters, the draft head and the base checkpoint, which the models share, are listed apart and never removed here (SRV-560, VIS-215). Remove asks first, with the GB it frees and the line that downloads the weights again, then `POST /v1/setup/remove {profiles, confirm: true}` deletes the folder. It refuses the running profile (switch first, or tick "Remove ... after the switch" in the review step: `remove_after` of the apply, done once the new setup answers), a folder a kept profile shares, and any folder that is not a real folder under the home folder or the Hugging Face cache, holds the installation, or holds what something else reads; in the Hugging Face cache the repository's whole folder goes, only when nothing else reads from it. Each removal appends a line to `run/weights-removed.txt`: the time, the profile, its repository at its revision, the folder, the GB and `bash ops/use-profile.sh <profile> --fetch-only`. A download that does not fit is refused before it starts, with the GB too few and the weights that could be removed.
+
+## The answer limit
+
+A request that sends no `max_tokens` may write up to `DEFAULT_MAX_TOKENS` tokens. A request's own `max_tokens` always wins, clamped to what fits in the window. `ops/serve.env` sets 32,768. A weight profile sets its own value when the model's card names another limit, and the registry field `default_max_tokens` (Default answer length, in the Methods and advanced step) has the same number as its default. Today only Ornith does: its card evaluates with up to 131,072 new tokens, and an answer at effort `xhigh` can run past 32,768. Qwen3.8's cards name 131,072 for the final answer alone, with the reasoning counted apart in a 1M window; here reasoning and answer share `max_tokens`, so the Qwen profiles keep 32,768. `ops/use-profile.sh` and the Setup Guide both start Ornith at 131,072, and `/v1/models` shows the running value as `tandem.max_output`.
+
+To change it, set Default answer length in the Methods and advanced step and install. The guide writes the value into `run/setup.env`, which `ops/serve.env` reads after the profile. From a shell, put `DEFAULT_MAX_TOKENS=<tokens>` in `run/local.env` and restart. A box that the guide set up for Ornith before 0.14.2 keeps the 32,768 it wrote then, until you change the field and install again.
+
+## Reasoning effort
+
+A fresh install thinks at effort `medium` when a request says nothing about thinking: `REASONING_EFFORT=medium` in `ops/serve.env`, for every model. Each level caps the thinking: `low` at 1,024 tokens, `medium` at 8,192, `xhigh` not at all, and `none` turns thinking off. A client's own effort word, budget or thinking switch wins ([server.md](server.md#thinking-budgets-from-the-client) has every shape). Under the conductor, the `tools` profile that tool clients get uses the server's level, and a profile that decides the effort by turn class (`chat`) sets its own level each turn.
+
+To change it, set Thinking effort in the Methods and advanced step and install, or put `REASONING_EFFORT=xhigh` in `run/local.env` and restart. `none` (thinking off) is the shell's value only.
+
+The published numbers name their effort. Speed rows run greedy with thinking off, since thinking changes what the model writes and so what a row measures. Quality rows against BF16 (KL, top-1, perplexity) read fixed text and have no effort. Each tool-eval-bench row names its effort and the server's default in its section ([tool-eval-bench.md](tool-eval-bench.md), [flint.md](flint.md#tool-calls)). The 27B and Ornith tool-eval-bench runs used `xhigh` as the server's default, and the Flint runs the shipped `medium`. To match a row on a fresh install, set the effort the row names.
 
 ## Benchmarks and the overlay
 

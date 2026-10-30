@@ -7,14 +7,16 @@
 //
 //   parts  = the OS + the weights + the registry's memory parts + the side slots + every tool that
 //            is on (the drafters at the profile's drafters_gib) + the KV
-//   KV     = pool on: (min(window, fill) + (slots - 1) x min(side, fill)) x bytes a token;
-//            pool off: every window at load; worst: every slot at its full window
+//   KV     = pool on: lanes x min(window, fill) x bytes a token (one window for every lane, SRV-707);
+//            pool off: every window at load; worst: every lane at its full window
 //   fits   = total <= device - floor (rounded to 0.01); room = budget - every part but the KV
+//   lanes_full = min(lanes, floor(room / one lane at its full window)): the lanes that can all hold
+//            the full window at once (every lane with the pool off whenever it fits)
 // Every figure is GiB (2^30 bytes).
 
 import type { SetupEstimate, SetupEstimatePart, SetupModel, SetupProfile, SetupSelection, SetupValue } from '../api/types';
 import { packNoImage } from './community';
-import { ENGINE_MAX_SLOTS, fieldError } from './fields';
+import { fieldError, slotsMax } from './fields';
 
 export const GIB = 2 ** 30;
 export const KV_TYPICAL_TOKENS = 32_768;
@@ -57,7 +59,7 @@ function onStep(name: string, v: number, step: number): number {
 }
 
 /** The selection complete and checked (estimate.py `check`); SelectionError otherwise. */
-export function checkSelection(m: SetupModel, body: unknown): SetupSelection & { side_window: number; device: string } {
+export function checkSelection(m: SetupModel, body: unknown): SetupSelection & { device: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SelectionError(422, 'invalid_selection', 'the selection must be a JSON object');
   const b = body as Record<string, unknown>;
   const extra = Object.keys(b).filter((k) => !KEYS.includes(k)).sort();
@@ -88,13 +90,14 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
   const p = m.parallelism;
   // the card's slots.max is how far it was measured; the engine's own limit is the cap
   const rawSlots = b.slots ?? p.slots.default;
-  if (typeof rawSlots === 'number' && Number.isInteger(rawSlots) && rawSlots > ENGINE_MAX_SLOTS) throw new SelectionError(422, 'out_of_range', `slots: ${rawSlots} is above ${ENGINE_MAX_SLOTS}, the most chats the engine verifies in one pass`);
-  const slots = intIn('slots', rawSlots, p.slots.min, ENGINE_MAX_SLOTS);
+  const top = slotsMax(m);
+  const why = p.slots.engine_max_reason ?? 'the most lanes the setup takes';
+  if (typeof rawSlots === 'number' && Number.isInteger(rawSlots) && rawSlots > top) throw new SelectionError(422, 'out_of_range', `slots: ${rawSlots} is above ${top}, ${why[0].toLowerCase() + why.slice(1)}`);
+  const slots = intIn('slots', rawSlots, p.slots.min, top);
   const window = onStep('window', intIn('window', b.window ?? p.window.default, p.window.min, p.window.max), p.window.step);
   const mw = (m.profiles.find((x) => x.id === pid) as SetupProfile).max_window;
   if (mw && window > mw) throw new SelectionError(422, 'out_of_range', `window: ${thousands(window)} is above ${pid}'s largest window, ${thousands(mw)}`);
-  // a side slot never holds more than slot 0 (server/app.py: min(side_max_len, max_len))
-  const side = Math.min(window, onStep('side_window', intIn('side_window', b.side_window ?? window, p.side_window.min, p.side_window.max), p.side_window.step));
+  // SRV-707: every lane has the window; an older page's `side_window` is read as nothing
   const pool = b.kv_pool ?? p.kv_pool.default;
   if (typeof pool !== 'boolean') throw new SelectionError(422, 'invalid_selection', 'kv_pool: true or false');
   const floor = b.floor_gb ?? p.floor_gb.default;
@@ -123,7 +126,7 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
   }
   const dev = b.device ?? m.devices[0].id;
   if (typeof dev !== 'string' || !m.devices.some((d) => d.id === dev)) throw new SelectionError(400, 'unknown_device', `no device preset '${dev}' for ${m.id}`);
-  return { model: m.id, profile: pid, components: comps, slots, window, side_window: side, kv_pool: pool, floor_gb: floor, methods: groups.methods, advanced: groups.advanced, device: dev };
+  return { model: m.id, profile: pid, components: comps, slots, window, kv_pool: pool, floor_gb: floor, methods: groups.methods, advanced: groups.advanced, device: dev };
 }
 
 /** Which bar category a part belongs to (the memory bar's colours and legend). */
@@ -140,16 +143,22 @@ export function categoryOf(m: SetupModel, id: string): PartCategory {
 
 const thousands = (n: number) => n.toLocaleString('en-US');
 
+/** The KV bytes a token: a component that is on and keeps the cache in fewer bytes says how many (Flint's e4m3
+ *  cache), else the model's (server/setup/estimate.py kv_bytes). */
+export function kvBytes(m: SetupModel, sel: SetupSelection): number {
+  for (const c of m.components) if (c.kv_bytes_per_token && sel.components?.[c.id]) return c.kv_bytes_per_token;
+  return m.parallelism.kv_bytes_per_token;
+}
+
 /** The estimate of a selection (checked first, as the server does). */
 export function estimate(m: SetupModel, selection: SetupSelection, availableGb: number | null = null): SetupEstimate {
   const sel = checkSelection(m, selection);
   const p = m.parallelism;
   const prof = profileOf(m, sel.profile);
   const dev = deviceOf(m, sel);
-  const kvb = p.kv_bytes_per_token;
+  const kvb = kvBytes(m, sel);
   const fill = p.typical_fill_tokens ?? KV_TYPICAL_TOKENS;
   const { slots, window } = sel;
-  const side = sel.side_window;
   const parts: SetupEstimatePart[] = [
     { id: 'os', label: 'The OS and other programs', gb: dev.reserved_gib, kind: 'fixed' },
     { id: 'weights', label: `Weights (${prof.label})`, gb: prof.weights_gib, kind: 'fixed' },
@@ -175,8 +184,8 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     }
     parts.push(part);
   }
-  const worstRows = window + (slots - 1) * side;
-  const typicalRows = Math.min(window, fill) + (slots - 1) * Math.min(side, fill);
+  const worstRows = slots * window;
+  const typicalRows = slots * Math.min(window, fill);
   const kvWorst = (worstRows * kvb) / GIB;
   const kv = ((sel.kv_pool ? typicalRows : worstRows) * kvb) / GIB;
   const fixed = parts.reduce((a, x) => a + x.gb, 0);
@@ -190,6 +199,9 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
   const mw = prof.max_window === undefined ? 0 : prof.max_window;
   if (mw === null) ctx = 0;
   else if (mw) ctx = Math.min(ctx, mw * slots);
+  const laneFull = (window * kvb) / GIB;
+  const unit = r2(laneFull);
+  const full = room <= 0 || mw === null ? 0 : unit <= 0 ? slots : Math.min(slots, Math.floor(r2(room) / unit));
   const notes: string[] = [];
   if (mw === null) notes.push(`${prof.label} does not fit ${dev.label} at any window: it is ${r2(Math.max(0, fixed - budget)).toFixed(2)} GiB over the budget before any context.`);
   if (!fits) {
@@ -198,11 +210,15 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     if (!sel.kv_pool) notes.push('Turn the shared KV pool on: without it every window takes its memory at load.');
     notes.push('Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.');
   } else if (!fitsWorst) {
-    notes.push(`With every slot at its full window the conversations would need ${r2(kvWorst - room).toFixed(2)} GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.`);
+    notes.push(
+      `${full} of ${slots} lanes can hold the full ${thousands(window)}-token window at once (${unit.toFixed(2)} GiB each); every lane at it would need ${r2(kvWorst - room).toFixed(2)} GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.`,
+    );
+  } else if (slots > 1) {
+    notes.push(`All ${slots} lanes can hold the full ${thousands(window)}-token window at once (${unit.toFixed(2)} GiB each).`);
   }
   if (room > 0) {
     const per = slots ? Math.min(window, Math.floor(ctx / slots)) : 0;
-    notes.push(`About ${thousands(ctx)} tokens of conversation fit in all, ${thousands(per)} a slot when all ${slots} are full (the window is ${thousands(window)}).`);
+    notes.push(`About ${thousands(ctx)} tokens of conversation fit in all, ${thousands(per)} a lane when all ${slots} are full (the window is ${thousands(window)}).`);
   }
   return {
     contract_version: '1.0',
@@ -219,6 +235,8 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     typical_fill_tokens: fill,
     kv_worst_gb: r2(kvWorst),
     room_gb: r2(room),
+    lane_full_gb: unit,
+    lanes_full: full,
     notes,
   };
 }

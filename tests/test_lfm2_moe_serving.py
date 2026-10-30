@@ -262,6 +262,55 @@ def test_a_joint_plain_step():
     _raises(lambda: (setattr(s0, "_plain_pending", True), s0.commit_tree([0, 1])), "keeps its one row")
 
 
+def test_graphs_ok_demands_the_probe_verdicts():
+    """A non-empty probe table is not a verdict: on a non-native CUDA device graphs need the
+    rotation probe, a passing gemv probe at every rate the model loads, and the MoE probe only
+    when the model has expert banks."""
+    import types as _t
+    from unittest import mock
+    import engine.models.lfm2_moe.serving as srv_mod
+    from tools.exl3_linear import EXL3Block
+
+    ada = _t.ModuleType("tools.exl3_ada")
+    ada._ROT_OK = None
+    ada._GEMV_OK = {}
+    moe = _t.ModuleType("tools.moe_ada")
+    moe._OK = None
+
+    def blk(kb):
+        return EXL3Block(torch.zeros(8, 8, 16 * kb, dtype=torch.int16), torch.ones(128), torch.ones(128))
+
+    def srv(kbs, banks=(), dev="cuda:0"):
+        s = Lfm2MoeServing.__new__(Lfm2MoeServing)
+        s._graphs = None
+        s.fn = _t.SimpleNamespace(device=torch.device(dev),
+                                  W={f"w{i}": blk(k) for i, k in enumerate(kbs)},
+                                  banks=dict.fromkeys(banks, object()))
+        return s
+
+    import tools as _tools
+    with mock.patch.dict("sys.modules", {"tools.exl3_ada": ada, "tools.moe_ada": moe}), \
+         mock.patch.object(_tools, "exl3_ada", ada, create=True), \
+         mock.patch.object(_tools, "moe_ada", moe, create=True), \
+         mock.patch.object(srv_mod, "_sm_supported", lambda d: False):
+        def go(kbs, gemv, rot, moe_ok, banks):
+            ada._GEMV_OK, ada._ROT_OK, moe._OK = dict(gemv), rot, moe_ok
+            return srv(kbs, banks)._graphs_ok
+        assert go((2,), {2: False}, True, True, (0,)) is False        # a failed gemv verdict
+        assert go((2, 3), {2: True, 3: False}, True, True, (0,)) is False
+        assert go((2, 3), {2: True}, True, True, (0,)) is False       # rate 3 never probed
+        assert go((2,), {2: True}, None, True, (0,)) is False         # rotation unprobed
+        assert go((2,), {2: True}, False, True, (0,)) is False        # rotation failed
+        assert go((2,), {2: True}, True, None, (0,)) is False         # MoE probe unprobed
+        assert go((2,), {2: True}, True, False, (0,)) is False        # MoE probe failed
+        assert go((2, 3), {2: True, 3: True}, True, True, (0,)) is True
+        assert go((2,), {2: True}, True, None, ()) is True            # no banks: no MoE ask
+    assert srv((2,), (), "cpu")._graphs_ok is False
+    s = srv((2,), (0,))
+    with mock.patch.object(srv_mod, "_sm_supported", lambda d: True):
+        assert s._graphs_ok is True                                  # native: no probe needed
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
@@ -273,3 +322,4 @@ if __name__ == "__main__":
             print(f"  {name:<44} FAIL {e}")
     print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
     sys.exit(1 if fails else 0)
+

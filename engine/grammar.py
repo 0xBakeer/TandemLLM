@@ -27,6 +27,7 @@ backreferences, lookaround or lazy quantifiers -- none has a DFA.
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from collections import OrderedDict
@@ -651,6 +652,10 @@ class Vocab:
 # grammars: 1,024 masks is 254 MB, and an evicted state costs one recomputation if it comes back.
 MASK_CACHE = 1024
 _MASKS: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+# A grammar's masks are keyed by a serial number of its own, never by `id()`: CPython gives a freed
+# object's id to the next one, and a new grammar keyed by a dead one's id read the dead one's masks
+# (a 97-token mask on a 99-token vocabulary in the tests, a wrong mask on a box)
+_SERIAL = itertools.count()
 
 
 class Grammar:
@@ -671,9 +676,15 @@ class Grammar:
         else:
             self.dfa, self.side = product_dfa(compile_regex(parts[0]), compile_regex(parts[1]))
         self._sides: dict[int, np.ndarray] = {}
+        self.serial = next(_SERIAL)
 
     def cached(self, state: int, device) -> bool:
-        return (id(self), state, str(device), "all") in _MASKS
+        return (self.serial, state, str(device), "all") in _MASKS
+
+    def forget(self) -> None:
+        """Drop this grammar's masks from the shared cache (it left the grammar cache)."""
+        for k in [k for k in _MASKS if k[0] == self.serial]:
+            del _MASKS[k]
 
     def open(self, state: int) -> bool:
         """SRV-619: both branches still alive here (the row decides)."""
@@ -701,7 +712,7 @@ class Grammar:
         variant = "all"
         if row is not None and self.open(state):
             variant = self.pick(state, int(row.argmax()))
-        key = (id(self), state, str(device), variant)
+        key = (self.serial, state, str(device), variant)
         m = _MASKS.get(key)
         if m is not None:
             _MASKS.move_to_end(key)
@@ -750,12 +761,12 @@ def grammar_for(pattern: str, vocab: Vocab, keep: int = 16,
     gk = pattern if parts is None else ("parts", pattern)
     g = _GRAMMARS.pop(gk, None)
     if g is None or g.vocab is not vocab:
+        if g is not None:
+            g.forget()                      # the same pattern on another vocabulary
         g = Grammar(pattern, vocab, parts)
     _GRAMMARS[gk] = g
     while len(_GRAMMARS) > keep:
-        old = _GRAMMARS.pop(next(iter(_GRAMMARS)))
-        for k in [k for k in _MASKS if k[0] == id(old)]:
-            del _MASKS[k]                   # before `id(old)` can name a new grammar
+        _GRAMMARS.pop(next(iter(_GRAMMARS))).forget()
     return g
 
 

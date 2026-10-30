@@ -221,7 +221,7 @@ The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha2
 
 An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bits a weight, and K is read from each tensor's own shape, so a pack that mixes K inside a layer is described as it is. `X.suh` and `X.svh` (fp16) scale and sign the input and output sides, which are rotated, and `X.mul1` is the codebook's multiplier. On the 3.05 pack the header audit counted 303,121 tensors: every routed expert at K 3, the dense projections and the head at K 5, except the sparse-attention indexer's projection at K 3 and the MTP layer's projections at K 3 to 5. By those headers a plain decode token reads about 4.23 GB in all at 1k of context, with the mixers as int8 (`PackIndex.decode_bytes`).
 
-`tools/fn_exl3_xcheck.py` holds our reading against exllamav3's own on the 3.05 pack. The trellis decode is equal bit for bit on 16 tensors (experts in layers 0, 11 and 47, GDN, attention, the indexer, a shared expert, a slice of the head). The dequantised weight agrees within 0.36 % of the largest weight, which is our BF16 rounding of the fp32 rotations. 4,096 n-gram rows are equal bit for bit.
+`tools/fn_exl3_xcheck.py` holds our reading against the converter's own on the 3.05 pack. The trellis decode is equal bit for bit on 16 tensors (experts in layers 0, 11 and 47, GDN, attention, the indexer, a shared expert, a slice of the head). The dequantised weight agrees within 0.36 % of the largest weight, which is our BF16 rounding of the fp32 rotations. 4,096 n-gram rows are equal bit for bit.
 
 ### The mixers as int8
 
@@ -256,5 +256,5 @@ Nobody has measured a pack's quality against the BF16 model yet. The BF16 releas
 | `QWEN38_FN_MIX` | `int8` (the default): int8 with an fp32 scale a group of 128 weights; `int8rows`: one scale a row; `fp16`: the pack's values |
 | `QWEN38_FN_TABLE`, `QWEN38_FN_TABLE_CACHE_GB` | the n-gram table's policy (`warm` or `cold`) and the cold row cache in GiB |
 | `QWEN38_FN_PREFILL_MM` | the prefill's weights for the mixers, router and small projections: `fp32` (the default) |
-| `tools/fn_exl3_xcheck.py` | our reading of a pack against exllamav3's |
+| `tools/fn_exl3_xcheck.py` | our reading of a pack against the converter's |
 | `tools/fn_mix_quality.py` | a mixer weight form against the pack's fp16 mixers |

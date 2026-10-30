@@ -80,6 +80,9 @@ DEFAULT_SETTINGS = {
 }
 # `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
 EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
+#: interruptions that are a stop of the harness's own, not an error: the call cap (SRV-665) and
+#: the run monitor's stall rule (SRV-677); the chat reads idle and Continue goes on
+RESUMABLE = ("limit", "stall")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
 TITLE_NEW = "New chat"
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -142,6 +145,7 @@ class Conv:
         self.sandbox_sent: tuple[float, dict | None] = (0.0, None)
         self.peek: tuple[float, dict | None] | None = None
         self.tok_ratio: float | None = None       # tokens per request character, learned
+        self.tok_counted = 0                      # the characters of the request it was learned on
         # chatd's estimate of the smallest request the engine refused for memory (runs.py): the
         # context guard compacts under it from then on (compaction.compact_at)
         self.memory_limit: int | None = None
@@ -150,13 +154,54 @@ class Conv:
         self.task_id: str | None = None
 
 
-class Slots:
-    """At most `n` runs talk to the engine at once (QSE_CHAT_MAX_RUNS, default 2)."""
+#: SRV-707: the runs chatd lets talk to the engine at once before it has read the engine's lanes
+#: (and with an engine that names none: another server, or ours unreachable): the shipped 8 lanes
+FALLBACK_RUNS = 8
 
-    def __init__(self, n: int):
-        self.n = max(1, n)
+
+def engine_lanes(facts: dict) -> int | None:
+    """SRV-707: the lanes our engine serves at once, from its facts (Engine.facts): `parallel.n`
+    of /health or of /v1/dashboard/system's `queue` (the slots built, slot 0 and its side slots);
+    1 for our engine without side slots; None from any other server or none at all."""
+    if not isinstance(facts, dict) or not facts:
+        return None
+    for src in ((facts.get("queue") or {}), (facts.get("engine") or {})):
+        par = src.get("parallel") if isinstance(src, dict) else None
+        if isinstance(par, dict):
+            try:
+                return max(1, int(par.get("n") or 1))
+            except (TypeError, ValueError):
+                return None
+    eng = facts.get("engine") or {}
+    return 1 if isinstance(eng, dict) and eng.get("max_len") else None
+
+
+class Slots:
+    """At most `n` runs talk to the engine at once. SRV-707: `n` follows the engine's lanes
+    (`follow`, `engine_lanes`; FALLBACK_RUNS until they are known) unless QSE_CHAT_MAX_RUNS fixes it
+    (`fixed`). Until SRV-707 it was a fixed 2 whatever the engine served: two chats ran and the
+    rest said "Waiting for a free run slot" with idle lanes on the engine."""
+
+    def __init__(self, n: int | None = None):
+        self.fixed = n is not None and n > 0
+        self.n = max(1, n) if self.fixed else FALLBACK_RUNS
+        self.source = "QSE_CHAT_MAX_RUNS" if self.fixed else "fallback"
         self.holders: set = set()
         self.cv = threading.Condition()
+
+    def follow(self, lanes: int | None) -> bool:
+        """The engine's lane count read anew; True when `n` changed. A fixed count stays."""
+        if self.fixed or lanes is None:
+            return False
+        with self.cv:
+            old, self.n, self.source = self.n, max(1, int(lanes)), "engine"
+            if self.n > old:
+                self.cv.notify_all()             # runs waiting for a run slot take the new ones
+        return self.n != old
+
+    def report(self) -> dict:
+        with self.cv:
+            return {"max": self.n, "source": self.source, "held": len(self.holders)}
 
     def acquire(self, run, timeout: float) -> bool:
         run = getattr(run, "slot_owner", run)          # a worker runs in its parent's slot
@@ -197,7 +242,7 @@ def device_label(ua: str | None) -> str | None:
 class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
               WebSearchMixin, VerifyMixin, TasksMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
-                 max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
+                 max_runs: int | None = None, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
                  sandboxes: Sandboxes | None = None):
         self.data_dir = data_dir
@@ -308,9 +353,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         self.emit(conv, {"type": "sandbox.changed", "sandbox": status})
 
     def library_available(self) -> bool:
+        """Whether the library's tools go into requests. A check that gets no answer (a busy
+        engine: the 3 s timeout, a reset) keeps the last answer (SRV-663): the tool list is the
+        prompt's head, and a flap dropped library_search and library_read from one request of a
+        196,472-token run on Ornith, which read it all again twice (2026-10-21 05:29, 05:42).
+        Only an answer of the engine's (any status) changes it."""
         if self._library is None or time.monotonic() - self._library[0] > 300:
             st, _ = self.engine.get_json("/v1/library", timeout=3.0)
-            self._library = (time.monotonic(), st == 200)
+            if st == 0 and self._library is not None:
+                self._library = (time.monotonic(), self._library[1])
+            else:
+                self._library = (time.monotonic(), st == 200)
         return self._library[1]
 
     def store_blob(self, cid: str | None, name: str, mime: str, data: bytes) -> dict:
@@ -448,6 +501,20 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 child is not None and child.phase == "permission") else "running"
         if branch and branch[-1]["role"] == "assistant" and branch[-1]["status"] in (
                 "error", "interrupted"):
+            # a run that stopped at its own step cap is no error: its Continue card goes on
+            # from there (live 2026-10-21, a 100-call run's header said "error")
+            last = conv.run if conv.run is not None and conv.run.message_id == branch[-1]["id"] \
+                else None
+            stats = branch[-1].get("stats") or {}
+            if isinstance(stats, str):                  # the rail's row: the column as stored
+                try:
+                    stats = json.loads(stats)
+                except ValueError:
+                    stats = {}
+            if branch[-1]["status"] == "interrupted" and (
+                    (stats or {}).get("interrupted") in RESUMABLE or
+                    getattr(last, "interrupt", None) in RESUMABLE):
+                return "idle"
             return "error"
         return "idle"
 
@@ -476,11 +543,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         with conv.lock:
             row = self._row(cid)
             metas = [dict(r) for r in self.store.all(
-                "WITH RECURSIVE p(id, parent_id, role, status, depth) AS ("
-                "SELECT id, parent_id, role, status, 0 FROM messages WHERE id = ? AND "
-                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, "
+                "WITH RECURSIVE p(id, parent_id, role, status, stats, depth) AS ("
+                "SELECT id, parent_id, role, status, stats, 0 FROM messages WHERE id = ? AND "
+                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, NULL, "
                 "p.depth + 1 FROM messages m JOIN p ON m.id = p.parent_id) "
-                "SELECT id, role, status FROM p ORDER BY depth DESC", (row["head_id"], cid))]
+                "SELECT id, role, status, stats FROM p ORDER BY depth DESC", (row["head_id"], cid))]
             if conv.live is not None and metas and metas[-1]["id"] == conv.live["id"]:
                 metas[-1]["status"] = conv.live["status"]
             last_user = next((m for m in reversed(metas) if m["role"] == "user"), None)
@@ -772,7 +839,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             row = self._row(cid)
             parent = body.get("parent_id") or row["head_id"]
             atts = self._attachments(cid, body.get("attachments") or [])
-            self._place(conv, row, atts)
+            self._place(conv, row, parent, atts)
             um = self._insert_message(cid, parent, "user", [{"type": "text", "text": text}],
                                       "done", client_msg_id=cmid, attachments=atts or None)
             self._title_from(conv, row, text)
@@ -837,6 +904,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             self.store.run("UPDATE conversations SET head_id = ? WHERE id = ?", (mid, conv.id))
         else:
             self.todos_onto(conv.id, user_mid)
+            self.plan_onto(conv.id, user_mid)
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}
@@ -850,6 +918,12 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.agents = bool(settings.get("agents"))
         if continue_mid and conv.live["parts"] and (parent is not None or run.agents):
             self._cut_calls(conv, run)
+        kept = getattr(conv, "stall_watch", None)
+        if continue_mid and kept is not None and kept[0] == mid:
+            # SRV-677: Continue goes on with the answer's stall rule (its pace, its streak); a
+            # stop it made is spent, its level stays until a check makes progress
+            run.stall, run.stall.stop = kept[1], False
+        conv.stall_watch = (mid, run.stall)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
             run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])
@@ -947,7 +1021,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         r = __import__("chatd.compaction", fromlist=["learn"]).learn(prompt_tokens, request_chars,
                                                                      image_tokens)
         if r is not None:
-            conv.tok_ratio = r
+            conv.tok_ratio, conv.tok_counted = r, request_chars
 
     def finish_guard(self, run: Run, outcome: str, exc: Exception) -> None:
         """The last line for a finish_run that broke halfway (runs.py `_main`). Forces the
@@ -1428,7 +1502,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
         step_from = (cp[2][0], cp[2][1]) if cp and cp[2] else None
         files += ctx_mod.file_tokens(branch, cp[1] if cp else 0, step_from, cp[3] if cp else None,
-                                     worker=conv.parent_id is not None)
+                                     int(info.get("max_len") or 0))
         # the run in flight counts from its own calls, whoever asks (a snapshot too)
         on = run or (conv.run if conv.run is not None and conv.run.active else None)
         tokens = _branch_tokens(branch, on, step_from)
@@ -1546,6 +1620,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             f = self.engine.facts()
             self._facts = (time.monotonic(), f)
             self._caps = (time.monotonic(), self._build_caps(f))
+            if self.slots.follow(engine_lanes(f)):      # SRV-707: as many runs as engine lanes
+                self.log(f"[chatd] run slots follow the engine: {self.slots.n}")
         finally:
             self._refreshing = False
 
@@ -1601,6 +1677,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "_effort_budgets": card.get("effort_budgets") or {},
                 # the word a provider takes to turn thinking off (DeepSeek: reasoning_effort none)
                 "_effort_off": c.get("effort_off"),
+                # the images one request may send (our engine's --max-images, SRV-676)
+                "_max_images": card.get("max_images"),
             })
         first = out[0] if out else None
         levels = (first or {}).get("capabilities", {}).get("effort_levels") or []
@@ -1629,7 +1707,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "tools": (m.get("capabilities") or {}).get("tools", True),
                 "effort_budgets": m.get("_effort_budgets") or {},
                 "effort_levels": (m.get("capabilities") or {}).get("effort_levels") or [],
-                "effort_off": m.get("_effort_off")}
+                "effort_off": m.get("_effort_off"), "max_images": m.get("_max_images")}
 
     def takes_slot(self, run) -> bool:
         """Whether the run's next call needs one of the run slots: a cloud model's does not, it
@@ -1712,7 +1790,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         except (ApiError, OSError, KeyError):
             return None
 
-    def _place(self, conv: Conv, row, atts: list[dict]) -> None:
+    def _place(self, conv: Conv, row, parent: str | None, atts: list[dict]) -> None:
         """SRV-487, when a message is sent: each attachment is saved in the chat's workspace under
         uploads/ (`path`; `unplaced`, why not, when it cannot be: the message is sent all the
         same), and a text file goes into the prompt whole only while the message's
@@ -1723,7 +1801,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             return
         settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
         window = int(self.model_info(settings.get("model")).get("max_len") or 0)
-        branch, _ = self._branch(conv, row["head_id"])
+        branch, _ = self._branch(conv, parent)          # an edit goes on the parent's branch
         left = attach_mod.budget(window, _branch_tokens(branch))
         ws_dir = self.workspace(conv.id).root
         for a in atts:
@@ -1745,8 +1823,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             if a["inline"]:
                 left -= tokens
             else:
+                where = f"at {a['path']}" if a.get("path") else f"not saved: {a.get('unplaced')}"
                 self.log(f"[attach] {a['id']} {tokens} tokens over the budget: one line, the file "
-                         f"at {a['path']}")
+                         f"{where}")
 
     # ================================================================== the stream
     def attach(self, cid: str, after: int | None) -> tuple[Subscriber | None, list]:

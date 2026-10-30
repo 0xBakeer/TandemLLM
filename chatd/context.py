@@ -22,16 +22,18 @@ FILE_TOOLS = ("read_file", "write_file", "edit_file")
 
 
 def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] | None = None,
-                fold_before: str | None = None, worker: bool = False) -> int:
+                fold_before: str | None = None, window: int | None = None) -> int:
     """The files in the window: what the file tools carry in the next request (the content a
-    write sent, an edit's old and new text, what a read returned; a stub where the request has
-    one, chatd/render.py), estimated, from message `start` on (the first one a compaction kept);
-    `step_from` (message index, step): that message's earlier steps were folded; `fold_before`:
-    the newest compaction's time; `worker`: a worker's request (its write and edit texts whole
-    until a compaction). Attachments count apart (their own token counts)."""
+    write sent, an edit's old and new text, what a read returned; a stub or a folded call where
+    the request has one, chatd/render.py), estimated, from message `start` on (the first one a
+    compaction kept); `step_from` (message index, step): that message's earlier steps were
+    folded; `fold_before`: the newest compaction's time; `window`: the model's (the fold marks).
+    Attachments count apart (their own token counts)."""
     import json
 
     from chatd import render
+    sf = (step_from[0] - start, step_from[1]) if step_from else None
+    folded = render.folded_calls(branch[start:], fold_before, sf, window)
     n = 0
     for i, m in enumerate(branch):
         if i < start or m.get("role") != "assistant":
@@ -46,7 +48,7 @@ def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] |
                     n += estimate_tokens(render.result_for(p, fold_before))
                 continue
             try:
-                a = json.loads(render.call_arguments(p, fold_before, worker))
+                a = json.loads(render.call_arguments(p, p.get("id") in folded))
             except ValueError:
                 continue
             if isinstance(a, dict):

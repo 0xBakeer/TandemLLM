@@ -3,7 +3,8 @@
     models/<id>/model.yaml           the tile, the weight profiles, the measured table, the tools that
                                      run beside the model, parallelism, methods, the device presets
     models/<id>/README.md            optional
-    models/<id>/measurements/*       optional raw data (the measured table's own files)
+    models/<id>/measurements/*       optional raw data (the measured table's own files, and the raw
+                                     file of every `parallel` row, tools/parallel_card.py)
     models/schema/model.schema.json  SCHEMA below as a JSON Schema file, for editors (`--schema`)
 
 `load_all()` reads every model.yaml with the safe loader, checks it against SCHEMA and the cross rules
@@ -14,7 +15,9 @@ model.yaml is skipped. The result is kept until a file's mtime moves.
 
 The cross rules: a schema version this code does not read is refused whole (a schema 2 must not be
 half-read); ids unique per list; exactly one recommended profile; every measured row, asset,
-dependency and default names something that exists; the tools that are on by default satisfy their
+dependency and default names something that exists; a `parallel` row (SPD-245) names a profile or a
+community pack of the model, once, every level decoded N requests at once in every round, and the row
+is its raw file's `row`; the tools that are on by default satisfy their
 own dependencies and conflicts, and no dependency goes round in a circle; a field's default and
 recommended value pass the field's own check; every `docs` link is a file in the repository. What the
 repository adds (tests/test_setup_registry.py): every serve.env key a model names is one the engine
@@ -65,12 +68,16 @@ MAKER_KINDS = ("ours", "vendor", "community")
 MODEL_ID = r"^[a-z0-9][a-z0-9.-]{0,63}$"
 # a string field without a pattern of its own: what a value written into serve.env may hold
 SAFE_VALUE = r"^[A-Za-z0-9._:-]{1,64}$"
-#: VIS-199: the most parallel chats (sequence slots) the guide and apply take, whatever a card
-#: measured. A joint verify pass holds at most 32 rows (server/slots.py `Meeting`,
-#: `--parallel-max-rows`) and a decoding chat keeps at least 2 of them (`share`), so 16 is the most
-#: that verify in one pass. A card's `slots.max` is how far it was measured; above it the guide says
-#: untested, and memory decides the rest (the estimate's `fits`).
-ENGINE_MAX_SLOTS = 16
+#: VIS-199, SRV-707: the most parallel lanes (sequence slots) the guide and apply take, whatever a
+#: card measured. A joint verify pass holds at most the family's row cap (32 by default, 64 for the 27B
+#: on EXL3; server/slots.py `Meeting`, `--parallel-max-rows`) and a decoding lane keeps at least 2 of
+#: them (`share`), so 16 lanes verify in one pass at 32 rows (JOINT_PASS_LANES); more verify in more
+#: passes a round, each pass reading the weights once, with a 2-row share each. The engine sets no
+#: limit of its own: this one keeps a typed count sane, and memory decides the rest (the estimate's
+#: `fits` and `lanes_full`). A card's `slots.max` is how far it was measured; above it the guide says
+#: untested.
+ENGINE_MAX_SLOTS = 64
+JOINT_PASS_LANES = 16
 
 _NUM = {"type": "number"}
 _NUM0 = {"type": "number", "minimum": 0}
@@ -145,6 +152,33 @@ _ROW = _obj({"profile": _ID, "build": _STR, "date": _STR, "comparable": {"type":
              "ttft_s": {"type": "object"},
              "lossless": {"type": ["object", "null"]}},
             required=("profile", "build", "date", "comparable", "cells", "ttft_s", "lossless"))
+# SPD-245: the card's speed row of a weight set on one build (tools/parallel_card.py): decode alone, the
+# prefill's first token at fixed prompt lengths, and N requests at once with the proof that N decoded
+# together. Every number is the raw file's (`raw`, models/<id>/measurements/), which holds the row too.
+_INT1 = {"type": "integer", "minimum": 1}
+PAR_LEVELS = ("1", "2", "4", "8")                  # requests at once
+PAR_PREFILL = ("2048", "8192", "32768")             # prompt tokens
+_PAR_SETUP = _obj({"env": _STR, "lanes": _INT1, "window": _INT1, "max_tokens": _INT1,
+                   "suffix_store": {"type": "boolean"}, "response_cache": {"type": "boolean"},
+                   "thinking": {"type": "boolean"},
+                   "sampling": _obj({"temperature": _NUM0, "top_k": {"type": "integer", "minimum": 0},
+                                     "top_p": _NUM0, "min_p": _NUM0, "seed": _STR}),
+                   "prompts": _obj({"set": _STR, "sha256": {"type": "string", "pattern": r"^[0-9a-f]{16}$"},
+                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())})})
+_PAR_LEVEL = _obj({"wall_tok_s": _NUM0, "decode_tok_s": {"type": ["number", "null"], "minimum": 0},
+                   "ttft_s": {"type": ["number", "null"], "minimum": 0},
+                   "at_once": {"type": "integer", "minimum": 0}, "rounds": _INT1})
+_PAR_PREFILL = _obj({"ttft_s": _NUM0, "tok_s": _NUM0, "prompt_tokens": _INT1})
+_PAR_ROW = _obj({"profile": {"type": "string", "pattern": r"^(community/)?[a-z0-9][a-z0-9._-]{0,79}$"},
+                 "build": _STR, "commit": {"type": "string", "pattern": r"^[0-9a-f]{7,40}$"},
+                 "date": {"type": "string", "pattern": r"^20[0-9]{2}-[01][0-9]-[0-3][0-9]$"},
+                 "raw": {"type": "string", "pattern": r"^models/[a-z0-9.-]+/measurements/[A-Za-z0-9._-]+\.json$"},
+                 "setup": _PAR_SETUP, "rounds": _INT1,
+                 "decode": _obj({"code": _NUM0, "prose": _NUM0}, required=()),
+                 "prefill": _obj({d: _PAR_PREFILL for d in PAR_PREFILL}, required=()),
+                 "levels": _obj({n: _PAR_LEVEL for n in PAR_LEVELS}, required=("1",)),
+                 "note": _NOTE},
+                required=("profile", "build", "commit", "date", "raw", "setup", "rounds", "levels"))
 _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "what": _STR,
                    "default": {"type": "boolean"}, "required": {"type": "boolean"},
                    "memory_gib": _NUM0, "memory_max_gib": {"type": ["number", "null"]},
@@ -153,7 +187,13 @@ _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "w
                    # serve.env key -> {"on": value, "off": value}; checked in _cross (the keys are
                    # upper case, which the conductor's validator does not take as map keys)
                    "knobs": {"type": "object"},
-                   "assets": _IDS, "docs": _STR, "note": _NOTE})
+                   "assets": _IDS, "docs": _STR, "note": _NOTE,
+                   # the KV bytes a token while it is on (a cache kept in fewer bytes), in place of
+                   # parallelism.kv_bytes_per_token; optional
+                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1}},
+                  required=("id", "label", "group", "what", "default", "required", "memory_gib",
+                            "memory_max_gib", "elastic", "disk_gb", "depends_on", "conflicts", "knobs",
+                            "assets", "docs", "note"))
 _FIELD = _obj({"id": _ID, "label": _STR, "what": _STR, "type": {"enum": list(FIELD_TYPES)},
                "options": {"type": "array", "items": _obj({"value": _STR, "label": _STR})},
                "min": _NUM, "max": _NUM, "pattern": _STR,
@@ -168,6 +208,9 @@ SCHEMA = _obj({
     "id": {"type": "string", "pattern": MODEL_ID},
     "name": _STR, "family": _STR, "params": _STR, "pitch": _STR, "architecture": _STR,
     "license": _STR, "icon": _NOTE, "recommended": {"type": "boolean"},
+    # #104: the engine family that serves it (engine/models, a registry name): what it can do (side slots)
+    # comes from the family's entry, not from this file
+    "engine": {"type": "string", "pattern": r"^[a-z0-9_]+$"},
     # the tile's place on the models step (lower first; a file without one is 0), then the folder's name
     "order": {"type": "integer", "minimum": 0},
     "links": {"type": "array", "items": _obj({"label": _STR, "url": _STR})},
@@ -175,9 +218,20 @@ SCHEMA = _obj({
                                                 "reserved_gib": _NUM0, "note": _NOTE})},
     "assets": {"type": "array", "items": _ASSET},
     "quality_source": _STR,
+    # ENG-409: the rules of the community packs this model is the base of (`community_bases` below)
+    "community_base": _obj({
+        "serves": {"enum": ["loader", "profile"]},
+        "loads": {"type": "object", "additionalProperties": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}}},
+        "drafters": {"type": "array", "items": _STR, "minItems": 1},
+        "assets": {"type": "object", "additionalProperties": _IDS},
+        "layers": {"type": "integer", "minimum": 1},
+        "hook": {"type": "string", "pattern": r"^engine\.models\.[a-z0-9_]+\.[a-z0-9_]+$"}},
+        required=("serves", "loads", "drafters", "hook")),
     "profiles": {"type": "array", "items": _PROFILE},
     "measurements": _obj({"build": _STR, "date": _STR, "method": _STR, "source": _STR,
                           "rows": {"type": "array", "items": _ROW}}),
+    # SPD-245, optional: the speed rows of the weight cards (_PAR_ROW)
+    "parallel": _obj({"method": _STR, "rows": {"type": "array", "items": _PAR_ROW}}),
     "memory": _obj({"parts": {"type": "array",
                               "items": _obj({"id": _ID, "label": _STR, "gib": _NUM0,
                                              "kind": {"enum": ["fixed", "reserve"]},
@@ -194,7 +248,9 @@ SCHEMA = _obj({
                                                                  "source"))}},
                    required=("parts", "sources")),
     "components": {"type": "array", "items": _COMPONENT},
-    "parallelism": _obj({"slots": _RANGE, "window": _SRANGE, "side_window": _SRANGE,
+    # SRV-707: one window for every lane (no side window of its own); `knobs.side_window` is the
+    # serve.env key the window is also written to (QSE_SIDE_MAX_LEN)
+    "parallelism": _obj({"slots": _RANGE, "window": _SRANGE,
                          "kv_pool": _obj({"default": {"type": "boolean"}}),
                          "floor_gb": _RANGE, "kv_hard_floor_gb": _NUM0,
                          "kv_bytes_per_token": {"type": "integer", "minimum": 1},
@@ -218,13 +274,62 @@ COMMUNITY_SCHEMA_VERSION = 1
 COMMUNITY_SLUG = r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
 COMMUNITY_FORMATS = ("exl3", "nvfp4", "fp8", "gguf")
 COMMUNITY_SUPPORTED = ("exl3",)            # a format with a load path here; the others are refused
-# the base models a community pack loads on: #1's standalone loader and the EXL3 overlay are the
-# 27B family's (engine/loader.py); another model's packs load only through that model's own profiles
-COMMUNITY_BASES = ("qwen3.8-27b",)
 # what the engine reads on each load path today: the standalone path is text only (ENG-271); the
 # overlay keeps the base checkpoint's vision tower; no path takes audio or video
 COMMUNITY_LOADS = {"standalone": ("text",), "overlay": ("text", "image")}
 MODALITIES = ("text", "image", "audio", "video")
+# ENG-409: the base models a community pack loads on are the models whose model.yaml has a `community_base`
+# section, with its rules (another model's packs load only through that model's own profiles, `profile`):
+#   serves    "loader": the pack is the model (standalone) or an overlay on the base, through the base's
+#             loader; "profile": the pack takes the place of the base's nearest own profile (`like`: its
+#             limits, its drafters, its assets)
+#   loads     the load paths a pack may take and what each serves
+#   drafters  the `drafters` values an entry may name ("none": the pack brings none of its own)
+#   assets    by `drafters` (and "overlay" for that load path), the base's assets a pack reads besides its
+#             own folder ("loader" bases; a "profile" base's are its nearest profile's)
+#   layers    the layer count a pack's config must have
+#   hook      the family's module (engine/models/<pkg>/community.py) that writes the pack's weight profile
+#             (`env(m, c, folder)`) and checks the pack's files (`check_pack(m, c, folder, rules)`)
+_BASES: dict = {"key": None, "rules": {}}
+
+
+def community_bases(models_dir: str | None = None) -> dict:
+    """model id -> its `community_base` rules, read from models/*/model.yaml (kept until a file's mtime moves)."""
+    import yaml
+    d = models_dir or MODELS_DIR
+    paths = sorted(glob.glob(os.path.join(d, "*", "model.yaml")))
+    key = (d, tuple((p, os.path.getmtime(p)) for p in paths))
+    if _BASES["key"] != key:
+        found = []
+        for p in paths:
+            try:
+                with open(p) as fh:
+                    data = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("community_base"), dict):
+                found.append((int(data.get("order") or 0), os.path.basename(os.path.dirname(p)),
+                              data["community_base"]))
+        # in the models step's order (`order`, then the folder), as the registry lists the models
+        _BASES.update(key=key, rules={mid: r for _, mid, r in sorted(found, key=lambda x: x[:2])})
+    return _BASES["rules"]
+
+
+def community_rules(e: dict) -> dict | None:
+    """The rules of entry `e`'s base, None outside the community bases."""
+    return community_bases().get(e["base_model"])
+
+
+def community_serves(e: dict) -> str | None:
+    """How entry `e`'s base serves its packs ("loader" or "profile"), None outside the community bases."""
+    return (community_rules(e) or {}).get("serves")
+
+
+def community_hook(e: dict):
+    """The family module that writes entry `e`'s weight profile and checks its pack (its base's `hook`)."""
+    import importlib
+    rules = community_rules(e)
+    return importlib.import_module(rules["hook"]) if rules else None
 # the files under ~/.tandemllm/community/ that are not a pack's folder (community.py)
 _RESERVED_SUFFIXES = (".json", ".partial", ".env", ".tmp")
 _HTTPS = {"type": "string", "pattern": r"^https://[^\s\"'<>`]{1,400}$"}
@@ -336,6 +441,8 @@ def _cycle(comps: list[dict]) -> str | None:
 
 def _cross(m: dict, root: str) -> list[str]:
     errs = []
+    if m.get("engine") is not None and engine_arch(m["engine"]) is None:
+        errs.append(f"$.engine: {m['engine']!r} is no engine family (engine/models)")
     for key in ("profiles", "components", "methods", "advanced", "devices", "assets"):
         ids = [x["id"] for x in m[key]]
         if len(set(ids)) != len(ids):
@@ -382,6 +489,7 @@ def _cross(m: dict, root: str) -> list[str]:
             for task, c in cells.items():
                 if len(c) not in (5, 6):
                     errs.append(f"$.measurements.rows[{i}].cells.{mode}.{task}: 5 or 6 numbers")
+    errs += _parallel_errors(m, root)
     comps = {c["id"]: c for c in m["components"]}
     for i, c in enumerate(m["components"]):
         for d in c["depends_on"] + c["conflicts"]:
@@ -416,10 +524,18 @@ def _cross(m: dict, root: str) -> list[str]:
     if loop:
         errs.append(f"$.components: {loop!r} depends on itself")
     p = m["parallelism"]
-    for k in ("slots", "window", "side_window", "floor_gb"):
+    for k in ("window", "floor_gb"):
         r = p[k]
         if not r["min"] <= r["default"] <= r["max"]:
             errs.append(f"$.parallelism.{k}: the default is outside min..max")
+    # SRV-707: the lanes' default is never past what the engine family serves; SPD-245: nor past the
+    # card's max, how far the lanes were measured (a new box starts on a lane count a run proved)
+    r, top = p["slots"], slots_limit(m)["engine_max"]
+    if not r["min"] <= r["default"] <= top or r["max"] < r["min"]:
+        errs.append(f"$.parallelism.slots: the default is outside min..{top} (the engine's lanes)")
+    elif r["default"] > r["max"]:
+        errs.append(f"$.parallelism.slots: the default {r['default']} is past the max {r['max']}, the lanes "
+                    f"this card measured")
     for k, v in (p.get("fixed") or {}).items():
         if not re.match(ENV_KEY, k) or not isinstance(v, str) or not re.fullmatch(SAFE_VALUE, v):
             errs.append(f"$.parallelism.fixed.{k}: a serve.env key and a plain string value")
@@ -435,6 +551,45 @@ def _cross(m: dict, root: str) -> list[str]:
                     errs.append(f"$.{group}[{i}].{which}: {why}")
             if f.get("docs") and not _docs_ok(f["docs"], root):
                 errs.append(f"$.{group}[{i}].docs: no file {f['docs']!r} in the repository")
+    return errs
+
+
+def _parallel_errors(m: dict, root: str) -> list[str]:
+    """SPD-245: a speed row names a weight set of this model, proves every level, and is its raw file's."""
+    errs = []
+    profiles = {p["id"] for p in m["profiles"]}
+    seen = set()
+    for i, r in enumerate((m.get("parallel") or {}).get("rows") or []):
+        at = f"$.parallel.rows[{i}]"
+        pid = r["profile"]
+        if pid.startswith("community/"):
+            if not os.path.isfile(os.path.join(root, "models", m["id"], "community", pid[len("community/"):] + ".json")):
+                errs.append(f"{at}: no community pack {pid!r} of this model")
+        elif pid not in profiles:
+            errs.append(f"{at}: no profile {pid!r}")
+        if pid in seen:
+            errs.append(f"{at}: a second row for {pid!r} (one row a weight set: the card's current numbers)")
+        seen.add(pid)
+        for n, lv in r["levels"].items():
+            if lv["at_once"] != int(n):
+                errs.append(f"{at}.levels.{n}: refused: {lv['at_once']} decoded at once, not {n} (the requests "
+                            f"queued; the level is run again)")
+            if lv["rounds"] != r["rounds"]:
+                errs.append(f"{at}.levels.{n}: {lv['rounds']} valid rounds of {r['rounds']}")
+            if int(n) > r["setup"]["lanes"]:
+                errs.append(f"{at}.levels.{n}: more requests than the setup's {r['setup']['lanes']} lanes")
+        if not r["raw"].startswith(f"models/{m['id']}/measurements/"):
+            errs.append(f"{at}.raw: not under models/{m['id']}/measurements/")
+            continue
+        path = os.path.join(root, r["raw"])
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError) as exc:
+            errs.append(f"{at}.raw: no raw file {r['raw']!r} ({type(exc).__name__})")
+            continue
+        if raw.get("row") != r:
+            errs.append(f"{at}: not the raw file's row ({r['raw']}); write it from the file")
     return errs
 
 
@@ -462,8 +617,33 @@ def parse(data, path: str = "model.yaml", root: str | None = None) -> dict:
         for r in data["measurements"]["rows"]])
     m.setdefault("recommended", False)
     m["parallelism"] = dict(data["parallelism"], fixed=dict(data["parallelism"].get("fixed") or {}))
+    m["parallelism"]["slots"] = dict(data["parallelism"]["slots"], **slots_limit(data))
     m.pop("quality_source", None)
+    m.pop("community_base", None)      # the registry's own rules (community_bases), not the payload's
     return m
+
+
+def engine_arch(name: str | None):
+    """The engine family's registry entry (engine/models), or None."""
+    if not name:
+        return None
+    from engine.models import REGISTRY
+    return REGISTRY.get(name)
+
+
+def slots_limit(m: dict) -> dict:
+    """#104: how many parallel chats the model's engine can serve: ENGINE_MAX_SLOTS, or 1 with the reason
+    when its family builds no side slots (its ServeSpec.side_slots, engine/models/adapter.py)."""
+    a = engine_arch(m.get("engine"))
+    if a is not None and not a.spec.side_slots:
+        return {"engine_max": 1, "engine_max_reason": f"{m.get('name') or m.get('id')} serves one chat at a time "
+                                                       "for now: its engine has no side slots yet."}
+    return {"engine_max": ENGINE_MAX_SLOTS, "engine_max_reason": None}
+
+
+def slots_max(m: dict) -> int:
+    """The most parallel chats a selection may ask for (#104)."""
+    return int(m["parallelism"]["slots"].get("engine_max") or ENGINE_MAX_SLOTS)
 
 
 def load(path: str, root: str | None = None) -> dict:
@@ -591,17 +771,16 @@ def config_max_len(folder: str | None) -> int | None:
 def with_config_window(m: dict, folders: list) -> dict:
     """ENG-363: the model with its window range up to what its checkpoint holds. The first folder of
     `folders` (the weight folders of its profiles present on this box) with a config sets the largest
-    window and side window (`config_max_len`); a box without the weights keeps the card's, which name
-    the same numbers. The defaults stay the card's (lowered only to the new largest)."""
+    window (`config_max_len`), every lane's (SRV-707); a box without the weights keeps the card's,
+    which names the same number. The default stays the card's (lowered only to the new largest)."""
     n = next((x for x in map(config_max_len, folders) if x), None)
     par = m["parallelism"]
-    if not n or all(par[k]["max"] == n for k in ("window", "side_window")):
+    if not n or par["window"]["max"] == n:
         return m
     m = copy.deepcopy(m)
-    for k in ("window", "side_window"):
-        r = m["parallelism"][k]
-        r["max"] = n - n % r["step"]
-        r["default"] = min(r["default"], r["max"])
+    r = m["parallelism"]["window"]
+    r["max"] = n - n % r["step"]
+    r["default"] = min(r["default"], r["max"])
     return m
 
 
@@ -671,12 +850,10 @@ def wizard_fields(m: dict) -> list[dict]:
         "components": [{"field": c["id"], "label": c["label"], "type": "bool"}
                        for c in m["components"]],
         "parallelism": [
-            {"field": "slots", "label": "Parallel requests", "type": "int",
-             "min": p["slots"]["min"], "max": ENGINE_MAX_SLOTS},
-            {"field": "window", "label": "Context window, first slot", "type": "int",
+            {"field": "slots", "label": "Parallel lanes", "type": "int",
+             "min": p["slots"]["min"], "max": slots_max(m)},
+            {"field": "window", "label": "Context window, every lane", "type": "int",
              "min": p["window"]["min"], "max": p["window"]["max"]},
-            {"field": "side_window", "label": "Context window, other slots", "type": "int",
-             "min": p["side_window"]["min"], "max": p["side_window"]["max"]},
             {"field": "kv_pool", "label": "Shared KV pool", "type": "bool"},
             {"field": "floor_gb", "label": "Memory kept free (GiB)", "type": "number",
              "min": p["floor_gb"]["min"], "max": p["floor_gb"]["max"]}],
@@ -786,10 +963,6 @@ def asset_present(a: dict, repo: str | None = None, m: dict | None = None) -> bo
 
 # ---------------------------------------------------------------------- community packs
 COMMUNITY_PREFIX = "community/"
-# the base model's assets a community pack reads besides its own folder, by its drafters and its
-# load path (the K3 files are named after the BF16 drafter folders, which give the rest of each arm)
-_COMMUNITY_ASSETS = {"tandem-exl3": ["exl3-drafters-k3", "exl3-draft-head-k4", "nvfp4-drafters"],
-                     "dflash2": ["nvfp4-drafters"], "in-pack": [], "none": []}
 _SOCIAL_URL = (("x", "X", "https://x.com/{}"), ("huggingface", "Hugging Face", "https://huggingface.co/{}"),
                ("bluesky", "Bluesky", "https://bsky.app/profile/{}"), ("mastodon", "Mastodon", "{}"),
                ("website", "Website", "{}"))
@@ -811,8 +984,17 @@ def _like(m: dict, fmt: str, bpw: float) -> dict | None:
     return min(same, key=lambda p: (abs(p["bpw"] - bpw), p["bpw"])) if same else None
 
 
-def community_assets(e: dict) -> list[str]:
-    return _COMMUNITY_ASSETS[e["drafters"]] + (["base-fp8"] if e["load"] == "overlay" else [])
+def community_assets(e: dict, m: dict | None = None) -> list[str]:
+    """The base model's assets a community pack reads besides its own folder: on a "loader" base by its
+    drafters and its load path (the base's `assets` rules); on a "profile" base (`m` the base) its nearest
+    profile's, which it drafts with."""
+    rules = community_rules(e) or {}
+    if rules.get("serves") == "profile":
+        like = _like(m, e["format"], e["bpw"]) if m is not None else None
+        return list(like["assets_required"]) if like else []
+    assets = rules.get("assets") or {}
+    return list(assets.get(e["drafters"]) or []) + (list(assets.get("overlay") or []) if e["load"] == "overlay"
+                                                    else [])
 
 
 def community_errors(data, slug: str | None, folder: str | None, models: dict[str, dict]) -> list[str]:
@@ -847,8 +1029,15 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
             if p["format"] != e["format"] or p["bpw"] != e["bpw"]:
                 errs.append(f"$.format: {e['format']} {e['bpw']:g} bpw is not profile {own}'s "
                             f"{p['format']} {p['bpw']} bpw")
-    elif e["base_model"] not in COMMUNITY_BASES:
-        errs.append(f"$.base_model: community packs load on {', '.join(COMMUNITY_BASES)} only")
+    elif e["base_model"] not in community_bases():
+        errs.append(f"$.base_model: community packs load on {', '.join(community_bases())} only")
+    rules = community_rules(e) if own is None else None
+    if rules is not None and e["load"] not in rules["loads"]:
+        errs.append(f"$.load: {e['base_model']} packs load {', '.join(rules['loads'])} only")
+    if rules is not None and e["drafters"] not in rules["drafters"]:
+        errs.append(f"$.drafters: a {e['base_model']} pack takes {', '.join(rules['drafters'])}"
+                    + (" (it drafts with the model's own drafters, from its nearest profile)"
+                       if rules["serves"] == "profile" else ""))
     if own is None and e["format"] not in COMMUNITY_SUPPORTED:
         errs.append(f"$.format: TandemLLM has no load path for {e['format']} packs yet "
                     f"({', '.join(COMMUNITY_SUPPORTED)} only)")
@@ -857,7 +1046,7 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append("$.modalities.text: a pack serves text")
     # a profile-backed pack serves what its model serves: images where the model has a Vision tool
     served = (("text", "image") if m and any("VISION" in c["knobs"] for c in m["components"]) else ("text",)) \
-        if own is not None else COMMUNITY_LOADS[e["load"]]
+        if own is not None else (rules["loads"] if rules is not None else COMMUNITY_LOADS).get(e["load"], ())
     for k in MODALITIES:
         if mods[k] and k not in served:
             errs.append(f"$.modalities.{k}: the {e['load']} load path does not serve {k} yet"
@@ -881,15 +1070,20 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append("$.verified: a verified entry says what was measured (build, device, date)")
     if v and not _date_ok(v["date"]):
         errs.append(f"$.verified.date: {v['date']!r} is not a date")
-    if m is not None and own is None and e["base_model"] in COMMUNITY_BASES:
+    if m is not None and own is None and e["base_model"] in community_bases():
         have = {a["id"] for a in m["assets"]}
-        for a in community_assets(e):
+        for a in community_assets(e, m):
             if a not in have:
                 errs.append(f"$.drafters: {e['base_model']} has no asset {a!r} for "
                             f"{e['drafters']} on the {e['load']} path")
-        if e["format"] in COMMUNITY_SUPPORTED and _like(m, e["format"], e["bpw"]) is None:
+        like = _like(m, e["format"], e["bpw"]) if e["format"] in COMMUNITY_SUPPORTED else None
+        if e["format"] in COMMUNITY_SUPPORTED and like is None:
             errs.append(f"$.format: {e['base_model']} has no {e['format']} profile to estimate "
                         f"the memory from")
+        if like is not None and community_serves(e) == "profile" and \
+                not os.path.isfile(os.path.join(ROOT, "ops", "profiles", like["id"] + ".env")):
+            errs.append(f"$.format: no ops/profiles/{like['id']}.env, the profile a {e['base_model']} pack "
+                        f"is served with")
     return errs
 
 
@@ -921,7 +1115,8 @@ def community_entry(e: dict, m: dict) -> dict:
                       for k, label, fmt in _SOCIAL_URL if social.get(k)],
         hf_url=f"https://huggingface.co/{e['hf']['repo']}/tree/{e['hf']['revision']}",
         memory={"weights_gib": like["weights_gib"],
-                "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" else 0.0,
+                "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" or
+                community_serves(e) == "profile" else 0.0,
                 "like": like["id"]})
 
 
@@ -939,7 +1134,7 @@ def community_profile(m: dict, c: dict) -> dict:
             "quality": {"kl_vs_bf16": None, "top1_pct": None, "ppl": None,
                         "date": v["date"] if v else c["added"],
                         "source": f"community entry {c['profile']} ({c['status']})"},
-            "assets_required": community_assets(c), "note": c["description"] or None,
+            "assets_required": community_assets(c, m), "note": c["description"] or None,
             "components_gib": dict(like.get("components_gib") or {}),
             "made_by": {"kind": "community", "name": c["author"]["github"], "github": c["author"]["github"],
                         "repo": None},

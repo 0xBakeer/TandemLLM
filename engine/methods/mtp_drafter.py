@@ -99,6 +99,13 @@ class MTPTreeDrafter:
         self.req = self._req()              # this request's own counts (the verbose report)
         self.cls = 0                        # the context class of the last round
         self._t_prev = None                 # the last round's start (perf_counter)
+        # SPD-239: the lanes that decoded in this drafter's last round (the round runner sets it): a round other
+        # lanes shared is priced by every lane's work, so only a round of one lane teaches the plain and drafted
+        # prices the turn and the skip weigh
+        self.lanes = 1
+        # SPD-233: the round runner found the joint plain step makes more tokens a ms at this many lanes than the
+        # drafted rounds (server/round_runner.py `_lane_plain`): the round takes the plain step without a draft
+        self.lane_skip = False
         self._cls_prev = 0
         self._obs = None                    # what the last round was, to price at the next start
         self._plain = None                  # a plain step was taken: None, or whether it captured
@@ -107,15 +114,30 @@ class MTPTreeDrafter:
         self._turn = None                   # this request drafts (True), takes plain steps (False), or undecided
         self.answer = 256.0                 # the usual answer length, tokens (EMA 0.2 of the requests')
         self._prime_ms = 0.0                # the last feed's backlog prime, ms
+        # opt-in (a block drafter whose draft costs a large share of a step): after a round the cut cut
+        # to the anchor alone, the next rounds take the plain step without a draft, 1, 2, 4 .. up to
+        # `anchor_backoff` of them as such rounds repeat; a round that keeps rows starts over. 0: off
+        self.anchor_backoff = 0
+        self._anchor_streak = 0
+        self._backoff_left = 0
+        # opt-in, no draft head (NoHead): after a round the lookup matched nothing or the cut kept the anchor alone,
+        # the next rounds take the plain step without looking (the lookup and the cut are host work on every
+        # token), 1, 2, 4 .. up to `look_backoff`; a round that drafts rows starts over. 0: off (Flint: on prose
+        # the lookup's rounds cost ~6 % of plain at 1.01 tokens a block, 2026-10-22)
+        self.look_backoff = 0
+        self._look_streak = 0
+        self._look_left = 0
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
         c = self.cut
         V, delta = c.prices.learned(c.kind, self.cls)
         q = self.req
-        return (f"mtp request: turn={q['turn']} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
+        ti = q.get("turn_in") or {}
+        ti = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in ti.items()}
+        return (f"mtp request: turn={q['turn']} turn_in={ti} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
                 f"draft_ms={q['draft_ms']:.0f} verify_ms={q['verify_ms']:.0f} ({q['verify_rows']} rows) "
-                f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows) "
+                f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows, {q['primes']} calls) commit_ms={q['commit_ms']:.0f} "
                 f"spans={ {k: [n, round(ms), t] for k, (n, ms, t) in q['spans'].items()} } "
                 f"spec_ms={c.spec_ms(self.cls) if c.spec_ms(self.cls) is None else round(c.spec_ms(self.cls), 2)} | "
                 f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} looked={self.stats['looked']} "
@@ -128,7 +150,7 @@ class MTPTreeDrafter:
     @staticmethod
     def _req() -> dict:
         return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
-                "prime_ms": 0.0, "prime_rows": 0, "tokens": 0, "turn": None,
+                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None, "turn_in": None,
                 "spans": {"block": [0, 0.0, 0], "anchor": [0, 0.0, 0], "plain": [0, 0.0, 0],
                           "unpriced": [0, 0.0, 0]}}
 
@@ -167,6 +189,7 @@ class MTPTreeDrafter:
             self.answer = 0.8 * self.answer + 0.2 * max(32, self.req["tokens"])
         self.req = self._req()
         self._turn = None
+        self._anchor_streak = self._backoff_left = 0
 
     def prime(self, tokens: list[int]) -> None:
         # the prompt's rows come through `sync`; the lookup indexes its tokens
@@ -192,6 +215,10 @@ class MTPTreeDrafter:
         if self.ngram is not None:
             self.ngram.observe(tokens)
         self.req["tokens"] += len(tokens)
+        if self.verify_ms is not None:
+            # a drafted round's commit (the host's side of it: a graph's replay is launched, its GPU
+            # time lands in the next wait)
+            self.req["commit_ms"] += float(getattr(self.s, "commit_ms", 0.0) or 0.0)
         # priced at the next round's start, by the wall time between the two; a round that captured a
         # graph took the capture's time and teaches nothing (its price for that row count would start
         # at ~170 ms and the cut would never ask again)
@@ -206,6 +233,9 @@ class MTPTreeDrafter:
         else:
             self._obs = None
         self._plain, self.round, self.verify_ms = None, None, None
+
+    #: SPD-215: a joint round (server/round_runner.py) prices this drafter's round by its share of the pass
+    joint_priced = True
 
     def on_verify(self, rows: int, ms: float) -> None:
         self.verify_ms = ms
@@ -234,7 +264,7 @@ class MTPTreeDrafter:
             span[0] += 1
             span[1] += ms
             span[2] += self._obs[3] if self._obs is not None and self._obs[0] != "plain" else 0
-        if self._obs is not None and self._t_prev is not None:
+        if self._obs is not None and self._t_prev is not None and self.lanes <= 1:
             if self._obs[0] == "plain":
                 self.cut.observe_plain(ms, self._cls_prev)
             else:
@@ -259,7 +289,13 @@ class MTPTreeDrafter:
         # calibrated q: the class-wide skip, learned for a head that drafts every round, priced the
         # lookup by the rounds that matched little (LFM2.5, 2026-10-14: three chat asks, then edit and
         # copy asks the lookup matched throughout took the plain step)
-        if self.head.depth and self.cut.skip(self.cls):
+        backoff = False
+        if self._backoff_left > 0:
+            self._backoff_left -= 1
+            backoff = True
+        # SPD-239: the class's skip (its drafted rounds priced above its plain step) weighs lone prices: a round
+        # other lanes share keeps drafting
+        if self.head.depth and (backoff or self.lane_skip or (self.lanes <= 1 and self.cut.skip(self.cls))):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -274,9 +310,19 @@ class MTPTreeDrafter:
         if self.head.depth == 0:
             # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
             # one, so the drafted rounds' price is learned from rounds that drafted
+            if self.lane_skip:
+                self.pending = None
+                self.stats["skipped"] += 1
+                return None
+            if self._look_left > 0:
+                self._look_left -= 1
+                self.pending = None
+                self.stats["skipped"] += 1
+                return None
             look = self._look(context)
             if look is None:
                 self.pending = None
+                self._look_miss()
                 return None
         rows, nexts = self.pending
         self.pending = None
@@ -291,7 +337,22 @@ class MTPTreeDrafter:
             look = self._look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
-        tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
+        # SPD-225: the rows' calibrated path probabilities as the tree's scores (a joint round's cut ranks
+        # every lane's nodes by them; without them every draft scored 0 and the cut went by lane order)
+        sc = getattr(self.cut, "last_scores", None)
+        tree = DraftTree(tokens=toks, parents=parents,
+                         scores=list(sc) if sc is not None and len(sc) == len(toks) else []).truncate(int(k) + 1)
+        if self.anchor_backoff:
+            if len(toks) <= 1:
+                self._anchor_streak += 1
+                self._backoff_left = min(1 << (self._anchor_streak - 1), self.anchor_backoff)
+            else:
+                self._anchor_streak = 0
+        if self.look_backoff and not self.head.depth:
+            if len(toks) <= 1:
+                self._look_miss()
+            else:
+                self._look_streak = 0
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
         # less the backlog's prime (rows a skipped round left: owed whether this round drafts or not);
@@ -316,10 +377,23 @@ class MTPTreeDrafter:
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
         # no draft head: no backlog to read into it, and each round's match decides (above)
-        self._turn = self.req["turn"] = (not self.head.depth
+        # the decision's inputs, for the request's line (a plain turn whose reason is not seen cannot be argued)
+        c = self.cut
+        self.req["turn_in"] = {"plain_ms": c.plain_ms(self.cls), "spec_ms": c.spec_ms(self.cls), "backlog": unfed,
+                               "answer": self.answer, "extra_ms": round(float(extra), 1)}
+        if getattr(self.s, "last_owed", None):
+            self.req["turn_in"]["owed"] = self.s.last_owed
+        # SPD-239: a lane whose last round other lanes shared drafts its turn: in a joint pass its rows cost a share
+        # of the pass, so the lone prices the turn weighs do not apply (a plain turn there gives 1 token a round)
+        self._turn = self.req["turn"] = (not self.head.depth or self.lanes > 1
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
+
+    def _look_miss(self) -> None:
+        if self.look_backoff:
+            self._look_streak += 1
+            self._look_left = min(1 << (self._look_streak - 1), self.look_backoff)
 
     @property
     def plain_turn(self) -> bool:
@@ -413,6 +487,7 @@ class MTPTreeDrafter:
             self._prime_ms = (time.perf_counter() - t0) * 1e3
             self.req["prime_ms"] += self._prime_ms
             self.req["prime_rows"] += n - keep
+            self.req["primes"] += 1
             if n - keep >= 64:
                 self.cut.observe_prime(self._prime_ms / (n - keep), self.cls)
         self.pending = (rows[n - keep:], nexts[n - keep:])

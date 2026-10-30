@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 # Triton kernels are a different arithmetic order for the same quantities and this file runs on a
 # CPU. Same convention as tests/test_forward_tree.py.
@@ -461,9 +462,11 @@ def test_the_response_cache_keys_on_prompt_and_params():
 
 
 def test_the_response_cache_expires_and_is_bounded():
-    rc = cache.ResponseCache(1 << 20, ttl_s=1e-6)   # a TTL this short expires on read
+    rc = cache.ResponseCache(1 << 20, ttl_s=1e-6)
     k = cache.ResponseCache.key([1, 2], max_new=8)
     rc.put(k, [9], [1, 2])
+    # past the TTL before the read: on a fast CPU the read came within the microsecond and hit
+    time.sleep(0.002)
     assert rc.get(k) is None and rc.report()["expired"] == 1
 
     rc = cache.ResponseCache(200, ttl_s=0)

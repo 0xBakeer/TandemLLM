@@ -39,3 +39,8 @@ def test_tree_budget_buys_the_sibling():
     b16, c16, _, _ = O.replay(tr, "tree", 16)
     b, c, _, _ = O.replay(tr, "chain")
     assert c16 / b16 >= c / b
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

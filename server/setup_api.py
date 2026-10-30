@@ -381,11 +381,12 @@ def remove_route(h, app, body) -> None:
     if not dry and body.get("confirm") is not True:
         return _err(h, 422, "confirm_required", "confirm: true removes the weights (dry_run: true shows "
                                                 "what would go)")
-    run = apply.running_job()
-    if run is not None:
-        return _err(h, 409, "job_running", f"job {run['id']} runs; remove when it is done", job=run["id"])
     try:
-        with _JOB_LOCK:
+        with _JOB_LOCK:     # checked under the lock: an apply that starts first is still refused
+            run = apply.running_job()
+            if run is not None:
+                return _err(h, 409, "job_running", f"job {run['id']} runs; remove when it is done",
+                            job=run["id"])
             out = remove.remove(body.get("profiles"), setup_mode=bool(app.STATE.get("setup_mode")),
                                 root=apply.ROOT, dry_run=dry)
     except remove.RemoveError as exc:

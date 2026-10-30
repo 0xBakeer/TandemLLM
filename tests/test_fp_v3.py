@@ -109,7 +109,8 @@ def test_the_27b_manifest_is_pinned():
         "engine/config.py", "engine/drafters/__init__.py", "engine/drafters/dflash2.py",
         "engine/drafters/draft_graph.py", "engine/drafters/dspark.py", "engine/drafters/mtp.py",
         "engine/gdn.py", "engine/kvpool.py", "engine/linear.py", "engine/loader.py", "engine/model.py",
-        "engine/settings.py", "engine/tree.py", "engine/verify_graph.py", "engine/vision.py"), M27.modules
+        "engine/models/qwen3_5/attn_group.py", "engine/settings.py", "engine/tree.py",
+        "engine/verify_graph.py", "engine/vision.py"), M27.modules
     assert M27.data == () and M27.arch == "qwen3_5"
     tools = sorted(os.path.relpath(p, ROOT) for p in mf.files(ROOT, M27)[len(M27.modules):])
     assert "tools/nvfp4_skinny.py" in tools and not any(t.startswith("tools/fn_") for t in tools), tools

@@ -112,7 +112,7 @@ def test_a_settled_commit_cannot_be_trimmed():
 
 # ------------------------------------------------------------------ the server's put
 
-def _remember_with(ahead: int, trim: bool, max_entry: int = 0, said=None, conv=None):
+def _remember_with(ahead: int, trim: bool, max_entry: int = 0, said=None, conv=None, mem=None):
     from server import app
     tree = T.BRANCHY
     path = tree.path(tree.leaves()[0])
@@ -122,10 +122,10 @@ def _remember_with(ahead: int, trim: bool, max_entry: int = 0, said=None, conv=N
         store = cache.StateStore(1 << 30, chunk=16, max_entry_bytes=max_entry)
         saved = {k: app.STATE.get(k) for k in ("engine", "drafter", "state_store", "session_cache",
                                                "verbose", "last_ctx", "session_trim",
-                                               "suffix_store", "store_big_said")}
+                                               "suffix_store", "store_big_said", "mem")}
         app.STATE.update(engine=eng, drafter=None, state_store=store, session_cache=True,
                          verbose=True, last_ctx=list(range(1, n_c + 1)), session_trim=trim,
-                         suffix_store=None, store_big_said=said)
+                         suffix_store=None, store_big_said=said, mem=mem)
         out = io.StringIO()
         try:
             with redirect_stdout(out):
@@ -155,6 +155,25 @@ def test_over_the_cap_is_said_once_per_conversation():
     assert store.stats.get("declined_big") == 1 and "per-entry cap" not in log, log
     store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1, said="a", conv="b")
     assert "over the store's per-entry cap" in log, log
+
+
+class _Full(cache.Budget):
+    """A memory policy with no room left: 10 GiB allocated against a 10 GiB ceiling."""
+
+    def __init__(self):
+        g = 1 << 30
+        super().__init__(10 * g, 12 * g, 1 * g, probe=lambda: (10 * g, 10 * g), empty=lambda: None)
+
+
+def test_the_put_names_the_memory_policy_not_the_size_cap():
+    """SRV-655 (Ornith, 2026-10-20): every decline read "too big for the per-entry cap (1024
+    MiB)" -- at kv.length 18 too -- while the memory policy had refused a snapshot well under
+    the cap. The log and the counters now say which."""
+    store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1 << 30, mem=_Full())
+    assert store.stats["puts"] == 0 and store.stats.get("declined_mem") == 1, store.stats
+    assert not store.stats.get("declined_big"), store.stats
+    assert "per-entry cap" not in log and "the memory policy refused its " in log and \
+        "allocated 10.00 GiB of a 10.00 GiB ceiling less 1.00 GiB of slack" in log, log
 
 
 def test_with_the_trim_on_the_put_succeeds_at_the_committed_length():

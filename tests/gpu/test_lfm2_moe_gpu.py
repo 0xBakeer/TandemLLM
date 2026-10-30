@@ -186,6 +186,41 @@ def test_the_decode_step_is_one_graph():
     return f"{len(replays)} tokens, {len(replays)} replays of 1 graph, logits = eager"
 
 
+def test_the_oracle_is_independent_and_matches_production():
+    """On the board: reference_matmul never dispatches into the accelerated helpers it gates,
+    and production exl3_matmul matches it within BOUND at every integer rate — including the
+    N < 256 combine-program tails — fp32 and bf16 out, and every batch row its one-row call."""
+    from unittest import mock
+    import types as _t
+
+    ada = _t.ModuleType("tools.exl3_ada")
+    def banned(*a, **kw):
+        raise AssertionError("the oracle called the accelerated path")
+    for n in ("rot_ok", "rot_in", "rot_out", "try_gemv", "try_gemv_rot", "decode_trellis_triton"):
+        setattr(ada, n, banned)
+
+    out = []
+    for kb in X.KS:
+        for N in (128, 256, 384):
+            w = X.random_block(N, 128, kb, seed=N + 128 + kb)
+            x = (torch.randn(9, 128, device="cuda") * 0.5).to(torch.bfloat16)
+            for fp32 in (False, True):
+                w.out_fp32 = fp32
+                with mock.patch.dict("sys.modules", {"tools.exl3_ada": ada}), \
+                     mock.patch.object(__import__("tools"), "exl3_ada", ada, create=True), \
+                     mock.patch.object(X.EXL3Block, "inner", banned):
+                    ref = X.reference_matmul(x, w).float()
+                got = X.exl3_matmul(x, w).float()
+                rel = _rel(got, ref)
+                assert rel < BOUND, (N, kb, fp32, rel)
+                for M in (1, 3, 9):
+                    one = X.exl3_matmul(x[M - 1:M].clone(), w)
+                    assert torch.equal(X.exl3_matmul(x[:M], w)[M - 1], one[0]), (N, kb, fp32, M)
+            w.out_fp32 = False
+            out.append(f"{N}@K{kb} {rel:.1e}")
+    return ", ".join(out)
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

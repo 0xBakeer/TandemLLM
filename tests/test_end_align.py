@@ -18,6 +18,9 @@ Such a turn resumed at the previous prompt's last 1,024 line and re-read the who
   5  a hidden span and a whitespace difference in one generation
   6  the bytes of a byte-level BPE tokenizer's tokens
   7  through the handler: `usage.prompt_tokens` is the client's count, the journal's resume `end`
+  9  SRV-679: a tool call the template wrote back in more than whitespace (a typed boolean or
+     number, an object's keys sorted, a character escaped) resumes at the end anchor when it is
+     the same call read as values, the text around it the same; anything else as sent
   8  SRV-239: a copy that leaves an answer's reasoning out (Open WebUI sends none back; the
      template renders `<think>\n\n</think>`) resumes at the end anchor, served with the rows'
      reasoning; two turns of it in a row; anything else in the answer changed is served as sent;
@@ -34,6 +37,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test_forward_tree as T  # noqa: E402,F401  (the CPU environment before the engine imports)
+os.environ.setdefault("QWEN38_PROMPT_END", "0")   # the grid and the end anchor alone (tests/test_prompt_end.py)
 
 import torch  # noqa: E402
 
@@ -194,6 +198,38 @@ def test_the_turn_after_an_aligned_turn_is_aligned_again():
     assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
 
 
+def test_a_later_generation_the_copy_rewrote_resumes_at_the_highest_aligned_anchor():
+    """SRV-657 (2026-10-21 02:26, Ornith): every turn aligned an early answer's whitespace, until
+    one generation's tool call came back with a character changed (not whitespace): the whole
+    alignment was refused and the turn resumed at the grid line below the FIRST difference,
+    132,635 of 144,923 tokens read again. Now the rows are served up to the highest resident
+    anchor inside the part the copy holds token for token past the aligned regions, and the turn
+    resumes there; the regions below it travel on."""
+    prompt = tokens(100, seed=79)
+    res, al = _setup()
+    out1, _ = _first(prompt, 40)
+    e1 = res.end["at"]
+    copy2 = prompt + out1[:10] + [NL] + out1[10:] + TOOL
+    ids2, _, a2 = app._end_replay(res, copy2)
+    assert a2 and ids2[:e1] == res.tokens[:e1]
+    out2, pre2, _ = turn(ids2, 30)
+    assert pre2["kind"] == "end"
+    line = max(b for b in res.anchors if b <= len(ids2))
+    assert line > e1, (sorted(res.anchors), e1)       # turn 2's prefill crossed a grid line
+    # turn 3: turn 1 re-rendered the same way, turn 2's answer with a character changed
+    k = next(i for i in range(5, len(out2) - 2) if out2[i] not in (NL, SP))
+    other = next(t for t in range(1, 95) if t != out2[k])
+    copy3 = copy2 + out2[:k] + [other] + out2[k + 1:] + TOOL2
+    ids3, spans, a3 = app._end_replay(res, copy3)
+    assert al.last_partial == line, (al.last_partial, line)
+    assert ids3[:line] == res.tokens[:line] and ids3[line:] == copy3[line + 1:], (len(ids3), line)
+    assert a3 == line - (len(prompt) + 10) and al.stats["partial"] == 1, (a3, al.stats)
+    got, pre3, _ = turn(ids3, 6)
+    assert pre3["kind"] == "resident" and pre3["reused"] == line, pre3
+    assert got == _cold(ids3, 6), "the anchor's gate: the same greedy tokens as cold"
+    return f"resumed at {line} of {len(ids3)} (the whole alignment refused; before: at 96)"
+
+
 # ------------------------------------------------------------------ 5. with a hidden span
 
 def test_a_hidden_span_and_whitespace_in_one_generation():
@@ -333,6 +369,97 @@ def test_srv239_two_thinking_turns_in_a_row():
     assert a3 and ids3 == res.tokens[:e2] + out2[e2 - len(ids2):] + TOOL2, (len(ids3), e2)
     _, pre3, _ = turn(ids3, 4)
     assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
+
+
+# ------------------------------------------------------------------ 9. SRV-679: a call re-rendered
+
+class _Words:
+    """A tokenizer of whole pieces: an id is its piece's index; `ids` splits a text on the
+    pieces given (longest first), one id a piece."""
+
+    def __init__(self, pieces):
+        self.pieces = list(dict.fromkeys(pieces))
+
+    def ids(self, *parts):
+        return [self.pieces.index(p) for p in parts]
+
+    def tb(self, i):
+        return self.pieces[int(i)].encode()
+
+
+class _Res:
+    """What the alignment reads of the resident prefix: its rows, its end anchor."""
+
+    def __init__(self, tokens, n_prompt):
+        self.tokens, self.end = list(tokens), {"at": len(tokens), "hidden": [], "mark": None}
+        self.n_prompt = n_prompt
+
+    def replay(self, ids):
+        return ids, []
+
+
+def _call_turn(value_rows, value_copy, extra_copy=(), name_copy="render_page", text_copy="ok"):
+    """A generation that ends in one tool call (Ornith's XML), and the client's copy of it with
+    the call's value as the template wrote it back."""
+    head = ["<|im_start|>", "user", "\n", "draw it", "<|im_end|>", "\n", "<|im_start|>",
+            "assistant", "\n"]
+    def gen(value, name, text):
+        return ["<think>", "\n", "check the page", "\n", "</think>", "\n\n", text, "\n\n",
+                "<tool_call>", "\n", "<function=", name, ">", "\n", "<parameter=", "port",
+                ">", "\n", "8090", "\n", "</parameter>", "\n", "<parameter=", "flags", ">",
+                "\n", value, "\n", "</parameter>", "\n", "</function>", "\n", "</tool_call>"]
+    tail = ["<|im_end|>", "\n", "<|im_start|>", "user", "\n", "<tool_response>", "\n",
+            "rendered", "\n", "</tool_response>", "<|im_end|>", "\n", "<|im_start|>",
+            "assistant", "\n"]
+    rows_g = gen(value_rows, "render_page", "ok")
+    copy_g = gen(value_copy, name_copy, text_copy)
+    w = _Words(head + rows_g + copy_g + tail + list(extra_copy))
+    rows = w.ids(*head, *rows_g)
+    copy = w.ids(*head, *copy_g, *tail)
+    al = endalign.EndAlign(w.tb)
+    al.marks = (w.pieces.index("<|im_start|>"), w.ids("user"), w.pieces.index("<|im_end|>"))
+    res = _Res(rows, len(head))
+    al.kept(res, len(head), "kept")
+    return al, res, rows, copy
+
+
+def test_srv679_a_call_the_template_rewrote_is_served_as_the_model_wrote_it():
+    """SRV-679 (live 2026-10-21, 5k-23k tokens read again a turn): the model wrote a call's value
+    one way, the parser typed it and the template wrote it back another (`true` -> `True`, `1` ->
+    `1.0`, an object's keys sorted by `tojson`, `<` escaped). Not whitespace: the copy parted
+    inside the generation and the turn resumed at the grid line below it. The same call, read as
+    values: the rows' tokens are served up to the end anchor and the copy's after it."""
+    cases = [("true", "True"), ("1", "1.0"), ('{"b": 2, "a": [1, true]}', '{"a": [1, true], "b": 2}'),
+             ('{"tag": "<b>"}', '{"tag": "\\u003cb\\u003e"}'), ("1e3", "1000.0")]
+    for mine, theirs in cases:
+        al, res, rows, copy = _call_turn(mine, theirs)
+        e = res.end["at"]
+        ids, spans, aligned = al.replay(res, copy)
+        assert aligned == e - res.n_prompt and ids[:e] == rows, (mine, theirs, aligned)
+        k = copy.index(al.marks[2], res.n_prompt)
+        assert ids[e:] == copy[k:], (mine, theirs)
+        assert al.stats["aligned_calls"] == 1 and al.stats["calls_tokens"] == e - res.n_prompt
+    return f"{len(cases)} re-rendered values served as the model wrote them"
+
+
+def test_srv679_another_call_or_another_text_is_served_as_sent():
+    for kw in ({"value_rows": "true", "value_copy": "false"},
+               {"value_rows": "1", "value_copy": "2"},
+               {"value_rows": "x", "value_copy": "y"},
+               {"value_rows": "true", "value_copy": "True", "name_copy": "present"},
+               {"value_rows": "true", "value_copy": "True", "text_copy": "fine"}):
+        al, res, rows, copy = _call_turn(**kw)
+        assert al.replay(res, copy) == (copy, [], 0), kw
+        assert al.stats["aligned_calls"] == 0 and al.last_refusal["why"] == "in_zone", kw
+    # off (QWEN38_END_ALIGN_CALLS=off): refused as before
+    al, res, rows, copy = _call_turn("true", "True")
+    al.calls = False
+    assert al.replay(res, copy) == (copy, [], 0)
+    # the values compared as JSON, the template's Python words read as JSON's
+    assert endalign.same_calls(
+        '<tool_call>\n<function=f>\n<parameter=a>\nNone\n</parameter>\n</function>\n</tool_call>',
+        '<tool_call>\n<function=f>\n<parameter=a>\nnull\n</parameter>\n</function>\n</tool_call>')
+    assert not endalign.same_calls("no call here", "no call here")
 
 
 if __name__ == "__main__":

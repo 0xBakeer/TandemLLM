@@ -209,8 +209,9 @@ def test_a_guest_whose_last_block_lands_late_leaves_the_resident_rows_intact():
 
 
 def _tier(d):
-    return disk_cache.DiskTier(d, chunk=CH, fingerprint="toy", settings={"admit_after": 1, "budget_gb": 1},
-                               free_bytes=lambda p: 10 ** 15, head_anchors=2, min_tokens=CH).open()
+    from disk_tier_util import waiting
+    return waiting(disk_cache.DiskTier(d, chunk=CH, fingerprint="toy", settings={"admit_after": 1, "budget_gb": 1},
+                                       free_bytes=lambda p: 10 ** 15, head_anchors=2, min_tokens=CH).open())
 
 
 def _disk_round_trip(wide):

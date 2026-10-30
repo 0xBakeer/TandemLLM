@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import os
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
+from engine import rowcopy
 import time
 
 from engine.drafters import Drafter, run_steps, tree_steps
@@ -393,6 +394,12 @@ class LengthRouter(Drafter):
         # the chosen arm's per-token q rows when the request samples.
         self.last_q = None
         self.last_key = None
+        # SPD-161: the rows a joint round keeps of this slot's tree (set by the server before each
+        # proposal; None alone): at or under the narrow arm's width, the wide arm is not drafted
+        self.row_cap = None
+        # SPD-161: set by a server with side slots whose joint cap can fall to the narrow width: the wide
+        # policy then never releases the narrow arm (it drafts there while `row_cap` fits it)
+        self.keep_narrow = False
         self.last_width = 0
         self.last_depth = 0
         self.last_expected = 0.0
@@ -520,6 +527,11 @@ class LengthRouter(Drafter):
             for head in (self.head_small, self.head_large):
                 if hasattr(head, "tree_temp"):
                     head.tree_temp = float(stair_temp)
+        # SPD-181: a sampled request's cut may rank the lattice at another temperature (a draw lands on
+        # a sibling far more often than an argmax does); `note_sampled` switches it per request
+        self.stair_temp = float(stair_temp)
+        st = _S.get("STAIR_TEMP_SAMPLED")
+        self.stair_temp_sampled = float(st) if st else None
         # What a block really costs, learned in the loop: the time from one proposal to the next is
         # the whole round (draft, verify, commit, sync), and its ratio to the staircase's price is
         # kept per (chain or tree, row tile, context class). The cut prices on the staircase times
@@ -732,6 +744,16 @@ class LengthRouter(Drafter):
             self.stats["idle"] = "s"
             self.stats["latched"] = "l"
 
+    def note_sampled(self, on: bool) -> None:
+        """SPD-181: the request samples (`on`) or decodes greedily; the cut's lattice temperature
+        follows (QWEN38_STAIR_TEMP_SAMPLED; unset: the one temperature for both)."""
+        if not self.calc or self.stair_temp_sampled is None:
+            return
+        t = self.stair_temp_sampled if on else self.stair_temp
+        for head in (self.head_small, self.head_large):
+            if hasattr(head, "tree_temp"):
+                head.tree_temp = t
+
     def set_sampling(self, sampler) -> None:
         """Both arms can sample their proposals; the length policy is unchanged."""
         for arm in (self.small, self.large):
@@ -835,6 +857,10 @@ class LengthRouter(Drafter):
                 out += fn()
         return out
 
+    @property
+    def hidden_free(self) -> bool:
+        return all(getattr(d, "hidden_free", False) for d in (self.small, self.large))
+
     def sync(self, tokens, hidden, first_pos, rows=None) -> None:
         lag = self._lagging() if self.switch else None
         for key, d in (("s", self.small), ("l", self.large)):
@@ -879,8 +905,16 @@ class LengthRouter(Drafter):
             if len(rows) != n:
                 self._catch_up(key)
                 return False
-            sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
-            kept = [t[sel] for t in taps]
+            if rowcopy.active() and len({t.dtype for t in taps}) == 1:
+                # SPD-201: the rows the drafting arm's sync records too, one copy for both arms
+                fused = rowcopy.rows_cat(list(taps), rows)
+                kept, col = [], 0
+                for t in taps:
+                    kept.append(fused[:, col:col + t.shape[1]])
+                    col += t.shape[1]
+            else:
+                sel = torch.as_tensor(rows, dtype=torch.long, device=taps[0].device)
+                kept = [t[sel] for t in taps]
         bl = self.backlog[key]
         if bl and bl[-1][0] + len(bl[-1][1]) != first_pos:
             # not contiguous with what is kept: bring the arm up to date first, then this block
@@ -897,6 +931,7 @@ class LengthRouter(Drafter):
         if not bl:
             return
         import torch
+        rowcopy.flush()
         head = self.head_small if key == "s" else self.head_large
         arm = self.small if key == "s" else self.large
         first = bl[0][0]
@@ -1466,6 +1501,10 @@ class LengthRouter(Drafter):
         request, as a released arm (so a snapshot carries only the wide arm)."""
         self.last_forced = False
         self._copy = False
+        if self.keep_narrow and self.idle is None:
+            # SPD-161: a server whose joint rounds can keep no more than the narrow width keeps the narrow
+            # arm synced (lazily, `lazy_cap`) and drafts on it while the round's cap is that narrow
+            return "s" if self.row_cap is not None and self.row_cap <= self.w_small else "l"
         if self.idle is None and self.stats.get("idle") != "s":
             self.idle = "s"
             rel = getattr(self.head_small, "release", None)
@@ -1779,6 +1818,12 @@ class LengthRouter(Drafter):
         self.k_left = k
         self._ctx = context
         key = self._choose(min(k, self.w_large - 1))
+        if (key == "l" and self.row_cap is not None and self.row_cap <= self.w_small
+                and self.idle != "s"):
+            # SPD-161: a joint round keeps at most `row_cap` rows of this tree (server/app.py, the
+            # family's tree cap); the wide arm's extra rows would be drafted and cut
+            key = "s"
+            self.stats["row_capped"] = self.stats.get("row_capped", 0) + 1
         if self.switch:
             self._use(key)
         child = self.small if key == "s" else self.large

@@ -66,3 +66,8 @@ def test_pick_prefers_bigger_only_when_it_pays():
     steep = lambda T: 70.0 if T <= 16 else 700.0                    # noqa: E731
     assert rung.pick(f, flat, 10.0, 3.0)[0] == 32
     assert rung.pick(f, steep, 10.0, 3.0)[0] == 16
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

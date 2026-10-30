@@ -258,12 +258,24 @@ def test_a_slow_subscriber_is_bounded_and_told_about_the_gap():
     try:
         with Captured() as cap:
             s = _open_stream(port, "?backlog=0", rcvbuf=4096)
-            time.sleep(0.3)                            # subscribed; now it stops reading
-            line = "[server] " + "x" * 200
-            for _ in range(20_000):
-                print(line)
+            end = time.time() + 5
+            while not cap.buf.subs and time.time() < end:
+                time.sleep(0.02)
             sub = cap.buf.subs[0]
+            # OPS-231: the subscriber stops taking while the writer runs (its next take waits for the
+            # writer), so the queue overflows on any box; before, the test relied on the writer
+            # outrunning the stream's thread, which a slower scheduler did not guarantee
+            gate, take = threading.Event(), sub.take
+
+            def held(timeout):
+                gate.wait(30)
+                return take(timeout)
+            sub.take = held
+            line = "[server] " + "x" * 200
+            for _ in range(logbuf.SUB_QUEUE * 3):
+                print(line)
             assert len(sub.q) <= logbuf.SUB_QUEUE and len(cap.buf.ring) <= logbuf.RING
+            gate.set()
             events, _ = _read_events(s, lambda ev: any(e.get("event") == "gap" for e in ev),
                                      timeout=20.0)
             gaps = [e["data"]["dropped"] for e in events if e.get("event") == "gap"]

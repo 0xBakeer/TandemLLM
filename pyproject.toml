@@ -61,6 +61,7 @@ packages = [
   "server.conductor.monitor",
   "server.laya_kit",
   "server.setup",
+  "server.toolformats",
 ]
 
 [tool.setuptools.package-dir]

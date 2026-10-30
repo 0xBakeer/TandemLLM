@@ -75,8 +75,23 @@ def class_of(rows: int, max_len: int) -> int:
 if HAVE_TRITON:
 
     @triton.jit
-    def _add_rms(H_IN, D_IN, H_OUT, N_OUT, W, eps, N: tl.constexpr, BLOCK: tl.constexpr, ADD: tl.constexpr):
-        r = tl.program_id(0)
+    def _pdl_enter():
+        """A programmatic dependent's entry: wait for the predecessor grid, then let the successor launch.
+        Returns 0 through the asm: a kernel adds it to its program ids, so every address it computes (and
+        every load of the predecessor's output) comes after the wait."""
+        return tl.inline_asm_elementwise("griddepcontrol.wait;\n\tgriddepcontrol.launch_dependents;\n\tmov.u32 $0, 0;",
+                                         "=r", [], dtype=tl.int32, is_pure=False, pack=1)
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _add_rms(H_IN, D_IN, H_OUT, N_OUT, W, eps, N: tl.constexpr, BLOCK: tl.constexpr, ADD: tl.constexpr,
+                 PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        r = tl.program_id(0) + z
         o = tl.arange(0, BLOCK)
         m = o < N
         h = tl.load(H_IN + r * N + o, mask=m, other=0.0)
@@ -124,9 +139,12 @@ if HAVE_TRITON:
 
     @triton.jit
     def _qk_prep(QKV, s_qkv, POS, SLOT, QW, KW, COS, SIN, Q, KC, VC, s_kh, s_kn, s_vh, s_vn, eps,
-                 HQ: tl.constexpr, HK: tl.constexpr, D: tl.constexpr):
-        r = tl.program_id(0)
-        hh = tl.program_id(1)
+                 HQ: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, PDL: tl.constexpr = False):
+        z = 0
+        if PDL:
+            z = _pdl_enter()
+        r = tl.program_id(0) + z
+        hh = tl.program_id(1) + z
         HALF: tl.constexpr = D // 2
         o = tl.arange(0, HALF)
         pos = tl.load(POS + r)
@@ -312,13 +330,14 @@ if HAVE_TRITON:
 
 # ------------------------------------------------------------------------------ the wrappers
 def add_rms(h: torch.Tensor, d: torch.Tensor | None, w: torch.Tensor, eps: float, h_out: torch.Tensor | None = None,
-            n_out: torch.Tensor | None = None):
-    """(h + d, norm(h + d)) as bf16 [M, N] (d None: (h, norm(h)))."""
+            n_out: torch.Tensor | None = None, pdl: bool = False):
+    """(h + d, norm(h + d)) as bf16 [M, N] (d None: (h, norm(h))). `pdl`: a programmatic dependent launch (the
+    kernel waits for its predecessor first, then lets its successor launch)."""
     M, N = h.shape
     hn = h if d is None else (torch.empty_like(h) if h_out is None else h_out)
     nn = torch.empty_like(h) if n_out is None else n_out
     _add_rms[(M,)](h, d if d is not None else h, hn, nn, w, eps, N=N, BLOCK=triton.next_power_of_2(N),
-                   ADD=d is not None, num_warps=4)
+                   ADD=d is not None, PDL=pdl, launch_pdl=pdl, num_warps=4)
     return hn, nn
 
 
@@ -378,7 +397,7 @@ def conv_rows_reference(bcx, state, wc, src):
 
 
 def qk_prep(qkv: torch.Tensor, pos: torch.Tensor, slot: torch.Tensor, qw, kw, cos, sin, kc, vc, hq: int, hk: int,
-            eps: float, q: torch.Tensor | None = None) -> torch.Tensor:
+            eps: float, q: torch.Tensor | None = None, pdl: bool = False) -> torch.Tensor:
     """qkv [M, (Hq + 2 Hk) D] bf16, pos / slot int64 [M], cos / sin bf16 [max_len, D], kc / vc
     [Hk, cap, D] -> q [M, Hq, D] bf16 (normed, rotated); k (normed, rotated) and v into the caches."""
     M = qkv.shape[0]
@@ -386,7 +405,7 @@ def qk_prep(qkv: torch.Tensor, pos: torch.Tensor, slot: torch.Tensor, qw, kw, co
     if q is None:
         q = torch.empty(M, hq, D, dtype=torch.bfloat16, device=qkv.device)
     _qk_prep[(M, hq + hk)](qkv, qkv.stride(0), pos, slot, qw, kw, cos, sin, q, kc, vc, kc.stride(0), kc.stride(1),
-                           vc.stride(0), vc.stride(1), eps, HQ=hq, HK=hk, D=D, num_warps=1)
+                           vc.stride(0), vc.stride(1), eps, HQ=hq, HK=hk, D=D, PDL=pdl, launch_pdl=pdl, num_warps=1)
     return q
 
 

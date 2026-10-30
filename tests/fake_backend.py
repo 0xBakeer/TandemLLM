@@ -37,6 +37,8 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
     FAKE_FINISH_ERROR    reasoning, then a finish chunk with `finish_reason: "error"` (our engine's
                          failure mid-stream; FAKE_FINISH_ERROR_ONCE: only the first time per text)
+    FAKE_MEMORY_FULL_ONCE  three answer tokens, then our engine's finish chunk with the
+                         `memory_full` error (SRV-709), the first time per text; then the answer
 
 For the harness (P4):
 
@@ -67,14 +69,18 @@ chunk). The tests of the workers (VIS-E15) steer the main agent and each worker 
 the stream answers 429, so chatd's reader polls).
 
 A prefix cache: a request whose messages begin with the messages of an earlier request reports
-those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
+those messages' tokens as `cached_tokens` (a backend's prefix cache, for P4's replay test). A token
 here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
 request's path, headers and body; `GET /fake/stats` the counts and the most streams it served at
 once. `refuse=<status>` (in a test) makes every completion answer that status. `memory=<n>` (in a
 test) answers a completion of more than n prompt tokens with our engine's memory refusal: a 503
 "a <n>-token prefill needs ... GiB with every cache given back", Retry-After 1 (`fake.refused`
 counts them). `window=<n>` (in a test) answers a completion of more than n prompt tokens with our
-engine's 400 for a prompt past the context window (`fake.windowed` counts them). `--key` makes
+engine's 400 for a prompt past the context window (`fake.windowed` counts them); with
+`strict = True` the prompt and `max_tokens` together count, and the 400 is a strict
+OpenAI-compatible backend's ("maximum context length is n tokens", a relay's backend). `tokenize` (in a test) answers `POST
+/v1/tokenize` (server/tokenize_api.py) with the prompt's tokens, or this number when it is an int;
+None: 404, a server without the route (`fake.counted` counts the calls). `--key` makes
 every route need `Authorization: Bearer <key>`.
 """
 
@@ -149,6 +155,9 @@ class Fake:
         self.refused = 0
         self.window: int | None = None  # the prompt tokens over which the request is too long
         self.windowed = 0
+        self.strict = False             # the window holds the prompt and max_tokens (strict)
+        self.tokenize = None            # POST /v1/tokenize: True (count) or an int; None: 404
+        self.counted = 0
         self.key = key
         self.tps = float(tps)
         self.dialect = dialect
@@ -171,6 +180,8 @@ class Fake:
         # fn() -> the rows of GET /v1/dashboard/live?follow=0 (None: 404, a server without the
         # route); the stream itself answers 429, so a reader polls
         self.live = None
+        # SRV-707: what /health adds (our engine's: max_len, parallel); None: {"status": "ok"} alone
+        self.health: dict | None = None
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -200,7 +211,7 @@ def make_handler(fake: Fake):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "FakeBackend"
-        # as vLLM's and SGLang's servers (uvicorn) do: without it, a keep-alive connection's
+        # as common OpenAI-compatible servers (uvicorn) do: without it, a keep-alive connection's
         # headers and first frame wait 40 ms for the reader's delayed ACK on Linux, and the
         # bench measured that instead of the proxy
         disable_nagle_algorithm = True
@@ -242,7 +253,7 @@ def make_handler(fake: Fake):
                     return self._json(429, {"error": {"message": "too many live streams"}})
                 return self._json(200, {"requests": fake.live(), "engine": {}})
             if p in ("/health", "/v1/health"):
-                return self._json(200, {"status": "ok"})
+                return self._json(200, {"status": "ok", **(fake.health or {})})
             if p == "/version" and fake.dialect == "vllm":
                 return self._json(200, {"version": "0.30.0"})
             if p == "/server_info" and (fake.dialect or "").startswith("sglang"):
@@ -315,6 +326,28 @@ def make_handler(fake: Fake):
                                    f"given back; the engine's peak is 52.6 GiB; retry when the "
                                    f"engine is idle", "type": "server_busy", "code": 503}},
                         (("Retry-After", "1"),))
+            if p == "/v1/tokenize":
+                if fake.tokenize is None:
+                    return self._json(404, {"error": {"message": "no route", "type": "not_found"}})
+                with fake.lock:
+                    fake.counted += 1
+                n = fake.tokenize if isinstance(fake.tokenize, int) and \
+                    not isinstance(fake.tokenize, bool) else \
+                    sum(_words((m or {}).get("content")) + 4 for m in body.get("messages") or [])
+                return self._json(200, {"tokens": n, "parts": {"system": 0, "tools": 0,
+                                                               "messages": n}})
+            if fake.window is not None and fake.strict and p.endswith("/completions"):
+                n_prompt = sum(_words((m or {}).get("content")) + 4
+                               for m in body.get("messages") or [])
+                n_out = int(body.get("max_tokens") or 0)
+                if n_prompt + n_out > fake.window:
+                    with fake.lock:
+                        fake.windowed += 1
+                    return self._json(400, {"error": {
+                        "message": f"This model's maximum context length is {fake.window} "
+                                   f"tokens. However, you requested {n_prompt + n_out} tokens "
+                                   f"({n_prompt} in the messages, {n_out} in the completion).",
+                        "type": "BadRequestError", "param": None, "code": 400}})
             if fake.window is not None and p.endswith("/completions"):
                 n_prompt = sum(_words((m or {}).get("content")) + 4
                                for m in body.get("messages") or [])
@@ -557,6 +590,13 @@ def make_handler(fake: Fake):
                 fake.once.add(k)
             return first
 
+        def _memory_full_now(self, text: str) -> bool:
+            with fake.lock:
+                k = ("FAKE_MEMORY_FULL", text)
+                first = k not in fake.once
+                fake.once.add(k)
+            return first
+
         def _drop_now(self, text: str) -> bool:
             if "FAKE_DROP_ONCE" not in text:
                 return True
@@ -618,6 +658,14 @@ def make_handler(fake: Fake):
                 k += 1
                 if k == 3 and stall:
                     time.sleep(stall)
+                if k == 3 and "FAKE_MEMORY_FULL_ONCE" in text and self._memory_full_now(text):
+                    ch = chunk({}, finish="error")
+                    ch["error"] = {"message": "memory is full: this request stopped after 3 tokens",
+                                   "type": "server_busy", "code": "memory_full", "retry_after": 30}
+                    self._event(ch)
+                    self._send_chunk(b"data: [DONE]\n\n")
+                    self._send_chunk(b"")
+                    return
                 if k == 3 and "FAKE_ERROR_FRAME" in text:
                     self._event({"error": {"message": "fake upstream failure",
                                            "type": "server_error"}})

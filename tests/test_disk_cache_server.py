@@ -38,6 +38,7 @@ from server import diskcache, memlimits, metrics as M  # noqa: E402
 from server.conductor import schema  # noqa: E402
 from tools import contract_check  # noqa: E402
 from test_cache import fresh, tokens  # noqa: E402
+from disk_tier_util import waiting  # noqa: E402
 from test_disk_cache import CH, HUGE, Pos  # noqa: E402
 
 CONTRACT = os.path.join(ROOT, "docs", "contract", "conductor-v1")
@@ -65,8 +66,8 @@ class Cond:
 
 def _tier(d, **kw):
     kw.setdefault("settings", {"admit_after": 1})
-    return dc.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
-                       free_bytes=lambda p: HUGE, **kw).open()
+    return waiting(dc.DiskTier(d, chunk=CH, fingerprint="t", min_tokens=CH, head_anchors=2,
+                               free_bytes=lambda p: HUGE, **kw).open())
 
 
 def _doc(**disk):
@@ -380,13 +381,12 @@ def test_the_served_loop_writes_the_head_and_a_restart_reads_it_with_the_same_te
 # ------------------------------------------------------------------ over HTTP (the fake engine)
 
 def test_the_routes_on_the_fake_engine():
-    from test_conductor_e2e import PROXY, _call, _port, _server, _wait
+    from test_conductor_e2e import PROXY, _call, _server, _wait
     root = tempfile.mkdtemp(prefix="qse-disk-http-")
-    port = _port()
-    proc, _ = _server(port, os.path.join(root, "conductor"),
+    proc, _ = _server(None, os.path.join(root, "conductor"),
                       extra=("--disk-cache", os.path.join(root, "disk")))
     try:
-        _wait(port, proc)
+        port = _wait(None, proc)
         st, _, got = _call(port, "GET", "/v1/conductor/memory/disk")
         assert st == 200 and got["running"] is False, got        # the fake engine runs none
         _check(got, "memory-disk")

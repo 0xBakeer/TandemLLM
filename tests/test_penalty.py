@@ -7,7 +7,7 @@ are pure tensor logic and need no model at all.
 
   1. the three formulas (multiplicative rep on negative/positive logits, flat presence,
      per-occurrence frequency) applied only to tokens the history contains;
-  2. chain rows see committed history PLUS the drafts above them (vLLM's per-position history);
+  2. chain rows see committed history PLUS the drafts above them (per-position history);
   3. tree rows see their ANCESTOR PATH, and a sibling leaves nothing behind;
   4. an off spec is a byte-identical no-op, and `seed` resets (the gate tools reuse one state).
 """
@@ -375,7 +375,7 @@ def test_logit_bias_is_added_to_every_row_at_every_site():
 
 
 def test_logit_bias_comes_before_the_penalties():
-    # vLLM's order: the bias is a logits processor, the penalties read the processed row
+    # the bias is a logits processor, the penalties read the processed row
     ps = PenaltyState(PenaltySpec(rep=2.0, bias={3: 4.0}), V, "cpu")
     ps.seed([3])
     r = row()

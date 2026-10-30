@@ -535,7 +535,7 @@
                   "minLength": 1
                 },
                 "minItems": 1,
-                "description": "the reminder after a block that does not parse; {error} is the parser's reason"
+                "description": "the reminder after a block that does not parse; {error} is the parser's reason, {format} how a call is written in the model's own format, shown with a tool the request offers (toolcall.call_format)"
               },
               "regenerations": {
                 "type": "integer",
@@ -558,6 +558,11 @@
                 "type": "string",
                 "minLength": 1,
                 "description": "the reminder for a schema problem: {name}, {problem}"
+              },
+              "unknown_text": {
+                "type": "string",
+                "minLength": 1,
+                "description": "SRV-693: the reminder for a call to a tool the request did not offer (and the server could not map): {name}, {tools} (the offered ones); absent: such a call goes out as written"
               },
               "cut": {
                 "enum": [

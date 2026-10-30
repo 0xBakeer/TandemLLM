@@ -246,10 +246,14 @@ def split(state: dict, probe=None, avail=mem_available, total=mem_total, pool=No
     kinds = pool.by_kind() if pool is not None and hasattr(pool, "by_kind") else None
     vmm = 0
     if kinds is not None and kinds.get("paged"):
-        for name, key in (("kv_pool", "engine_kv"), ("drafter_kv", "drafter_kv")):
+        for name, key in (("kv_pool", "engine_kv"), ("drafter_kv", "drafter_kv"), ("kv_pool", "other")):
+            # SRV-655: a model whose KV buffers are not named `kv.*` has its rows in the pool's
+            # "other" kind; its adapter counts no paged bytes itself (a 262,144-row window's
+            # addresses, 6.44 GB with 0.61 committed, were its KV here)
             if kinds.get(key):
                 put(name, kinds[key])
-                vmm_parts.append(name)
+                if name not in vmm_parts:
+                    vmm_parts.append(name)
         vmm = int(kinds.get("engine_kv", 0) + kinds.get("drafter_kv", 0) + kinds.get("other", 0))
     ma, mt = avail(), (total() if total is not None else None)
     in_use = (mt - ma) if ma is not None and mt is not None else None

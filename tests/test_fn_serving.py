@@ -52,14 +52,19 @@ class _FN:
         self.primed: list = []
         self.resets = 0
         self.commits: list = []
-        self._pend_owner = None
-        self._pend_n = torch.ones(2, dtype=torch.int32)
+        self._pending: dict = {}          # id(state) -> state with parked GDN rows (SPD-229: each its own)
         self.flushes = 0
 
-    def flush(self):
-        self.flushes += 1
-        self._pend_n.zero_()
-        self._pend_owner = None
+    def parked(self, st):
+        return id(st) in self._pending
+
+    def drop_parked(self, st):
+        self._pending.pop(id(st), None)
+
+    def flush(self, st=None):
+        for s in ([st] if st is not None else list(self._pending.values())):
+            if self._pending.pop(id(s), None) is not None:
+                self.flushes += 1
 
     def new_state(self, cap=None, paged=False):
         cap = cap or 64
@@ -250,6 +255,58 @@ def test_a_draft_cut_to_the_anchor_is_a_drafted_round():
     return "a draft cut to the anchor: a drafted round of one token, not a plain step; wants_graphs"
 
 
+def test_a_round_other_lanes_shared_teaches_no_price():
+    """SPD-239: the drafter prices a round by the wall time to its next proposal; a round the round runner ran with
+    other lanes (`lanes` > 1) spans every lane's work (C2 2026-10-25: a request priced drafting at 30.6 ms a token
+    against plain 25.1 and took 221 plain steps), so it is not learned; a lone round is, as before."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    prompt = list(range(50))
+    d.reset()
+    d.sync(prompt, _rows(0, 50), 0)
+    for lanes, learned in ((4, False), (1, True)):
+        d.cut.spec.clear(), d.cut.rounds.clear(), d.cut.plain.clear()
+        d.lanes = lanes
+        blk = d.propose_tree(prompt, 8)
+        assert blk is not None and blk.n_draft > 0
+        d.on_verify(len(blk.tokens), 5.0)
+        d.observe([100])
+        d.sync([100], _rows(len(prompt), 1), len(prompt))
+        prompt = prompt + [100]
+        d.propose_tree(prompt, 8)
+        assert (0 in d.cut.spec) is learned and (0 in d.cut.rounds) is learned, (lanes, d.cut.spec)
+        d.observe([101])
+        d.sync([101], _rows(len(prompt), 1), len(prompt))
+        prompt = prompt + [101]
+    return "a round of 4 lanes: no drafted price learned; a lone round: learned"
+
+
+def test_a_shared_round_drafts_where_a_lone_one_would_skip():
+    """SPD-239: a class whose lone prices make it skip (drafted above plain) and whose turn would go plain still
+    drafts when its last round had other lanes (`lanes` > 1): in a joint pass a plain lane gives one token a round
+    (C4 2026-10-25: a side slot priced at 30 ms a token skipped 222 of 225 rounds, C4 82.7 -> 70.0)."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    prompt = list(range(50))
+    d.reset()
+    d.sync(prompt, _rows(0, 50), 0)
+    assert d.propose_tree(prompt, 8).n_draft > 0
+    for _ in range(40):
+        d.cut.observe_plain(20.0, 0)
+        d.cut.observe_spec(30.0, 0, 1)
+    d.observe([100])
+    d.sync([100], _rows(50, 1), 50)
+    d.lanes = 4
+    assert d.propose_tree(prompt + [100], 8) is not None and d.stats["skipped"] == 0
+    d.observe([101])
+    d.sync([101], _rows(51, 1), 51)
+    d.lanes = 1
+    assert d.propose_tree(prompt + [100, 101], 8) is None and d.stats["skipped"] == 1
+    return "lanes 4: drafts where lanes 1 skips"
+
+
 def test_a_turns_backlog_prime_is_not_its_first_rounds_price():
     """P0 (2026-10-12): the first drafted round of a turn at 140k read the turn's backlog into the head
     (772 rows, 200 ms) and was priced at 93 ms; the turn weighs the prime (`StairCut.turn`), the round's
@@ -400,7 +457,7 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     assert not s.captured
     # after the server's warm-up: the state starts over and class 0's graphs are taken at once
     s.st.length = 500
-    s.idle_captures = lambda: iter([1, 2, 3]) if s.st.length == 0 else None
+    s.idle_captures = lambda ahead=True, wants=None: iter([1, 2, 3]) if s.st.length == 0 and not ahead else None
     assert s.precapture(None) is None and s.precapture(object()) == 3 and s.st.length == 0
     return ("8 graphs of the 1,024 class (2 widths, 4 commits, a moved one over a tree, 2 feeds); then nothing owed; "
             "a first replay unpriced; class 0 right after the warm-up")
@@ -555,18 +612,18 @@ def test_pending_verbs():
     assert s.trim_pending(12) and not s.trim_pending(11) and s.st.length == 12   # absorbed: refused
     s._chain = 2
     assert not s.trim_pending(20) and s.st.length == 12 and s._chain == 2       # past the chain: no
-    fn._pend_owner = s.st                              # parked GDN rows of this state
+    fn._pending[id(s.st)] = s.st                       # parked GDN rows of this state
     s.settle()
-    assert fn.commits[-1] == [0, 1] and fn.flushes == 1 and fn._pend_owner is None and s.st.length == 14
-    fn._pend_owner, fn._pend_n[:] = s.st, 3
+    assert fn.commits[-1] == [0, 1] and fn.flushes == 1 and not fn.parked(s.st) and s.st.length == 14
+    fn._pending[id(s.st)] = s.st
     s._chain, s.picks = 2, [1, 2]
     s.discard_pending()
-    assert s._chain is None and s.picks is None and fn._pend_owner is None and int(fn._pend_n.sum()) == 0
+    assert s._chain is None and s.picks is None and not fn.parked(s.st)
     other = FNState(cap=8)
-    fn._pend_owner = other                             # another state's parked rows are not ours
+    fn._pending[id(other)] = other                     # another state's parked rows are not ours
     s.discard_pending()
     s.settle()
-    assert fn._pend_owner is other and fn.flushes == 1
+    assert fn.parked(other) and fn.flushes == 1
     return "trim inside a pending chain, drop it, refuse absorbed rows; settle lands chain and parked rows; discard"
 
 
@@ -615,6 +672,181 @@ def test_the_drafter_resumes_and_snapshots_its_head():
     assert d.held is None and d.head.st.length == 0
     return "the head's views; a snapshot feeds the queue first; resume and restore set its length and the waiting row"
 
+
+def _qsa_class(n: int) -> int:
+    """Flash-Next's context classes (engine.py `qsa_class`: 4 keys a block, dense up to TOPK 512 blocks)."""
+    if (n + 1) // 4 <= 512:
+        return 0
+    nb = 1024
+    while nb * 4 < n + 1:
+        nb *= 2
+    return nb
+
+
+def _ahead_serving(max_len: int = 32_768):
+    """A Flash-Next serving after the warm-up: class 0's graphs taken, the graph classes stubbed."""
+    from engine.models.flashnext import serving as S
+    fn = _FN()
+    fn.qsa_class = _qsa_class
+    fn.stage_rows = lambda toks, parents, st: None
+    fn.stage_commit = lambda st, path: None
+    made = []
+
+    class VG:
+        def __init__(self, fn_, st, M, cls):
+            self.key = (M, cls)
+
+        def capture(self):
+            made.append(("v",) + self.key)
+
+        def replay(self):
+            pass
+
+    class CG:
+        def __init__(self, fn_, st, key):
+            self.key = key
+
+        def capture(self):
+            made.append(("c",) + self.key)
+
+    head = types.SimpleNamespace(depth=3, graphs={})
+    head.capture_class = lambda n, cls: (made.append(("m", n, cls)), head.graphs.__setitem__((n, cls), 1))
+    s = FlashNextServing(fn, max_len)
+    s.heads["mtp"] = head
+    s.captured, s.commit_ms = False, 0.0
+    return s, made, (S, VG, CG)
+
+
+def _drain(s, stubs, steps):
+    S, VG, CG = stubs
+    real, (S.VerifyGraph, S.CommitGraph) = (S.VerifyGraph, S.CommitGraph), (VG, CG)
+    sync, torch.cuda.synchronize = torch.cuda.synchronize, lambda: None
+    try:
+        return 0 if steps is None else sum(1 for _ in steps)
+    finally:
+        S.VerifyGraph, S.CommitGraph = real
+        torch.cuda.synchronize = sync
+
+
+def test_idle_captures_take_the_classes_ahead_and_the_owed_ones():
+    """SRV-713: after the warm-up (class 0 only, `precapture`) an idle window also captures the classes ahead
+    of the state's length (the next one, and each further one starting within `AHEAD_TOKENS`: from an empty
+    state 1,024 from 2,051 tokens and 2,048 from 4,096, where the conductor's prompts start) and every class
+    a turn found without graphs (`capture_cost`), whatever length the state was left at; none where `wants`
+    says drafting does not pay; the state's length unchanged."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0 and s.idle_captures(ahead=False) is None
+    nxt = [s._next_class_len(n) for n in (0, 2051, 4096, 30_000)]
+    assert nxt == [2051, 4096, 8192, None], nxt
+    assert s._capture_lengths(True) == [0, 2051, 4096], s._capture_lengths(True)
+    assert s.capture_cost(4784) > 0 and s.last_owed.startswith("2048:v")   # the conductor's prompt: owed
+    assert s.idle_captures(wants=lambda n: False) is None, s._capture_lengths(True)   # drafting does not pay
+    asked = []
+    n = _drain(s, stubs, s.idle_captures(wants=lambda n: asked.append(n) or True))
+    assert n > 0 and {m[-1] for m in made[-n:]} == {1024, 2048} and asked == [4784, 2051], (made[-n:], asked)
+    assert s.capture_cost(4784) == 0.0 and s.capture_cost(4129) == 0.0 and s._owed == {}, s._owed
+    assert s.last_owed == "2048:v0c0m0" and s.st.length == 0
+    # a side question leaves the state short; a turn at 9,000 tokens found class 4096 without graphs
+    s.st.length = 300
+    assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
+    n = _drain(s, stubs, s.idle_captures())
+    assert {m[-1] for m in made[-n:]} == {4096} and s.capture_cost(9000) == 0.0 and s.st.length == 300, made[-n:]
+    assert s.idle_captures() is None
+    # a state at 4,784 tokens: its own class has them, the next (4,096 from 8,192) is taken ahead
+    s.st.length = 4784
+    assert s._capture_lengths(True) == [4784, 8192] and s.idle_captures() is None     # 4096 captured above
+    return "classes 1,024 and 2,048 ahead of an empty state, 4,096 owed from a short one; none unwanted"
+
+
+def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
+    """SRV-713: every request through the conductor starts in Flash-Next's first sparse class (its plan's
+    prompt, 4,129-4,784 tokens on the 2026-10-26 card run). The warm-up captured class 0 only, so StairCut
+    weighed the class's 25 missing graphs (9.5 s) against a 256-token answer and the whole turn took the
+    plain step (1.0 a block, 39 tok/s on code; raw, short prompts, 69.6). After one idle window the same
+    turn drafts; the turn's prices are the run's (22.0 ms plain, 17.7 ms drafted a token)."""
+    s, made, stubs = _ahead_serving()
+    _drain(s, stubs, s.idle_captures(ahead=False))                    # the warm-up's class 0
+    s.capture_ms = 380.0                                              # a graph's capture on the box
+    pc = str(s.price_class(4784))
+    prices = PriceModel({pc: {"plain": {"1": 22.0}, "spec": {"1": 17.7}, "prime": {"1": 0.03}}})
+    prompt = list(range(4784))
+
+    def turn():
+        d = MTPTreeDrafter(s, _StubHead(), StairCut(prices, siblings=False))
+        d.reset()
+        d.sync(prompt, _rows(0, len(prompt)), 0)
+        tree = d.propose_tree(prompt, 8)
+        return d.req["turn"], d.req["turn_in"], tree
+
+    t, ti, tree = turn()
+    assert t is False and tree is None and ti["extra_ms"] > 5000, ti  # the bug: graphs owed, a plain turn
+    _drain(s, stubs, s.idle_captures())                               # one idle window (state at 0)
+    t, ti, tree = turn()
+    assert t is True and ti["extra_ms"] == 0.0 and tree is not None and tree.n_draft > 0, (t, ti, tree)
+    return "a 4,784-token turn: plain while class 2048 is owed, drafts after one idle window"
+
+
+def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records():
+    """SRV-713: the round runner issues the next draft before the commit (QSE_RUNNER_PIPE). In one round of a
+    class without graphs both were captured inline: the next draft's MTP chain graph (its warm-up and capture
+    run the MTP step, `_mtp_begin`), then the block's commit graph, which reads the verify's records
+    (`rec`). The MTP step emptied them and the commit's capture failed on the first layer: a raw 4,024-token
+    request on Flash-Next 3.05 ended in HTTP 500, KeyError: 0 in `commit_dev` (2026-10-26, 6d691a11)."""
+    import contextlib
+    from engine.models.flashnext import engine as E
+    eng = object.__new__(E.FlashNextEngine)
+    eng.cfg = types.SimpleNamespace(linear_layers=(0, 1), ple_layers={}, has_indexer=False)
+    eng._joint, eng._multi, eng._pending, eng.fold, eng.host_ms, eng.hash = {}, None, {}, False, {}, {}
+    eng._block = ([7, 8, 9], [-1, 0, 1])
+    eng.settle = lambda st: None
+    eng.stage_commit = lambda st, path: (3, len(path), False, 0)
+    eng._commit_bufs = lambda key: {"stack": torch.zeros(len(key), 3)}
+    eng._rows_buffers = lambda M, key: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
+    eng.stage_mtp = lambda st_m, nexts, depth: 0
+    eng.mtp_chain_dev = lambda st_m, n, depth, cls: eng._mtp_begin(n, ("mtp", "mtp", 0, n), cls)
+    read = []
+
+    def commit_dev(st, key):                    # what the real one reads first: each linear layer's record
+        read.extend(type(eng.rec[li]).__name__ for li in eng.cfg.linear_layers)
+    eng.commit_dev = commit_dev
+
+    class CG:                                   # the commit graph: its capture runs `commit_dev`
+        def __init__(self, eng_, st, key):
+            self.eng, self.st, self.key = eng_, st, key
+            self.graph = types.SimpleNamespace(replay=lambda: None)
+
+        def capture(self):
+            self.eng.commit_dev(self.st, self.key)
+
+    class _Graph:
+        def replay(self):
+            pass
+
+    stream = lambda: types.SimpleNamespace(wait_stream=lambda s: None)    # noqa: E731
+    cuda = {"Stream": stream, "stream": lambda s: contextlib.nullcontext(), "current_stream": stream, "CUDAGraph": _Graph,
+            "graph": lambda g: contextlib.nullcontext(), "synchronize": lambda: None}
+    real = {k: getattr(torch.cuda, k) for k in cuda}
+    real_cg = E.CommitGraph
+    st, st_m = FNState(cap=16), FNState(cap=16)
+    try:
+        for k, v in cuda.items():
+            setattr(torch.cuda, k, v)
+        E.CommitGraph = CG
+        # 1. the block's verify graph replays: the records are its intermediates
+        vg = object.__new__(E.VerifyGraph)
+        vg.eng, vg.graph = eng, _Graph()
+        vg.rec = {0: (1, 2, 3, 4), 1: (1, 2, 3, 4), "stack": torch.zeros(3, 3)}
+        vg.replay()
+        # 2. the next draft's MTP chain graph, captured inline (no graph for its feed at this class)
+        E.MTPChainGraph(eng, st_m, 2, 3, 1024).capture()
+        # 3. the block's commit graph, captured inline: it reads the verify's records
+        eng.commit(st, [0, 1], {})
+    finally:
+        for k, v in real.items():
+            setattr(torch.cuda, k, v)
+        E.CommitGraph = real_cg
+    assert read == ["tuple", "tuple"] and eng.rec is vg.rec and st.length == 2, (read, eng.rec)
+    return "verify replay, an inline MTP capture, an inline commit capture: the commit reads both layers' records"
 
 if __name__ == "__main__":
     fails = 0

@@ -1,10 +1,13 @@
 """Plan mode, the todo list and rewind (SRV-363, plan note Chat 7). Mixed into
 `chatd.service.Service`.
 
-PLAN MODE is a chat setting (`plan_mode`). The model gets the read tools (read_file, glob, grep,
-web_search, web_fetch, the library, present) and `todo_write`, a line in the system block that asks for a plan
-and no changes, and effort high unless the chat chose more. A call to any other tool is refused
-with "plan mode: read tools only" and the run goes on. Approve (`POST .../plan/approve`) takes the
+PLAN MODE is a chat setting (`plan_mode`). The model may use the read tools (read_file, glob, grep,
+web_search, web_fetch, the library, present) and `todo_write`; it gets a line on the turn's user
+message that asks for a plan and no changes (`plan_onto`), and effort high unless the chat chose
+more: on our engine as high's reasoning cap, the chat's effort word unchanged (the template renders
+the word in the system turn; chatd/agent.py `plan_effort`). A call to any other tool is refused with "plan mode: read tools only" and the run goes on.
+The request keeps the chat's whole tool list and system block (SRV-663): with them changed by the
+mode, the turn into plan mode and the one after Approve read the whole conversation again. Approve (`POST .../plan/approve`) takes the
 plan's items (the numbered or bulleted lines of the answer, or the list the user edited), makes
 them the todo list, leaves plan mode and sends "Carry out the approved plan."
 
@@ -99,6 +102,18 @@ class PlansMixin:
         if m is None or any(p.get("type") == "todos" for p in m["parts"]):
             return
         parts = m["parts"] + [{"type": "todos", "text": todo_text(items), "items": items}]
+        self.store.run("UPDATE messages SET parts = ? WHERE id = ?", (json.dumps(parts), user_mid))
+
+    def plan_onto(self, cid: str, user_mid: str) -> None:
+        """At a plan-mode run's start: the plan rule onto its user message, once (SRV-663). On the
+        message, not in the system block: the prompt's head stays the same in and out of plan
+        mode, and the turn after the plan reads only its own message."""
+        if not self.settings_of(cid).get("plan_mode"):
+            return
+        m = self._messages(cid).get(user_mid)
+        if m is None or any(p.get("type") == "plan" for p in m["parts"]):
+            return
+        parts = m["parts"] + [{"type": "plan", "text": PLAN_RULE}]
         self.store.run("UPDATE messages SET parts = ? WHERE id = ?", (json.dumps(parts), user_mid))
 
     # ------------------------------------------------------------------ plan mode

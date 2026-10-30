@@ -9,21 +9,9 @@ turned into tokens by the *target's* `lm_head`.
 
 WHICH TARGET HIDDEN STATES, AND FROM WHERE
 ------------------------------------------
-`dflash_config.target_layer_ids = [5, 19, 33, 47, 61]`, and those ids are consumed by the serving
-stack as *capture points at the entry of that layer*, not as that layer's output. The target model
-marks the listed layers and each marked layer captures inside
-`LayerCommunicator.prepare_attn_and_capture_last_layer_outputs`, whose body is:
-
-    hidden_states, residual = self.prepare_attn(hidden_states, residual, ...)
-    if captured_last_layer_outputs is not None:
-        gathered_last_layer_output = self._communicate_simple_fn(hidden_states=residual, ...)
-        ...
-        captured_last_layer_outputs.append(gathered_last_layer_output)
-
-`prepare_attn` is the fused add-norm: it folds the incoming `hidden_states` into `residual` and
-writes `input_layernorm(residual)` into `hidden_states`. What is appended is **`residual`** -- the
-residual stream *entering* layer L, i.e. the output of layer L-1 *after* its MLP residual add and
-*before* layer L's `input_layernorm`. The name of the helper says it: "capture_last_layer_outputs".
+`dflash_config.target_layer_ids = [5, 19, 33, 47, 61]`, and each id names a *capture point at the
+entry of that layer*, not that layer's output: the residual stream *entering* layer L, i.e. the
+output of layer L-1 *after* its MLP residual add and *before* layer L's `input_layernorm`.
 
 So the five tensors this drafter needs are the residual stream entering target layers
 5, 19, 33, 47 and 61, concatenated in that (ascending) order into [N, 5 * 5120] and fed to `fc`.
@@ -42,17 +30,11 @@ THE BLOCK
     ids       = [anchor, MASK, MASK, MASK, MASK, MASK, MASK, MASK]      (mask id 248070)
     positions = [p,      p+1,  p+2,  p+3,  p+4,  p+5,  p+6,  p+7]
 
-where `anchor` is the last token the target decided and `p` is its position -- the serving worker
-builds precisely this (`block_ids.fill_(mask_token_id); block_ids[:, 0].copy_(bonus_tokens)`,
-`positions = prefix_lens + [0..block_size-1]`).
+where `anchor` is the last token the target decided and `p` is its position.
 
 Row j of the module's output predicts the token at position p+j, so **row 0 is dead** (its token is
-the anchor, already known) and one block yields `block_size - 1 = 7` proposals, not 8:
-
-    draft_hidden = draft_hidden.view(bs, block_size, -1)
-    pred_hidden  = draft_hidden[:, 1:, :]            # [bs, block_size-1, H]
-    ...
-    draft_tokens[:, 0].copy_(block_ids[:, 0]); draft_tokens[:, 1:].copy_(draft_next)
+the anchor, already known) and one block yields `block_size - 1 = 7` proposals, not 8: the draft
+tokens are the head's choices on rows 1..7.
 
 That matches `engine/spec.py` one for one: the verify pass runs `[tok] + draft` with
 `len(draft) == 7`, and an all-accept block yields 7 drafted tokens plus the bonus.
@@ -61,21 +43,15 @@ CONTEXT ENTERS AS KV, NOT AS TOKENS
 -----------------------------------
 `target_hidden` is projected once, `hidden_norm(fc(target_hidden))`, and that single tensor is what
 every one of the five layers projects its context K and V from -- the HF reference passes the same
-`target_hidden` into every layer, and the serving worker materialises it into the draft KV cache
-once per committed token:
-
-    ctx_hidden = self.draft_model.project_target_hidden(target_hidden)
-    for layer in self.draft_model.layers:
-        k, v = layer.self_attn.kv_proj_only(ctx_hidden)
-        k = attn.apply_k_norm(k); k = attn.apply_k_rope(positions, k)
+`target_hidden` into every layer. Each layer's context K is k_norm then RoPE of `k_proj` of it at the
+token's position, its V `v_proj` of it, computed once per committed token.
 
 So the context costs `k_proj + v_proj` per layer per committed token, paid in `sync()`, and the
 draft pass itself only ever projects Q from the eight noise rows. Q comes from the noise block, K
 and V from context concatenated with the noise block, which is the KV injection the reference
 names.
 
-Attention is **non-causal**: `config.is_causal = false` maps to `AttentionType.ENCODER_ONLY`, so
-inside the block every row sees every other row, including later ones -- that is what makes this a
+Attention is **non-causal** (`config.is_causal = false`), so inside the block every row sees every other row, including later ones -- that is what makes this a
 block drafter rather than seven chained steps. All five layers are `sliding_attention` with
 `sliding_window = 2048`, applied to the context side.
 
@@ -83,7 +59,7 @@ NORM CONVENTION -- THE THING THAT IS EASY TO GET WRONG
 ------------------------------------------------------
 The target uses `GemmaRMSNorm`, `normalize(x) * (1 + w)`, which is what `engine.model.rms_norm`
 implements. The draft checkpoint does **not**: it is a Qwen3 draft (`Qwen3RMSNorm` in the HF
-reference, sglang's plain `RMSNorm` whose weight is initialised to `ones`) and computes
+reference, whose weight is initialised to `ones`) and computes
 `normalize(x) * w`. Every norm in this file therefore uses the local `_rms`, never the engine's.
 `tools/dflash2_probe.py` checks this empirically: the checkpoint's norm weights sit near 1.0, which
 only makes sense for the plain convention.
@@ -113,18 +89,9 @@ for 7. Against a 26.93 GB verify step it is 23 % of a step for up to 8 accepted 
 
 THE SELECTOR DOES NOT REPLACE THE HEAD READ
 -------------------------------------------
-It is an inference-time device -- the serving worker runs it on every draft, greedy and sampling
-alike -- but it *consumes* the head's output instead of avoiding it. `compute_candidates` runs the
-full head and then takes the top k:
-
-    def _project_candidate_logits(hidden, lm_head, *, num_org, use_quant_head):
-        weight = lm_head.weight
-        return torch.matmul(hidden.to(weight.dtype), weight[:num_org].T)
-    ...
-    def _radix_topk(scores, k):
-        # The selector's largest single cost: it reads the whole logits tensor.
-
-and the codebooks are then *gathered* by candidate id, 32 rows of 256 per slot. So the whole
+It is an inference-time device -- it runs on every draft, greedy and sampling alike -- but it
+*consumes* the head's output instead of avoiding it: the candidates are the top k of the full head's
+logits, so the whole logits tensor is read, and the codebooks are then *gathered* by candidate id, 32 rows of 256 per slot. So the whole
 2,542,796,800 B of `lm_head` is read either way; the selector adds 2,621,440 B for
 `hidden_projection` and 114,688 B of gathers, 0.04 % of the draft, and buys acceptance rather than
 bytes: it rescores the 16 candidates per slot against the previous slot's choice through a rank-256
@@ -138,10 +105,9 @@ path is wired here behind `draft_head=`, off by default until `tools/draft_head.
 
 WHAT IS NOT IN THE REFERENCE
 ----------------------------
-`blocks=2` (two chained 8-wide drafts, 14 proposals) has no counterpart in the serving stack. The
-worker runs exactly one draft forward per verify; the only supported way to propose more is a larger
-`block_size` (`speculative_num_draft_tokens` overrides the checkpoint's 8 and `set_block_size`
-re-blocks the convolutions). The chaining implemented below is therefore this engine's own, and its
+`blocks=2` (two chained 8-wide drafts, 14 proposals) has no counterpart in the reference, which runs
+exactly one draft forward per verify; there the only way to propose more is a larger `block_size`
+(`set_block_size` re-blocks the convolutions). The chaining implemented below is therefore this engine's own, and its
 shape is stated where it is built.
 """
 
@@ -192,6 +158,8 @@ import glob
 import json
 import os
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
+from engine import native_tree, rowcopy  # noqa: E402
+from engine.drafters import topk_small  # noqa: E402
 
 import torch
 import torch.nn.functional as F
@@ -233,7 +201,7 @@ class DFlash2Config:
         self.rope_theta = float(raw.get("rope_parameters", {}).get("rope_theta", 1e7))
         self.layer_types = list(raw.get("layer_types", ["full_attention"] * self.num_hidden_layers))
         self.sliding_window = int(raw.get("sliding_window") or 0) or None
-        # `is_causal: false` -> AttentionType.ENCODER_ONLY in the serving stack.
+        # `is_causal: false`: every block row attends to every other one.
         self.is_causal = bool(raw.get("is_causal", False))
         # z-lab's DFlash2 carries `block_size` inside `dflash_config`; the SpecForge-derived
         # checkpoints (DSpark) carry it at the top level, where their base class reads it.
@@ -434,7 +402,17 @@ def exl3_projections(w: dict, path: str, key: str) -> dict:
             for j, m in enumerate(members):
                 out[f"layers.{i}.{m}.weight"] = grp.member(j)
             fused += 1
-    print(f"[drafter] {n} EXL3 projections from {path}: {nb / 1e9:.3f} GB, {fused} fused groups")
+    # SPD-179: the bf16 projections the blocks replace leave the loaded checkpoint (`load_weights`
+    # keeps it for every drafter of this snapshot): nothing reads them once the blocks are in, and
+    # they were about 3.3 GB a checkpoint beside their 0.65 GB of EXL3
+    freed = 0
+    for base in bases:
+        if base != "fc":
+            t = w.pop(f"{base}.weight", None)
+            if isinstance(t, torch.Tensor):
+                freed += t.numel() * t.element_size()
+    print(f"[drafter] {n} EXL3 projections from {path}: {nb / 1e9:.3f} GB, {fused} fused groups, "
+          f"{freed / 1e9:.2f} GB of bf16 released")
     _EXL3_PROJ[key] = out
     return out
 
@@ -495,8 +473,8 @@ def _rope_tables(positions: torch.Tensor, dim: int, theta: float,
                  dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     """Neox-style full rotary over all `dim` of the head; the draft has no partial factor.
 
-    Distinct from the target's rotary in this engine, which is partial at 0.25 over head_dim 256.
-    `get_rope(head_dim, rotary_dim=head_dim, base=1e7, is_neox_style=True)` in the serving stack.
+    Distinct from the target's rotary in this engine, which is partial at 0.25 over head_dim 256:
+    NeoX-style rotation over the whole head_dim, base 1e7.
     """
     inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32,
                                         device=positions.device) / dim))
@@ -513,41 +491,32 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 def _grouped_conv(h: torch.Tensor, delta: torch.Tensor, base: torch.Tensor,
                   num_groups: int, group_size: int, taps: int,
                   block_pos: torch.Tensor) -> torch.Tensor:
-    """One dynamic depthwise K-tap convolution along the token axis, inside a block.
+    """One dynamic depthwise K-tap convolution along the token axis, inside a block:
 
-    Port of `_grouped_conv` in the serving model, operation for operation:
+        y[t, c] = sum over j < taps with block_pos[t] >= j of (base[j, c] + delta[t, j, c // group_size]) * h[t - j, c]
 
-        blocks = hidden_states.unflatten(-1, (num_groups, group_size))
-        coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
-        out = coefficients[:, 0] * blocks
-        position = arange(T) & (block_size - 1)
-        for tap in range(1, taps):
-            shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-            out = out + coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
-        return out.flatten(-2)
+    the terms added in tap order, each product taken as (coefficient * h) * mask.
 
-    Three details that are the whole thing:
+      * grouping -- channel c is in group c // group_size (contiguous runs). `base` is per channel
+        [taps, H]; `delta` is per group [T, taps, num_groups] and is shared by the channels of its
+        group. `kernel_projection` emits 2 * taps * num_groups features laid out [side][tap][group],
+        the order `_Conv.prepare` reshapes them in.
+      * direction -- tap j reads row t - j: the convolution looks backwards, it is causal.
+      * blocking -- `block_pos` is a row's index within its block, and a tap that would reach across
+        a block boundary (block_pos[t] < j) adds nothing. A block never sees the one before it.
 
-      * grouping -- `unflatten(-1, (num_groups, group_size))` splits the 5120 channels into 320
-        contiguous runs of 16, so channel c is in group c // 16. `base_kernel` is per *channel*
-        [2, taps, 5120]; the projected `delta` is per *group* [T, taps, 320] and is broadcast
-        across the 16 channels of its group. `kernel_projection` emits 2 * taps * num_groups =
-        1280 features laid out [side][tap][group], which is the reshape order used here.
-      * direction -- `F.pad(blocks[:-tap], (..., tap, 0))` pads the *front* of the token axis, so
-        `shifted[t] = blocks[t - tap]`. The convolution looks backwards: it is causal.
-      * blocking -- `position` is the index *within* the block, and the `position >= tap` mask kills
-        every tap that would reach across a block boundary. A block never sees the one before it.
-
-    The coefficient used at tap t belongs to the *current* token: the kernel is dynamic per output
-    row, not a shared filter.
+    The coefficient at tap j belongs to the *current* row t: the kernel is dynamic per output row,
+    not a shared filter.
     """
-    blocks = h.unflatten(-1, (num_groups, group_size))
-    coef = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
-    out = coef[:, 0] * blocks
-    for tap in range(1, taps):
-        shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-        out = out + coef[:, tap] * shifted * (block_pos >= tap).view(-1, 1, 1)
-    return out.flatten(-2)
+    T = h.shape[0]
+    x = h.unflatten(-1, (num_groups, group_size))                          # [T, groups, size]
+    k = base.view(1, taps, num_groups, group_size) + delta[..., None]      # [T, taps, groups, size]
+    y = k[:, 0] * x
+    for j in range(1, taps):
+        back = torch.zeros_like(x)                                         # back[t] = x[t - j], 0 before
+        back[j:] = x[:T - j]
+        y = y + k[:, j] * back * (block_pos >= j).view(-1, 1, 1)
+    return y.flatten(-2)
 
 
 class _Conv:
@@ -764,6 +733,14 @@ class DFlash2Module:
             y = yield key, x
             return y
 
+        def prep(c, x, i, side):
+            # SPD-161: the convolution's kernel projection, one call over every block's rows (PACK_KP)
+            if PACK_KP:
+                coef = (yield ("kp", i, side), x).reshape(x.shape[0], 2, c.taps, c.groups)
+                return (_grouped_conv(x, coef[:, 0], c.base[0], c.groups, c.gsize, c.taps, block_pos),
+                        coef[:, 1])
+            return c.prepare(x, block_pos)
+
         h = noise_emb
         for i in range(cfg.num_hidden_layers):
             p = f"layers.{i}"
@@ -772,7 +749,7 @@ class DFlash2Module:
             x = _rms(h, self.w[f"{p}.input_layernorm.weight"], cfg.rms_norm_eps)
             akernel = None
             if conv is not None:
-                x, akernel = conv[0].prepare(x, block_pos)
+                x, akernel = yield from prep(conv[0], x, i, 0)
             q = (yield from lin(x, f"{p}.self_attn.q_proj.weight")).view(t, nh, hd)
             q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
             k = (yield from lin(x, f"{p}.self_attn.k_proj.weight")).view(t, nkv, hd)
@@ -782,12 +759,33 @@ class DFlash2Module:
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
             v = v.transpose(0, 1)[None]
             if ctx_kv is not None:
-                ck, cv = ctx_kv[i]
-                k = torch.cat([ck[None], k], dim=2)
-                v = torch.cat([cv[None], v], dim=2)
-            o = F.scaled_dot_product_attention(q, k.repeat_interleave(rep, dim=1),
-                                               v.repeat_interleave(rep, dim=1),
-                                               attn_mask=masks[1] if cfg.is_sliding(i) else masks[0])
+                e = ctx_kv[i]
+                if len(e) == 3:
+                    # SPD-203 (PACK_TAIL): the window was gathered with the block's rows left free at its
+                    # tail; the block's keys and values go there (the values `torch.cat` writes)
+                    ck, cv, n0 = e
+                    ck[:, n0:] = k[0]
+                    cv[:, n0:] = v[0]
+                    k, v = ck[None], cv[None]
+                else:
+                    ck, cv = e
+                    k = torch.cat([ck[None], k], dim=2)
+                    v = torch.cat([cv[None], v], dim=2)
+            mask = masks[1] if cfg.is_sliding(i) else masks[0]
+            if PACK_FOLD:
+                # SPD-203: each key/value head's query group folded into the query rows ([1, nkv, rep t,
+                # hd]): the heads are read in place, no copy of the window to nh heads (the drafter's
+                # bits may move by the kernel's row tiling; the target verifies every token)
+                L = k.shape[2]
+                qf = q.reshape(1, nkv, rep * t, hd)
+                mf = None if mask is None else mask.expand(t, L).repeat(rep, 1)
+                o = F.scaled_dot_product_attention(qf, k, v, attn_mask=mf).reshape(1, nh, t, hd)
+            elif PACK_GQA:
+                # SPD-161: the key/value heads read in place by the query groups (no copy to nh heads)
+                o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=True)
+            else:
+                o = F.scaled_dot_product_attention(q, k.repeat_interleave(rep, dim=1),
+                                                   v.repeat_interleave(rep, dim=1), attn_mask=mask)
             o = o.transpose(1, 2).reshape(t, -1)
             o = yield from lin(o, f"{p}.self_attn.o_proj.weight")
             if conv is not None:
@@ -798,7 +796,7 @@ class DFlash2Module:
             x = _rms(h, self.w[f"{p}.post_attention_layernorm.weight"], cfg.rms_norm_eps)
             mkernel = None
             if conv is not None:
-                x, mkernel = conv[1].prepare(x, block_pos)
+                x, mkernel = yield from prep(conv[1], x, i, 1)
             g = yield from lin(x, f"{p}.mlp.gate_proj.weight")
             u = yield from lin(x, f"{p}.mlp.up_proj.weight")
             x = yield from lin(F.silu(g) * u, f"{p}.mlp.down_proj.weight")
@@ -827,12 +825,20 @@ class DFlash2Module:
         return None, delta < cfg.sliding_window
 
     # ---- candidate selection ---------------------------------------------------
-    def unary_candidates(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def unary_candidates(self, logits: torch.Tensor, exact: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
         """Top-k over the head's output. The head read has already happened by this point --
         `logits` is [P, V] and reading it whole is, in the reference's own words, "the selector's
-        largest single cost"."""
+        largest single cost". `exact=False` (the batched packed draft): the top-k over the logits'
+        own dtype, no fp32 copy of [P, V] (the values are the same; only the order of exact ties
+        can differ)."""
         k = self.cfg.selector_top_k
-        vals, ids = torch.topk(logits.float(), k, dim=-1)
+        if topk_small.ON and logits.is_cuda and logits.dim() == 2:
+            # SPD-201: two passes over the rows instead of the radix select, in fp32 either way, the same
+            # values; exact ties to the lowest id (engine/drafters/topk_small.py)
+            vals, ids = topk_small.topk(logits, k)
+        else:
+            vals, ids = torch.topk(logits if not exact else logits.float(), k, dim=-1)
+        vals = vals.float()
         if self.cfg.output_multiplier != 1.0:
             vals = vals * self.cfg.output_multiplier
         if self.cfg.final_logit_softcapping is not None:
@@ -957,6 +963,18 @@ class DFlash2Module:
 
 # ----------------------------------------------------------------------------- the drafter
 
+#: SPD-161, the packed draft only (the lone draft keeps its statements): the convolutions' kernel projections
+#: as one call over every block's rows, and attention over the key/value heads in place (`enable_gqa`). The
+#: drafter's rows may move by an ulp (a library GEMM's rows and another attention path); the target's never
+PACK_KP = _S.get("DF2_PACK_KP") == "1"
+PACK_GQA = _S.get("DF2_PACK_GQA") == "1"
+#: SPD-203: the packed draft's attention with each query group folded into its key/value head's rows
+PACK_FOLD = _S.get("DF2_PACK_FOLD") == "1"
+#: SPD-203: the packed draft gathers each layer's window with the block's rows free at its tail (no cat)
+PACK_TAIL = _S.get("DF2_PACK_TAIL") == "1"
+PACK_TOPK = _S.get("DF2_PACK_TOPK") == "1"
+
+
 def forward_block_multi(module: "DFlash2Module", items: list) -> list:
     """The packed draft of parallel requests (server/slots.py): `forward_block` for several slots' blocks over ONE module, each NVFP4
     projection one call over every block's rows (rows are independent of their neighbours on the
@@ -980,7 +998,8 @@ def forward_block_multi(module: "DFlash2Module", items: list) -> list:
         answers: dict = {}
         for key, js in groups.items():
             xs = [reqs[j][1] for j in js]
-            y = _lin(torch.cat(xs, dim=0) if len(xs) > 1 else xs[0], module.w[key])
+            w = module.w[key] if isinstance(key, str) else module.convs[key[1]][key[2]].kp
+            y = _lin(torch.cat(xs, dim=0) if len(xs) > 1 else xs[0], w)
             for j, part in zip(js, y.split([x.shape[0] for x in xs], dim=0)):
                 answers[j] = part
         nxt = []
@@ -994,9 +1013,342 @@ def forward_block_multi(module: "DFlash2Module", items: list) -> list:
     return done
 
 
+#: SPD-203: the packed draft as one batched block pass: every row-wise statement (norms, rotary, the
+#: convolutions, the MLP) once over all blocks' rows, attention once per layer over [E, heads, t, L]
+#: with each block's window padded to the longest (padded columns masked: exact zeros in the softmax)
+#: and each key/value head's query group folded into its rows. The drafter's bits may move (the
+#: attention's tiling, the padded width); it only proposes, the target verifies every token
+PACK_BATCH = _S.get("DF2_PACK_BATCH") == "1"
+
+
+def forward_block_batched(module: "DFlash2Module", noise: torch.Tensor, positions: torch.Tensor,
+                          ctx_k: list, ctx_v: list, mask: torch.Tensor) -> torch.Tensor:
+    """`forward_block` for E blocks of t rows at once. `noise` [E*t, H], `positions` [E*t], `ctx_k` /
+    `ctx_v` per layer [E, nkv, L + t, hd]: each block's window padded to L, its last t rows free for
+    the block's own keys and values (written here, no concatenated copy), `mask` [E, t, L + t]
+    (True: attend). Returns `norm(h)` [E*t, H]."""
+    m, cfg = module, module.cfg
+    E = ctx_k[0].shape[0]
+    T = noise.shape[0]
+    t = T // E
+    L = ctx_k[0].shape[2] - t
+    hd, nh, nkv = cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads
+    rep = nh // nkv
+    dev = noise.device
+    block_pos = torch.arange(t, device=dev).repeat(E)
+    cos, sin = m.rope(positions, hd, noise.dtype)                         # [E*t, hd]
+    cos = cos.view(E, 1, t, hd)
+    sin = sin.view(E, 1, t, hd)
+    # folded query rows: [E, nkv, rep * t]; the mask repeats per group member
+    fmask = mask[:, None].expand(E, rep, t, L + t).reshape(E, 1, rep * t, L + t)
+
+    def rope(x):                                                          # x [E, heads, t, hd]
+        return x * cos + _rotate_half(x) * sin
+
+    def conv_in(c, x):
+        coef = _lin(x, c.kp).reshape(T, 2, c.taps, c.groups)
+        return (_grouped_conv(x, coef[:, 0], c.base[0], c.groups, c.gsize, c.taps, block_pos),
+                coef[:, 1])
+
+    h = noise
+    for i in range(cfg.num_hidden_layers):
+        p = f"layers.{i}"
+        conv = m.convs[i]
+        res = h
+        x = _rms(h, m.w[f"{p}.input_layernorm.weight"], cfg.rms_norm_eps)
+        if conv is not None:
+            x, akernel = conv_in(conv[0], x)
+        q = _rms(_lin(x, m.w[f"{p}.self_attn.q_proj.weight"]).view(T, nh, hd),
+                 m.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
+        k = _rms(_lin(x, m.w[f"{p}.self_attn.k_proj.weight"]).view(T, nkv, hd),
+                 m.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
+        v = _lin(x, m.w[f"{p}.self_attn.v_proj.weight"]).view(T, nkv, hd)
+        q = rope(q.view(E, t, nh, hd).transpose(1, 2))                    # [E, nh, t, hd]
+        k = rope(k.view(E, t, nkv, hd).transpose(1, 2))
+        v = v.view(E, t, nkv, hd).transpose(1, 2)
+        kk, vv = ctx_k[i], ctx_v[i]                                       # [E, nkv, L + t, hd]
+        kk[:, :, L:] = k
+        vv[:, :, L:] = v
+        qf = q.reshape(E, nkv, rep * t, hd)
+        o = F.scaled_dot_product_attention(qf, kk, vv, attn_mask=fmask)  # [E, nkv, rep t, hd]
+        o = o.reshape(E, nh, t, hd).transpose(1, 2).reshape(T, nh * hd)
+        o = _lin(o, m.w[f"{p}.self_attn.o_proj.weight"])
+        if conv is not None:
+            o = conv[0].finish(o, akernel, block_pos)
+        h = res + o
+
+        res = h
+        x = _rms(h, m.w[f"{p}.post_attention_layernorm.weight"], cfg.rms_norm_eps)
+        if conv is not None:
+            x, mkernel = conv_in(conv[1], x)
+        g = _lin(x, m.w[f"{p}.mlp.gate_proj.weight"])
+        u = _lin(x, m.w[f"{p}.mlp.up_proj.weight"])
+        x = _lin(F.silu(g) * u, m.w[f"{p}.mlp.down_proj.weight"])
+        if conv is not None:
+            x = conv[1].finish(x, mkernel, block_pos)
+        h = res + x
+    return _rms(h, m.w["norm.weight"], cfg.rms_norm_eps)
+
+
 #: The server's hook for the packed draft -- a callable (drafter, anchor, pos0) -> the draft
 #: graph's outputs, or None to draft alone. None outside a server with side slots (`--parallel N`).
 DRAFT_MEET = None
+
+#: SPD-161: with the packed draft on (`DRAFT_MEET` set, side slots), a block's sync -- the draft K/V of its
+#: committed positions, `project_context` and `context_kv` -- is kept until this drafter's next read of its
+#: cache and then run for every pending slot in one call (`flush_syncs`, at the packed draft): eight slots
+#: paid it one after another under the GPU turn, about 21 ms of a 246 ms round at C8. The rows are the same
+#: per-row arithmetic; only the draft K/V's bits can move (the target's output never reads them). 0: at once
+DEFER_SYNC = _S.get("DF2_DEFER_SYNC") == "1"
+#: SPD-177: with the KV pool, the context K/V is committed for a window of rows, not the whole context.
+#: Every layer of the draft is sliding-window attention (2048), so rows more than the window behind the
+#: newest are never read by a draft. Pages wholly below `ctx - window - one page of rows` are given back
+#: and their addresses point at one shared page instead (a cache's copy of them reads and writes
+#: garbage, never a fault); a resume or a restore at an earlier row maps its window again (rows it lost
+#: read as zeros). Below the threshold (window + a page) nothing is given back: the path of today.
+#: The family that builds the drafter says whether (`DFlash2Drafter(kv_window=)`, off unless it asks);
+#: an explicit QWEN38_DF2_KV_WINDOW=0/1 wins over it.
+def kv_window_for(family: bool) -> bool:
+    if _S.is_set("DF2_KV_WINDOW"):
+        return _S.get("DF2_KV_WINDOW") == "1"
+    return bool(family)
+
+
+def _window_buffer(kvp):
+    """`kvpool.PagedBuffer` with a floor: the pages below it alias one shared page (SPD-177)."""
+
+    class WindowBuffer(kvp.PagedBuffer):
+        def __init__(self, *a, window: int = 2048, **kw):
+            super().__init__(*a, **kw)
+            self.window = int(window)
+            self.page_rows = max(1, self.page // self.row_bytes)
+            self.keep = self.window + self.page_rows
+            self.floor = 0                 # rows below it are not committed (page-aligned)
+            self.alias: set = set()        # pages mapped onto `dummy`
+            self.dummy = None              # the shared page's handle
+
+        def _floor_for(self, rows: int) -> int:
+            r = max(0, int(rows) - self.keep)
+            return (r // self.page_rows) * self.page_rows
+
+        def _alias_map(self, pages) -> None:
+            if self.drv is None or not pages:
+                for p in pages:
+                    self.alias.add(p)
+                return
+            L, P = self.drv.lib, self.page
+            if self.dummy is None:
+                import ctypes
+                h = ctypes.c_uint64()
+                self.drv._check(L.cuMemCreate(ctypes.byref(h), P, ctypes.byref(self.drv.prop), 0), "cuMemCreate")
+                self.dummy = int(h.value)
+            import ctypes
+            for p in pages:
+                if p in self.alias or p in self.handles:
+                    continue
+                self.drv._check(L.cuMemMap(self.base + p * P, P, 0, self.dummy, 0), "cuMemMap")
+                self.drv._check(L.cuMemSetAccess(self.base + p * P, P, ctypes.byref(self.drv.access), 1),
+                                "cuMemSetAccess")
+                self.alias.add(p)
+
+        def _alias_unmap(self, pages) -> None:
+            pages = [p for p in pages if p in self.alias]
+            if self.drv is not None and pages:
+                import torch
+                torch.cuda.synchronize()
+                for p in pages:
+                    self.drv._check(self.drv.lib.cuMemUnmap(self.base + p * self.page, self.page), "cuMemUnmap")
+            for p in pages:
+                self.alias.discard(p)
+
+        def set_floor(self, floor: int) -> None:
+            """Move the floor: pages wholly below it alias the shared page; pages it uncovers are
+            unaliased (`ensure` maps them fresh and zeroed).
+
+            SPD-211: an uncovered page is unmapped until that `ensure`, and the paged set's `ensure`
+            (`kvpool.ensure_for`) returns at once while the set's row count is past the rows asked:
+            the count stayed where it was, so a resume at 28,672 after a 37,387-token session left
+            rows 16,384..24,575 unmapped under `rows` and the next sync, copy or draft read of them
+            was an illegal memory access. The set's count comes down with this buffer's."""
+            floor = (max(0, int(floor)) // self.page_rows) * self.page_rows
+            lowered = False
+            with self.lock:
+                if floor > self.floor:
+                    gone = [p for p in self._pages_for(0, floor) if p in self.handles]
+                    nbytes = self._release_pages(gone)
+                    self._alias_map(self._pages_for(0, floor))
+                    if self.pool is not None and nbytes:
+                        self.pool._add(self.owner, -nbytes)
+                        self.pool.stats["pages_released"] += len(gone)
+                elif floor < self.floor:
+                    self._alias_unmap(self._pages_for(floor, self.floor))
+                    self.rows = min(self.rows, floor)
+                    lowered = True
+                self.floor = floor
+            ps = kvp._BY_PTR.get(self.tensor.data_ptr()) if lowered and self.tensor is not None else None
+            if ps is not None:
+                ps.lower(self.rows)
+
+        def need_bytes(self, rows: int) -> int:
+            rows = max(0, min(int(rows), self.max_rows))
+            lo = max(self.floor, self._floor_for(rows))
+            return sum(1 for p in self._pages_for(lo, self.round_rows(rows))
+                       if p not in self.handles) * self.page
+
+        def ensure(self, rows: int) -> int:
+            rows = max(0, min(int(rows), self.max_rows))
+            want = self._floor_for(rows)
+            if want > self.floor:
+                self.set_floor(want)                   # the window moved on: give the old pages back
+            if rows <= self.rows:
+                return 0
+            with self.lock:
+                if rows <= self.rows:
+                    return 0
+                target = self.round_rows(rows)
+                new = [p for p in self._pages_for(self.floor, target) if p not in self.handles]
+                nbytes = len(new) * self.page
+                if self.pool is not None:
+                    self.pool.gate(self.owner, nbytes)
+                self._alias_unmap(new)
+                self._map_pages(new)
+                if self.drv is not None and new:
+                    P = self.page
+                    for a, b in kvp._runs(new):
+                        self._flat[a * P:min(self.nbytes, b * P)].zero_()
+                self.rows = target
+                if self.pool is not None:
+                    self.pool._add(self.owner, nbytes)
+                    self.pool.stats["commits"] += 1
+                    self.pool.stats["pages_mapped"] += len(new)
+                return nbytes
+
+        def cover(self, lo: int, hi: int) -> int:
+            """SPD-223: every page of rows [lo, hi) mapped before a draft graph gathers them: below the floor
+            onto the shared page, at or above it fresh and zeroed (as `ensure` maps them); the pages it had to
+            map (0 on the path that is right). A gather of an unmapped page is an illegal memory access."""
+            lo, hi = max(0, int(lo)), min(int(hi), self.max_rows)
+            if hi <= lo:
+                return 0
+            with self.lock:
+                miss = [p for p in self._pages_for(lo, hi) if p not in self.handles and p not in self.alias]
+                if not miss:
+                    return 0
+                fp = self.floor // self.page_rows if self.page_rows else 0
+                below, above = [p for p in miss if p < fp], [p for p in miss if p >= fp]
+                self._alias_map(below)
+                if above:
+                    nbytes = len(above) * self.page
+                    if self.pool is not None:
+                        self.pool.gate(self.owner, nbytes)
+                    self._map_pages(above)
+                    if self.drv is not None:
+                        P = self.page
+                        for a, b in kvp._runs(above):
+                            self._flat[a * P:min(self.nbytes, b * P)].zero_()
+                    if self.pool is not None:
+                        self.pool._add(self.owner, nbytes)
+                return len(miss)
+
+        def trim(self, rows: int = 0) -> int:
+            if int(rows) < self.floor:
+                self.set_floor(self._floor_for(rows))
+            return super().trim(rows)
+
+        def close(self) -> None:
+            self.set_floor(0)
+            super().close()
+            if self.drv is not None and self.dummy is not None:
+                self.drv.lib.cuMemRelease(self.dummy)
+                self.dummy = None
+
+    return WindowBuffer
+
+
+def check_window(device: str = "cpu", rows: int = 37387, resume: int = 28672,
+                 shape=(5, 8, 65536, 128)) -> list[str]:
+    """SPD-211: a resume below a long session's window, through the paged set as the server runs it
+    (`cache.drafter_resume`: `kvpool.ensure_for`, then `state_resume`), leaves every page the drafter
+    then reads or writes committed: rows from the new floor to the resume point plus the pool's margin,
+    in both window buffers. On "cuda" the pages are the driver's and the rows are written and read back
+    (before the fix the write is an illegal memory access); on "cpu" the pool's bookkeeping is checked."""
+    from engine import kvpool as kvp
+    pool = kvp.KVPool(hard_floor=0, margin_rows=256, meminfo=lambda: 1 << 50)
+    saved, kvp.POOL = kvp.POOL, pool
+    W = _window_buffer(kvp)
+    ps = kvp.PagedSet("check", pool=pool)
+    bufs = []
+    try:
+        eng_kv = ps.add(kvp.PagedBuffer((4, 2, shape[2], 256), 2, torch.bfloat16, device, pool=pool, name="kv.k"))
+        ckb = ps.add(W(shape, 2, torch.bfloat16, device, pool=pool, name="draft.k", window=2048))
+        cvb = ps.add(W(shape, 2, torch.bfloat16, device, pool=pool, name="draft.v", window=2048))
+        bufs = [eng_kv, ckb, cvb]
+        d = DFlash2Drafter.__new__(DFlash2Drafter)
+        d._psync, d._partial, d.module, d.ctx_len, d._tap_rows = [], False, object(), 0, []
+        d._ckb, d._cvb, d._ck, d._cv = ckb, cvb, ckb.tensor, cvb.tensor
+        d._cs = torch.zeros(shape[2], dtype=torch.uint8, device=device)
+        ps.ensure(rows)                                   # the first session's prefill and decode
+        d._ck[:, :, rows - 2048:rows] = 1.0
+        d.ctx_len = rows
+        old = ckb.floor
+        kvp.ensure_for(d._ck, resume)                     # the second request: resume earlier
+        d.state_resume(resume)
+        out = [f"session {rows:,} rows: floor {old:,}; resume at {resume:,}: floor {ckb.floor:,}, "
+               f"set rows {ps.rows:,}"]
+        hi = min(shape[2], resume + pool.margin_rows)
+        for b in (ckb, cvb):
+            miss = [p for p in b._pages_for(b.floor, hi) if p not in b.handles]
+            assert not miss, f"{b.name}: {len(miss)} page(s) of rows {b.floor:,}..{hi:,} not committed"
+        out.append(f"rows {ckb.floor:,}..{hi:,} committed in both window buffers")
+        if device != "cpu":
+            for t in (d._ck, d._cv):
+                t[:, :, ckb.floor:hi] = 2.0               # the prefill's sync from the resume point
+            torch.cuda.synchronize()
+            ok = all(bool((t[:, :, ckb.floor:hi] == 2.0).all()) for t in (d._ck, d._cv))
+            assert ok, "rows written above the floor did not read back"
+            out.append("written and read back on the device")
+        return out
+    finally:
+        for b in reversed(bufs):
+            b.close()
+        kvp.POOL = saved
+
+
+#: the longest sync that waits (a block's rows); a prompt's sync runs at once
+DEFER_SYNC_ROWS = 64
+
+
+def flush_syncs(ds) -> None:
+    """Run the pending syncs (`DEFER_SYNC`) of the drafters `ds` -- one `project_context` and one
+    `context_kv` call over every pending row of the drafters that share a checkpoint -- and write each
+    one's rows into its own cache."""
+    rowcopy.flush()
+    groups: dict = {}
+    for d in ds:
+        if getattr(d, "_psync", None):
+            groups.setdefault(id(d.module.w), []).append(d)
+    for grp in groups.values():
+        m = grp[0]._build()
+        parts, pos = [], []
+        for d in grp:
+            for fused, first, n in d._psync:
+                parts.append(fused)
+                pos.extend(range(first, first + n))
+        from engine.model import h2d
+        with torch.no_grad():
+            ctx_hidden = m.project_context(torch.cat(parts).to(m.dtype))
+            positions = h2d(pos, torch.long, grp[0].eng.device)
+            kv = m.context_kv(ctx_hidden, positions)
+            r = 0
+            for d in grp:
+                for _, first, n in d._psync:
+                    for i, (k, v) in enumerate(kv):
+                        d._ck[i, :, first:first + n] = k[:, r:r + n]
+                        d._cv[i, :, first:first + n] = v[:, r:r + n]
+                    if d._cs is not None:
+                        d._cs[first:first + n] = 1
+                    r += n
+                d._psync = []
 
 
 class DFlash2Drafter(Drafter):
@@ -1004,6 +1356,7 @@ class DFlash2Drafter(Drafter):
 
     name = "dflash2"
     wants_rows = True          # engine/spec.py hands it the accepted rows of the tap after a tree
+    hidden_free = True         # `sync` never reads its `hidden` (SPD-201: a recorded copy may be pending)
 
     def requires(self) -> dict:
         """The taps (hidden states of these target layers, this width), the target's
@@ -1014,8 +1367,9 @@ class DFlash2Drafter(Drafter):
     def __init__(self, eng, ckpt: str | None = None, *, blocks: int = 1,
                  selector: bool = True, draft_head: str | None = None,
                  max_len: int | None = None, path: str = "greedy", tap: str = "entry",
-                 block: int | None = None):
-        """`block` overrides the checkpoint's block length.
+                 block: int | None = None, kv_window: bool = False):
+        """`block` overrides the checkpoint's block length. `kv_window`: the family's choice of SPD-177's
+        draft KV window (`kv_window_for`; the environment's explicit value wins).
 
         The module is non-causal inside its block and its rotary is absolute, so nothing in the
         architecture ties it to eight: a block of sixteen is sixteen rows, fifteen of them masked,
@@ -1025,8 +1379,9 @@ class DFlash2Drafter(Drafter):
         slot. `tools/train_dflash2.py --block` trains one.
         """
         self.eng = eng
+        self.kv_window = kv_window_for(kv_window)
         # Which hidden state `target_layer_ids` names. The header argues for the residual stream
-        # ENTERING the listed layer, from the serving stack's capture point. The alternative
+        # ENTERING the listed layer, the reference's capture point. The alternative
         # reading -- the listed layer's OUTPUT -- is one index along, and it is the one thing the
         # CPU probe cannot settle, because the probe feeds synthetic hidden states. So it is a
         # flag, and acceptance decides it.
@@ -1088,7 +1443,11 @@ class DFlash2Drafter(Drafter):
 
         # The draft's own KV cache, one entry per committed target position.
         self._ck: torch.Tensor | None = None
+        self._psync: list = []        # SPD-161: syncs not yet written (`DEFER_SYNC`), in order
         self._cv: torch.Tensor | None = None
+        self._ckb = self._cvb = None   # SPD-177: the window buffers behind _ck / _cv (kv_window)
+        self._cs: torch.Tensor | None = None   # SPD-177: a row's K/V is real (1) or not (0)
+        self._partial = False          # SPD-177: a resume uncovered rows that are not real
         self.ctx_len = 0
 
         # Sampled drafting. The serving loop calls `drafter.sampler = sampler` when the
@@ -1131,15 +1490,15 @@ class DFlash2Drafter(Drafter):
                 self._alloc_cache()          # released by `release`; the weights stayed
             return self.module
         self._w = load_weights(self.snapshot, self.eng.device)
-        missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
-        if missing:
-            raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
-                               f"first: {missing[:3]}")
         if DRAFT_EXL3 and os.path.isfile(self._exl3_file()):
             self._w = exl3_projections(self._w, os.path.expanduser(self._exl3_file()),
                                        key=f"{self.snapshot}|{self._exl3_file()}")
         elif DRAFT_NVFP4:
             self._w = quantise_projections(self._w, self.cfg.num_hidden_layers, key=self.snapshot)
+        missing = [n for n in self.cfg.expected_tensors() if n not in self._w]
+        if missing:
+            raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
+                               f"first: {missing[:3]}")
         self.module = DFlash2Module(self.cfg, self._w)
         self._alloc_cache()
         if self._draft_head_path:
@@ -1164,6 +1523,19 @@ class DFlash2Drafter(Drafter):
             # SRV-307: the target's paged set grows and trims this arm's context KV with its own
             # rows (a context row is a position the target has forwarded)
             from engine import kvpool as _kvp
+            if self.kv_window and cfg.sliding_window:
+                # SPD-177: the window of rows a draft reads, committed; the rest given back
+                W = _window_buffer(_kvp)
+                self._ckb = pages.add(W(shape, 2, torch.bfloat16, self.eng.device, owner=pages.owner,
+                                        name="draft.k", window=cfg.sliding_window))
+                self._cvb = pages.add(W(shape, 2, torch.bfloat16, self.eng.device, owner=pages.owner,
+                                        name="draft.v", window=cfg.sliding_window))
+                self._ck, self._cv = self._ckb.tensor, self._cvb.tensor
+                # a byte a row: 1 where the row's K/V is this drafter's own, 0 where it is not (never
+                # written, below the floor, or mapped fresh). It is a view like K and V, so every cache
+                # that copies their rows copies whether they are real with them.
+                self._cs = torch.zeros(self.max_len, dtype=torch.uint8, device=self.eng.device)
+                return
             self._ck = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
                                                   owner=pages.owner, name="draft.k")).tensor
             self._cv = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
@@ -1204,8 +1576,10 @@ class DFlash2Drafter(Drafter):
         if free_cache:
             self._ck = None
             self._cv = None
+            self._cs = None
         self.ctx_len = 0
         self._tap_rows = []
+        self._psync = []
 
     # ---- tap -------------------------------------------------------------------
     def attach(self) -> None:
@@ -1243,6 +1617,8 @@ class DFlash2Drafter(Drafter):
         self.ctx_len = 0
         self._tap_i = 0
         self._tap_rows = []
+        self._psync = []
+        self._partial = False
 
     # ---- serving-time state cache ----------------------------------------------------------
     def state_snapshot(self):
@@ -1256,9 +1632,16 @@ class DFlash2Drafter(Drafter):
         rounding error it was assumed to be when this was written, and still the cheapest quarter
         of a snapshot: without it the prefill is warm and the decode is cold.
         """
+        self._flush_sync()
         n = int(self.ctx_len)
         if self._ck is None or n == 0:
             return ("dflash2", 0, None, None)
+        if self._cs is not None:
+            # SPD-177: the rows from the floor, with whether each is real
+            self._stamps_floor()
+            lo = min(self._ckb.floor, n)
+            return ("dflash2w", n, lo, self._ck[:, :, lo:n].clone(), self._cv[:, :, lo:n].clone(),
+                    self._cs[lo:n].clone())
         return ("dflash2", n, self._ck[:, :, :n].clone(), self._cv[:, :, :n].clone())
 
     def snapshot_bytes_per_token(self) -> int:
@@ -1268,29 +1651,72 @@ class DFlash2Drafter(Drafter):
         return 2 * self._ck[:, :, :1].numel() * self._ck.element_size()
 
     def state_restore(self, snap) -> None:
-        kind, n, ck, cv = snap
-        if kind != "dflash2":
+        kind = snap[0]
+        cs = None
+        if kind == "dflash2w":
+            _, n, lo, ck, cv, cs = snap
+        elif kind == "dflash2":
+            _, n, ck, cv = snap
+            lo = 0
+        else:
             raise ValueError(f"not a dflash2 snapshot: {kind!r}")
+        self._flush_sync()
         if n:
             self._build()
             from engine import kvpool as _kvp
+            self._fit_window(n)
             _kvp.ensure_for(self._ck, n)      # SRV-307
-            self._ck[:, :, :n] = ck
-            self._cv[:, :, :n] = cv
+            a = max(lo, self._ckb.floor if self._ckb is not None else 0)
+            self._ck[:, :, a:n] = ck[:, :, a - lo:]
+            self._cv[:, :, a:n] = cv[:, :, a - lo:]
+            if self._cs is not None:
+                self._cs[:n] = 0
+                self._cs[a:n] = cs[a - lo:] if cs is not None else 1
+                self._stamps_floor()
         self.ctx_len = int(n)
+
+    def _fit_window(self, n: int) -> None:
+        """SPD-177: before rows up to `n` are resumed or restored, the window they end in is mapped
+        (rows the floor had given back read as zeros)."""
+        old = self._ckb.floor if self._ckb is not None else 0
+        for b in (self._ckb, self._cvb):
+            if b is not None:
+                f = b._floor_for(n)
+                if f < b.floor:
+                    b.set_floor(f)
+        if self._cs is not None and self._ckb is not None and self._ckb.floor < old:
+            self._cs[self._ckb.floor:old] = 0          # mapped fresh: zeros, not this drafter's rows
+            self._partial = True
+
+    def _stamps_floor(self) -> None:
+        """SPD-177: rows below the floor are not real, whatever a copy wrote into their stamps."""
+        if self._cs is not None and self._ckb is not None and self._ckb.floor:
+            self._cs[:self._ckb.floor] = 0
 
     def state_resume(self, n: int) -> None:
         """The draft KV rows below `n` are already in place, written by an earlier prefill of the
         same tokens (`engine/cache.py::ResidentPrefix`): pick up from there without a copy."""
         n = int(n)
+        self._flush_sync()
         if n:
             self._build()
+            self._fit_window(n)
+            from engine import kvpool as _kvp
+            _kvp.ensure_for(self._ck, n)
+            self._stamps_floor()
         self.ctx_len = n
         self._tap_rows = []
 
     def kv_views(self) -> list:
-        """The position-indexed buffers a request writes, as (tensor, position axis)."""
-        return [(self._ck, 2), (self._cv, 2)] if self._ck is not None else []
+        """The position-indexed buffers a request writes, as (tensor, position axis). With the window
+        (SPD-177) the row stamps are one more: a copy of rows carries whether they are real."""
+        self._flush_sync()
+        if self._ck is None:
+            return []
+        if self._cs is not None:
+            self._stamps_floor()
+            return [(self._ck, 2), (self._cv, 2), (self._cs, 0)]
+        return [(self._ck, 2), (self._cv, 2)]
 
     def sync(self, tokens: list[int], hidden: torch.Tensor, first_pos: int,
              rows: list[int] | None = None) -> None:
@@ -1316,6 +1742,7 @@ class DFlash2Drafter(Drafter):
         if rows is None and taps[0].shape[0] < n:
             raise RuntimeError(f"tap holds {taps[0].shape[0]} positions, sync wants {n}")
         with torch.no_grad():
+            picked = None
             if rows is None:
                 # A chain block: the accepted tokens are the first n rows of the pass.
                 picked = [r[:n] for r in taps]
@@ -1326,16 +1753,37 @@ class DFlash2Drafter(Drafter):
                 # the 12:05 failure in the ledger, in its tree form.
                 if len(rows) != n:
                     raise RuntimeError(f"{len(rows)} rows for {n} tokens")
-                from engine.model import h2d
-                sel = h2d(rows, torch.long, taps[0].device)
-                picked = [r[sel] for r in taps]
-            fused = torch.cat(picked, dim=-1)
+                picked = None
+                if rowcopy.active():
+                    # SPD-201: the round's row copies in one launch (engine/rowcopy.py)
+                    fused = rowcopy.rows_cat(taps, rows)
+                else:
+                    from engine.model import h2d
+                    sel = h2d(rows, torch.long, taps[0].device)
+                    picked = [r[sel] for r in taps]
+            if picked is not None:
+                fused = torch.cat(picked, dim=-1)
+            if DEFER_SYNC and DRAFT_MEET is not None and n <= DEFER_SYNC_ROWS:
+                # SPD-161: written at this drafter's next cache read, with the other slots' (`flush_syncs`)
+                self._psync.append((fused, first_pos, n))
+                self.ctx_len = first_pos + n
+                return
+            rowcopy.flush()
+            self._flush_sync()
             ctx_hidden = m.project_context(fused.to(m.dtype))
             positions = torch.arange(first_pos, first_pos + n, device=self.eng.device)
             for i, (k, v) in enumerate(m.context_kv(ctx_hidden, positions)):
                 self._ck[i, :, first_pos:first_pos + n] = k
                 self._cv[i, :, first_pos:first_pos + n] = v
+            if self._cs is not None:
+                self._cs[first_pos:first_pos + n] = 1
+                self._stamps_floor()
         self.ctx_len = first_pos + n
+
+    def _flush_sync(self) -> None:
+        """This drafter's pending syncs into its cache, before anything reads it (`DEFER_SYNC`)."""
+        if self._psync:
+            flush_syncs([self])
 
     def propose(self, context: list[int], k: int) -> list[int]:
         return run_steps(self._propose_steps(context, k))
@@ -1386,7 +1834,7 @@ class DFlash2Drafter(Drafter):
         the module, turn rows 1.. into tokens, and hand back the block's own K/V for a chained
         second block.
 
-        The chain (`blocks=2`) is this engine's own and has no counterpart in the serving stack,
+        The chain (`blocks=2`) is this engine's own and has no counterpart in the reference,
         which runs one draft forward per verify; there the only way to propose more than
         `block_size - 1` tokens is to raise `block_size` itself. What is carried here is rows
         0..block_size-2 of this block's per-layer K and V -- not row block_size-1, whose position
@@ -1406,6 +1854,7 @@ class DFlash2Drafter(Drafter):
             if DraftGraph.eligible(self):
                 # parallel requests: with other slots decoding, this draft call joins their packed
                 # draft (`DRAFT_MEET`, server/app.py); alone, or outside such a server, the graph
+                self._pred_proj = None          # set by a packed draft for the round logger
                 out = DRAFT_MEET(self, anchor, pos0) if DRAFT_MEET is not None else None
                 if out is None:
                     out = self.graph_run(anchor, pos0)
@@ -1414,7 +1863,20 @@ class DFlash2Drafter(Drafter):
                 cand, scores = out[0], out[1]
                 self._lattice = (cand, scores)
                 self._logp_host = None
-                if len(out) > 2 and logp:
+                self._native_lat = None
+                if len(out) > 3 and logp and native_tree.ready() and not self._want_lattice:
+                    # SPD-201: the walk and the tree read the pinned copy in place (engine/native_tree.py)
+                    blob, lp = out[3][0].get_raw(out[3][1])
+                    toks = list(native_tree.module().walk(blob, *cand.shape))
+                    self._cand_host = None
+                    self._native_lat = (blob, lp)
+                elif len(out) > 3:
+                    # the packed draft's one copy for every block (draft_graph `_HostBlobs`)
+                    blob, lp = out[3][0].get(out[3][1])
+                    toks, self._cand_host = m._walk_blob(blob, *cand.shape)
+                    if logp:
+                        self._logp_host = lp
+                elif len(out) > 2 and logp:
                     toks, self._cand_host, self._logp_host = m.walk_host_logp(cand, scores, out[2])
                 else:
                     toks, self._cand_host = m.walk_host(cand, scores)
@@ -1424,9 +1886,16 @@ class DFlash2Drafter(Drafter):
         noise = F.embedding(ids, self.eng.w.norm("embed_tokens.weight")).to(m.dtype)
         positions = torch.arange(pos0, pos0 + bs, device=dev)
 
+        self._flush_sync()
         lo = 0
         if cfg.sliding_window is not None:
             lo = max(0, pos0 - cfg.sliding_window + 1)
+        if self._cs is not None and self.ctx_len > lo and (self._ckb.floor or self._partial):
+            # SPD-177: only the real rows of the window (a resume past the floor left zeros)
+            self._stamps_floor()
+            bad = (self._cs[lo:self.ctx_len] == 0).nonzero()
+            if bad.numel():
+                lo = min(self.ctx_len, lo + int(bad[-1]) + 1)
         ctx_pos = torch.arange(lo, self.ctx_len, device=dev)
         ctx_kv = [(self._ck[i, :, lo:self.ctx_len], self._cv[i, :, lo:self.ctx_len])
                   for i in range(cfg.num_hidden_layers)]
@@ -1456,8 +1925,13 @@ class DFlash2Drafter(Drafter):
     def graph_run(self, anchor: int, pos0: int):
         """The lone draft call from this drafter's graph."""
         from engine.drafters.draft_graph import DraftGraph
+        self._flush_sync()
         g = getattr(self, "_graph", None)
-        if g is None or g.ck_ptr != self._ck.data_ptr():
+        if g is None or g.ptrs != DraftGraph.pointers(self):
+            # SPD-223: every tensor the graph baked (the window, the row flags, embeddings, head, max_len)
+            if g is not None:
+                print(f"[dflash2] draft graph rebuilt: its tensors moved ({g.ptrs} -> {DraftGraph.pointers(self)})",
+                      flush=True)
             g = self._graph = DraftGraph(self)
         return g.run(anchor, pos0)
 
@@ -1585,6 +2059,15 @@ class DFlash2Drafter(Drafter):
         if not chain:
             return None
         build = lattice_paths if self.tree_mode == "paths" else lattice_tree
+        nat, self._native_lat = getattr(self, "_native_lat", None), None
+        if (nat is not None and self._lattice is not None and budget > 0 and not sampled
+                and build is lattice_tree):
+            L, k = self._lattice[0].shape
+            return native_tree.lattice_tree(nat[0], nat[1], L, k, anchor, chain, budget)
+        if nat is not None and self._lattice is not None:
+            # a caller past the native tree's case: the lists the Python tree reads
+            self._cand_host = self._lattice[0].tolist()
+            self._logp_host = nat[1].tolist()
         if self._lattice is None or budget <= 0:
             if sampled:
                 self.last_det_tree = DraftTree.chain(anchor, chain, source="df2-greedy")

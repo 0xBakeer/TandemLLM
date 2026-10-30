@@ -1,0 +1,106 @@
+name: Bug report
+description: Report a crash or a wrong answer.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One bug per issue. A security problem goes to a private report instead (SECURITY.md).
+        Leave a field empty when you do not know it.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine (model code, loading, decoding)
+        - Engine kernels
+        - Drafting and speculation (lookup, StairCut, MTP)
+        - Caches (KV, prefix, disk)
+        - OpenAI API, tool calls, streaming
+        - Conductor
+        - Proxy
+        - Chat service (chatd, sandbox, files)
+        - Dashboard
+        - Setup Guide
+        - install.sh
+        - Service scripts, profiles, watchdog
+        - Manual or docs
+        - I do not know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model
+    attributes:
+      label: Model
+      options:
+        - Recursive Flint
+        - Qwen3.8-27B
+        - Qwen3.8-Flash-Next
+        - LFM2.5-24B-A2B
+        - Nemotron 3.5 Lightning
+        - Nemotron 3.5 Bolt
+        - Nemotron 3.5 Super VL
+        - Ornith-1.5-122B
+        - A community pack
+        - Another backend behind the proxy
+        - Not about a model
+    validations:
+      required: true
+
+  - type: dropdown
+    id: weights
+    attributes:
+      label: Weight format
+      options: [EXL3, NVFP4, BF16, GGUF IQ2, Community pack, Not about weights]
+
+  - type: input
+    id: profile
+    attributes:
+      label: Profile
+      description: The profile you run. The Setup Guide shows it.
+      placeholder: flint-exl3-4.0
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options: [NVIDIA DGX Spark, NVIDIA RTX PRO 6000, Another GPU or machine]
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: TandemLLM version
+      description: "`cat VERSION` in the checkout, or the version in `GET /health`."
+      placeholder: 0.14.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact request or command. A curl line or a short script helps most.
+      placeholder: |
+        1. Start with `ops/use-profile.sh flint-exl3-4.0`
+        2. Send this request: ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The engine log around the error (`journalctl` or the Dev view's log), or the browser console for the dashboard.
+      render: text

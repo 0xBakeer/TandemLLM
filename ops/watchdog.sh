@@ -1,9 +1,13 @@
 #!/bin/bash
 # One health check. Meant for cron every minute, or a loop; it restarts only what it is sure about.
 #
-# Three states and only one of them is a restart:
+# Four states and two of them are a restart:
 #   healthy   -> nothing
 #   draining  -> nothing. A graceful stop is in progress and killing it is the bug, not the fix.
+#   failed    -> restart, after WATCHDOG_FAILED_FAILS (2) checks: /health answers 500 with
+#                `status: failed` (SRV-671: a CUDA context lost to a device-side assert answers
+#                every request with an error; on 2026-10-21 that lasted 30 minutes). No loading grace:
+#                the process answers, it is not loading.
 #   silent    -> restart, after CONSECUTIVE failures, so one slow health check during a long
 #                verify does not bounce a working server.
 set -u
@@ -58,6 +62,16 @@ CODE="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://127.0.0.1:$PORT/hea
 CODE="${CODE:-000}"
 if [ "$CODE" = "200" ]; then echo 0 > "$STATE"; rm -f "$LOGS/loading.since"; chatd_check; exit 0; fi
 if [ "$CODE" = "503" ]; then say "draining (503), leaving it alone"; echo 0 > "$STATE"; exit 0; fi
+# SRV-671: the engine says it failed (500, `"status": "failed"`, the reason under `failed`)
+FAILED=""
+if [ "$CODE" = "500" ]; then
+    BODY="$(curl -s -m 10 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
+    case "$BODY" in
+        *'"status": "failed"'*|*'"status":"failed"'*)
+            FAILED="$(printf '%s' "$BODY" | sed -n 's/.*"failed": *"\([^"]*\)".*/\1/p' | cut -c1-160)"
+            FAILED="${FAILED:-the engine says it failed}";;
+    esac
+fi
 # The box lock. Every hold runs as `flock ~/.qwen38-box.flock ops/hold.sh...`, and a held
 # lock means somebody owns the board: the silence is theirs, as with the pause file, which a hold
 # arms only after it has the lock and removes just before it lets go. Taken here, not before the
@@ -79,7 +93,7 @@ fi
 # still draining -- a second full load is how this box wedges). So: if a server process exists,
 # give it time; after LOADING_MAX minutes of consecutive failure, restart for real.
 PID="$(engine_pids "$PORT" | head -1)"                 # an engine, not a look-alike
-if [ -n "$PID" ]; then
+if [ -n "$PID" ] && [ -z "$FAILED" ]; then
     # The timestamp belongs to THIS loader, so it carries the pid it was taken for. It used to be
     # removed only on a 200: a loader that died before it ever answered left its start time behind,
     # the next one inherited an age already past LOADING_MAX, and three strikes later the watchdog
@@ -99,11 +113,19 @@ if [ -n "$PID" ]; then
 fi
 N=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
 echo "$N" > "$STATE"
-say "health check failed (code $CODE), $N/$NEED"
+if [ -n "$FAILED" ]; then
+    NEED="${WATCHDOG_FAILED_FAILS:-2}"
+    say "the engine failed (code 500): $FAILED, $N/$NEED"
+else
+    say "health check failed (code $CODE), $N/$NEED"
+fi
 [ "$N" -lt "$NEED" ] && exit 0
 say "restarting"
 rm -f "$LOGS/loading.since"                            # the next loader times its own load
-bash "$HERE/stop.sh" 30 >> "$WD" 2>&1
+# the status page (ops/engine_status.py) says why while the engine stops and loads again
+WHY="${FAILED:+the engine failed: $FAILED}"
+STATUS_REASON="${WHY:-the watchdog restarts a silent engine}" bash "$HERE/stop.sh" 30 >> "$WD" 2>&1
 sleep "${RESTART_SETTLE_S:-5}"                          # the kernel's memory back first (OPS-41)
-bash "$HERE/start.sh" >> "$WD" 2>&1 && say "restarted" || say "RESTART FAILED"
+START_REASON="${WHY:+restarting after a failure: $FAILED}" bash "$HERE/start.sh" >> "$WD" 2>&1 \
+    && say "restarted" || say "RESTART FAILED"
 echo 0 > "$STATE"

@@ -19,6 +19,7 @@ schema: 1
 id: qwen3.8-flash-next
 name: Qwen3.8-Flash-Next
 family: Qwen3.8
+engine: qwen4_exp
 params: ~124B, ~3B active a token
 recommended: false
 pitch: A mixture-of-experts model that reads only a few experts a token, in turboderp's EXL3 packs, with its own
@@ -254,6 +255,30 @@ measurements:
         greedy_512: {prose: [51.07, 51.07, 42.1, 2.15, 1], chat: [64.0, 64.0, 38.9, 2.49, 1], code: [82.69, 82.69, 42.1, 3.48, 1]}
       ttft_s: {}
       lossless: null
+# SPD-245: the weight cards' speed rows on the current build (docs/measurement.md, "The weight cards' speed
+# rows"). Each row is its raw file's `row` (models/<id>/measurements/parallel-*.json, tools/parallel_card.py).
+parallel:
+  method: >-
+    tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts
+    bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its
+    own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512
+    tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the
+    median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1
+    warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the
+    decode window; a round counts only when /health shows N decoding at once and no other request running.
+    Suffix store and response cache off.
+  rows:
+    - profile: "flashnext-3.05"
+      build: "0.14.2"
+      commit: "6d691a11"
+      date: "2026-10-26"
+      raw: "models/qwen3.8-flash-next/measurements/parallel-2026-10-26-flashnext-3.05.json"
+      setup: {env: "v3-fn-3.05", lanes: 8, window: 262144, max_tokens: 512, suffix_store: false, response_cache: false, thinking: false, sampling: {temperature: 1.0, top_k: 20, top_p: 0.95, min_p: 0.0, seed: "one per request"}, prompts: {set: "card-v1", sha256: "eb44b3d5e32e2b9c", prompt_tokens: {code: 245, prose: 189}}}
+      rounds: 3
+      decode: {code: 69.6, prose: 49.0}
+      prefill: {"2048": {ttft_s: 1.95, tok_s: 1048.0, prompt_tokens: 2042}, "8192": {ttft_s: 6.95, tok_s: 1178.0, prompt_tokens: 8187}, "32768": {ttft_s: 29.82, tok_s: 1099.0, prompt_tokens: 32763}}
+      levels: {"1": {wall_tok_s: 44.1, decode_tok_s: 45.7, ttft_s: 0.43, at_once: 1, rounds: 3}, "2": {wall_tok_s: 59.4, decode_tok_s: 60.9, ttft_s: 0.69, at_once: 2, rounds: 3}, "4": {wall_tok_s: 85.0, decode_tok_s: 86.5, ttft_s: 1.06, at_once: 4, rounds: 3}, "8": {wall_tok_s: 108.2, decode_tok_s: 110.2, ttft_s: 2.22, at_once: 8, rounds: 3}}
+
 memory:
   parts:
   - id: engine
@@ -522,20 +547,15 @@ components:
 parallelism:
   slots:
     min: 1
-    max: 1
-    default: 1
+    max: 8
+    default: 8
   window:
     min: 8192
     max: 262144
     default: 262144
     step: 4096
-  side_window:
-    min: 8192
-    max: 262144
-    default: 262144
-    step: 4096
   kv_pool:
-    default: false
+    default: true
   floor_gb:
     min: 10
     max: 40

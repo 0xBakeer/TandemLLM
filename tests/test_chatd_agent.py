@@ -172,6 +172,10 @@ def test_the_step_cap_ends_interrupted_and_continue_goes_on():
         s = c.wait_idle(cid, 20)
         a = s["messages"][-1]
         assert a["status"] == "interrupted" and "limit of 1 model call" in a["parts"][-1]["message"]
+        # the cap is no error: the chat's status is idle, the Continue card says the rest
+        assert s["status"] == "idle", s["status"]
+        assert next(x for x in c.ok("GET", "/conversations")["conversations"]
+                    if x["id"] == cid)["status"] == "idle"
         c.ok("POST", f"/conversations/{cid}/continue")
         s = c.wait_idle(cid, 20)
         a = s["messages"][-1]
@@ -687,6 +691,214 @@ def test_another_400_is_not_retried():
         c.close()
 
 
+# ---------------------------------------------------------------------- results sized to the room
+# #18's own shape (SRV-639): one user turn, the big result in the last step. A paragraph-per-line
+# file read with the default limit filled the window, nothing could be compacted, and the run died
+# with an over-window 400. One step's results now share a budget of the room left, and read_file
+# cuts at whole lines and names the offset to read on from.
+
+class _Ctx:
+    def __init__(self, ws, cap=None, agents=False):
+        self.ws, self.cap, self.agents = ws, cap, agents
+
+
+def _ws(files: dict) -> Workspace:
+    ws = Workspace(tempfile.mkdtemp(prefix="rd18-"))
+    for name, text in files.items():
+        ws.write(name, text.encode())
+    return ws
+
+
+def _numbered(out: str) -> dict:
+    """{line number: text} of a read's rows (a row in part where the read cut a line)."""
+    rows = {}
+    for row in out.splitlines():
+        if row[:6].strip().isdigit() and row[6:7] == "\t":
+            rows[int(row[:6])] = row[7:]
+    return rows
+
+
+def test_a_long_line_file_is_read_in_honest_pages():
+    import re
+    paras = [f"para {i}: " + " ".join(f"w{i}x{k}" for k in range(400)) for i in range(1, 301)]
+    ws = _ws({"town.md": "\n".join(paras) + "\n"})
+    got, off, reads = {}, 1, 0
+    while True:
+        out = T._read(_Ctx(ws, cap=20_000), {"path": "town.md", "offset": off}).content
+        reads += 1
+        rows = _numbered(out)
+        assert len(out) <= 20_000 + 200, len(out)
+        assert all(rows[i] == paras[i - 1] for i in rows), "whole lines only"
+        got.update(rows)
+        m = re.search(r"\[truncated at 20,000 characters: lines (\d+)-(\d+) of 300 shown, "
+                      r"([\d,]+) more bytes; read on with offset=(\d+)\]$", out)
+        if m is None:
+            assert "more lines" not in out and "truncated" not in out
+            break
+        assert int(m.group(1)) == off and int(m.group(4)) == int(m.group(2)) + 1
+        rest = sum(len(p.encode()) + 1 for p in paras[int(m.group(2)):])
+        assert int(m.group(3).replace(",", "")) == rest
+        off = int(m.group(4))
+    assert sorted(got) == list(range(1, 301)) and reads > 10
+    # no budget: the result caps (64,000 characters), not the whole 2,000 lines
+    out = T._read(_Ctx(ws), {"path": "town.md"}).content
+    assert len(out) <= T.MODEL_LIMIT_CHARS + 200 and out.endswith("]") and "offset=" in out
+    # `limit` stopped it: the line count and the offset
+    out = T._read(_Ctx(ws), {"path": "town.md", "offset": 3, "limit": 2}).content
+    assert sorted(_numbered(out)) == [3, 4] and out.endswith("[296 more lines; read on with "
+                                                             "offset=5]"), out[-80:]
+
+
+def test_a_line_longer_than_one_read_pages_by_column():
+    line = "".join(f"{k:07d} " for k in range(40_000))           # 320,000 characters
+    ws = _ws({"min.js": "head\n" + line + "\ntail\n"})
+    out = T._read(_Ctx(ws, cap=50_000), {"path": "min.js"}).content
+    assert _numbered(out) == {1: "head"} and out.endswith("read on with offset=2]"), out[-120:]
+    pieces, col = [], 1
+    while True:
+        out = T._read(_Ctx(ws, cap=50_000), {"path": "min.js", "offset": 2,
+                                             "column": col}).content
+        rows = _numbered(out)
+        pieces.append(rows[2])
+        assert len(out) <= 50_200
+        if "goes on" not in out:
+            assert rows.get(3) == "tail"
+            break
+        tail = out.rsplit("\n", 1)[1]
+        left = len(line) - (col - 1) - len(rows[2])
+        assert tail == (f"[line 2 goes on: {left:,} more bytes of it; read on with offset=2, "
+                        f"column={col + len(rows[2])}]"), tail
+        col += len(rows[2])
+    assert "".join(pieces) == line and len(pieces) == 7
+    # Agents mode: its 12,000 characters, the same paging
+    out = T._read(_Ctx(ws, agents=True), {"path": "min.js", "offset": 2}).content
+    assert len(_numbered(out)[2]) < 12_000 and "read on with offset=2, column=" in out
+
+
+def test_step_budget_and_margin():
+    from chatd import compaction as comp
+    # half of what is left under the compaction line, 2,000 tokens at least, never past the
+    # window less twice the answer's room
+    assert comp.step_budget(262_144, 11_000) == int((209_715 - 11_000) * 0.5)
+    assert comp.step_budget(262_144, 208_000) == comp.RESULT_FLOOR
+    assert comp.step_budget(262_144, 259_500) == 262_144 - 259_500 - 2048
+    assert comp.step_budget(262_144, 262_000) == 0
+    assert comp.step_budget(0, 5) is None
+    assert comp.result_chars(10_000, 4, 0.25) == int(2500 / (0.25 * 1.15))
+    assert comp.result_chars(0, 11, 0.25) == comp.MIN_RESULT_CHARS
+    # the margin: 15 % of the estimate of what the engine never counted, 256 at least
+    assert comp.margin(700_000, 30_000, 0.25) == int(670_000 * 0.25 * 0.15)
+    assert comp.margin(30_100, 30_000, 0.25) == comp.MIN_MARGIN
+    assert comp.margin(10_000, 0, None) == int(10_000 * 0.3 * 0.15)
+
+
+def _paragraphs(n=300, words=400) -> str:
+    return "\n".join(f"para {i}: " + "lorem " * words for i in range(1, n + 1)) + "\n"
+
+
+def _read_run(c, window: int, *reads: dict, strict: bool = False):
+    small_window(c, window=window)
+    cid = c.new()
+    c.svc.workspace(cid).write("town.md", _paragraphs().encode())
+    c.fake.window, c.fake.strict = window, strict
+    c.send(cid, calls(*(("read_file", dict({"path": "town.md"}, **r)) for r in reads)))
+    s = c.wait_idle(cid, 30)
+    return s, [p for p in parts_of(s) if p.get("type") == "tool_call"]
+
+
+def test_a_paragraph_file_read_fits_the_room_and_the_run_answers():
+    """On main the read came back as 64,000 characters (about 10,700 of the fake's tokens) into
+    a 6,000-token window: an over-window 400 that nothing could compact."""
+    c = Chat()
+    try:
+        s, reads = _read_run(c, 6000, {})
+        a = s["messages"][-1]
+        assert a["status"] == "done" and c.fake.windowed == 0, (a["status"], a["parts"][-1])
+        text = reads[0]["model_content"]
+        assert "read on with offset=" in text and len(text) < 20_000, len(text)
+        last = requests(c)[-1]
+        assert c.fake.prompt_tokens(last)[0] + last["max_tokens"] <= 6000
+    finally:
+        c.close()
+
+
+def test_many_reads_in_one_step_share_the_budget():
+    c = Chat()
+    try:
+        s, reads = _read_run(c, 6000, *({"offset": 1 + 27 * k} for k in range(11)), strict=True)
+        a = s["messages"][-1]
+        assert len(reads) == 11 and all(r["status"] == "done" for r in reads)
+        assert a["status"] == "done" and c.fake.windowed == 0, a["parts"][-1]
+        assert all(len(r["model_content"]) < 3000 for r in reads)
+        assert all("read on with offset=" in r["model_content"] for r in reads)
+        for b in requests(c):                    # every request inside the window, output too
+            assert c.fake.prompt_tokens(b)[0] + b["max_tokens"] <= 6000
+    finally:
+        c.close()
+
+
+def _edge_chat(c, window: int, backend: str = "engine", max_output=None):
+    real = c.svc.model_info
+
+    def info(mid):
+        return dict(real(mid), max_len=window, backend=backend, max_output=max_output)
+    c.svc.model_info = info
+    c.svc.learn_ratio = lambda *a: None
+    cid = c.new()
+    c.svc.conv(cid).tok_ratio = 0.5
+    return cid
+
+
+def test_at_the_edge_our_engine_counts_the_request_exactly():
+    c = Chat()
+    try:
+        cid = _edge_chat(c, 12_000)
+        c.fake.tokenize = 6000
+        c.send(cid, "word " * 1800)            # about 4,700 estimated: no count needed
+        s = c.wait_idle(cid, 20)
+        assert s["messages"][-1]["status"] == "done" and c.fake.counted == 0
+        c.send(cid, "more " * 1700)            # about 9,200 and its margin: the edge
+        s = c.wait_idle(cid, 20)
+        assert s["messages"][-1]["status"] == "done" and c.fake.counted == 1
+        assert requests(c)[-1]["max_tokens"] == 12_000 - 6000 - 256 - 256
+    finally:
+        c.close()
+
+
+def test_a_request_the_engine_counts_over_the_window_is_never_sent():
+    c = Chat()
+    try:
+        cid = _edge_chat(c, 12_000)
+        c.fake.tokenize = 11_500
+        n = len(requests(c))
+        c.send(cid, "word " * 3500)            # about 9,000 estimated: it would go
+        s = c.wait_idle(cid, 20)
+        a = s["messages"][-1]
+        assert a["status"] == "error" and c.fake.counted == 1 and len(requests(c)) == n
+        assert a["parts"][-1]["message"].startswith(
+            "This request is 11,500 tokens (the engine's count) and the model's window is "
+            "12,000: there is no room left for an answer."), a["parts"][-1]["message"]
+    finally:
+        c.close()
+
+
+def test_a_relayed_model_keeps_the_estimate_margin_free():
+    c = Chat()
+    try:
+        cid = _edge_chat(c, 12_000, backend="proxy", max_output=8192)
+        c.fake.tokenize = 1                     # never asked: it counts our engine's model only
+        c.send(cid, "word " * 2800)            # about 9,200 and its margin: the edge
+        s = c.wait_idle(cid, 20)
+        assert s["messages"][-1]["status"] == "done" and c.fake.counted == 0
+        b = requests(c)[-1]
+        chars = len(json.dumps(b["messages"], ensure_ascii=False)) + \
+            len(json.dumps(b.get("tools") or [], ensure_ascii=False))
+        est = int(chars * 0.5) + 16
+        assert b["max_tokens"] == 12_000 - est - int(chars * 0.5 * 0.15) - 256, b["max_tokens"]
+    finally:
+        c.close()
+
+
 def test_a_request_that_cannot_fit_fails_before_the_engine_is_asked():
     c = Chat()
     try:
@@ -705,7 +917,7 @@ def test_a_request_that_cannot_fit_fails_before_the_engine_is_asked():
 def test_earlier_reasoning_is_left_out_when_nothing_else_helps():
     c = Chat()
     try:
-        small_window(c, window=2600)
+        small_window(c, window=2700)          # read_file's `column` (SRV-639) took 2,600's slack
         cid = c.new()
         c.send(cid, "FAKE_REASONING FAKE_LONG 6 " + "w " * 300)
         c.wait_idle(cid, 20)

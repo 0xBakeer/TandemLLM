@@ -8,8 +8,7 @@ a request that asks for sampling must get real sampling, not a 400.
 `temperature`, `min_p`, `top-k` and `top-p` are applied to a row AFTER the penalties, `logit_bias`
 and the no-repeat rule (deterministic transforms, still meaningful under sampling), with a
 per-request `torch.Generator` so a `seed` reproduces a request exactly. `min_p` keeps the
-tokens whose probability is at least `min_p` times the top one's, after the temperature (vLLM's
-order). Like the other filters it is part of `_filter`, the one function every target row goes
+tokens whose probability is at least `min_p` times the top one's, after the temperature. Like the other filters it is part of `_filter`, the one function every target row goes
 through -- the single draw, `probs_rows` for the chain and the tree, the keyed draws -- so the
 walks below accept against the filtered distribution and stay exact; a sampling drafter draws its
 proposal through the same filter, and its q is what it drew from, which is all the q-aware accept
@@ -76,6 +75,18 @@ BATCH = _S.get("SAMPLE_BATCH") == "1"
 # base vs nucleus 2 x 2 runs a side: no class worse beyond the run-to-run spread; board gate
 # tools/sampled_dist.py nospec/det/cool PASS, greedy identical). 0 = the probs_rows path.
 NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
+# SPD-201: a joint round's keyed draws (`round_walks`, seeded requests) from one kernel: every (slot,
+# depth) noise row is `torch.rand` after its `manual_seed(_key(seed, position))` bit for bit
+# (engine/keyed_noise.py, held per torch version by tests/test_keyed_noise.py), the noise and argmax
+# torch's own ops over all rows at once, and each generator left as the walk leaves it. The draws are
+# the same bits; 0 = a seed, a launch and four elementwise launches a depth and slot, as before.
+KEYED_KERNEL = _S.get("SAMPLE_KEYED_KERNEL") == "1"
+# SPD-201: a joint round's keyed draws over each row's kept set (`keyed_noise.sparse_keyed_draws`): the top
+# candidates, `_filter`'s steps on them and the noise at their ids, for every slot of a profile in one kernel;
+# no [n, V] distribution or noise rows. Rows with top_k in 1..48 and a temperature; the rest as before. The
+# draws are the dense walk's but where a softmax or cumulative sum of the kept values rounds differently
+# (another summation order): an ulp, at a tie. 0 = the dense walk
+SPARSE_KEYED = _S.get("SAMPLE_SPARSE_KEYED") == "1"
 
 
 _MASK64 = (1 << 64) - 1
@@ -121,8 +132,8 @@ class Sampler:
 
     @property
     def on(self) -> bool:
-        # `temperature = 0` is greedy whatever top-p and top-k say -- OpenAI's reading and vLLM's,
-        # and the only one that makes sense: both filters shrink a candidate set the argmax is
+        # `temperature = 0` is greedy whatever top-p and top-k say -- OpenAI's reading, and the
+        # only one that makes sense: both filters shrink a candidate set the argmax is
         # already the maximum of. Reading a lone top-p as "sampling on" made
         # `{"temperature": 0, "top_p": 0.95}` sample the RAW logits, because `_filter` divides by
         # the temperature only when there is one, and it also took the request out of the response
@@ -201,7 +212,11 @@ class Sampler:
         drop[..., 0] = False
         out = torch.full_like(flat, float("-inf")).scatter_(-1, idx, vals.masked_fill(drop, float("-inf")))
         wide = cumulative[:, -1] <= self.top_p    # the nucleus is wider than k0: the sort
-        if k0 < V and bool(wide.any()):
+        # SPD-161: after a top-k of at most k0 every finite logit is among the k0 taken, so their mass is the
+        # row's (1 to a few ulp) and above any top-p <= 0.999: no row is wide, and the host need not ask
+        # (a synchronize a walk). Bit for bit the asked path (tests/test_sample_batch.py).
+        confined = 0 < self.top_k <= k0 and self.top_p <= 0.999
+        if k0 < V and not confined and bool(wide.any()):
             rows = wide.nonzero().flatten()
             sorted_logits, order = torch.sort(flat[rows], descending=True, dim=-1)
             probs = torch.softmax(sorted_logits, dim=-1)
@@ -394,6 +409,8 @@ class Sampler:
         keyed = self.coupled and start is not None
         if BATCH and not keyed:
             return self._tree_walk_batched(dists, tokens, parents, q)
+        if BATCH and keyed:
+            return self._tree_walk_keyed(dists, tokens, parents, start)
         path, node = [0], 0
         while True:
             kids = [c for c in range(node + 1, len(tokens)) if parents[c] == node]
@@ -422,6 +439,48 @@ class Sampler:
         return path, new
 
     @torch.no_grad()
+    @torch.no_grad()
+    def _tree_walk_keyed(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
+                         start: int) -> tuple[list[int], list[int]]:
+        """`tree_walk` for a seeded request (SPD-163 step 2) with every node's keyed draw taken up front
+        and brought over in one copy. A node at depth d draws `argmax(log p + G_(start + d))`, `pick_at`'s
+        statements: the noise of a position is a function of the seed and the position alone, so the
+        nodes of one depth share one noise row, made once (one row a depth, not one a visited node with
+        a copy each). The same draws, bit for bit, at every node the walk visits. The generator is left as
+        the one-at-a-time walk left it: last seeded at the position the walk stopped on."""
+        n = len(tokens)
+        dev = dists.device
+        depth = [0] * n
+        kids: list[list[int]] = [[] for _ in range(n)]
+        for c in range(1, n):
+            depth[c] = depth[parents[c]] + 1
+            kids[parents[c]].append(c)
+        D = max(depth) + 1
+        V = dists.shape[-1]
+        g = self._rng(dev)
+        seed = self.seed if self.seed is not None else 0
+        noise = []
+        for d in range(D):
+            g.manual_seed(_key(seed, start + d))
+            u = torch.rand(V, generator=g, device=dev)
+            noise.append(-torch.log(-torch.log(u.clamp_min(1e-20))))
+        G = torch.stack(noise)
+        rows = torch.log(dists[:n].float()) + (G[torch.tensor(depth, device=dev)] if D > 1 else G)
+        xs = torch.argmax(rows, dim=-1).tolist()
+        path, node = [0], 0
+        while True:
+            x = xs[node]
+            nxt = next((k for k in kids[node] if tokens[k] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        last = len(path) - 1
+        if last != D - 1:
+            g.manual_seed(_key(seed, start + last))
+            torch.rand(V, generator=g, device=dev)
+        return path, [tokens[i] for i in path[1:]] + [x]
+
     def _tree_walk_batched(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
                            q: list | None) -> tuple[list[int], list[int]]:
         """`tree_walk` (unseeded) with every node's randomness drawn up front on the device and
@@ -479,3 +538,212 @@ class Sampler:
             node = nxt
         new = [tokens[i] for i in path[1:]] + [x]
         return path, new
+
+
+@torch.no_grad()
+def round_walks(specs: list) -> list:
+    """SPD-161: the walks of a joint round's slots in one batch (the round runner, `server/app.py
+    _run_round`), each bit for bit what the slot's own walk computes, with one copy to the host for all.
+
+    `specs`: per slot None (the slot walks itself) or dict(sampler, rows [T, V] (penalties applied), tokens,
+    parents, start, q, picks (the verify graph's argmax on the device, or None)). Returns per slot None, or
+    ("picks", list) for a greedy slot (the slot's engine walks them: `accept_tree`), or ("walk", (path,
+    new)) for a sampled one. Each slot's rows are filtered alone, on the tensor its own walk filters (a
+    reduction's split on CUDA can depend on the row count); the draws stay each slot's own (its generator,
+    its keyed noise), copied to the host in one go. Taken here: greedy; a seeded request's keyed walk
+    (`_tree_walk_keyed`); an unseeded one's batched walk without q (`_tree_walk_batched`) and its nucleus
+    draws (`row_draws`). Anything else (a q-aware spine, BATCH off): None."""
+    out: list = [None] * len(specs)
+    dev_vals: list = []                  # (slot, kind, device tensor of draws, extra)
+    groups: dict = {}
+    for i, sp in enumerate(specs):
+        if sp is None:
+            continue
+        sm, rows, n = sp["sampler"], sp["rows"], len(sp["tokens"])
+        if sm is None or not sm.on:
+            x = sp.get("picks")
+            dev_vals.append((i, "picks", (x if x is not None else rows.argmax(-1))[:n].reshape(-1), None))
+            continue
+        if not BATCH:
+            continue
+        keyed = sm.coupled and sp.get("start") is not None
+        q = sp.get("q")
+        if not keyed and q is not None and any(v is not None for v in q):
+            continue                                      # the q-aware spine: the slot's own walk
+        if not keyed and NUCLEUS and sm.nucleus_ok():
+            dev_vals.append((i, "draws", sm.row_draws(rows[:n]), None))
+            continue
+        groups.setdefault((sm.temperature, sm.top_p, sm.top_k, sm.min_p), []).append(i)
+    many: list = []                     # keyed slots for the one-kernel draws (KEYED_KERNEL)
+    for key_, idx in list(groups.items()):
+        sm0 = specs[idx[0]]["sampler"]
+        if not (SPARSE_KEYED and sm0.temperature > 0.0 and 0 < sm0.top_k <= _sparse_topk_max()):
+            continue
+        keyed = [i for i in idx if specs[i]["sampler"].coupled and specs[i].get("start") is not None
+                 and specs[i]["rows"].is_cuda]
+        if not keyed:
+            continue
+        got = _keyed_sparse_many([(specs[i]["sampler"], specs[i]["rows"], specs[i]["tokens"],
+                                   specs[i]["parents"], specs[i]["start"]) for i in keyed])
+        for i, (xs, extra) in zip(keyed, got):
+            dev_vals.append((i, "keyed", xs, extra))
+        rest = [i for i in idx if i not in keyed]
+        if rest:
+            groups[key_] = rest
+        else:
+            del groups[key_]
+    for idx in groups.values():
+        sm0 = specs[idx[0]]["sampler"]
+        # SPD-201: each slot's rows filtered alone, on the tensor its own walk filters (`probs_rows`): a
+        # reduction over [n, V] (logsumexp, top-k, softmax) may split differently by n on CUDA, and a token at
+        # the top-p boundary then enters or leaves the kept set -- the draws would depend on the batch
+        dists = [sm0._filter(specs[i]["rows"].float()) for i in idx]
+        for i, d in zip(idx, dists):
+            sp = specs[i]
+            sm, n = sp["sampler"], len(sp["tokens"])
+            if sm.coupled and sp.get("start") is not None:
+                if KEYED_KERNEL and d.is_cuda:
+                    many.append((i, sm, d, sp))
+                    continue
+                xs, depth = _keyed_draws(sm, d, sp["tokens"], sp["parents"], sp["start"])
+                dev_vals.append((i, "keyed", xs, depth))
+            else:
+                x = torch.multinomial(d[:n], 1, generator=sm._rng(d.device)).squeeze(-1)
+                dev_vals.append((i, "draws", x, None))
+    if many:
+        got = _keyed_draws_many([(sm, d, sp["tokens"], sp["parents"], sp["start"]) for _, sm, d, sp in many])
+        for (i, _, _, _), (xs, extra) in zip(many, got):
+            dev_vals.append((i, "keyed", xs, extra))
+    if not dev_vals:
+        return out
+    flat = torch.cat([v.reshape(-1).to(torch.long) for _, _, v, _ in dev_vals]).tolist()
+    pos = 0
+    for i, kind, v, extra in dev_vals:
+        k = v.numel()
+        xs, pos = [int(t) for t in flat[pos:pos + k]], pos + k
+        sp = specs[i]
+        if kind == "picks":
+            out[i] = ("picks", xs)
+        elif kind == "draws":
+            out[i] = ("walk", sp["sampler"].walk_draws(xs, sp["tokens"], sp["parents"]))
+        else:
+            out[i] = ("walk", _keyed_walk(sp["sampler"], xs, extra, sp["tokens"], sp["parents"], sp["start"],
+                                          sp["rows"].shape[-1], sp["rows"].device))
+    return out
+
+
+def _keyed_draws(sm: "Sampler", dists: torch.Tensor, tokens: list, parents: list, start: int):
+    """`_tree_walk_keyed`'s device part: every node's keyed draw (one noise row a depth)."""
+    n = len(tokens)
+    dev = dists.device
+    depth = [0] * n
+    for c in range(1, n):
+        depth[c] = depth[parents[c]] + 1
+    D = max(depth) + 1
+    V = dists.shape[-1]
+    g = sm._rng(dev)
+    seed = sm.seed if sm.seed is not None else 0
+    noise = []
+    for d in range(D):
+        g.manual_seed(_key(seed, start + d))
+        u = torch.rand(V, generator=g, device=dev)
+        noise.append(-torch.log(-torch.log(u.clamp_min(1e-20))))
+    G = torch.stack(noise)
+    rows = torch.log(dists[:n].float()) + (G[torch.tensor(depth, device=dev)] if D > 1 else G)
+    return torch.argmax(rows, dim=-1), (depth, D)
+
+
+def _keyed_draws_many(items: list) -> list:
+    """`_keyed_draws` for several slots at once (`KEYED_KERNEL`): items (sampler, dists, tokens, parents,
+    start); returns per slot (draws, (depth, D, True)). Every noise row is the one `_keyed_draws` takes
+    (engine/keyed_noise.py), the ops after it the same ops on the rows of all slots; no generator is
+    touched (`_keyed_walk` leaves each as the one-at-a-time walk does)."""
+    from engine import keyed_noise as KN
+    out: list = [None] * len(items)
+    by_v: dict = {}
+    for j, it in enumerate(items):
+        by_v.setdefault((it[1].shape[-1], it[1].device), []).append(j)
+    for (V, dev), js in by_v.items():
+        keys, sel, metas = [], [], []
+        for j in js:
+            sm, d, tokens, parents, start = items[j]
+            n = len(tokens)
+            depth = [0] * n
+            for c in range(1, n):
+                depth[c] = depth[parents[c]] + 1
+            D = max(depth) + 1
+            seed = sm.seed if sm.seed is not None else 0
+            base = len(keys)
+            keys.extend(_key(seed, start + k) for k in range(D))
+            sel.extend(base + x for x in depth)
+            metas.append((j, n, depth, D))
+        G = KN.uniforms(keys, V, dev)
+        G = G.clamp_min_(1e-20).log_().neg_().log_().neg_()     # -log(-log(u)), as `_keyed_draws`
+        logd = torch.cat([items[j][1][:n].float() for j, n, _, _ in metas]).log_()
+        xs = torch.argmax(logd + G[torch.tensor(sel).to(dev, non_blocking=True)], dim=-1)
+        pos = 0
+        for (j, n, depth, D) in metas:
+            out[j] = (xs[pos:pos + n], (depth, D, True))
+            pos += n
+    return out
+
+
+def _sparse_topk_max() -> int:
+    from engine import keyed_noise as KN
+    return KN.SPARSE_TOPK_MAX
+
+
+def _keyed_sparse_many(items: list) -> list:
+    """`_keyed_draws_many` over each row's kept set (SPARSE_KEYED): items (sampler, rows [T, V] logits, tokens,
+    parents, start) of one sampling profile; per slot (draws, (depth, D, True)), the generators left as the
+    kernel walk leaves them (`_keyed_walk`)."""
+    from engine import keyed_noise as KN
+    sm0 = items[0][0]
+    rows, keys, metas = [], [], []
+    for sm, lg, tokens, parents, start in items:
+        n = len(tokens)
+        depth = [0] * n
+        for c in range(1, n):
+            depth[c] = depth[parents[c]] + 1
+        seed = sm.seed if sm.seed is not None else 0
+        keys.extend(_key(seed, start + d) for d in depth)
+        rows.append(lg[:n])
+        metas.append((n, depth, max(depth) + 1))
+    xs = KN.sparse_keyed_draws(rows, keys, rows[0].shape[-1], sm0.temperature, sm0.top_k, sm0.top_p, sm0.min_p,
+                               rows[0].device)
+    out, pos = [], 0
+    for n, depth, D in metas:
+        out.append((xs[pos:pos + n], (depth, D, True)))
+        pos += n
+    return out
+
+
+def _keyed_walk(sm: "Sampler", xs: list, extra, tokens: list, parents: list, start: int, V: int, dev):
+    """`_tree_walk_keyed`'s host part on its draws, the generator left as that walk leaves it."""
+    depth, D = extra[0], extra[1]
+    kernel = len(extra) > 2 and extra[2]
+    n = len(tokens)
+    kids: list[list[int]] = [[] for _ in range(n)]
+    for c in range(1, n):
+        kids[parents[c]].append(c)
+    path, node = [0], 0
+    while True:
+        x = xs[node]
+        nxt = next((k for k in kids[node] if tokens[k] == x), None)
+        if nxt is None:
+            break
+        path.append(nxt)
+        node = nxt
+    last = len(path) - 1
+    if kernel:
+        # the draws took no generator: it is left where the one-at-a-time walk leaves it, seeded at
+        # the last node's position and one `torch.rand(V)` on (no launch)
+        from engine import keyed_noise as KN
+        g = sm._rng(dev)
+        g.manual_seed(_key(sm.seed if sm.seed is not None else 0, start + last))
+        g.set_offset(KN.policy(V, dev)[1])
+    elif last != D - 1:
+        g = sm._rng(dev)
+        g.manual_seed(_key(sm.seed if sm.seed is not None else 0, start + last))
+        torch.rand(V, generator=g, device=dev)
+    return path, [tokens[i] for i in path[1:]] + [x]
