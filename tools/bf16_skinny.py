@@ -35,12 +35,17 @@ def default_split(N: int, K: int) -> tuple[int, int]:
     return wk, 1
 
 
+#: the next K step's weights loaded during this one's products (same bits)
+PF = 1
+
+
 def mm(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor | None = None, wk: int | None = None,
-       nt: int | None = None) -> torch.Tensor:
+       nt: int | None = None, pf: int | None = None) -> torch.Tensor:
     """x [M, K] bf16 (M <= 32) @ w [N, K] bf16 -> fp32 [M, N]."""
     M, K = x.shape
     N = w.shape[0]
     y = out if out is not None else torch.empty(M, N, dtype=torch.float32, device=x.device)
     dwk, dnt = default_split(N, K)
-    _module().bf16_skinny(x.contiguous(), w, y, dwk if wk is None else wk, dnt if nt is None else nt)
+    _module().bf16_skinny(x.contiguous(), w, y, dwk if wk is None else wk, dnt if nt is None else nt,
+                          PF if pf is None else pf)
     return y

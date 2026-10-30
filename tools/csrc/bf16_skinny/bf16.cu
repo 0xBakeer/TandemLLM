@@ -24,7 +24,8 @@ __device__ __forceinline__ void mma_bf16(float* c, uint32_t a0, uint32_t a1, uin
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-template <int MT, int WK, int NT>
+// PF: the next K step's weight vectors loaded before this step's products (same bits)
+template <int MT, int WK, int NT, int PF = 0>
 __global__ void __launch_bounds__(32 * WK)
 bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w, float* __restrict__ y,
                    int M, int N, int kq, int lx, int lw, int ly) {
@@ -47,12 +48,29 @@ bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __r
         wok[n] = row < N;
         wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
     }
+    uint4 nlo[NT], nhi[NT];
+    if (PF && k0 < k1) {
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            nlo[n] = wok[n] ? ldw(wr[n] + (size_t)k0 * 64) : make_uint4(0, 0, 0, 0);
+            nhi[n] = wok[n] ? ldw(wr[n] + (size_t)k0 * 64 + 8) : make_uint4(0, 0, 0, 0);
+        }
+    }
     for (int kk = k0; kk < k1; ++kk) {
         uint32_t B[NT][8];
 #pragma unroll
         for (int n = 0; n < NT; ++n) {
-            const uint4 lo = wok[n] ? ldw(wr[n] + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
-            const uint4 hi = wok[n] ? ldw(wr[n] + (size_t)kk * 64 + 8) : make_uint4(0, 0, 0, 0);
+            uint4 lo, hi;
+            if (PF) {
+                lo = nlo[n]; hi = nhi[n];
+                if (kk + 1 < k1) {
+                    nlo[n] = wok[n] ? ldw(wr[n] + (size_t)(kk + 1) * 64) : make_uint4(0, 0, 0, 0);
+                    nhi[n] = wok[n] ? ldw(wr[n] + (size_t)(kk + 1) * 64 + 8) : make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                lo = wok[n] ? ldw(wr[n] + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
+                hi = wok[n] ? ldw(wr[n] + (size_t)kk * 64 + 8) : make_uint4(0, 0, 0, 0);
+            }
             B[n][0] = lo.x; B[n][1] = lo.y; B[n][2] = lo.z; B[n][3] = lo.w;
             B[n][4] = hi.x; B[n][5] = hi.y; B[n][6] = hi.z; B[n][7] = hi.w;
         }
@@ -111,18 +129,18 @@ bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __r
     }
 }
 
-template <int MT, int WK, int NT>
+template <int MT, int WK, int NT, int PF>
 void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1);
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
-    auto kern = bf16_skinny_kernel<MT, WK, NT>;
+    auto kern = bf16_skinny_kernel<MT, WK, NT, PF>;
     if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     kern<<<(N + 8 * NT - 1) / (8 * NT), 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),
         y.data_ptr<float>(), M, N, K / 64, x.stride(0), w.stride(0), y.stride(0));
 }
 
-void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nt) {
+void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nt, int64_t pf) {
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
                 "bf16_skinny: x, w bf16, y fp32");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1), "bf16_skinny: K % 64");
@@ -130,14 +148,16 @@ void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, 
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && y.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0,
                 "bf16_skinny: row-major, 16-byte aligned rows");
     const bool two = x.size(0) > 16;
-#define L(WK, NT)                                     \
-    if (wk == WK && nt == NT) {                       \
-        if (two) launch<2, WK, NT>(x, w, y);          \
-        else launch<1, WK, NT>(x, w, y);              \
+#define L(WK, NT, PF)                                 \
+    if (wk == WK && nt == NT && pf == PF) {           \
+        if (two) launch<2, WK, NT, PF>(x, w, y);      \
+        else launch<1, WK, NT, PF>(x, w, y);          \
         return;                                       \
     }
-    L(1, 1) L(2, 1) L(4, 1) L(8, 1) L(16, 1) L(32, 1)
-    L(4, 2) L(8, 2) L(16, 2) L(32, 2)
+    L(1, 1, 0) L(2, 1, 0) L(4, 1, 0) L(8, 1, 0) L(16, 1, 0) L(32, 1, 0)
+    L(4, 2, 0) L(8, 2, 0) L(16, 2, 0) L(32, 2, 0)
+    L(1, 1, 1) L(2, 1, 1) L(4, 1, 1) L(8, 1, 1) L(16, 1, 1) L(32, 1, 1)
+    L(2, 2, 1) L(4, 2, 1) L(8, 2, 1) L(16, 2, 1)
 #undef L
     TORCH_CHECK(false, "bf16_skinny: (wk, nt) not built");
 }

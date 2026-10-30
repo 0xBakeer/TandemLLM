@@ -205,7 +205,13 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_kernels as K
         w = self.W["lm_head.weight"]
         if isinstance(w, torch.Tensor):
-            y = K.gemv_bf16(x, w)
+            if x.shape[0] <= 32:
+                # tools/bf16_skinny with 32 warps a CTA: 258 GB/s on the 1.27 GB head (fn_gemv: 241), the sums
+                # rounded once to bf16 as before
+                from tools import bf16_skinny as BS
+                y = BS.mm(x.contiguous(), w, wk=32, nt=1).to(torch.bfloat16)
+            else:
+                y = K.gemv_bf16(x, w)
             return y.float() if out is None else out.copy_(y)
         if DENSE_MAX:
             return K.dense(x, w, out=out) if out is not None else K.dense(x, w).float()
