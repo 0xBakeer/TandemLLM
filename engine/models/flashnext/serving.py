@@ -171,6 +171,11 @@ class FlashNextServing:
     # cut skips drafts often at C8, and each plain step alone held the other lanes' round
     caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False,
                         joint_plain=True)
+    #: SPD-249: `forward_tree_multi` reads each block's tokens on the host (the runner may hand host tensors:
+    #: QSE_RUNNER_HOST_BLOCKS)
+    host_blocks = True
+    #: SPD-249: the round runner sets it before a joint pass when a joint graph may be captured in it
+    joint_capture_ok = False
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
@@ -289,7 +294,11 @@ class FlashNextServing:
         a layer (`union.ExpertUnion`), None when not counted."""
         un = getattr(self.fn, "union", None)
         rep = un.report() if un is not None else None
-        return {"experts_union": rep} if rep is not None else None
+        out = {"experts_union": rep} if rep is not None else {}
+        from engine.models.flashnext import engine as E
+        if E.JOINT_GRAPH:
+            out["joint_graphs"] = self.fn.joint_graph_stats()          # SPD-249
+        return out or None
 
     def draft_heads(self) -> dict:
         """The draft heads this pack carries, by name: its MTP layer ("mtp", made by `add_mtp_head`)."""
@@ -673,6 +682,10 @@ class FlashNextServing:
         in one pass (`FlashNextEngine.verify_multi`: the weights read once); each slot's logits, picks
         and streams as its `forward_tree` leaves them, and its block committed by its `commit_tree`."""
         fn = items[0][0].fn
+        # SPD-249: a joint graph may be captured in this pass only when the server's round runner says so (its
+        # thread, no request waiting for the GPU: `joint_capture_ok`, set a round at a time)
+        fn.joint_capture_ok = bool(getattr(items[0][0], "joint_capture_ok", False))
+        items[0][0].joint_capture_ok = False
         jobs = []
         t0 = time.perf_counter()
         for s, block, parents, start in items:
@@ -684,7 +697,10 @@ class FlashNextServing:
         if jt is not None:
             # SPD-239: the host before the pass (a chain's commit, the window, the blocks to the host)
             jt["host_pre"] = jt.get("host_pre", 0.0) + 1e3 * (time.perf_counter() - t0)
-        outs = fn.verify_multi(jobs)
+        try:
+            outs = fn.verify_multi(jobs)
+        finally:
+            fn.joint_capture_ok = False
         torch.cuda.current_stream().synchronize()
         res = []
         for (s, block, parents, start), (logits, picks, stack) in zip(items, outs):

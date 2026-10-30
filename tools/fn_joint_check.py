@@ -22,6 +22,11 @@ state's lone verify and commit (its graphs, as a slot alone runs them), at every
 tools/fn_moe_group_check.py --replay).
 `--commit-multi` (SPD-239): the joint states commit in one call (`FlashNextServing.commit_tree_multi`, every
 lane's copies in one launch); their next rounds and end states are then held to the lone twins' own commits.
+`--graph` (SPD-249): the joint passes from the joint graphs (QWEN38_FN_JOINT_GRAPH, captures allowed every pass):
+each lane's block width varies by round (1..`--block` rows, a tree on odd rounds) and every fourth round only the
+first five lanes run, so the keys' padding, the lanes' row cuts and other lane sets are replayed; per round whether it
+ran from a graph, its pad rows' expert ids (all -1) and its real rows' (none -1). The timing then alternates eager and
+graph passes (`joint_eager_ms`, `joint_graph_ms`, without the part marks).
 """
 
 from __future__ import annotations
@@ -68,6 +73,7 @@ def main() -> None:
                     help="SPD-239: the joint states commit in one call (FlashNextServing.commit_tree_multi)")
     ap.add_argument("--dump-moe", help="SPD-249: one more joint pass; every layer's expert input rows and ids to this "
                     "file (torch.save), for tools/fn_moe_group_check.py --replay")
+    ap.add_argument("--graph", action="store_true", help="SPD-249: the joint passes from the joint graphs")
     ap.add_argument("--json")
     a = ap.parse_args()
     global FlashNextServing, build
@@ -116,32 +122,70 @@ def main() -> None:
             for s_, p_ in zip(states, paths_):
                 s_.commit_tree(p_)
 
+    E_mod = None
+    if a.graph:
+        from engine.models.flashnext import engine as E_mod
+        E_mod.JOINT_GRAPH = True
+
+    def jstats():
+        return json.loads(json.dumps(fn.joint_graph_stats())) if a.graph else {}
+
     rounds = []
     for r in range(a.rounds):
-        blocks = [block_of(conts[j], at[j], a.block, r % 2 == 1) for j in range(len(prompts))]
-        lone_out, paths = [], []
-        for j, s in enumerate(lone):
+        on = list(range(len(prompts)))
+        if a.graph:
+            if r % 4 == 3:
+                on = on[:5]
+            blocks = {j: block_of(conts[j], at[j], 1 + (r + j) % a.block, r % 2 == 1) for j in on}
+            joint[0].joint_capture_ok = True
+        else:
+            blocks = {j: block_of(conts[j], at[j], a.block, r % 2 == 1) for j in on}
+        g0 = jstats()
+        lone_out, paths = {}, {}
+        for j in on:
+            s = lone[j]
             toks, parents = blocks[j]
             lg = s.forward_tree(torch.tensor(toks, device="cuda"), parents, s.st.length).clone()
             path, new = walk.accept_tree(DraftTree(tokens=toks, parents=parents), lg.argmax(-1).tolist())
             s.commit_tree(path)
-            lone_out.append(lg)
-            paths.append(path)
+            lone_out[j] = lg
+            paths[j] = path
         outs = FlashNextServing.forward_tree_multi(
-            [(s, torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], s.st.length) for j, s in enumerate(joint)])
-        same = [bool(torch.equal(lone_out[j], outs[j])) for j in range(len(joint))]
-        diff = [float((lone_out[j] - outs[j]).abs().max()) for j in range(len(joint))]
-        commit_joint(joint, paths)
-        for j in range(len(joint)):
+            [(joint[j], torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], joint[j].st.length) for j in on])
+        same = [bool(torch.equal(lone_out[j], o)) for j, o in zip(on, outs)]
+        diff = [float((lone_out[j] - o).abs().max()) for j, o in zip(on, outs)]
+        rows = sum(len(blocks[j][0]) for j in on)
+        info = {}
+        if a.graph:
+            g1 = jstats()
+            info["graph"] = g1["replays"] > g0["replays"]
+            info["captured"] = g1["captures"] > g0["captures"]
+            info["eager"] = {k: v - g0["eager"].get(k, 0) for k, v in g1["eager"].items() if v != g0["eager"].get(k, 0)}
+            if info["graph"]:
+                # the pad rows route to no expert, the real rows to their own (SPD-249: U and every expert's rows are
+                # the unpadded pass's)
+                key = (len(on), next(x for x in E_mod.JG_ROWS if x >= rows), 0)
+                G = fn._jg_state()["graphs"][key]
+                ids = [G.t[("ids", li)] for li in range(fn.cfg.num_hidden_layers)]
+                info["pad_ids_masked"] = all(bool((t[rows:] == -1).all()) for t in ids)
+                info["real_ids_routed"] = all(bool((t[:rows] >= 0).all()) for t in ids)
+                info["pad_rows"] = key[1] - rows
+        commit_joint([joint[j] for j in on], [paths[j] for j in on])
+        for j in on:
             at[j] += len(paths[j])
-        rows = sum(len(b[0]) for b in blocks)
-        rounds.append({"round": r, "rows": rows, "tree": r % 2 == 1, "equal": same, "max_diff": diff})
-        print(f"[joint] round {r}: {rows} rows, equal {same}, max diff {diff}", flush=True)
+        rounds.append({"round": r, "lanes": len(on), "rows": rows, "tree": r % 2 == 1, "equal": same, "max_diff": diff,
+                       **info})
+        print(f"[joint] round {r}: {len(on)} lanes, {rows} rows, equal {same}, max diff {diff} {info}", flush=True)
     timing = None
     if a.timing:
         tl = te = tj = 0.0
-        fn.joint_timing = {}
+        tg, ng_ = [0.0, 0.0], [0, 0]
+        fn.joint_timing = None if a.graph else {}
+        cap0 = jstats().get("captures", 0)
         for r in range(a.timing):
+            if a.graph:
+                E_mod.JOINT_GRAPH = bool(r % 2)                 # eager and graph passes in turn
+                joint[0].joint_capture_ok = True
             blocks = [block_of(conts[j], at[j], a.block, False) for j in range(len(prompts))]
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -162,13 +206,21 @@ def main() -> None:
             t3 = time.perf_counter()
             if r:                                               # the first round warms
                 tl, te, tj = tl + t1 - t0, te + t2 - t1, tj + t3 - t2
+            if a.graph and r >= 2 and jstats()["captures"] == cap0:
+                tg[r % 2] += t3 - t2                            # no pass that captured
+                ng_[r % 2] += 1
+            cap0 = jstats().get("captures", 0)
             for j in range(len(prompts)):
                 at[j] += len(blocks[j][0])
         n = max(1, a.timing - 1)
-        npass = fn.joint_timing.get("passes")         # a family whose joint pass marks no parts: none
+        npass = fn.joint_timing.get("passes") if fn.joint_timing is not None else None
         jt = {k: round(v / npass, 2) for k, v in fn.joint_timing.items() if k != "passes"} if npass else {}
         timing = {"states": len(prompts), "rows": len(prompts) * a.block, "lone_graphs_ms": round(tl / n * 1e3, 2),
                   "lone_eager_ms": round(te / n * 1e3, 2), "joint_ms": round(tj / n * 1e3, 2), "joint_parts_ms": jt}
+        if a.graph:
+            E_mod.JOINT_GRAPH = True
+            timing.update(joint_eager_ms=round(tg[0] / max(1, ng_[0]) * 1e3, 2),
+                          joint_graph_ms=round(tg[1] / max(1, ng_[1]) * 1e3, 2), graphs=jstats())
         fn.joint_timing = None
         print(f"[joint] timing {timing}", flush=True)
     kern = None
@@ -266,6 +318,8 @@ def main() -> None:
                  if not torch.equal(t.narrow(ax, 0, s_l.st.length), u.narrow(ax, 0, s_j.st.length))]
         end.append({"length": [s_l.st.length, s_j.st.length], "sections_differ": bad, "views_differ": views})
         print(f"[joint] end: {end[-1]}", flush=True)
+    if a.graph:
+        print(f"[joint] graphs: {jstats()}", flush=True)
     if a.json:
         json.dump({"rounds": rounds, "end": end, "timing": timing, "kernels": kern, "lone_kernels": lone_k}, open(a.json, "w"), indent=1)
 

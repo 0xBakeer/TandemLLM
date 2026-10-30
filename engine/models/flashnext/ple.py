@@ -173,8 +173,11 @@ class NGramHash:
             if hist[i] == self.eos:
                 seg = i + 1
         shifted = [hist[t - s] if t - seg >= s else self.eos for s in range(self.ngram_size)]
-        mult = self.mult.tolist()
-        sizes, offs = self.sizes.tolist(), self.offsets.tolist()
+        lists = self.__dict__.get("_lists")
+        if lists is None:
+            # SPD-249: the multipliers, sizes and offsets as Python integers once (the same values every call)
+            lists = self._lists = (self.mult.tolist(), self.sizes.tolist(), self.offsets.tolist())
+        mult, sizes, offs = lists
 
         def wrap(v: int) -> int:
             v &= _MASK64

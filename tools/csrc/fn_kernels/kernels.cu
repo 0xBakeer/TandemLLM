@@ -897,6 +897,7 @@ __global__ void moe_groups_kernel(const int* __restrict__ IDS, const int* __rest
     for (int i = 0; i < P; ++i) {
         const int p = ORDER ? ORDER[i] : i;
         const int e = IDS[p];
+        if (e < 0) continue;                         // SPD-249: a joint graph's pad rows route to no expert
         if (ng == 0 || e != cur || g[1] == GR) {     // GR: SPD-249's cap (MOE_GR today)
             g = G + (size_t)ng * (2 + MOE_GR);
             g[0] = e; g[1] = 0;
@@ -1142,7 +1143,8 @@ __global__ void __launch_bounds__(256) moe_combine_kernel(const float* __restric
     if (threadIdx.x < S) {
         const int e = IDS[m * S + threadIdx.x];
         int r = 0;
-        for (int s = 0; s < S; ++s) r += IDS[m * S + s] < e;
+        // SPD-249: a tie (only a joint graph's pad row, every id -1) ranks by slot, so every rank is filled
+        for (int s = 0; s < S; ++s) r += IDS[m * S + s] < e || (IDS[m * S + s] == e && s < (int)threadIdx.x);
         ord[r] = threadIdx.x;
     }
     __syncthreads();
@@ -1240,7 +1242,8 @@ __global__ void __launch_bounds__(1024) combine_inject_norm_kernel(const __nv_bf
     if (threadIdx.x < S) {
         const int e = IDS[m * S + threadIdx.x];
         int r = 0;
-        for (int q = 0; q < S; ++q) r += IDS[m * S + q] < e;
+        // SPD-249: a tie (only a joint graph's pad row, every id -1) ranks by slot, so every rank is filled
+        for (int q = 0; q < S; ++q) r += IDS[m * S + q] < e || (IDS[m * S + q] == e && q < (int)threadIdx.x);
         ord[r] = threadIdx.x;
     }
     __syncthreads();
@@ -1606,6 +1609,7 @@ __global__ void __launch_bounds__(256) attn_prep_multi_kernel(const __nv_bfloat1
     while (j + 1 < E && ENT[(j + 1) * APM_FIELDS] <= m) ++j;
     const int64_t* en = ENT + (size_t)j * APM_FIELDS;
     const int r = m - (int)en[0];
+    if (r >= (int)en[1]) return;                      // SPD-249: a joint graph's pad rows past the last lane
     __nv_bfloat16* KC = reinterpret_cast<__nv_bfloat16*>(en[2]);
     __nv_bfloat16* VC = reinterpret_cast<__nv_bfloat16*>(en[3]);
     __nv_bfloat16* IKC = reinterpret_cast<__nv_bfloat16*>(en[4]);

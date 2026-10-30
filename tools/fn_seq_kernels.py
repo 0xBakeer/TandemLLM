@@ -84,7 +84,7 @@ def _module():
     if _MOD is None:
         tag = nb.tag(_CPP, _CUDA)
         _MOD = nb.load(f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
+                       functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv", "seq_ple_conv_multi",
                                   "seq_qsa_pool", "seq_qsa_pool_multi", "seq_qsa_scores", "seq_qsa_topk"],
                        extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                        verbose=False)
@@ -274,6 +274,24 @@ def ple_conv(gvn, gv, state, w_bf16, src):
     y = torch.empty_like(gv)
     _module().seq_ple_conv(gvn, gv, state, w_bf16, src, y)
     return y
+
+
+def ple_conv_entry(gvn, gv, state, w_bf16, src, y) -> list:
+    """SPD-249: one lane's `ple_conv` call as a `ple_conv_multi` entry: gvn, gv, y [M, C] bf16 (the lane's rows),
+    state [1, C, slen] bf16, w [C, 4] bf16, src int32 [M, 3] (lane-relative rows)."""
+    M, C = gvn.shape
+    assert gvn.is_contiguous() and gv.is_contiguous() and y.is_contiguous() and state.is_contiguous() and w_bf16.is_contiguous()
+    assert gvn.dtype == gv.dtype == y.dtype == state.dtype == w_bf16.dtype == torch.bfloat16
+    assert gv.shape == y.shape == (M, C) and state.numel() == C * state.shape[-1] and w_bf16.numel() == 4 * C
+    assert src.dtype == torch.int32 and src.is_contiguous() and src.numel() == 3 * M
+    return [gvn.data_ptr(), gv.data_ptr(), state.data_ptr(), state.shape[-1], w_bf16.data_ptr(), src.data_ptr(),
+            y.data_ptr(), M] + [0] * 8
+
+
+def ple_conv_multi(entries: torch.Tensor, C: int, rows_max: int) -> None:
+    """SPD-249: `ple_conv` of several lanes in one launch (`entries` int64 [lanes, 16] on the device, one
+    `ple_conv_entry` a lane): each row's own arithmetic."""
+    _module().seq_ple_conv_multi(entries, int(C), int(rows_max))
 
 
 # ------------------------------------------------------------------------------------- QSA

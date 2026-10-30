@@ -78,6 +78,10 @@ MTP_PACK = os.environ.get("QSE_RUNNER_MTP_PACK", "1") == "1"
 #: SPD-239: a joint round's commits at once where the family commits several slots in one call (its
 #: `commit_tree_multi`: every lane's copies in one launch); 0: each tail commits its own
 COMMIT_MULTI = os.environ.get("QSE_RUNNER_COMMIT_MULTI", "1") == "1"
+#: SPD-249: a joint pass hands the families that read a block on the host (`host_blocks`) a host tensor of its
+#: tokens instead of a device copy each lane (which the family read back to the host, a stream sync each lane); the
+#: same tokens. 0: device blocks for every family
+HOST_BLOCKS = os.environ.get("QSE_RUNNER_HOST_BLOCKS", "0") == "1"
 #: SPD-233: at E lanes of families that join a plain step to the joint pass (`joint_plain`), the runner weighs its
 #: drafted rounds' tokens a GPU ms against its plain rounds' (one joint decode step, a token a lane) and takes the
 #: better: in plain mode every lane's drafter skips its draft. Each mode's rate is a running mean of the rounds
@@ -170,6 +174,9 @@ class Runner:
         # issue, the proposals' rest (it reads the draft back), the verify's issue, the walk (it reads the
         # pass back), the tails
         self.ms = {k: 0.0 for k in ("prop", "packed", "rest", "verify", "walk", "tails", "round")}
+        # SPD-249: the round's thread CPU ms outside the verify pass's wait, beside its wall ms (`round` - `verify`): the
+        # gap is time the runner's thread did not run (the GIL held by another thread, or the OS)
+        self.ms["out_cpu"] = 0.0
         # the same phases on the GPU's timeline (SPD-201 host cut, step a): a CUDA event at the round's start and
         # at each phase's end, read one round later (never waited on). A segment's GPU time is its end event
         # minus the one before: the packed draft and the verify pass are the GPU's own work, the others the
@@ -177,6 +184,7 @@ class Runner:
         # round's start
         self.gpu = {k: 0.0 for k in ("prop", "packed", "rest", "verify", "walk", "tails", "between", "period")}
         self.gpu_n = 0
+        self._verify_cpu = 0.0
         self._ev: list = []                 # this round's (label, event)
         self._ev_done: list = []            # finished rounds' event lists, read when complete
         self._ev_last = None                # the last round's final event
@@ -441,6 +449,7 @@ class Runner:
         self._mark("start")
         ms0 = dict(self.ms)
         t_r = t0 = time.perf_counter()
+        c_r = time.thread_time()
         # 1. proposals to their drafts, one packed draft, the proposals' rest
         for t in tasks:
             if t.slot.index == 0 and not t.done:
@@ -503,6 +512,8 @@ class Runner:
             self.prices.note_accept(self._round_acc, self._round_exp)
         self._bind_none()
         self._t("round", t_r)
+        self.ms["out_cpu"] += 1e3 * (time.thread_time() - c_r) - self._verify_cpu
+        self._verify_cpu = 0.0
         me = self._ms_e.setdefault(self._round_e, {"n": 0})
         me["n"] += 1
         for k, v in self.ms.items():
@@ -690,7 +701,10 @@ class Runner:
             self._round_rows = sum(len(x.tokens) for x in trees)
             self._round_exp += sum(sum(x.scores[1:]) for x in trees)
         t0 = time.perf_counter()
-        blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
+        if HOST_BLOCKS and len(group) > 1 and getattr(group[0].eng, "host_blocks", False):
+            blocks = [torch.tensor(x.tokens, dtype=torch.long) for x in trees]
+        else:
+            blocks = [h2d(x.tokens, torch.long, t.device) for x, t in zip(trees, group)]
         if len(group) == 1 and not (JOINT1 and getattr(group[0].eng, "forward_tree_multi", None) is not None):
             t = group[0]
             self._bind(t)
@@ -701,7 +715,14 @@ class Runner:
                 on_verify(trees[0].n_draft + 1, (time.perf_counter() - t0) * 1e3)
         else:
             multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
+            if hasattr(group[0].eng, "joint_capture_ok"):
+                # SPD-249: a family's joint graph may be captured in this pass: on this thread, while no request
+                # waits for the GPU (an admission's prefill), never otherwise
+                tn = self.pool.turn
+                group[0].eng.joint_capture_ok = tn is None or tn.waiting() == 0
+            c_v = time.thread_time()
             outs = multi([(t.eng, b, x.parents, t.pos) for t, b, x in zip(group, blocks, trees)])
+            self._verify_cpu += 1e3 * (time.thread_time() - c_v)
             self.stats["joint"] += 1
             if JOINT_PRICE:
                 # a drafter that prices its rounds by its verify (the MTP tree drafter's StairCut) gets its

@@ -195,10 +195,11 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
     # SPD-233: the LiLiCorr draft of several lanes in one pass (lilicorr.py _PackedGraph)
     # ENG-399: Flint's decode step, joint decode step, verify block and commit (engine/models/flint/engine.py)
     # SPD-163: the 27B's joint verify pass (engine/models/qwen3_5/joint_graphs.py JointGraphs)
+    # SPD-249: Flash-Next's joint verify pass (engine/models/flashnext/engine.py `_jg_capture`)
     assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/drafters/draft_graph.py",
                              "engine/drafters/lilicorr.py", "engine/drafters/lilicorr.py",
                              "engine/generative/qwen35.py"] + [
-                             "engine/models/flashnext/engine.py"] * 4 + ["engine/models/flint/engine.py"] * 4 + [
+                             "engine/models/flashnext/engine.py"] * 5 + ["engine/models/flint/engine.py"] * 4 + [
                              "engine/models/lfm2_moe/engine.py"] * 4 + [
                              "engine/models/nemotron_h/engine.py"] * 4 + [
                              "engine/models/qwen3_5/joint_graphs.py", "engine/verify_graph.py"], found

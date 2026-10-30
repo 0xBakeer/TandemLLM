@@ -48,4 +48,19 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: a joint pass's PLE layer: decode, projections, norms and gate once over every lane's rows, the conv a lane
     # at a time (each row's own arithmetic); 0: the PLE step a lane at a time
     'FN_PLE_MULTI': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a dense joint pass from a CUDA graph keyed by (lanes, rows padded to 16/24/32, class 0), the lanes'
+    # states through its entry tables, the pad rows routed to no expert; captured on the round runner only while no
+    # request waits; 0: every joint pass eager
+    'FN_JOINT_GRAPH': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: stage_rows' tree arrays (depth, paths, ancestor cells, GDN tree control, window sources) kept by tree
+    # shape, and a joint graph's lane views kept by (start, rows): the same host rows with less host work; 0: per call
+    'FN_TREE_PLAN': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a joint graph pass reads its PLE rows on the reader thread while the lanes are staged and the segments
+    # before the first PLE layer run (the eager pass's FN_PLE_LATE); the rows land before that layer's segment; 0: read
+    # before the first segment
+    'FN_JG_PLE_LATE': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: the joint graphs kept (the least recently replayed go first)
+    'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)
+    'FN_JOINT_GRAPH_AFTER': ('2', 'engine/models/flashnext/engine.py'),
 }

@@ -337,6 +337,35 @@ __global__ void __launch_bounds__(256) ple_conv_kernel(const __nv_bfloat16* __re
     Y[(size_t)m * C + c] = __float2bfloat16_rn(b2f(GV[(size_t)m * C + c]) + sl);
 }
 
+// SPD-249: `ple_conv_kernel` for every lane of a joint pass in one launch, grid (C / 256, rows max, lanes): lane z's
+// call from its entry E[z] = [gvn, gv, state, slen, w, src, y, M, 0...] (16 fields; gvn / gv / y the lane's rows,
+// src's rows lane-relative); each CTA computes what the lane's own launch computes for that row.
+__global__ void __launch_bounds__(256) ple_conv_multi_kernel(const long long* __restrict__ E, int C) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.z * 16;
+    const int m = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
+    if (m >= (int)e[7] || c >= C) return;
+    const __nv_bfloat16* GVN = reinterpret_cast<const __nv_bfloat16*>(e[0]);
+    const __nv_bfloat16* GV = reinterpret_cast<const __nv_bfloat16*>(e[1]);
+    const __nv_bfloat16* PS = reinterpret_cast<const __nv_bfloat16*>(e[2]);
+    const int slen = (int)e[3];
+    const __nv_bfloat16* W = reinterpret_cast<const __nv_bfloat16*>(e[4]);
+    const int* SRC = reinterpret_cast<const int*>(e[5]);
+    __nv_bfloat16* Y = reinterpret_cast<__nv_bfloat16*>(e[6]);
+    float acc = 0.f;
+#pragma unroll
+    for (int j = 0; j < 3; ++j) {
+        const int s = SRC[m * 3 + j];
+        const float v = s >= 0 ? b2f(GVN[(size_t)s * C + c]) : b2f(PS[(size_t)c * slen + (-1 - s)]);
+        acc = fmaf(v, b2f(W[(size_t)c * 4 + j]), acc);
+    }
+    acc = fmaf(b2f(GVN[(size_t)m * C + c]), b2f(W[(size_t)c * 4 + 3]), acc);
+    const float a = bfr(acc);
+    const float sl = bfr(a / (1.0f + ::expf(-a)));
+    Y[(size_t)m * C + c] = __float2bfloat16_rn(b2f(GV[(size_t)m * C + c]) + sl);
+}
+
 // ------------------------------------------------------------------------------------- QSA
 // One pooled indexer key per CTA (128 threads = the indexer head dim): the mean of the block's 4 raw
 // keys (fp32, in key order, / 4, rounded to bf16), the RMS norm (1 + w), the rope at the block's first
@@ -592,6 +621,15 @@ void seq_ple_conv(torch::Tensor gvn, torch::Tensor gv, torch::Tensor ps, torch::
     launch(ple_conv_kernel, dim3((C + 255) / 256, M), dim3(256), st, (const __nv_bfloat16*)gvn.data_ptr(),
         (const __nv_bfloat16*)gv.data_ptr(), (const __nv_bfloat16*)ps.data_ptr(), slen, (const __nv_bfloat16*)w.data_ptr(),
         (const int*)src.data_ptr(), (__nv_bfloat16*)y.data_ptr(), C);
+}
+
+void seq_ple_conv_multi(torch::Tensor E, int64_t C, int64_t rows_max) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0 || rows_max <= 0) return;
+    launch(ple_conv_multi_kernel, dim3((unsigned)((C + 255) / 256), (unsigned)rows_max, (unsigned)E.size(0)), dim3(256), st,
+           (const long long*)E.data_ptr(), (int)C);
 }
 
 void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos,

@@ -78,6 +78,26 @@ ATTN_MULTI = _S.get("FN_ATTN_MULTI") == "1"
 #: SPD-249: a joint pass's PLE layer decodes, projects, norms and gates every lane's rows at once (row-wise), only the
 #: dilated conv over each lane's own state a lane at a time; 0: the whole PLE step a lane at a time
 PLE_MULTI = _S.get("FN_PLE_MULTI") == "1"
+#: SPD-249: a dense joint pass (every lane's context within the dense class) from a CUDA graph keyed by (lanes, the
+#: rows padded to JG_ROWS, class 0): the lanes' rows contiguous in one rows buffer, every lane's state reached through
+#: the graph's entry tables, the pad rows routed to no expert; a key the server has not let capture yet runs eager.
+#: 0: every joint pass eager
+JOINT_GRAPH = _S.get("FN_JOINT_GRAPH") == "1"
+# SPD-249: stage_rows' tree arrays kept by tree shape, a joint graph's lane views kept (the same host rows)
+TREE_PLAN = _S.get("FN_TREE_PLAN") == "1"
+# SPD-249: a joint graph pass reads its PLE rows on the reader thread while the segments before the PLE layer run
+JG_PLE_LATE = _S.get("FN_JG_PLE_LATE") == "1"
+#: SPD-249: the joint graphs kept (the least recently replayed go first)
+JOINT_GRAPH_MAX = int(_S.get("FN_JOINT_GRAPH_MAX") or 12)
+#: SPD-249: a key is captured at its n-th pass (the eager ones before it compile every kernel it runs)
+JOINT_GRAPH_AFTER = int(_S.get("FN_JOINT_GRAPH_AFTER") or 2)
+#: SPD-249: the padded row counts of the joint graphs (a pass's rows go up to the next one)
+JG_ROWS = (16, 24, 32)
+#: SPD-249: the most lanes a joint graph holds (its entry tables)
+JG_LANES = 8
+#: SPD-249: the layers where a joint graph's pass is cut into graphs of its own: the host writes a segment's entry rows
+#: while the GPU runs the segment before it (only the first segment's rows wait for the host)
+JG_CUTS = (2, 10, 22, 34)
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -295,13 +315,16 @@ class FlashNextEngine(FlashNextRef):
             K.moe(xs, ids, wts, self.banks[li], order=order, out=out[r0:r0 + step])
         return out
 
-    def moe_parts(self, x, li):
+    def moe_parts(self, x, li, pad=None):
         """The router and the experts of every (row, slot) pair, without the combine (the trunk
-        folds it into the next inject): (yd [M S, H] fp32, ids, wts)."""
+        folds it into the next inject): (yd [M S, H] fp32, ids, wts). `pad` (SPD-249, a joint graph): bool [M, 1]
+        on the device, its rows' ids set to -1 (the grouped kernels skip them: they pull no expert)."""
         from tools import fn_kernels as K
         c = self.cfg
         logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
         ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
+        if pad is not None:
+            ids.masked_fill_(pad, -1)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
         yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
@@ -796,6 +819,32 @@ class FlashNextEngine(FlashNextRef):
         h["packed"].numpy()[row * nh:row * nh + ids.size] = tab.rows_of(ids) if rows is None else rows
         h["heads"].numpy()[row * nh:row * nh + ids.size] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
 
+    #: SPD-249: tree plans kept (`_tree_plan`); a joint round's trees repeat a few dozen shapes
+    TREE_PLANS_MAX = 4096
+
+    def _tree_plan(self, parents: list[int]) -> dict:
+        """SPD-249: the host arrays `stage_rows` derives from a block's `parents` alone, computed once a shape: depth,
+        paths, the ancestor cells (rows, columns, path rows), the GDN tree control and slots, the conv and PLE window
+        sources. The values are the ones the per-call code computes, so the staged rows are the same bits."""
+        from tools import fn_seq_kernels as SK
+        key = tuple(parents)
+        plans = self.__dict__.setdefault("_tplans", {})
+        tp = plans.get(key)
+        if tp is not None:
+            return tp
+        if len(plans) >= self.TREE_PLANS_MAX:
+            plans.clear()
+        depth, paths = self._tree_paths(parents)
+        ri = np.concatenate([np.full(len(pa), i, dtype=np.int64) for i, pa in enumerate(paths)])
+        ci = np.concatenate([np.arange(len(pa), dtype=np.int64) for pa in paths])
+        pv = np.concatenate([np.asarray(pa, dtype=np.int64) for pa in paths])
+        ctl, slots = SK.tree_ctl(parents)
+        tp = plans[key] = {"depth": np.asarray(depth, dtype=np.int64), "dmax": int(max(depth)), "paths": paths,
+                           "ri": ri, "ci": ci, "pv": pv, "ctl": np.asarray(ctl), "slots": slots,
+                           "csrc": np.asarray(SK.window_src(parents, (3, 2, 1), 3)),
+                           "psrc": np.asarray(SK.window_src(parents, (9, 6, 3), 9))}
+        return tp
+
     @staticmethod
     def _tree_paths(parents: list[int]) -> tuple[list[int], list[list[int]]]:
         """Each row's depth and its root-to-row path (DFS pre-order, `parents`)."""
@@ -812,7 +861,9 @@ class FlashNextEngine(FlashNextRef):
         out: list = [{} for _ in items]
         for li in self.cfg.ple_layers:
             hsh = self.hash[li]
-            ids = [np.asarray(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens, self._tree_paths(parents)[1]),
+            ids = [np.asarray(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens,
+                                                self._tree_plan(parents)["paths"] if TREE_PLAN else
+                                                self._tree_paths(parents)[1]),
                               dtype=np.int64).reshape(-1) for tokens, parents, st in items]
             rows = self.tables[li].rows_of(np.concatenate(ids)) if ids else None
             k = 0
@@ -841,36 +892,54 @@ class FlashNextEngine(FlashNextRef):
             d["heads"].copy_(h["heads"], non_blocking=True)
             rb["copied"].record()
 
-    def stage_rows(self, tokens: list[int], parents: list[int], st: FNState, key=None, ple: dict | None = None) -> None:
+    def stage_rows(self, tokens: list[int], parents: list[int], st: FNState, key=None, ple: dict | None = None,
+                   rb: dict | None = None) -> None:
         """Host work of a verify block: `tokens` in DFS pre-order with `parents` (-1 for the first
         row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path. `key`:
         the rows buffers' own key (a joint pass stages each state's block in its own, `verify_multi`).
-        `ple`: the block's PLE ids and rows read already ({layer: (ids, rows)}, `_ple_batch`)."""
+        `ple`: the block's PLE ids and rows read already ({layer: (ids, rows)}, `_ple_batch`). `rb` (SPD-249): a lane's
+        rows of a joint graph's buffer (`_jg_lane`): written there, the caller copies the whole buffer once."""
         from tools import fn_seq_kernels as SK
         M = len(tokens)
         hm, t0 = self.host_ms, time.perf_counter()
-        rb = self._rows_buffers(M, key)
-        rb["copied"].synchronize()
+        lane = rb is not None
+        if not lane:
+            rb = self._rows_buffers(M, key)
+            rb["copied"].synchronize()
         t1 = time.perf_counter()
         hm["stage_wait"] = hm.get("stage_wait", 0.0) + 1e3 * (t1 - t0)
         h, L = rb["h"], st.length
-        depth, paths = self._tree_paths(parents)
-        d = np.asarray(depth, dtype=np.int64)
-        rb["last"] = L + int(d.max())          # SPD-249: the block's last position for `class_check`
+        tp = self._tree_plan(parents) if TREE_PLAN else None
+        if tp is not None:
+            d, paths = tp["depth"], tp["paths"]
+            rb["last"] = L + tp["dmax"]
+        else:
+            depth, paths = self._tree_paths(parents)
+            d = np.asarray(depth, dtype=np.int64)
+            rb["last"] = L + int(d.max())          # SPD-249: the block's last position for `class_check`
         h["tok"].numpy()[:] = tokens
         h["pos"].numpy()[:] = L + d + st.delta
         h["slot"].numpy()[:] = L + np.arange(M)
         anc = h["anc"].numpy()
-        for i, pa in enumerate(paths):
-            anc[i, :len(pa)] = L + np.asarray(pa)
+        if tp is not None:
+            anc[tp["ri"], tp["ci"]] = L + tp["pv"]          # the cells the loop below writes, the same values
+        else:
+            for i, pa in enumerate(paths):
+                anc[i, :len(pa)] = L + np.asarray(pa)
         t2 = time.perf_counter()
         self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M,
                         st.delta)
         t3 = time.perf_counter()
-        ctl, self._ctl_slots = SK.tree_ctl(parents)
-        h["gctl"].numpy()[:] = ctl
-        h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
-        h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
+        if tp is not None:
+            self._ctl_slots = tp["slots"]
+            h["gctl"].numpy()[:] = tp["ctl"]
+            h["csrc"].numpy()[:] = tp["csrc"]
+            h["psrc"].numpy()[:] = tp["psrc"]
+        else:
+            ctl, self._ctl_slots = SK.tree_ctl(parents)
+            h["gctl"].numpy()[:] = ctl
+            h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
+            h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
         t4 = time.perf_counter()
         for li in self.cfg.ple_layers:
             if ple == "late":
@@ -886,8 +955,9 @@ class FlashNextEngine(FlashNextRef):
         hm["stage_qsa"] = hm.get("stage_qsa", 0.0) + 1e3 * (t3 - t2)
         hm["stage_tree"] = hm.get("stage_tree", 0.0) + 1e3 * (t4 - t3)
         hm["stage_ple"] = hm.get("stage_ple", 0.0) + 1e3 * (t5 - t4)
-        rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
-        rb["copied"].record()
+        if not lane:
+            rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+            rb["copied"].record()
         self._block = (list(tokens), list(parents), paths)
 
     def rows_step(self, st: FNState, M: int, write: bool = False, cls: int = 0) -> torch.Tensor:
@@ -978,6 +1048,10 @@ class FlashNextEngine(FlashNextRef):
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         S = c.num_experts_per_tok + 1
+        if JOINT_GRAPH:
+            out = self._joint_graph_pass(items)
+            if out is not None:
+                return out
         jt = self.joint_timing
         marks = []
         t_h0 = time.perf_counter()
@@ -1101,6 +1175,389 @@ class FlashNextEngine(FlashNextRef):
         if jt is not None:
             mark("end")
             self._timed(jt, marks, cx)
+        return out
+
+    # ------------------------------------------------------------------ SPD-249: joint passes from CUDA graphs
+    def _jg_state(self) -> dict:
+        """The joint graphs' state: kept graphs by key (LRU order), passes seen a key, the shared pool and capture
+        stream, and the counts for /health (replays, captures, eager passes by reason)."""
+        g = self.__dict__.get("_jgs")
+        if g is None:
+            g = self._jgs = {"graphs": {}, "seen": {}, "pool": None, "stream": None, "bufs": {},
+                             "stats": {"replays": 0, "captures": 0, "capture_ms": 0.0, "evicted": 0, "eager": {},
+                                       "stage_ms": 0.0, "plan_ms": 0.0, "stage_parts_ms": {}, "stage_cpu_ms": 0.0,
+                                       "plan_cpu_ms": 0.0}}
+        return g
+
+    def joint_graph_stats(self) -> dict:
+        """SPD-249: the joint graphs' counts (kept keys, replays, captures and their ms, eager passes by reason)."""
+        g = self._jg_state()
+        return {**g["stats"], "kept": [list(k) for k in g["graphs"]]}
+
+    def _jg_eager(self, why: str) -> None:
+        e = self._jg_state()["stats"]["eager"]
+        e[why] = e.get(why, 0) + 1
+
+    def _jg_why(self, items: list, rows: int) -> str | None:
+        """Why this pass runs eager instead of from a graph (None: it may run from one)."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        if not (ROWWISE and GDN_MULTI and GDN_PRE_MULTI and ATTN_MULTI and PLE_MULTI and JOINT_MOE_GROUP and PLE_BATCH):
+            return "switches"
+        if K.MOE_STAGE or self.joint_timing is not None or self.route_trace is not None or self._moe_record is not None:
+            return "measuring"
+        if len(items) > JG_LANES:
+            return "lanes"
+        if rows > JG_ROWS[-1]:
+            return "rows"
+        k0 = None
+        for tokens, parents, st in items:
+            depth = [0] * len(parents)
+            for i, p in enumerate(parents):
+                depth[i] = 0 if p < 0 else depth[p] + 1
+            if self.qsa_class(st.length + max(depth)):
+                return "sparse"
+            for li in c.attention_layers:
+                kc, vc = st.k[li], st.v[li]
+                if not (kc.is_contiguous() and vc.is_contiguous()):
+                    return "layout"
+                ks = (kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1))
+                if k0 is None:
+                    k0 = ks
+                elif ks != k0:
+                    return "layout"
+        return None
+
+    def _jg_buffers(self, R: int) -> dict:
+        """The rows buffer of an R-row joint graph (every lane's rows contiguous, `_rows_buffers`' layout) and its pad
+        mask (bool [R, 1], pinned host and device)."""
+        rb = self._rows_buffers(R, ("jg", R))
+        if "pad_h" not in rb:
+            rb["pad_h"] = torch.zeros(R, 1, dtype=torch.bool, pin_memory=True)
+            rb["d"]["pad"] = torch.zeros(R, 1, dtype=torch.bool, device=self.device)
+        return rb
+
+    def _jg_lane(self, rb: dict, s: int, M: int) -> dict:
+        """Lane rows s..s+M-1 of a joint rows buffer as a rows buffer of its own (views: `stage_rows` writes the lane's
+        host rows there, the entry tables point the kernels at its device rows). SPD-249: kept by (s, M) on the
+        buffer, so a pass makes no views it made before."""
+        if TREE_PLAN:
+            lanes = rb.setdefault("lanes", {})
+            lv = lanes.get((s, M))
+            if lv is None:
+                lv = lanes[(s, M)] = self._jg_lane_new(rb, s, M)
+            return lv
+        return self._jg_lane_new(rb, s, M)
+
+    def _jg_lane_new(self, rb: dict, s: int, M: int) -> dict:
+        nh = self.cfg.ngram_heads
+
+        def cut(v):
+            out = {}
+            for name, t in v.items():
+                if name == "pad":
+                    continue
+                if name == "pidx":
+                    out[name] = t                   # a decode step's pool row: shared, no verify reads it
+                    continue
+                out[name] = t[s * nh:(s + M) * nh] if name in ("heads", "packed") else t[s:s + M]
+            return out
+        return {"M": M, "h": cut(rb["h"]), "d": cut(rb["d"]), "attn": {}}
+
+    def _jg_pad(self, rb: dict, n: int, R: int, ple: bool = True) -> None:
+        """The pad rows n..R-1 of a joint rows buffer's host image: row 0's token and PLE rows (valid table rows), no
+        visible key, position and slot 0; the pad mask set past n. `ple` False: the PLE rows later (`_jg_ple_late`)."""
+        h, nh = rb["h"], self.cfg.ngram_heads
+        rb["pad_h"].numpy()[:n] = False
+        rb["pad_h"].numpy()[n:] = True
+        if n >= R:
+            return
+        h["tok"].numpy()[n:] = h["tok"].numpy()[0]
+        h["pos"].numpy()[n:] = 0
+        h["slot"].numpy()[n:] = 0
+        h["actl"].numpy()[n:] = 0
+        if ple:
+            self._jg_pad_ple(h, n, R)
+
+    def _jg_pad_ple(self, h: dict, n: int, R: int) -> None:
+        nh = self.cfg.ngram_heads
+        h["heads"].numpy()[n * nh:] = np.resize(h["heads"].numpy()[:nh], (R - n) * nh)
+        h["packed"].numpy()[n * nh:] = np.resize(h["packed"].numpy()[:nh], ((R - n) * nh, h["packed"].shape[1]))
+
+    def _jg_ple_late(self, rb: dict, cx: list, ples: list, n: int, R: int, stats: dict) -> None:
+        """SPD-249: the PLE rows read meanwhile (`_ple_batch` on the reader thread) into each lane's host rows of a
+        joint graph's buffer, the pad rows' after them, and the buffer's PLE rows to the device (stream order: before
+        the segment of the first PLE layer replays; the whole-buffer copy before the first segment carried stale PLE
+        rows that no layer before it reads)."""
+        t0 = time.perf_counter()
+        for x, ple in zip(cx, ples):
+            h = x["rb"]["h"]
+            for li in self.cfg.ple_layers:
+                self._ple_fill(h, 0, li, *ple[li])
+        if n < R:
+            self._jg_pad_ple(rb["h"], n, R)
+        rb["d"]["packed"].copy_(rb["h"]["packed"], non_blocking=True)
+        rb["d"]["heads"].copy_(rb["h"]["heads"], non_blocking=True)
+        sp = stats["stage_parts_ms"]
+        sp["ple_late"] = sp.get("ple_late", 0.0) + 1e3 * (time.perf_counter() - t0)
+
+    def _jg_lanes(self, G, rows: list, R: int) -> None:
+        """The attention's row-to-lane table of a graph's pass (the pad rows on the last lane: no key visible)."""
+        lh = G.aent["lane_h"].numpy()
+        for j, r in enumerate(rows):
+            lh[r.start:r.stop] = j
+        lh[rows[-1].stop:R] = len(rows) - 1
+
+    def _ple_conv_fill(self, cx, rows, li, use, gvn, gv, y, ent, k) -> None:
+        """The PLE conv's lane entries of layer li (`ent` row k) and each lane's normed rows for its commit."""
+        from tools import fn_seq_kernels as SK
+        hrow = ent["h"].numpy()[k]
+        for j, x in enumerate(cx):
+            use(x)
+            r = rows[j]
+            hrow[j] = SK.ple_conv_entry(gvn[r], gv[r], x["st"].ple_conv[li], self._wc[("ple", li)], self._cur["d"]["psrc"],
+                                        y[r])
+            self.rec[("ple", li)] = gvn[r]
+
+    def _ple_multi_jg(self, cx, rows, h, li, use, G, jd):
+        """`_ple_multi` in a joint graph: the decode, projections, norms and gate over the buffer's R rows, the conv of
+        every lane in one launch (`ple_conv_multi`, each lane's state from its entry) -> [R, hc H] (pad rows: no
+        value)."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        p = self.pre(li) + "ple."
+        H, eps = c.hidden_size, c.rms_norm_eps
+        tab, pd = self.tables[li], self._ple_dev()
+        R = h.shape[0]
+        emb = decode_rows(jd["packed"], jd["heads"], pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(R, -1)
+        key = K.hc_norm(K.gemv_bf16(emb, self.W[p + "key_proj.weight"]), self.W[p + "norm_key.weight"], H, eps)
+        val = K.gemv_bf16(emb, self.W[p + "value_proj.weight"])
+        qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
+        gv = SK.ple_gate(key, qry, val, c.hc_count)
+        gvn = K.hc_norm(gv, self.W[p + "norm_conv.weight"], H, eps)
+        y = torch.empty_like(gv)
+        G.t[("ple", li)] = (gvn, gv, y)
+        k = G.pent["k"]
+        self._ple_conv_fill(cx, rows, li, use, gvn, gv, y, G.pent, k)
+        dev = G.pent["d"][k, :len(cx)]
+        dev.copy_(G.pent["h"][k, :len(cx)], non_blocking=True)
+        G.pent["k"] += 1
+        SK.ple_conv_multi(dev, gv.shape[1], R)
+        return y
+
+    def _jg_body(self, cx, rows, G, jd, use, a: int, b: int) -> None:
+        """Layers a..b-1 of a joint graph's pass (one segment, captured): `_verify_multi_rowwise`'s layers over the R
+        rows of the buffer `jd`, every lane-level call through the graph's entry tables, the pad rows' expert ids -1;
+        its tensors kept in G.t (the streams carried to the next segment there)."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
+        G.gent["k"], G.aent["k"], G.pent["k"] = G.kidx[a]
+        if a == 0:
+            G.aent["lane_dd"].copy_(G.aent["lane_h"], non_blocking=True)
+            Hs = self.W["embed_tokens.weight"].index_select(0, jd["tok"]).repeat(1, hc)
+            Ns = None
+        else:
+            Hs, Ns = G.t.pop("carry")
+        for li in range(a, b):
+            p = self.pre(li)
+            if li in c.ple_layers:
+                Hs, Ns = Hs + self._ple_multi_jg(cx, rows, Hs, li, use, G, jd), None
+            if Ns is None:
+                Ns = K.hc_norm(Hs, self._site_norm(li), H, eps)
+            X, DI = self._mix(Ns, p + "attn_hyper_connection")
+            if c.is_linear(li):
+                a = p + "linear_attn."
+                qkvz, ab = self.lin(X, self.W[a + "qkvz"]), K.gemv_bf16(X, self.W[a + "ab"])
+                out = self.lin(self._gdn_multi(cx, rows, qkvz, ab, li, use, jg=G), self.W[a + "out_proj.weight"])
+            else:
+                a = p + "self_attn."
+                qkv = self.lin(X, self.W[a + "qkv"])
+                iqk = self.lin(X, self.W[a + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+                out = self.lin(self._attn_multi(cx, rows, qkv, iqk, li, use, jg=G), self.W[a + "o_proj.weight"])
+            Hs, Ns = K.inject_norm(Hs, out, DI, self.W[p + "attn_hyper_connection.rank"],
+                                   self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+            XM, DI2 = self._mix(Ns, p + "mlp_hyper_connection")
+            nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
+            grp, K.MOE_GROUP = K.MOE_GROUP, True
+            try:
+                yd, ids, wts = self.moe_parts(XM, li, pad=jd["pad"])
+            finally:
+                K.MOE_GROUP = grp
+            G.t[("ids", li)] = ids
+            Hs, Ns = K.combine_inject_norm(Hs, yd, ids, wts, DI2, self.W[p + "mlp_hyper_connection.rank"], nxt, hc, eps)
+        if b < c.num_hidden_layers:
+            G.t["carry"] = (Hs, Ns)
+            return
+        if Ns is None:
+            Ns = K.hc_norm(Hs, self._site_norm(c.num_hidden_layers), H, eps)
+        dd = K.gemv(Ns, self.W["hyper_connection_mixer.down_inject"])
+        Xh = K.mix_up(dd, Ns, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc)
+        if DENSE_MAX:
+            logits = K.dense(Xh, self.W["lm_head.weight"])
+        else:
+            from tools.exl3_linear import exl3_matmul
+            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        G.t["logits"], G.t["next"], G.t["stack"] = logits, torch.argmax(logits, dim=-1), Hs
+
+    def _jg_plan(self, G, cx, rows, use, a: int, b: int) -> None:
+        """Before a segment's replay (layers a..b-1): its entry tables' host rows for this pass's lanes, over the graph's
+        own tensors (the `_fill` parts the capture ran, layer by layer in the same order); each lane's commit records."""
+        c = self.cfg
+        kg, ka, kp = G.kidx[a]
+        for li in range(a, b):
+            if li in c.ple_layers:
+                gvn, gv, y = G.t[("ple", li)]
+                self._ple_conv_fill(cx, rows, li, use, gvn, gv, y, G.pent, kp)
+                kp += 1
+            if c.is_linear(li):
+                qkvz, ab, o, Y, Gg, Bt = G.t[("gdn", li)]
+                self._gdn_multi_fill(cx, rows, qkvz, ab, li, use, o, Y, Gg, Bt, G.gent, kg)
+                kg += 1
+            else:
+                self._attn_multi_fill(cx, rows, li, use, G.aent, ka)
+                ka += 1
+
+    def _jg_capture(self, key: tuple, cx, rows, jd, use):
+        """Capture key's graph over this pass's lanes (on the runner's thread, under the capture lock; the caller
+        replays it for the pass). The lanes' parked-row buffers and the scratch exist before it."""
+        js = self._jg_state()
+        t0 = time.perf_counter()
+        c = self.cfg
+        self._scratch()
+        self._ple_dev()
+        for x in cx:
+            for li in c.linear_layers:
+                self._parked(li, x["st"])
+        if js["pool"] is None:
+            js["pool"] = torch.cuda.graph_pool_handle()
+            js["stream"] = capture_lock.lease_stream()
+        G = JointGraph(self, key)
+        self._jg_lanes(G, rows, key[1])
+        s = js["stream"]
+        s.wait_stream(torch.cuda.current_stream())
+        for (a, b), g in zip(G.segs, G.graphs):
+            with capture_lock.LOCK, torch.cuda.graph(g, pool=js["pool"], stream=s):
+                self._jg_body(cx, rows, G, jd, use, a, b)
+        torch.cuda.current_stream().wait_stream(s)
+        graphs = js["graphs"]
+        while len(graphs) >= JOINT_GRAPH_MAX:
+            old = graphs.pop(next(iter(graphs)))
+            old.drop()
+            js["stats"]["evicted"] += 1
+        graphs[key] = G
+        ms = 1e3 * (time.perf_counter() - t0)
+        js["stats"]["captures"] += 1
+        js["stats"]["capture_ms"] += ms
+        print(f"[fn-jgraph] captured lanes {key[0]} rows {key[1]} class {key[2]}: {ms:.0f} ms ({len(graphs)} kept)",
+              flush=True)
+        return G
+
+    def _joint_graph_pass(self, items: list):
+        """`verify_multi` from a joint graph: the outputs as the eager pass leaves them, or None (run it eager): a pass
+        that does not qualify (`_jg_why`), or whose key has no graph yet and may not capture now (the server lets a
+        capture happen only on its round runner while no request waits: `joint_capture_ok`)."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        E = len(items)
+        n = sum(len(t) for t, _, _ in items)
+        why = self._jg_why(items, n)
+        if why is not None:
+            self._jg_eager(why)
+            return None
+        R = next(r for r in JG_ROWS if r >= n)
+        key = (E, R, 0)
+        js = self._jg_state()
+        G = js["graphs"].get(key)
+        if G is None:
+            seen = js["seen"][key] = js["seen"].get(key, 0) + 1
+            if seen < JOINT_GRAPH_AFTER or not getattr(self, "joint_capture_ok", False):
+                self._jg_eager("no graph")
+                return None
+        slots = 0
+        for tokens, parents, st in items:
+            slots += SK.tree_ctl(parents)[1]
+        if slots > self._scratch().shape[0]:
+            self._jg_eager("scratch")
+            return None
+        t0, c0 = time.perf_counter(), time.thread_time()
+        rb = self._jg_buffers(R)
+        rb["copied"].synchronize()
+        ta = time.perf_counter()
+        # SPD-249: with a graph to replay, the PLE rows are read on the reader thread while the lanes are staged and
+        # the segments before the first PLE layer run; they land in the host rows (and on the device, in stream order)
+        # before that layer's segment replays (`_jg_ple_late`): the same rows
+        late = None
+        if G is not None and JG_PLE_LATE and c.ple_layers and min(c.ple_layers) > 0:
+            late = self._ple_reader().submit(self._ple_batch, items)
+            ples = ["late"] * len(items)
+        else:
+            ples = self._ple_batch(items)
+        tb = time.perf_counter()
+        cx, s0 = [], 0
+        for j, (tokens, parents, st) in enumerate(items):
+            M = len(tokens)
+            lv = self._jg_lane(rb, s0, M)
+            self.stage_rows(tokens, parents, st, ple=ples[j], rb=lv)
+            cx.append({"st": st, "M": M, "cls": 0, "block": self._block, "rb": lv, "rec": {}, "slots": self._ctl_slots})
+            s0 += M
+        tc = time.perf_counter()
+        self._jg_pad(rb, n, R, ple=late is None)
+        rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+        rb["d"]["pad"].copy_(rb["pad_h"], non_blocking=True)
+        rows, s0 = [], 0
+        for x in cx:
+            rows.append(slice(s0, s0 + x["M"]))
+            s0 += x["M"]
+
+        def use(x):
+            self._cur, self._write, self._cls, self.rec = x["rb"], False, x["cls"], x["rec"]
+        t1, c1 = time.perf_counter(), time.thread_time()
+        # SPD-249: the staging's host ms by part, and its thread CPU ms (wall above CPU: the thread waited, e.g. on the GIL)
+        sp = js["stats"]["stage_parts_ms"]
+        for name, v in (("wait", ta - t0), ("ple", tb - ta), ("lanes", tc - tb), ("pad_copy", t1 - tc)):
+            sp[name] = sp.get(name, 0.0) + 1e3 * v
+        js["stats"]["stage_cpu_ms"] += 1e3 * (c1 - c0)
+        if G is None:
+            G = self._jg_capture(key, cx, rows, rb["d"], use)
+            for g in G.graphs:
+                g.replay()
+            t2 = t1
+        else:
+            js["graphs"][key] = js["graphs"].pop(key)          # most recently used last
+            self._jg_lanes(G, rows, R)
+            t2, c2 = 0.0, 0.0
+            p0 = min(c.ple_layers) if late is not None else None
+            for (a, b), g in zip(G.segs, G.graphs):
+                # a segment's rows are written while the GPU runs the segments before it
+                t, cpu = time.perf_counter(), time.thread_time()
+                if late is not None and a <= p0 < b:
+                    self._jg_ple_late(rb, cx, late.result(), n, R, js["stats"])
+                    late = None
+                self._jg_plan(G, cx, rows, use, a, b)
+                t2 += time.perf_counter() - t
+                c2 += time.thread_time() - cpu
+                g.replay()
+            js["stats"]["plan_cpu_ms"] += 1e3 * c2
+            t2 += t1
+            js["stats"]["plan_ms"] += 1e3 * (t2 - t1)
+        rb["copied"].record()
+        js["stats"]["stage_ms"] += 1e3 * (t1 - t0)
+        js["stats"]["replays"] += 1
+        self._gdn_multi_on = True
+        out = []
+        for j, x in enumerate(cx):
+            r = rows[j]
+            for li in range(c.num_hidden_layers):
+                x["rec"][("ids", li)] = G.t[("ids", li)][r]
+            x["rec"]["stack"] = G.t["stack"][r]
+            self._joint[id(x["st"])] = (x["block"], x["rec"], 0)
+            out.append((G.t["logits"][r], G.t["next"][r], G.t["stack"][r]))
+        if GDN_DEFER and self.fold:
+            self._applied_deferred(cx)
+        else:
+            self._applied([x["st"] for x in cx])
         return out
 
     def _timed(self, jt: dict, marks: list, cx: list) -> None:
@@ -1669,12 +2126,12 @@ class FlashNextEngine(FlashNextRef):
             self.rec[("ple", li)] = gvn[r]
         return torch.cat(outs)
 
-    def _gdn_multi(self, cx, rows, qkvz, ab, li, use):
+    def _gdn_multi(self, cx, rows, qkvz, ab, li, use, jg=None):
         """SPD-239: a joint pass's GDN layer li past its projections for every state: each state's conv and gates
         (`gdn_pre`, its rows recorded for its commit as `_gdn1_core` records them), the delta rule of every state in
         one launch (`fn_seq_kernels.gdn_rows_multi`: each state's own call, its tree's scratch slots its own), the
         gated norm once over every row (row-wise). None (the state-at-a-time path) when the trees' slots exceed
-        the scratch."""
+        the scratch. `jg` (SPD-249): a joint graph's capture: its own entry tables, its tensors kept for replays."""
         from tools import fn_kernels as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
@@ -1685,21 +2142,46 @@ class FlashNextEngine(FlashNextRef):
         self._gdn_multi_on = True
         R, H = qkvz.shape[0], c.linear_num_value_heads
         o = torch.empty(R, H, c.linear_value_head_dim, dtype=torch.bfloat16, device=self.device)
-        ent = self._gdn_entries(len(cx))
-        hrow, slot = ent["h"].numpy()[ent["k"]], 0
         pre_multi = GDN_PRE_MULTI and not self._write
+        Y = Gg = Bt = None
         if pre_multi:
             # SPD-249: every state's conv and gates in one launch (`gdn_pre_multi`), each row's own arithmetic
             C = self._wc[li].shape[0]
             Y = torch.empty(R, C, dtype=torch.bfloat16, device=self.device)
             Gg = torch.empty(R, H, dtype=torch.float32, device=self.device)
             Bt = torch.empty(R, H, dtype=torch.float32, device=self.device)
-            prow = ent["hp"].numpy()[ent["k"]]
+        ent = self._gdn_entries(len(cx)) if jg is None else jg.gent
+        k = ent["k"]
+        self._gdn_multi_fill(cx, rows, qkvz, ab, li, use, o, Y, Gg, Bt, ent, k)
+        if jg is not None:
+            jg.t[("gdn", li)] = (qkvz, ab, o, Y, Gg, Bt)
+        if pre_multi:
+            pdev = ent["dp"][k, :len(cx)]
+            pdev.copy_(ent["hp"][k, :len(cx)], non_blocking=True)
+            SK.gdn_pre_multi(pdev, self._wc[li], self._wc[("alog", li)], self._wc[("dtb", li)],
+                             R if jg is not None else max(x["M"] for x in cx))
+        dev = ent["d"][k, :len(cx)]
+        dev.copy_(ent["h"][k, :len(cx)], non_blocking=True)
+        ent["k"] += 1
+        SK.gdn_rows_multi(dev, c.key_dim, H, c.num_v_per_k)
+        p = self.pre(li) + "linear_attn."
+        hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), qkvz[:, c.conv_dim:].reshape(-1, c.linear_value_head_dim),
+                          self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        return hh.view(R, -1)
+
+    def _gdn_multi_fill(self, cx, rows, qkvz, ab, li, use, o, Y, Gg, Bt, ent, k) -> None:
+        """`_gdn_multi`'s host part: each state's entry rows of layer li (`ent` row k; Y None: its `gdn_pre` launched
+        here, a state at a time) and its rows recorded for its commit. A joint graph's replay runs only this, over
+        the graph's own tensors (`_jg_plan`)."""
+        from tools import fn_seq_kernels as SK
+        stk = self._scratch()
+        hrow, slot = ent["h"].numpy()[k], 0
+        prow = ent["hp"].numpy()[k] if Y is not None else None
         for j, x in enumerate(cx):
             use(x)
             st, d = x["st"], self._cur["d"]
             q = qkvz[rows[j]]
-            if pre_multi:
+            if Y is not None:
                 y, gg, beta = Y[rows[j]], Gg[rows[j]], Bt[rows[j]]
                 prow[j] = SK.gdn_pre_entry(q, st.conv[li], d["csrc"], y, ab[rows[j]], gg, beta)
             else:
@@ -1710,20 +2192,8 @@ class FlashNextEngine(FlashNextRef):
                                         o[rows[j]], self._write, pre=self._parked(li, st),
                                         limit=GDN_DEFER if (self.fold and not self._write) else 0)
             slot += x["slots"]
-        if pre_multi:
-            pdev = ent["dp"][ent["k"], :len(cx)]
-            pdev.copy_(ent["hp"][ent["k"], :len(cx)], non_blocking=True)
-            SK.gdn_pre_multi(pdev, self._wc[li], self._wc[("alog", li)], self._wc[("dtb", li)], max(x["M"] for x in cx))
-        dev = ent["d"][ent["k"], :len(cx)]
-        dev.copy_(ent["h"][ent["k"], :len(cx)], non_blocking=True)
-        ent["k"] += 1
-        SK.gdn_rows_multi(dev, c.key_dim, H, c.num_v_per_k)
-        p = self.pre(li) + "linear_attn."
-        hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), qkvz[:, c.conv_dim:].reshape(-1, c.linear_value_head_dim),
-                          self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
-        return hh.view(R, -1)
 
-    def _attn_multi(self, cx, rows, qkv, iqk, li, use):
+    def _attn_multi(self, cx, rows, qkv, iqk, li, use, jg=None):
         """SPD-249: a joint pass's attention layer li past its projections for every lane at once: one `attn_prep_multi`
         (each lane's caches, positions and slots from its entry), a sparse lane's indexer selection on its own as
         `_attn1_core` runs it, one `attn_rows_multi` and one gate over every row. Each row's arithmetic is its lone
@@ -1738,23 +2208,12 @@ class FlashNextEngine(FlashNextRef):
         if any((k.stride(0), k.stride(1), v.stride(0), v.stride(1)) != strides or not k.is_contiguous()
                or not v.is_contiguous() for k, v in zip(ks, vs)):
             return None
-        ent = self._attn_entries(len(cx), sum(x["M"] for x in cx), rows)
+        ent = self._attn_entries(len(cx), sum(x["M"] for x in cx), rows) if jg is None else jg.aent
         k = ent["k"]
-        ap, ar = ent["ap_h"].numpy()[k], ent["ar_h"].numpy()[k]
         p = self.pre(li) + "self_attn."
         ip = p + "indexer."
-        nhi, ihd = 0, (c.indexer_head_dim if c.has_indexer else 0)
-        sparse = []
-        for j, x in enumerate(cx):
-            use(x)
-            st, d = x["st"], self._cur["d"]
-            cls = self._cls if c.has_indexer else 0
-            iq = d["iq"] if cls else None
-            if cls:
-                sparse.append(j)
-                nhi = max(nhi, iq.shape[1])
-            ap[j] = K.attn_prep_entry(rows[j].start, x["M"], st.k[li], st.v[li], st.ik.get(li), d["pos"], d["slot"], iq)
-            ar[j] = SK.attn_rows_entry(rows[j].start, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"])
+        ihd = c.indexer_head_dim if c.has_indexer else 0
+        nhi, sparse = self._attn_multi_fill(cx, rows, li, use, ent, k)
         n = len(cx)
         apd, ard = ent["ap_d"][k, :n], ent["ar_d"][k, :n]
         apd.copy_(ent["ap_h"][k, :n], non_blocking=True)
@@ -1779,6 +2238,26 @@ class FlashNextEngine(FlashNextRef):
             SK.qsa_select(sc, d["tail"], d["sel"])
         o = SK.attn_rows_multi(q, ard, ent["lane_d"], strides, Hk, bufs=ent.setdefault(("attn", q.shape[0]), {}))
         return K.gate_mul(o, qkv, D)
+
+    def _attn_multi_fill(self, cx, rows, li, use, ent, k) -> tuple:
+        """`_attn_multi`'s host part: each lane's prep and rows entries of layer li (`ent` row k) -> (the most indexer
+        heads of a sparse lane, the sparse lanes). A joint graph's replay runs only this (`_jg_plan`)."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        ap, ar = ent["ap_h"].numpy()[k], ent["ar_h"].numpy()[k]
+        nhi, sparse = 0, []
+        for j, x in enumerate(cx):
+            use(x)
+            st, d = x["st"], self._cur["d"]
+            cls = self._cls if c.has_indexer else 0
+            iq = d["iq"] if cls else None
+            if cls:
+                sparse.append(j)
+                nhi = max(nhi, iq.shape[1])
+            ap[j] = K.attn_prep_entry(rows[j].start, x["M"], st.k[li], st.v[li], st.ik.get(li), d["pos"], d["slot"], iq)
+            ar[j] = SK.attn_rows_entry(rows[j].start, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"])
+        return nhi, sparse
 
     def _attn_entries(self, n: int, M: int, rows) -> dict:
         """`_attn_multi`'s entry tables: pinned host rows and their device copies for every attention layer of a pass
@@ -2342,6 +2821,54 @@ class DecodeGraph:
         eng._pending.pop(id(st), None)
         st.length += 1
         return eng.g["logits"]
+
+
+class JointGraph:
+    """SPD-249: one key's joint verify pass captured (`FlashNextEngine._joint_graph_pass`): the graph, its entry
+    tables (pinned host rows a replay rewrites, device rows the graph copies them to) and the tensors its replays
+    leave (logits, picks, streams, each layer's commit records)."""
+
+    def __init__(self, eng: FlashNextEngine, key: tuple):
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c, dev = eng.cfg, eng.device
+        E, R = key[0], key[1]
+        self.key = key
+        L = c.num_hidden_layers
+        cuts = [0] + [x for x in JG_CUTS if 0 < x < L] + [L]
+        self.segs = list(zip(cuts, cuts[1:]))
+        self.graphs = [torch.cuda.CUDAGraph() for _ in self.segs]
+        # each layer's first entry rows: (GDN, attention, PLE) rows of the layers before it
+        self.kidx, kg, ka, kp = {}, 0, 0, 0
+        for li in range(L + 1):
+            self.kidx[li] = (kg, ka, kp)
+            if li < L:
+                kp += li in c.ple_layers
+                kg += c.is_linear(li)
+                ka += not c.is_linear(li)
+        self.t: dict = {}
+        nl = max(len(c.linear_layers), 1)
+        na = max(sum(1 for li in range(c.num_hidden_layers) if not c.is_linear(li)), 1)
+        npl = max(len(c.ple_layers), 1)
+
+        def pair(L, F):
+            return (torch.zeros(L, E, F, dtype=torch.int64, pin_memory=True),
+                    torch.zeros(L, E, F, dtype=torch.int64, device=dev))
+        h, d = pair(nl, SK.COMMIT_FIELDS)
+        hp, dp = pair(nl, SK.COMMIT_FIELDS)
+        self.gent = {"h": h, "d": d, "hp": hp, "dp": dp, "k": 0}
+        aph, apd = pair(na, K.APM_FIELDS)
+        arh, ard = pair(na, SK.ARM_FIELDS)
+        lane_dd = torch.zeros(R, dtype=torch.int32, device=dev)
+        self.aent = {"ap_h": aph, "ap_d": apd, "ar_h": arh, "ar_d": ard, "k": 0, "lane_dd": lane_dd, "lane_d": lane_dd,
+                     "lane_h": torch.zeros(R, dtype=torch.int32, pin_memory=True)}
+        ph, pd = pair(npl, 16)
+        self.pent = {"h": ph, "d": pd, "k": 0}
+
+    def drop(self) -> None:
+        for g in self.graphs:
+            g.reset()
+        self.t.clear()
 
 
 class VerifyGraph:
