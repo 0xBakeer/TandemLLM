@@ -196,6 +196,9 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     through `mm_i8_tc`, fp16 ones as fp32. A weight with its own `mul_rows(x)` (bf16 out) multiplies itself."""
     if hasattr(w, "mul_rows"):
         return w.mul_rows(x).float()
+    if isinstance(w, torch.Tensor) and w.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
+        # a bf16 weight (NVIDIA FP4-Local's mixers): the tensor cores, fp32 accumulate, the sums rounded once
+        return torch.nn.functional.linear(x, w).float()
     if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
         return mm_i8_tc(x.contiguous(), w)
     if MM in ("fp32", "tc"):

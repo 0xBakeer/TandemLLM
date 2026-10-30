@@ -151,58 +151,83 @@ __device__ __forceinline__ bool reduce_warps(float* acc, float* part, int warp, 
 }
 
 // gate|up and the activation: A[pair, c] = bf16(bf16(silu(g)) u), g = bf16(gate . x s2g), u = bf16(up . x s2u).
-// grid (I / 8, GY): a CTA owns intermediate columns c0..c0+7 (gate rows c0.., up rows I + c0..), groups y, y + GY, ..
-template <int WK>
+// grid (I / (8 NT), GY): a CTA owns intermediate columns c0..c0+8NT-1 (gate rows c0.., up rows I + c0..), groups y,
+// y + GY, ..; a K step loads its 2 NT weight vectors before the activation and the products (more bytes in flight)
+template <int WK, int NT, int MT>
 __global__ void __launch_bounds__(32 * WK) moe_gu_kernel(const __nv_bfloat16* __restrict__ X, int ldx, int S,
         const int* __restrict__ order, const int* __restrict__ gstart, const int* __restrict__ gcount,
         const int* __restrict__ gexp, const int* __restrict__ ngp, const uint8_t* __restrict__ W,
         const uint8_t* __restrict__ SC, const float* __restrict__ S2, __nv_bfloat16* __restrict__ A, int I, int H) {
     extern __shared__ float part[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
-    const int c0 = blockIdx.x * 8, KQ = H / 128, per = (KQ + WK - 1) / WK;
+    const int c0 = blockIdx.x * 8 * NT, KQ = H / 128, per = (KQ + WK - 1) / WK;
     const int q0 = warp * per, q1 = min(KQ, q0 + per);
     const int ng = *ngp;
     for (int gi = blockIdx.y; gi < ng; gi += gridDim.y) {
         const int e = gexp[gi], s0 = gstart[gi], cnt = gcount[gi];
-        const int p0 = g < cnt ? order[s0 + g] : -1, p1 = g + 8 < cnt ? order[s0 + g + 8] : -1;
-        const __nv_bfloat16* x0 = X + (size_t)(p0 >= 0 ? p0 / S : 0) * ldx + 32 * t;
-        const __nv_bfloat16* x1 = X + (size_t)(p1 >= 0 ? p1 / S : 0) * ldx + 32 * t;
-        const size_t rg = (size_t)e * 2 * I + c0 + g, ru = rg + I;
-        const uint8_t* wg = W + rg * (H / 2) + 16 * t;
-        const uint8_t* wu = W + ru * (H / 2) + 16 * t;
-        const uint8_t* sg = SC + rg * (H / 16) + 2 * t;
-        const uint8_t* su = SC + ru * (H / 16) + 2 * t;
-        float acc[8];
+        // row tile a: the group's pairs 16a + g and 16a + g + 8
+        int pr[2 * MT];
+        const __nv_bfloat16* xr[2 * MT];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) acc[i] = 0.f;
-        for (int q = q0; q < q1; ++q) {
-            const uint4 bg = ldg16(wg + (size_t)q * 64), bu = ldg16(wu + (size_t)q * 64);
-            const uint32_t pg = *reinterpret_cast<const uint16_t*>(sg + q * 8);
-            const uint32_t pu = *reinterpret_cast<const uint16_t*>(su + q * 8);
-            uint4 xa[4], xb[4];
-            load_x(xa, x0 + (size_t)q * 128, p0 >= 0);
-            load_x(xb, x1 + (size_t)q * 128, p1 >= 0);
-            step_mma(acc, bg, pg, xa, xb);
-            step_mma(acc + 4, bu, pu, xa, xb);
+        for (int m = 0; m < 2 * MT; ++m) {
+            const int i = 16 * (m >> 1) + 8 * (m & 1) + g;
+            pr[m] = i < cnt ? order[s0 + i] : -1;
+            xr[m] = X + (size_t)(pr[m] >= 0 ? pr[m] / S : 0) * ldx + 32 * t;
         }
-        if (reduce_warps<WK, 8>(acc, part, warp, lane)) {
-            const float s2g = S2[2 * e], s2u = S2[2 * e + 1];
-            // acc[0..3] gate, acc[4..7] up: (row g, col 2t), (row g, col 2t+1), (row g+8, col 2t), (row g+8, col 2t+1)
+        // tile n: gate rows c0 + 8n + g (2n), up rows I + c0 + 8n + g (2n + 1)
+        const uint8_t* wr[2 * NT];
+        const uint8_t* sr[2 * NT];
 #pragma unroll
-            for (int k = 0; k < 4; ++k) {
-                const int p = k < 2 ? p0 : p1;
-                if (p < 0) continue;
-                const float gv = bfr(acc[k] * s2g), uv = bfr(acc[4 + k] * s2u);
-                const float a = bfr(bfr(gv / (1.0f + expf(-gv))) * uv);
-                A[(size_t)p * I + c0 + 2 * t + (k & 1)] = __float2bfloat16_rn(a);
+        for (int n = 0; n < 2 * NT; ++n) {
+            const size_t r = (size_t)e * 2 * I + (n & 1) * I + c0 + 8 * (n >> 1) + g;
+            wr[n] = W + r * (H / 2) + 16 * t;
+            sr[n] = SC + r * (H / 16) + 2 * t;
+        }
+        constexpr int NA = MT * 2 * NT * 4;                  // acc[a][n] at (a 2NT + n) 4
+        float acc[NA];
+#pragma unroll
+        for (int i = 0; i < NA; ++i) acc[i] = 0.f;
+        for (int q = q0; q < q1; ++q) {
+            uint4 b[2 * NT];
+            uint32_t sp[2 * NT];
+#pragma unroll
+            for (int n = 0; n < 2 * NT; ++n) {
+                b[n] = ldg16(wr[n] + (size_t)q * 64);
+                sp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + q * 8);
             }
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                if (16 * a >= cnt) break;                     // a tile past the group's rows (warp-uniform)
+                uint4 xa[4], xb[4];
+                load_x(xa, xr[2 * a] + (size_t)q * 128, pr[2 * a] >= 0);
+                load_x(xb, xr[2 * a + 1] + (size_t)q * 128, pr[2 * a + 1] >= 0);
+#pragma unroll
+                for (int n = 0; n < 2 * NT; ++n) step_mma(acc + (a * 2 * NT + n) * 4, b[n], sp[n], xa, xb);
+            }
+        }
+        if (reduce_warps<WK, NA>(acc, part, warp, lane)) {
+            const float s2g = S2[2 * e], s2u = S2[2 * e + 1];
+            // tile n: gate 2n, up 2n + 1: (row g, col 2t), (row g, col 2t+1), (row g+8, ..)
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) {
+                        const int p = pr[2 * a + (k >> 1)];
+                        if (p < 0) continue;
+                        const float gv = bfr(acc[(a * 2 * NT + 2 * n) * 4 + k] * s2g);
+                        const float uv = bfr(acc[(a * 2 * NT + 2 * n + 1) * 4 + k] * s2u);
+                        const float av = bfr(bfr(gv / (1.0f + expf(-gv))) * uv);
+                        A[(size_t)p * I + c0 + 8 * n + 2 * t + (k & 1)] = __float2bfloat16_rn(av);
+                    }
         }
         if (WK > 1) __syncthreads();                       // part is the next group's
     }
 }
 
 // down: Y[pair, n] = (A[pair] . down[e][n]) s2d, fp32. grid (H / (8 NT), GY).
-template <int WK, int NT>
+template <int WK, int NT, int MT>
 __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* __restrict__ A,
         const int* __restrict__ order, const int* __restrict__ gstart, const int* __restrict__ gcount,
         const int* __restrict__ gexp, const int* __restrict__ ngp, const uint8_t* __restrict__ W,
@@ -214,33 +239,48 @@ __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* 
     const int ng = *ngp;
     for (int gi = blockIdx.y; gi < ng; gi += gridDim.y) {
         const int e = gexp[gi], s0 = gstart[gi], cnt = gcount[gi];
-        const int p0 = g < cnt ? order[s0 + g] : -1, p1 = g + 8 < cnt ? order[s0 + g + 8] : -1;
-        const __nv_bfloat16* x0 = A + (size_t)(p0 >= 0 ? p0 : 0) * I + 32 * t;
-        const __nv_bfloat16* x1 = A + (size_t)(p1 >= 0 ? p1 : 0) * I + 32 * t;
-        float acc[NT * 4];
+        int pr[2 * MT];
+        const __nv_bfloat16* xr[2 * MT];
 #pragma unroll
-        for (int i = 0; i < NT * 4; ++i) acc[i] = 0.f;
+        for (int m = 0; m < 2 * MT; ++m) {
+            const int i = 16 * (m >> 1) + 8 * (m & 1) + g;
+            pr[m] = i < cnt ? order[s0 + i] : -1;
+            xr[m] = A + (size_t)(pr[m] >= 0 ? pr[m] : 0) * I + 32 * t;
+        }
+        constexpr int NA = MT * NT * 4;
+        float acc[NA];
+#pragma unroll
+        for (int i = 0; i < NA; ++i) acc[i] = 0.f;
         for (int q = q0; q < q1; ++q) {
-            uint4 xa[4], xb[4];
-            load_x(xa, x0 + (size_t)q * 128, p0 >= 0);
-            load_x(xb, x1 + (size_t)q * 128, p1 >= 0);
+            uint4 b[NT];
+            uint32_t sp[NT];
 #pragma unroll
             for (int n = 0; n < NT; ++n) {
                 const size_t r = (size_t)e * H + n0 + 8 * n + g;
-                const uint4 b = ldg16(W + r * (I / 2) + 16 * t + (size_t)q * 64);
-                const uint32_t sp = *reinterpret_cast<const uint16_t*>(SC + r * (I / 16) + 2 * t + q * 8);
-                step_mma(acc + 4 * n, b, sp, xa, xb);
+                b[n] = ldg16(W + r * (I / 2) + 16 * t + (size_t)q * 64);
+                sp[n] = *reinterpret_cast<const uint16_t*>(SC + r * (I / 16) + 2 * t + q * 8);
+            }
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                if (16 * a >= cnt) break;
+                uint4 xa[4], xb[4];
+                load_x(xa, xr[2 * a] + (size_t)q * 128, pr[2 * a] >= 0);
+                load_x(xb, xr[2 * a + 1] + (size_t)q * 128, pr[2 * a + 1] >= 0);
+#pragma unroll
+                for (int n = 0; n < NT; ++n) step_mma(acc + (a * NT + n) * 4, b[n], sp[n], xa, xb);
             }
         }
-        if (reduce_warps<WK, NT * 4>(acc, part, warp, lane)) {
+        if (reduce_warps<WK, NA>(acc, part, warp, lane)) {
             const float s2 = S2[e];
 #pragma unroll
-            for (int n = 0; n < NT; ++n)
+            for (int a = 0; a < MT; ++a)
 #pragma unroll
-                for (int k = 0; k < 4; ++k) {
-                    const int p = k < 2 ? p0 : p1;
-                    if (p >= 0) Y[(size_t)p * H + n0 + 8 * n + 2 * t + (k & 1)] = acc[4 * n + k] * s2;
-                }
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) {
+                        const int p = pr[2 * a + (k >> 1)];
+                        if (p >= 0) Y[(size_t)p * H + n0 + 8 * n + 2 * t + (k & 1)] = acc[(a * NT + n) * 4 + k] * s2;
+                    }
         }
         if (WK > 1) __syncthreads();
     }
@@ -258,42 +298,42 @@ void nvfp4_moe_plan(torch::Tensor ids, int64_t E, torch::Tensor order, torch::Te
 
 void nvfp4_moe_gu(torch::Tensor x, int64_t S, torch::Tensor order, torch::Tensor gstart, torch::Tensor gcount,
                   torch::Tensor gexp, torch::Tensor ng, torch::Tensor w, torch::Tensor sc, torch::Tensor s2,
-                  torch::Tensor a, int64_t gy, int64_t wk) {
+                  torch::Tensor a, int64_t gy, int64_t wk, int64_t nt, int64_t mt) {
     const int H = x.size(1), I = a.size(1);
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && x.stride(0) % 8 == 0, "x bf16 rows");
     TORCH_CHECK(w.size(1) == 2 * I && w.size(2) * 2 == H && H % 128 == 0 && I % 8 == 0, "gate|up [E, 2I, H/2]");
     auto st = at::cuda::getCurrentCUDAStream();
-    dim3 grid(I / 8, (int)gy);
-#define L(WK)                                                                                                       \
-    if (wk == WK) {                                                                                                 \
-        moe_gu_kernel<WK><<<grid, 32 * WK, (WK - 1) * 8 * 32 * 4, st>>>(                                           \
+#define L(WK, NT, MT)                                                                                               \
+    if (wk == WK && nt == NT && mt == MT) {                                                                         \
+        TORCH_CHECK(I % (8 * NT) == 0, "I % 8 NT");                                                                 \
+        moe_gu_kernel<WK, NT, MT><<<dim3(I / (8 * NT), (int)gy), 32 * WK, (WK - 1) * MT * 2 * NT * 4 * 32 * 4, st>>>( \
             (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (int)S, order.data_ptr<int>(),                    \
             gstart.data_ptr<int>(), gcount.data_ptr<int>(), gexp.data_ptr<int>(), ng.data_ptr<int>(),              \
             w.data_ptr<uint8_t>(), sc.data_ptr<uint8_t>(), s2.data_ptr<float>(), (__nv_bfloat16*)a.data_ptr(), I, H); \
         return;                                                                                                     \
     }
-    L(1) L(2) L(4) L(5) L(8) L(10)
+    L(4, 1, 1) L(2, 2, 1) L(4, 2, 1) L(4, 1, 2) L(4, 1, 4) L(2, 2, 4) L(4, 2, 2) L(2, 1, 4) L(1, 1, 4) L(1, 2, 4)
 #undef L
-    TORCH_CHECK(false, "nvfp4_moe_gu: wk not built");
+    TORCH_CHECK(false, "nvfp4_moe_gu: (wk, nt, mt) not built");
 }
 
 void nvfp4_moe_down(torch::Tensor a, torch::Tensor order, torch::Tensor gstart, torch::Tensor gcount,
                     torch::Tensor gexp, torch::Tensor ng, torch::Tensor w, torch::Tensor sc, torch::Tensor s2,
-                    torch::Tensor y, int64_t gy, int64_t wk, int64_t nt) {
+                    torch::Tensor y, int64_t gy, int64_t wk, int64_t nt, int64_t mt) {
     const int I = a.size(1), H = y.size(1);
     TORCH_CHECK(w.size(1) == H && w.size(2) * 2 == I && I % 128 == 0, "down [E, H, I/2]");
     TORCH_CHECK(y.dtype() == torch::kFloat && y.is_contiguous(), "y fp32 [P, H]");
     auto st = at::cuda::getCurrentCUDAStream();
-#define L(WK, NT)                                                                                                   \
-    if (wk == WK && nt == NT) {                                                                                     \
+#define L(WK, NT, MT)                                                                                               \
+    if (wk == WK && nt == NT && mt == MT) {                                                                         \
         TORCH_CHECK(H % (8 * NT) == 0, "H % 8 NT");                                                                 \
-        moe_down_kernel<WK, NT><<<dim3(H / (8 * NT), (int)gy), 32 * WK, (WK - 1) * NT * 4 * 32 * 4, st>>>(         \
+        moe_down_kernel<WK, NT, MT><<<dim3(H / (8 * NT), (int)gy), 32 * WK, (WK - 1) * MT * NT * 4 * 32 * 4, st>>>( \
             (const __nv_bfloat16*)a.data_ptr(), order.data_ptr<int>(), gstart.data_ptr<int>(), gcount.data_ptr<int>(), \
             gexp.data_ptr<int>(), ng.data_ptr<int>(), w.data_ptr<uint8_t>(), sc.data_ptr<uint8_t>(),               \
             s2.data_ptr<float>(), y.data_ptr<float>(), I, H);                                                       \
         return;                                                                                                     \
     }
-    L(1, 1) L(1, 2) L(1, 4) L(5, 1) L(5, 2) L(5, 4)
+    L(1, 2, 1) L(1, 1, 1) L(5, 2, 1) L(1, 2, 2) L(1, 2, 4) L(1, 4, 4) L(1, 1, 4) L(5, 2, 4)
 #undef L
-    TORCH_CHECK(false, "nvfp4_moe_down: (wk, nt) not built");
+    TORCH_CHECK(false, "nvfp4_moe_down: (wk, nt, mt) not built");
 }

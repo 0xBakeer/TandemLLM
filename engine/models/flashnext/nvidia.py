@@ -143,6 +143,14 @@ def nvfp4_dequant(w: torch.Tensor, scale: torch.Tensor, scale2: torch.Tensor) ->
     return v * s[..., : v.shape[-1]]
 
 
+def mxfp8_bf16(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """MXFP8 -> bf16 [N, K] without an fp32 copy: e4m3 -> bf16 is exact, and so is the product by 2^(E8M0 - 127) for
+    every normal result (a power of two moves the exponent only)."""
+    N, K = w.shape
+    s = torch.exp2(scale.to(torch.int32).to(torch.float32) - 127).to(torch.bfloat16)
+    return (w.view(torch.float8_e4m3fn).to(torch.bfloat16).view(N, K // 32, 32) * s[:, :K // 32, None]).view(N, K)
+
+
 def mxfp8_dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """MXFP8 -> fp32 [N, K]: e4m3 values x 2^(E8M0 - 127) per 32 values."""
     s = torch.exp2(scale.to(torch.int32).float() - 127).repeat_interleave(32, dim=1)
@@ -177,6 +185,8 @@ class NVWeight:
         if self.kind == "mxfp8" and x.shape[0] <= 32:
             from tools import mxfp8_skinny as S
             return S.mm(x, self.parts["w"], self.parts["s"])
+        if self.kind == "mxfp8" and x.dtype == torch.bfloat16:
+            return torch.nn.functional.linear(x, mxfp8_bf16(self.parts["w"], self.parts["s"]))
         return torch.nn.functional.linear(x, self.dequant(x.dtype))
 
     def rows(self, a: int, b: int) -> "NVWeight":
@@ -284,7 +294,9 @@ class BF16Rows:
         if x.shape[0] <= 32:
             from tools import bf16_skinny as BS
             return BS.mm(x, self.w)
-        return x.float() @ self.w.float().T
+        # a prompt chunk: the library GEMM in bf16 (fp32 accumulate, the sums rounded once; prompt rows agree with
+        # the row step on the next token, not bit for bit -- engine.forward_pre)
+        return torch.nn.functional.linear(x, self.w).float()
 
     def dequant(self, dtype=torch.bfloat16) -> torch.Tensor:
         return self.w.to(dtype)
