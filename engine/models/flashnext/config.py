@@ -45,6 +45,7 @@ IGNORED = {
     "attention_dropout", "bos_token_id", "pad_token_id", "dtype", "torch_dtype", "initializer_range",
     "output_router_logits", "router_aux_loss_coef", "use_cache", "tie_word_embeddings",
     "transformers_version", "intermediate_size",
+    "ple_embedding_dtype",     # NVIDIA FP4-Local: the n-gram table's storage format; the loader reads it from the tensors
 }
 # fields whose value would change the arithmetic: the one value this engine implements
 FIXED = {"attention_bias": False, "mamba_ssm_dtype": "float32", "mtp_use_dedicated_embeddings": False,
