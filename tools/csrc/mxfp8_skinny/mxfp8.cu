@@ -48,32 +48,43 @@ __device__ __forceinline__ void mma_bf16(float* c, uint32_t a0, uint32_t a1, uin
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-template <int MT, int WK>
+template <int MT, int WK, int NT>
 __global__ void __launch_bounds__(32 * WK)
 mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                     __nv_bfloat16* __restrict__ y, int M, int N, int kq, int lx, int lw, int ls, int ly) {
-    extern __shared__ float part[];                       // [WK - 1][MT][4][32]
+    extern __shared__ float part[];                       // [WK - 1][MT][NT][4][32]
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
-    const int n0 = blockIdx.x * 8;
-    const int row = n0 + g;
-    const bool wok = row < N;
+    const int n0 = blockIdx.x * 8 * NT;
     const int per = (kq + WK - 1) / WK, k0 = warp * per, k1 = min(kq, k0 + per);
-    float acc[MT][4];
+    float acc[MT][NT][4];
 #pragma unroll
     for (int a = 0; a < MT; ++a)
 #pragma unroll
-        for (int i = 0; i < 4; ++i) acc[a][i] = 0.f;
-    const uint8_t* wr = w + (size_t)(wok ? row : 0) * lw + 16 * t;
-    const uint8_t* sr = s + (size_t)(wok ? row : 0) * ls + (t >> 1);
-    for (int kk = k0; kk < k1; ++kk) {
-        uint4 wb = wok ? ldg16(wr + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
-        const float sc = wok ? e8m0(sr[kk * 2]) : 0.f;
-        uint32_t B[8];
-        const uint32_t wv[4] = {wb.x, wb.y, wb.z, wb.w};
+        for (int n = 0; n < NT; ++n)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-            B[2 * q] = dec2(wv[q] & 0xffffu, sc);
-            B[2 * q + 1] = dec2(wv[q] >> 16, sc);
+            for (int i = 0; i < 4; ++i) acc[a][n][i] = 0.f;
+    const uint8_t* wr[NT];
+    const uint8_t* sr[NT];
+    bool wok[NT];
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int row = n0 + 8 * n + g;
+        wok[n] = row < N;
+        wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
+        sr[n] = s + (size_t)(wok[n] ? row : 0) * ls + (t >> 1);
+    }
+    for (int kk = k0; kk < k1; ++kk) {
+        uint32_t B[NT][8];
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            uint4 wb = wok[n] ? ldg16(wr[n] + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
+            const float sc = wok[n] ? e8m0(sr[n][kk * 2]) : 0.f;
+            const uint32_t wv[4] = {wb.x, wb.y, wb.z, wb.w};
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                B[n][2 * q] = dec2(wv[q] & 0xffffu, sc);
+                B[n][2 * q + 1] = dec2(wv[q] >> 16, sc);
+            }
         }
         const int kx = kk * 64 + 16 * t;                  // the lane's 16 logical K of this step
 #pragma unroll
@@ -85,8 +96,10 @@ mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restri
             const uint32_t X0[8] = {x0a.x, x0a.y, x0a.z, x0a.w, x0b.x, x0b.y, x0b.z, x0b.w};
             const uint32_t X1[8] = {x1a.x, x1a.y, x1a.z, x1a.w, x1b.x, x1b.y, x1b.z, x1b.w};
 #pragma unroll
-            for (int j = 0; j < 4; ++j)                   // values 4j, 4j+1 | 4j+2, 4j+3
-                mma_bf16(acc[a], X0[2 * j], X1[2 * j], X0[2 * j + 1], X1[2 * j + 1], B[2 * j], B[2 * j + 1]);
+            for (int n = 0; n < NT; ++n)
+#pragma unroll
+                for (int j = 0; j < 4; ++j)               // values 4j, 4j+1 | 4j+2, 4j+3
+                    mma_bf16(acc[a][n], X0[2 * j], X1[2 * j], X0[2 * j + 1], X1[2 * j + 1], B[n][2 * j], B[n][2 * j + 1]);
         }
     }
     // warp order: warp 0's slice, then + warp 1's, ... (a function of K and WK only)
@@ -95,7 +108,9 @@ mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restri
 #pragma unroll
             for (int a = 0; a < MT; ++a)
 #pragma unroll
-                for (int i = 0; i < 4; ++i) part[(((warp - 1) * MT + a) * 4 + i) * 32 + lane] = acc[a][i];
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) part[((((warp - 1) * MT + a) * NT + n) * 4 + i) * 32 + lane] = acc[a][n][i];
         }
         __syncthreads();
         if (warp > 0) return;
@@ -103,37 +118,43 @@ mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restri
 #pragma unroll
             for (int a = 0; a < MT; ++a)
 #pragma unroll
-                for (int i = 0; i < 4; ++i) acc[a][i] += part[(((v - 1) * MT + a) * 4 + i) * 32 + lane];
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) acc[a][n][i] += part[((((v - 1) * MT + a) * NT + n) * 4 + i) * 32 + lane];
     }
     // c0 (row g, col 2t), c1 (row g, col 2t+1), c2 (row g+8, col 2t), c3 (row g+8, col 2t+1)
-    const int c = n0 + 2 * t;
 #pragma unroll
-    for (int a = 0; a < MT; ++a) {
-        const int r0 = a * 16 + g, r1 = r0 + 8;
-        if (r0 < M) {
-            if (c < N) y[(size_t)r0 * ly + c] = __float2bfloat16_rn(acc[a][0]);
-            if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = __float2bfloat16_rn(acc[a][1]);
-        }
-        if (r1 < M) {
-            if (c < N) y[(size_t)r1 * ly + c] = __float2bfloat16_rn(acc[a][2]);
-            if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = __float2bfloat16_rn(acc[a][3]);
+    for (int n = 0; n < NT; ++n) {
+        const int c = n0 + 8 * n + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int r0 = a * 16 + g, r1 = r0 + 8;
+            if (r0 < M) {
+                if (c < N) y[(size_t)r0 * ly + c] = __float2bfloat16_rn(acc[a][n][0]);
+                if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = __float2bfloat16_rn(acc[a][n][1]);
+            }
+            if (r1 < M) {
+                if (c < N) y[(size_t)r1 * ly + c] = __float2bfloat16_rn(acc[a][n][2]);
+                if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = __float2bfloat16_rn(acc[a][n][3]);
+            }
         }
     }
 }
 
-template <int MT, int WK>
+template <int MT, int WK, int NT>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1);
-    const int smem = WK > 1 ? (WK - 1) * MT * 4 * 32 * 4 : 0;
-    auto kern = mxfp8_skinny_kernel<MT, WK>;
-    dim3 grid((N + 7) / 8);
+    const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
+    auto kern = mxfp8_skinny_kernel<MT, WK, NT>;
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    dim3 grid((N + 8 * NT - 1) / (8 * NT));
     kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), w.data_ptr<uint8_t>(), s.data_ptr<uint8_t>(),
         reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), M, N, K / 64, x.stride(0), w.stride(0), s.stride(0),
         y.stride(0));
 }
 
-void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk) {
+void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk, int64_t nt) {
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kByte && s.scalar_type() == at::kByte,
                 "mxfp8_skinny: x bf16, w uint8 (e4m3 bytes), s uint8 (E8M0)");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && s.size(1) * 32 == w.size(1), "mxfp8_skinny: K");
@@ -141,13 +162,15 @@ void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tens
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && s.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0,
                 "mxfp8_skinny: row-major, 16-byte aligned rows");
     const bool two = x.size(0) > 16;
-#define L(WK)                                         \
-    if (wk == WK) {                                   \
-        if (two) launch<2, WK>(x, w, s, y);           \
-        else launch<1, WK>(x, w, s, y);               \
+#define L(WK, NT)                                     \
+    if (wk == WK && nt == NT) {                       \
+        if (two) launch<2, WK, NT>(x, w, s, y);       \
+        else launch<1, WK, NT>(x, w, s, y);           \
         return;                                       \
     }
-    L(1) L(2) L(4) L(8) L(16)
+    L(1, 1) L(2, 1) L(4, 1) L(8, 1) L(16, 1)
+    L(1, 2) L(2, 2) L(4, 2) L(8, 2) L(16, 2)
+    L(1, 4) L(2, 4) L(4, 4) L(8, 4) L(16, 4)
 #undef L
-    TORCH_CHECK(false, "mxfp8_skinny: wk must be 1, 2, 4, 8 or 16");
+    TORCH_CHECK(false, "mxfp8_skinny: (wk, nt) not built");
 }

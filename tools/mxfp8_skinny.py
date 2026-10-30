@@ -35,13 +35,23 @@ def _module():
 def default_wk(K: int) -> int:
     """K-split warps for a weight of width K: a function of K only (row invariance)."""
     steps = K // 64
-    return 8 if steps >= 64 else 4 if steps >= 16 else 2 if steps >= 4 else 1
+    return 16 if steps >= 32 else 8 if steps >= 16 else 2 if steps >= 4 else 1
 
 
-def mm(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor, wk: int | None = None, out: torch.Tensor | None = None):
-    """x [M, K] bf16 (M <= 32) @ MXFP8 w [N, K] (uint8 e4m3 bytes) with scales s [N, K/32] (uint8 E8M0) -> [M, N] bf16."""
+def default_nt(M: int) -> int:
+    """8-row weight tiles a CTA: 1 up to 16 rows, 2 above (the 2-row-tile path runs out of registers at nt=1 and high
+    wk). Free to follow M: the tile count regroups whole output columns, the bits do not change."""
+    return 1 if M <= 16 else 2
+
+
+def mm(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor, wk: int | None = None, out: torch.Tensor | None = None,
+       nt: int | None = None):
+    """x [M, K] bf16 (M <= 32) @ MXFP8 w [N, K] (uint8 e4m3 bytes) with scales s [N, K/32] (uint8 E8M0) -> [M, N] bf16.
+
+    nt = 8-row weight tiles a CTA owns (1, 2, 4): the activations of a K step are loaded once and reused across them."""
     M, K = x.shape
     N = w.shape[0]
     y = out if out is not None else torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
-    _module().mxfp8_skinny(x.contiguous(), w, s, y, default_wk(K) if wk is None else wk)
+    _module().mxfp8_skinny(x.contiguous(), w, s, y, default_wk(K) if wk is None else wk,
+                            default_nt(M) if nt is None else nt)
     return y

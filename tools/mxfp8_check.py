@@ -17,7 +17,10 @@ for name in ("layers.0.linear_attn.in_proj_qkv", "layers.0.linear_attn.out_proj"
     y = S.mm(x, w, s)
     yr = F.linear(x, wref)
     rel = ((y.float() - yr.float()).norm() / yr.float().norm()).item()
-    inv = all(torch.equal(S.mm(x[:m], w, s), torch.cat([S.mm(x[i:i + 1], w, s) for i in range(m)])) for m in (2, 5, 16, 17, 32))
+    inv = all(torch.equal(S.mm(x[:m], w, s, nt=nt), torch.cat([S.mm(x[i:i + 1], w, s, nt=nt) for i in range(m)]))
+              for m in (2, 5, 16, 17, 32) for nt in (1, 2, 4))
+    # the tile count only regroups whole output columns: every nt gives the same bits
+    inv = inv and all(torch.equal(S.mm(x, w, s, nt=nt), y) for nt in (2, 4))
     # bandwidth at 1 and 16 rows
     res = []
     for m in (1, 16):
