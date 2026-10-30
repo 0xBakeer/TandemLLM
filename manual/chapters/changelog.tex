@@ -219,13 +219,13 @@ A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through t
   \item A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
   \item When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
   \item Images only: there is no video input (VIS-97).
-  \item The 5.05 Flash-Next pack does not load yet.
+  \item The 5.05 Flash-Next pack's full load and generation had not been validated.
   \item Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
   \item The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
 \end{itemize}
 
 
-\paragraph{Profiles and windows.} Five weight profiles, \code{flashnext-2.05} to \code{flashnext-6.05}, and a second tile in the setup guide. Each pack has its largest window in the registry: 262,144 tokens for 2.05 and 3.05, 208,896 for 4.05 with the vision tower on; 5.05 does not load yet (its experts use 5 and 7 bits a weight), and 6.05 fits no window on one DGX Spark. 3.05 reads its n-gram table cold. A start with a longer \code{--max-len} is refused before the load.
+\paragraph{Profiles and windows.} Five weight profiles, \code{flashnext-2.05} to \code{flashnext-6.05}, and a second tile in the setup guide. Each pack has its largest window in the registry: 262,144 tokens for 2.05 and 3.05, 208,896 for 4.05 with the vision tower on; 5.05 was not validated at that release (its earlier blocker was 7-bit dense projections, not the MoE kernels), and 6.05 fits no window on one DGX Spark. 3.05 reads its n-gram table cold. A start with a longer \code{--max-len} is refused before the load.
 
 \paragraph{Speculation.} The pack's own MTP layer drafts, cut by the shared StairCut, with the lookup in the same tree. StairCut keeps its prices, the plain step's cost and a drafted round's cost per context class, takes the plain step where drafting does not pay, and captures missing graphs while the server is idle. One greedy request a length and its repeat, second round on a fresh server: 56.6 and 57.3~tok/s at 1k against 41.0 and 45.4 plain, 42.1 and 52.4 at 140k against 33.9 and 41.4; at 260,800 tokens the class takes plain turns (\measured).
 

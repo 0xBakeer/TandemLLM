@@ -4,7 +4,7 @@
     manual/tandemllm-manual.tex);
   * the pack table in docs/quantisation.md and in the chapter (Table "The Flash-Next packs") matches
     models/qwen3.8-flash-next/model.yaml and ops/profiles/flashnext-<bpw>.env row by row: the branch,
-    the disk size, the weights, the n-gram table and its policy, the largest window (or that the pack
+    the disk size, the weights, the n-gram table and its policy, the largest window (or that load/generation is unverified, the pack
     does not load yet, or fits none);
   * docs/architecture.md marks the layering pieces not built yet (ENG-251, 253, 255, 259) as planned;
   * docs/adding-a-model.md names every adapter verb: the ones engine/models/adapter.py lists and the
@@ -43,6 +43,8 @@ def _env(profile_id: str) -> dict:
 
 def _window(p: dict) -> str:
     """The largest-window cell a profile's row must carry."""
+    if "load/generation unverified" in (p.get("badges") or []):
+        return "load/generation unverified"
     if "does not load yet" in (p.get("badges") or []):
         return "does not load yet"
     if p.get("max_window") is None:
@@ -129,6 +131,20 @@ def test_adding_a_model_names_every_adapter_verb():
                      if not any(re.fullmatch(rf"(eng\.)?{re.escape(v)}(\([^)]*\))?(\.\w+)?", sp) for sp in spans))
     assert not missing, f"docs/adding-a-model.md names no {missing}"
     return f"{len(verbs)} verbs: {', '.join(sorted(verbs))}"
+
+
+def test_unverified_status_is_not_a_validated_window():
+    """The 5.05 badge reads 'load/generation unverified': not 'does not load yet', and the estimate
+    is not a measured window."""
+    assert _window({"badges": ["load/generation unverified"], "max_window": 53248}) == "load/generation unverified"
+    assert _window({"badges": [], "max_window": 53248}) == "53,248"
+    assert _window({"badges": [], "max_window": None}) == "does not fit"
+    assert _window({"badges": ["does not load yet"], "max_window": 53248}) == "does not load yet"
+    assert "Two packs do not run." not in _read("manual", "chapters", "flashnext.tex")
+    p = next(pr for pr in _profiles() if pr["id"] == "flashnext-5.05")
+    assert "load/generation unverified" in p["badges"] and "does not load yet" not in p["badges"]
+    for needle in ("7-bit dense projections", "unverified", "estimate"):
+        assert needle in p["note"], needle
 
 
 if __name__ == "__main__":
