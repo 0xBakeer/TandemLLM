@@ -59,6 +59,9 @@ KNOBS: dict[str, tuple] = {
     # before the first PLE layer run (the eager pass's FN_PLE_LATE); the rows land before that layer's segment; 0: read
     # before the first segment
     'FN_JG_PLE_LATE': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: the round runner hands a lane's tree over when its tokens are known (before its cuts and staging): its PLE
+    # rows are read into the table's row cache on the reader thread, the verify's own read finds them there; 0: off
+    'FN_PLE_PREFETCH': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: the joint graphs kept (the least recently replayed go first)
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)

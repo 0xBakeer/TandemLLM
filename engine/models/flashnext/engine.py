@@ -87,6 +87,10 @@ JOINT_GRAPH = _S.get("FN_JOINT_GRAPH") == "1"
 TREE_PLAN = _S.get("FN_TREE_PLAN") == "1"
 # SPD-249: a joint graph pass reads its PLE rows on the reader thread while the segments before the PLE layer run
 JG_PLE_LATE = _S.get("FN_JG_PLE_LATE") == "1"
+#: SPD-249: a lane's tree is handed over as soon as its tokens are known (`ple_prefetch`, the round runner after its
+#: drafts' collect): its PLE rows are read into the table's row cache on the reader thread, so the verify's own read
+#: (the same ids, the same rows) finds them there; 0: off
+PLE_PREFETCH = _S.get("FN_PLE_PREFETCH") == "1"
 #: SPD-249: the joint graphs kept (the least recently replayed go first)
 JOINT_GRAPH_MAX = int(_S.get("FN_JOINT_GRAPH_MAX") or 12)
 #: SPD-249: a key is captured at its n-th pass (the eager ones before it compile every kernel it runs)
@@ -872,6 +876,33 @@ class FlashNextEngine(FlashNextRef):
                 k += x.size
         return out
 
+    def ple_prefetch(self, items: list) -> None:
+        """SPD-249: [(tokens, parents, st)] of trees a verify will stage: their PLE rows read on the reader thread
+        (`_ple_batch`, the result dropped), so the rows sit in the table's cache when the verify reads them. Values
+        never come from here: the verify reads its own rows (a tree its round cuts reads a subset of these ids, a
+        state that moves before the verify reads other ids and misses)."""
+        if not (PLE_PREFETCH and items and self.cfg.ple_layers):
+            return
+        self._ple_reader().submit(self._ple_warm, items)
+
+    def _ple_warm(self, items: list) -> None:
+        t0 = time.perf_counter()
+        try:
+            self._ple_batch(items)
+        except Exception:                                          # noqa: BLE001
+            # a warm-up only: the verify reads (and raises) on its own
+            self._pf_stats()["errors"] += 1
+            return
+        st = self._pf_stats()
+        st["batches"] += 1
+        st["ms"] += 1e3 * (time.perf_counter() - t0)
+
+    def _pf_stats(self) -> dict:
+        st = self.__dict__.get("_pfs")
+        if st is None:
+            st = self._pfs = {"batches": 0, "ms": 0.0, "errors": 0}
+        return st
+
     def _ple_reader(self):
         """The one thread a joint pass reads its PLE rows on (`verify_multi` with QWEN38_FN_PLE_LATE)."""
         ex = getattr(self, "_plex", None)
@@ -1192,7 +1223,10 @@ class FlashNextEngine(FlashNextRef):
     def joint_graph_stats(self) -> dict:
         """SPD-249: the joint graphs' counts (kept keys, replays, captures and their ms, eager passes by reason)."""
         g = self._jg_state()
-        return {**g["stats"], "kept": [list(k) for k in g["graphs"]]}
+        out = {**g["stats"], "kept": [list(k) for k in g["graphs"]]}
+        if PLE_PREFETCH:
+            out["ple_prefetch"] = dict(self._pf_stats())
+        return out
 
     def _jg_eager(self, why: str) -> None:
         e = self._jg_state()["stats"]["eager"]

@@ -676,6 +676,16 @@ class FlashNextServing:
         return len(parents) <= 32
 
     @staticmethod
+    def prefetch_rows(items: list) -> None:
+        """SPD-249: [(serving, tokens, parents)] of trees whose tokens the round runner knows before it stages them:
+        their PLE rows read early into the table's cache (`FlashNextEngine.ple_prefetch`, QWEN38_FN_PLE_PREFETCH)."""
+        by: dict = {}
+        for s, tokens, parents in items:
+            by.setdefault(id(s.fn), (s.fn, []))[1].append(([int(t) for t in tokens], [int(p) for p in parents], s.st))
+        for fn, jobs in by.values():
+            fn.ple_prefetch(jobs)
+
+    @staticmethod
     @torch.no_grad()
     def forward_tree_multi(items: list) -> list:
         """ENG-241 step 3: [(serving, block, parents, start)] of sequence slots over one engine, verified

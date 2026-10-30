@@ -81,3 +81,8 @@ def test_parts_add_up_and_pass_arguments():
     assert p("a", lambda x, y: x + y, 2, 3) == 5
     p("a", lambda: None)
     assert set(p.ms) == {"a"} and p.ms["a"] >= 0
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

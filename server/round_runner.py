@@ -477,6 +477,7 @@ class Runner:
             t.steps = None
             if t.tree is not None:
                 t.tree = t.tree.truncate(t.eng.max_len - t.pos)
+        self._prefetch(tasks)
         # 2. the joint verify pass (a task without a draft takes its plain step alone)
         t0 = self._t("rest", t0)
         live = [t for t in tasks if not t.done]
@@ -561,6 +562,24 @@ class Runner:
         if calls:
             self._packed(calls)
         return self._t("packed", t0)
+
+    def _prefetch(self, tasks: list) -> None:
+        """SPD-249: the drafted trees' tokens are known: a family that reads host rows for a tree's rows (its
+        engine's `prefetch_rows`, e.g. its per-token embedding rows) may start that read now, before the round's cuts and
+        staging; what the verify computes does not change."""
+        by: dict = {}
+        for t in tasks:
+            if t.done or t.tree is None or t.tree.n_draft == 0:
+                continue
+            pf = getattr(type(t.eng), "prefetch_rows", None)
+            if pf is not None:
+                by.setdefault(pf, []).append((t.eng, t.tree.tokens, t.tree.parents))
+        for pf, items in by.items():
+            try:
+                pf(items)
+            except Exception as exc:                               # noqa: BLE001
+                print(f"[runner] prefetch failed ({type(exc).__name__}: {exc}); the verify reads its own rows",
+                      flush=True)
 
     def _lane_decide(self, target: int) -> bool:
         """`_lane_plain` once for the round `target` (the probe counter steps once a decided round); a second call
