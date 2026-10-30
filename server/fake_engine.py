@@ -571,6 +571,7 @@ def load(app, a) -> None:
         state_store=None, session_cache=False, prefix_cache=False, prefix_chunk=0,
         response_cache=None, suffix_store=None, suffix_scope="all",
         usage_default=(a.usage_default == "on"),
+        usage_context=a.usage_context,
         # SRV-475: a test's checkpoint sampling (a directory with a generation_config.json)
         card_sampling=app.loopescape_mod.card_sampling(os.environ.get("QSE_FAKE_CARD_DIR")))
     app.generate_stream = generate_stream

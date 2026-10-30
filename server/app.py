@@ -7823,6 +7823,7 @@ class Handler(BaseHTTPRequestHandler):
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
+        rec.usage_context = STATE.get("usage_context", "client")
         rec.model = str(body.get("model") or STATE.get("model", ""))
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
@@ -8941,7 +8942,8 @@ class Handler(BaseHTTPRequestHandler):
             mm_end = mm
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
-            # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
+            # Keep the occupied context before excluding hidden tokens for client accounting.
+            rec.context_prompt_tokens = n_prompt
             rec.prompt_tokens, rec.thinking = n_prompt - hidden_prompt, bool(in_think)
             rec.hidden_prompt = max(0, int(hidden_prompt))
             rec.hidden_at = _hidden_positions(hid_at, hid_tail, s1_len, n_prompt,
@@ -10899,6 +10901,11 @@ def parser() -> argparse.ArgumentParser:
                          "for include_usage only when a model's Usage capability is ticked), or "
                          "nothing, as before (off). include_usage true/false is honoured either "
                          "way. Default from QSE_USAGE_DEFAULT")
+    ap.add_argument("--usage-context", default=os.environ.get("QSE_USAGE_CONTEXT", "client"),
+                    choices=("client", "engine"),
+                    help="usage.prompt_tokens counts the client's prompt (client, the default) "
+                         "or the full context occupied after replay (engine). Use engine for "
+                         "clients that trigger compaction from usage. Default from QSE_USAGE_CONTEXT")
     ap.add_argument("--usage-ledger", default="off",
                     help="the SQLite usage ledger's path, or off (the default). One row per "
                          "request, counts and times only, no text. NOT read from the environment: "
@@ -11015,6 +11022,8 @@ def _thinking_default(a) -> None:
 def main() -> None:
     ap = parser()
     a = ap.parse_args()
+    if a.usage_context not in ("client", "engine"):
+        ap.error("--usage-context / QSE_USAGE_CONTEXT is client or engine")
     _thinking_default(a)
     # argparse does not check a default against `choices`, and a typo in QSE_DASHBOARD_LOGIN
     # ("true", "ON") must not quietly decide who reads the dashboard
@@ -11171,7 +11180,7 @@ def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
                  argloop=a.argloop,
                  prefill_heartbeat=float(a.prefill_heartbeat_s),
                  response_cache=rcache, suffix_scope=a.suffix_store_scope,
-                 usage_default=(a.usage_default == "on"), **model)
+                 usage_default=(a.usage_default == "on"), usage_context=a.usage_context, **model)
 
 
 def _load(a) -> None:
