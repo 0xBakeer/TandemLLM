@@ -530,6 +530,14 @@ def test_a_side_slot_shares_the_weights_and_has_its_own_state():
     assert (d0.head.key, d2.head.key) == (0, 1)                    # its own draft buffers
     assert d2.cut is not d0.cut and d2.cut.prices.table == d0.cut.prices.table and d2.cut.spec == {}
     assert d2.ngram is not None and d2.ngram.corpus is ng0.corpus
+    assert not d2.freeze
+    d0.freeze = True                               # SPD-249 (FN_DRAFT_FREEZE): a side slot's drafter frozen too
+    MTPTreeDrafter.capture_all = lambda self: None
+    try:
+        _, d3 = s0.side_slot(32, d0)
+    finally:
+        MTPTreeDrafter.capture_all = real
+    assert d3.freeze and d3.cut.frozen
     per_token, const = s0.side_slot_bytes(32, paged=False)
     assert per_token > s0.cost().view_bytes_per_token and const > s0.cost().section_bytes
     assert s0.side_slot_bytes(32, paged=True)[0] == 0

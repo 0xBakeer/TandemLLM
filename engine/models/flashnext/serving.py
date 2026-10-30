@@ -313,7 +313,8 @@ class FlashNextServing:
                 ng.corpus = drafter0.ngram.corpus
             c0 = drafter0.cut
             d2 = MTPTreeDrafter(e2, e2.add_mtp_head(drafter0.depth),
-                                StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=c0.siblings), ng)
+                                StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=c0.siblings), ng,
+                                freeze=getattr(drafter0, "freeze", False))
             d2.capture_all()
         return e2, d2
 
@@ -841,7 +842,10 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                      max_depth=16, min_corpus_order=8)
                 log(f"[server] Flash-Next lookup in the cut: corpus "
                     f"{(corpus or 'none') if ngram.corpus is not None else 'none'}")
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram)
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram,
+                                     freeze=_S.get("FN_DRAFT_FREEZE") == "1")
+            if drafter.freeze:
+                log("[server] Flash-Next drafter state frozen (FN_DRAFT_FREEZE): the cut learns nothing")
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")

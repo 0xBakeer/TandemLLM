@@ -87,8 +87,14 @@ class MTPTreeDrafter:
     last_q = None
     wants_rows = False
 
-    def __init__(self, eng, head, cut: StairCut, ngram=None, look_depth: int = 16):
+    def __init__(self, eng, head, cut: StairCut, ngram=None, look_depth: int = 16, freeze: bool = False):
         self.s, self.head, self.cut, self.depth = eng, head, cut, head.depth
+        # SPD-249: `freeze` keeps the drafter's adaptive state at its start (the cut's calibration and prices from
+        # the price file, no turn ageing, the usual answer length): a fresh server then drafts the same rounds for
+        # the same tokens whatever ran before, so an A/B's accepted tokens a round compare across arms
+        self.freeze = bool(freeze)
+        if self.freeze:
+            cut.frozen = True
         self.ngram, self.look_depth = ngram, look_depth
         self.pending = None                 # (streams, next tokens) of the round's own feed
         self.held = None                    # (tokens, streams) of the last rows synced
@@ -185,7 +191,7 @@ class MTPTreeDrafter:
         self.pending = None
         self.held, self.queue, self.round, self.verify_ms = None, [], None, None
         self._t_prev, self._obs, self._plain = None, None, None
-        if self.req["tokens"]:
+        if self.req["tokens"] and not self.freeze:
             self.answer = 0.8 * self.answer + 0.2 * max(32, self.req["tokens"])
         self.req = self._req()
         self._turn = None

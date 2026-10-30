@@ -38,6 +38,10 @@ KNOBS: dict[str, tuple] = {
     # union times one expert's), in /health (parallel.joint_stats) and the runner's line; 0: off (a diagnosis, set
     # it only to measure)
     'FN_UNION_EVERY': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: the MTP drafters (slot 0's and the side slots') keep their adaptive state at its start: the cut's
+    # calibration and prices from the price file, no turn ageing, the usual answer length (A/B arms on fresh servers
+    # draft alike for the same tokens); 0: they learn as served
+    'FN_DRAFT_FREEZE': ('0', 'engine/models/flashnext/serving.py'),
     # SPD-249: a joint pass's attention layer: every lane's prep in one launch, its rows in one split and one combine
     # launch from lane entry tables, one gate over every row (each row's own arithmetic); 0: a lane at a time
     'FN_ATTN_MULTI': ('0', 'engine/models/flashnext/engine.py'),
