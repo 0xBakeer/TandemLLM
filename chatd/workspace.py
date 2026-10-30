@@ -424,8 +424,18 @@ class Workspace:
             single = stat.S_ISREG(os.lstat(tgt).st_mode)
         except Exception:
             single = False
-        targets = [tgt] if single else list(self.walk(start))
+            tgt = ""
+        # The walk is streamed, not listed: `list(self.walk(start))` walked the whole tree
+        # before the first file was opened, so a grep that stopped at `limit` had already
+        # paid for the entire tree (main's lazy walk stopped at the limit). The budget
+        # covers the walk too: the deadline is checked at the top of the file loop, so a
+        # tree that is walked but not searched still counts against the 10 s.
+        targets = [tgt] if single else self.walk(start)
         for p in targets:
+            if time.monotonic() > deadline:
+                out.append(f"{self.show(p)}: <grep stopped at the {GREP_BUDGET_S}s "
+                           f"budget — partial results>")
+                return out
             if include and not fnmatch.fnmatch(os.path.basename(p), include):
                 continue
             try:

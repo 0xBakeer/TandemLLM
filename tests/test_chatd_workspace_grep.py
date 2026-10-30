@@ -11,6 +11,7 @@ runs per 1 MiB chunk instead of re-copying the buffer per line.
 Run: python tests/test_chatd_workspace_grep.py   (pytest-collectable too: def test_* + assert)
 """
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -69,6 +70,44 @@ def test_directory_walk_still_greps_siblings():
 
 def test_a_genuine_no_match_still_says_so():
     assert WS.grep("no-such-thing-xyz", "/workspace") == []
+
+
+def test_the_walk_is_lazy_so_a_limit_stops_it():
+    # `list(self.walk(start))` walked the whole tree before the first file was opened,
+    # so a grep that stopped at `limit` had already paid for the entire tree. The walk
+    # is streamed now, and the files it never reaches are not touched.
+    d = tempfile.mkdtemp(prefix="ws-lazy-")
+    try:
+        os.makedirs(d + "/uploads", exist_ok=True)
+        for i in range(2000):
+            with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
+                f.write("LAZYNEEDLE\n")
+        ws = Workspace(d)
+        t0 = time.monotonic()
+        h = ws.grep("LAZYNEEDLE", "/workspace/uploads", limit=1)
+        took = time.monotonic() - t0
+        assert len(h) == 1, h
+        # the whole tree is 2000 files; a lazy walk that stops at the limit is quick
+        assert took < 2.0, f"a limited grep over 2000 files took {took:.2f}s"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_budget_covers_the_walk_too():
+    # a tree that is walked but never searched still counts against the 10 s budget
+    d = tempfile.mkdtemp(prefix="ws-budget-")
+    try:
+        os.makedirs(d + "/uploads", exist_ok=True)
+        for i in range(2000):
+            with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
+                f.write("nothing to see here\n")
+        ws = Workspace(d)
+        t0 = time.monotonic()
+        h = ws.grep("LAZYNEEDLE-ABSENT", "/workspace/uploads")
+        took = time.monotonic() - t0
+        assert took < 12.0, f"the walk was not bounded: {took:.2f}s"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_line_numbers_follow_reads_splitlines():
