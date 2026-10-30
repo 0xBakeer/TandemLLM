@@ -6789,6 +6789,11 @@ class Handler(BaseHTTPRequestHandler):
         if (not self.close_connection and not self._body_done
                 and "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()):
             self.close_connection = True
+        # RFC 9112 section 6.1: a request that carries BOTH Transfer-Encoding: chunked
+        # and Content-Length is answered and then the connection is closed, because the
+        # two framings disagree about where the body ends and only closing resolves it.
+        if not self.close_connection and http_body.conflicting_framing(self.headers):
+            self.close_connection = True
 
     def _read_body(self) -> bytes:
         """The request's body, consumed whole or not at all -- server/http_body.py owns

@@ -27,6 +27,16 @@ class BodyError(Exception):
         self.code, self.type, self.message = code, type_, message
 
 
+def conflicting_framing(headers) -> bool:
+    """RFC 9112 section 6.1: a request that carries BOTH Transfer-Encoding: chunked
+    and Content-Length is answered and then the connection is closed, because the two
+    framings disagree about where the body ends and only closing resolves it. The
+    body is read as chunked (Transfer-Encoding outranks Content-Length); the close
+    is what makes the disagreement harmless."""
+    return ("chunked" in (headers.get("Transfer-Encoding") or "").lower()
+            and headers.get("Content-Length") is not None)
+
+
 def read_body(rfile, headers) -> bytes:
     """The request's body, consumed whole or not at all. An answer written with the
     body still unread is a desync one request away: every path out of here has read
@@ -45,11 +55,13 @@ def _content_length(headers) -> int:
     raw = headers.get("Content-Length")
     if raw is None or not raw.strip():
         return 0                                 # an absent header is no body, as before
-    try:
-        n = int(raw)
-    except ValueError:
+    if not _DIGITS.fullmatch(raw):
+        # int() would take "+5", "1_0", " 5 " and "٥" (an Arabic-Indic five). The size
+        # sizes a pre-auth allocation, so it is ASCII digits only -- and exactly that,
+        # with no surrounding whitespace either.
         raise BodyError(400, "invalid_request_error",
                         "Content-Length: not a number") from None
+    n = int(raw)
     if n < 0:
         raise BodyError(400, "invalid_request_error", "Content-Length: negative")
     if n > MAX_BODY_BYTES:
@@ -63,6 +75,10 @@ def _content_length(headers) -> int:
 # seventy zeros and a '1' parsed as the last chunk and the rest of the line became a
 # trailer. An unterminated (too long) size line is a 400, as the stdlib does.
 _CHUNK_SIZE = re.compile(rb"[0-9a-fA-F]+")
+
+# A Content-Length is ASCII digits only. int() also takes "+5", "1_0", " 5 " and "٥"
+# (an Arabic-Indic five), and the value sizes a pre-auth allocation.
+_DIGITS = re.compile(r"[0-9]+")
 
 
 def _read_chunked(rfile) -> bytes:
@@ -82,6 +98,12 @@ def _read_chunked(rfile) -> bytes:
         if size == 0:
             for _ in range(100):                 # the trailers, to a blank line; capped
                 t = rfile.readline(1024)         # at the stdlib's 100 header lines
+                if t and not t.endswith(b"\n"):
+                    # A trailer longer than the cap comes back in two parts: the lone
+                    # "\n" would count as the blank line and the real one would stay
+                    # on the wire for the next request.
+                    raise BodyError(400, "invalid_request_error",
+                                    "transfer-encoding: trailer line too long")
                 if not t or t in (b"\r\n", b"\n"):
                     break
             else:
