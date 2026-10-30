@@ -48,7 +48,9 @@ __device__ __forceinline__ void mma_bf16(float* c, uint32_t a0, uint32_t a1, uin
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-template <int MT, int WK, int NT>
+// PF: the next K step's weight vectors and scales are loaded before this step's products (registers double-buffered;
+// the arithmetic, and so the bits, are the same)
+template <int MT, int WK, int NT, int PF = 0>
 __global__ void __launch_bounds__(32 * WK)
 mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                     __nv_bfloat16* __restrict__ y, int M, int N, int kq, int lx, int lw, int ls, int ly) {
@@ -73,12 +75,37 @@ mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restri
         wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
         sr[n] = s + (size_t)(wok[n] ? row : 0) * ls + (t >> 1);
     }
-    for (int kk = k0; kk < k1; ++kk) {
-        uint32_t B[NT][8];
+    uint4 nw[NT];
+    uint32_t ns[NT];
+    if (PF && k0 < k1) {
 #pragma unroll
         for (int n = 0; n < NT; ++n) {
-            uint4 wb = wok[n] ? ldg16(wr[n] + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
-            const float sc = wok[n] ? e8m0(sr[n][kk * 2]) : 0.f;
+            nw[n] = wok[n] ? ldg16(wr[n] + (size_t)k0 * 64) : make_uint4(0, 0, 0, 0);
+            ns[n] = wok[n] ? sr[n][k0 * 2] : 0u;
+        }
+    }
+    for (int kk = k0; kk < k1; ++kk) {
+        uint32_t B[NT][8];
+        uint4 cw[NT];
+        uint32_t cs[NT];
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            if (PF) {
+                cw[n] = nw[n];
+                cs[n] = ns[n];
+                if (kk + 1 < k1) {
+                    nw[n] = wok[n] ? ldg16(wr[n] + (size_t)(kk + 1) * 64) : make_uint4(0, 0, 0, 0);
+                    ns[n] = wok[n] ? sr[n][(kk + 1) * 2] : 0u;
+                }
+            } else {
+                cw[n] = wok[n] ? ldg16(wr[n] + (size_t)kk * 64) : make_uint4(0, 0, 0, 0);
+                cs[n] = wok[n] ? sr[n][kk * 2] : 0u;
+            }
+        }
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const uint4 wb = cw[n];
+            const float sc = wok[n] ? e8m0(cs[n]) : 0.f;
             const uint32_t wv[4] = {wb.x, wb.y, wb.z, wb.w};
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
@@ -141,11 +168,11 @@ mxfp8_skinny_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restri
     }
 }
 
-template <int MT, int WK, int NT>
+template <int MT, int WK, int NT, int PF>
 void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1);
     const int smem = WK > 1 ? (WK - 1) * MT * NT * 4 * 32 * 4 : 0;
-    auto kern = mxfp8_skinny_kernel<MT, WK, NT>;
+    auto kern = mxfp8_skinny_kernel<MT, WK, NT, PF>;
     if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     dim3 grid((N + 8 * NT - 1) / (8 * NT));
     kern<<<grid, 32 * WK, smem, at::cuda::getCurrentCUDAStream()>>>(
@@ -154,7 +181,8 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         y.stride(0));
 }
 
-void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk, int64_t nt) {
+void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk, int64_t nt,
+                  int64_t pf) {
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kByte && s.scalar_type() == at::kByte,
                 "mxfp8_skinny: x bf16, w uint8 (e4m3 bytes), s uint8 (E8M0)");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && s.size(1) * 32 == w.size(1), "mxfp8_skinny: K");
@@ -162,15 +190,17 @@ void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tens
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && s.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0,
                 "mxfp8_skinny: row-major, 16-byte aligned rows");
     const bool two = x.size(0) > 16;
-#define L(WK, NT)                                     \
-    if (wk == WK && nt == NT) {                       \
-        if (two) launch<2, WK, NT>(x, w, s, y);       \
-        else launch<1, WK, NT>(x, w, s, y);           \
+#define L(WK, NT, PF)                                 \
+    if (wk == WK && nt == NT && pf == PF) {           \
+        if (two) launch<2, WK, NT, PF>(x, w, s, y);   \
+        else launch<1, WK, NT, PF>(x, w, s, y);       \
         return;                                       \
     }
-    L(1, 1) L(2, 1) L(4, 1) L(8, 1) L(16, 1)
-    L(1, 2) L(2, 2) L(4, 2) L(8, 2) L(16, 2)
-    L(1, 4) L(2, 4) L(4, 4) L(8, 4) L(16, 4)
+    L(1, 1, 0) L(2, 1, 0) L(4, 1, 0) L(8, 1, 0) L(16, 1, 0)
+    L(1, 2, 0) L(2, 2, 0) L(4, 2, 0) L(8, 2, 0) L(16, 2, 0)
+    L(1, 4, 0) L(2, 4, 0) L(4, 4, 0) L(8, 4, 0) L(16, 4, 0)
+    L(1, 1, 1) L(2, 1, 1) L(4, 1, 1) L(8, 1, 1) L(16, 1, 1) L(1, 2, 1) L(2, 2, 1) L(4, 2, 1) L(8, 2, 1) L(16, 2, 1)
+    L(8, 4, 1) L(16, 4, 1)
 #undef L
     TORCH_CHECK(false, "mxfp8_skinny: (wk, nt) not built");
 }

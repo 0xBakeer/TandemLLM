@@ -187,13 +187,27 @@ __global__ void __launch_bounds__(32 * WK) moe_gu_kernel(const __nv_bfloat16* __
         float acc[NA];
 #pragma unroll
         for (int i = 0; i < NA; ++i) acc[i] = 0.f;
+        // the next K step's weights are loaded before this step's products (registers double-buffered)
+        uint4 nb[2 * NT];
+        uint32_t nsp[2 * NT];
+        if (q0 < q1) {
+#pragma unroll
+            for (int n = 0; n < 2 * NT; ++n) {
+                nb[n] = ldg16(wr[n] + (size_t)q0 * 64);
+                nsp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + q0 * 8);
+            }
+        }
         for (int q = q0; q < q1; ++q) {
             uint4 b[2 * NT];
             uint32_t sp[2 * NT];
 #pragma unroll
             for (int n = 0; n < 2 * NT; ++n) {
-                b[n] = ldg16(wr[n] + (size_t)q * 64);
-                sp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + q * 8);
+                b[n] = nb[n];
+                sp[n] = nsp[n];
+                if (q + 1 < q1) {
+                    nb[n] = ldg16(wr[n] + (size_t)(q + 1) * 64);
+                    nsp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + (q + 1) * 8);
+                }
             }
 #pragma unroll
             for (int a = 0; a < MT; ++a) {
@@ -251,14 +265,34 @@ __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* 
         float acc[NA];
 #pragma unroll
         for (int i = 0; i < NA; ++i) acc[i] = 0.f;
+        const uint8_t* wr[NT];
+        const uint8_t* sr[NT];
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const size_t r = (size_t)e * H + n0 + 8 * n + g;
+            wr[n] = W + r * (I / 2) + 16 * t;
+            sr[n] = SC + r * (I / 16) + 2 * t;
+        }
+        uint4 nb[NT];
+        uint32_t nsp[NT];
+        if (q0 < q1) {
+#pragma unroll
+            for (int n = 0; n < NT; ++n) {
+                nb[n] = ldg16(wr[n] + (size_t)q0 * 64);
+                nsp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + q0 * 8);
+            }
+        }
         for (int q = q0; q < q1; ++q) {
             uint4 b[NT];
             uint32_t sp[NT];
 #pragma unroll
             for (int n = 0; n < NT; ++n) {
-                const size_t r = (size_t)e * H + n0 + 8 * n + g;
-                b[n] = ldg16(W + r * (I / 2) + 16 * t + (size_t)q * 64);
-                sp[n] = *reinterpret_cast<const uint16_t*>(SC + r * (I / 16) + 2 * t + q * 8);
+                b[n] = nb[n];
+                sp[n] = nsp[n];
+                if (q + 1 < q1) {
+                    nb[n] = ldg16(wr[n] + (size_t)(q + 1) * 64);
+                    nsp[n] = *reinterpret_cast<const uint16_t*>(sr[n] + (q + 1) * 8);
+                }
             }
 #pragma unroll
             for (int a = 0; a < MT; ++a) {
@@ -286,7 +320,27 @@ __global__ void __launch_bounds__(32 * WK) moe_down_kernel(const __nv_bfloat16* 
     }
 }
 
+// the shared expert's activation in one launch: gu bf16 [M, 2I] (gate | up, as its MXFP8 / bf16 launch returns them)
+// -> a bf16 [M, I] = bf16(bf16(silu(g)) u), the routed experts' arithmetic (moe_gu_kernel's epilogue)
+__global__ void silu_mul_kernel(const __nv_bfloat16* __restrict__ gu, int ldg, __nv_bfloat16* __restrict__ a, int I,
+                                int total) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    const int m = i / I, c = i - m * I;
+    const float gv = __bfloat162float(gu[(size_t)m * ldg + c]), uv = __bfloat162float(gu[(size_t)m * ldg + I + c]);
+    a[(size_t)m * I + c] = __float2bfloat16_rn(bfr(gv / (1.0f + expf(-gv))) * uv);
+}
+
 // ------------------------------------------------------------------------------------------- host
+void nvfp4_silu_mul(torch::Tensor gu, torch::Tensor a) {
+    const int M = gu.size(0), I = a.size(1);
+    TORCH_CHECK(gu.dtype() == torch::kBFloat16 && a.dtype() == torch::kBFloat16 && gu.size(1) == 2 * I &&
+                gu.stride(1) == 1 && a.is_contiguous(), "silu_mul: gu bf16 [M, 2I], a bf16 [M, I]");
+    const int total = M * I;
+    silu_mul_kernel<<<(total + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        (const __nv_bfloat16*)gu.data_ptr(), (int)gu.stride(0), (__nv_bfloat16*)a.data_ptr(), I, total);
+}
+
 void nvfp4_moe_plan(torch::Tensor ids, int64_t E, torch::Tensor order, torch::Tensor gstart, torch::Tensor gcount,
                     torch::Tensor gexp, torch::Tensor ng) {
     const int P = ids.numel();

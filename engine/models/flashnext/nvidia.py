@@ -333,12 +333,11 @@ class NVBank:
 
     def _sh(self, x: torch.Tensor) -> torch.Tensor:
         """The shared expert of the rows: fp32 [M, H] (gate|up one launch, the activation, down)."""
+        from tools import nvfp4_moe as NM
+
         def lin(w, v):
             return w.mul_rows(v) if hasattr(w, "mul_rows") else torch.nn.functional.linear(v, w)
-        gu = lin(self.shared["gu"], x).float()
-        g, u = gu[:, :self.I], gu[:, self.I:]
-        a = (g / (1.0 + torch.exp(-g))).to(torch.bfloat16).float() * u
-        return lin(self.shared["down"], a.to(torch.bfloat16)).float()
+        return lin(self.shared["down"], NM.silu_mul(lin(self.shared["gu"], x)))
 
     def experts(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         """x [M, H] bf16, ids int32 [M, S] (the shared expert as id E, the last slot) -> yd [M S, H] fp32,

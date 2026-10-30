@@ -30,7 +30,7 @@ def _module():
     global _MOD
     if _MOD is None:
         _MOD = nb.load(f"tandem_nvfp4_moe_{nb.tag(_CPP, _CUDA)}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["nvfp4_moe_plan", "nvfp4_moe_gu", "nvfp4_moe_down"],
+                       functions=["nvfp4_moe_plan", "nvfp4_moe_gu", "nvfp4_moe_down", "nvfp4_silu_mul"],
                        extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"])
     return _MOD
 
@@ -98,3 +98,10 @@ def experts(x: torch.Tensor, ids: torch.Tensor, bank, wk_gu: int = 4, nt_gu: int
     m.nvfp4_moe_down(a, p["order"], p["gstart"], p["gcount"], p["gexp"], p["ng"], bank.d_w, bank.d_s, bank.d_s2, y, gy,
                      wk_d, nt_d, mt)
     return y
+
+
+def silu_mul(gu: torch.Tensor) -> torch.Tensor:
+    """gu bf16 [M, 2I] (gate | up) -> bf16 [M, I] = bf16(bf16(silu(g)) u), in one launch (the routed experts' rounding)."""
+    a = torch.empty(gu.shape[0], gu.shape[1] // 2, dtype=torch.bfloat16, device=gu.device)
+    _module().nvfp4_silu_mul(gu, a)
+    return a
