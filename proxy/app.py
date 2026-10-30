@@ -59,6 +59,13 @@ STATE: dict = {}
 # by it, however long its upstream is quiet or the client is slow to read.
 IDLE_TIMEOUT_S = 60.0
 
+# The body framing -- BodyError, the cap, the Content-Length spine, the chunked parser --
+# is server/http_body.py, the same code the standalone server calls: the two servers
+# carried it line for line and a fix had to land twice.
+from server import http_body  # noqa: E402
+
+BodyError = http_body.BodyError
+
 
 def version() -> str:
     """VERSION in a checkout, the distribution's version when installed (proxy/_version.py)."""
@@ -145,7 +152,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_one_request(self):
         self.connection.settimeout(self.timeout)          # the request phase (IDLE_TIMEOUT_S)
+        self._body_done = False
         super().handle_one_request()
+        # a chunked body the handler never read stayed on the wire and the next request on
+        # the keep-alive connection was parsed from the middle of it (the size line as a
+        # request line). A body this handler never touched at all closes the connection,
+        # the same decision the standalone server made.
+        if (not self.close_connection and not self._body_done
+                and "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()):
+            self.close_connection = True
 
     def send_response(self, code, message=None):
         self.connection.settimeout(None)                  # the answer: no timeout
@@ -175,9 +190,26 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
+    _body_done = False               # the request in hand has had its body read to the end
+
     def _read_raw(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
+        """The request's body, consumed whole or not at all -- server/http_body.py owns
+        the framing, the same module the standalone server calls. An answer written with
+        the body still unread is a desync one request away: every path out of here has
+        read to the end of the framing, and BodyError (or handle_one_request) closes the
+        connection."""
+        try:
+            raw = http_body.read_body(self.rfile, self.headers)
+        except BodyError:
+            self.close_connection = True     # the promised bytes, if they ever come,
+            raise                            # would be read as the next request
+        self._body_done = True
+        return raw
+
+    def _body_error(self, exc) -> None:
+        """A framing/body refusal: 400 or 413 with the error's own message. The connection
+        closes afterwards: the unread body would be the next request."""
+        self._json(exc.code, {"error": {"type": exc.type, "message": exc.message}})
 
     def _peer(self) -> str:
         return (self.client_address or ("",))[0]
@@ -292,7 +324,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?")[0].rstrip("/")
         t_arrival = time.perf_counter()
-        raw = self._read_raw()
+        try:
+            raw = self._read_raw()
+        except BodyError as exc:
+            return self._body_error(exc)
         if path.startswith("/v1/collect/"):          # P6: a plugin's batch, its own token
             from proxy import collect_api
             return collect_api.handle(self, STATE["svc"], path, raw)
@@ -335,7 +370,10 @@ class Handler(BaseHTTPRequestHandler):
         if chat_forward.route(self, method, STATE["auth"]):
             return
         path = self.path.split("?")[0].rstrip("/")
-        raw = self._read_raw()
+        try:
+            raw = self._read_raw()
+        except BodyError as exc:
+            return self._body_error(exc)
         try:
             body = json.loads(raw) if raw else None
         except ValueError as exc:
@@ -423,7 +461,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
                                                          f"SameSite=Strict; Path=/; Max-Age=0"
                                                          f"{secure}"),))
-        who = self.headers.get("X-Real-IP") or self._peer()
+        who = a.login_key(self._peer(), self.headers)
+        # the one rule, in server/auth.py: X-Real-IP counts from loopback (an nginx on this
+        # host) or from a peer named by TANDEM_TRUSTED_PROXY; every other peer is keyed as
+        # itself, so a browser that reached us directly cannot pick its own bucket.
         if a.login_blocked(who):
             return self._json(429, {"error": {"type": "too_many",
                                               "message": "too many failed logins; wait a minute"}},
@@ -590,7 +631,8 @@ def build(args, env=None) -> Service:
     login = (args.dashboard_login == "on")
     admin = env.get("TANDEM_ADMIN_TOKEN") or env.get("QSE_ADMIN_TOKEN") or None
     a = auth_mod.Auth(admin, env.get("QSE_METRICS_TOKEN") or None, login=login,
-                      trust_loopback=args.trust_loopback == "on")
+                      trust_loopback=args.trust_loopback == "on",
+                      trusted_proxies=env.get("TANDEM_TRUSTED_PROXY", "").split(","))
     registry = metrics_mod.Registry()
     live = live_mod.LiveRegistry(blocks=lambda: None, last_prefill=lambda: None,
                                  engine=_live_engine, hz=live_mod.DEFAULT_HZ, activity=False,

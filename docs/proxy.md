@@ -61,7 +61,7 @@ Then open `http://127.0.0.1:8080/dashboard/#/usage`.
     docker run -d --name tandem-dash -p 127.0.0.1:8080:8080 -v tandem-dash:/data \
         --env-file dash.env tandemllm-dash
 
-The config database, the usage ledger and the key file (when `TANDEM_SECRETS_KEY` is not set) live in the `/data` volume. Inside the container the server binds 0.0.0.0, so what the outside reaches is what `-p` publishes: `127.0.0.1:8080` for this machine, a LAN address for a local network. Turn the login on (`TANDEM_DASHBOARD_LOGIN=on` and `TANDEM_ADMIN_TOKEN`) before you publish it to anything but loopback. The container runs as an unprivileged user and answers its health check on `/health`.
+The config database, the usage ledger and the key file (when `TANDEM_SECRETS_KEY` is not set) live in the `/data` volume. Inside the container the server binds 0.0.0.0, so what the outside reaches is what `-p` publishes: `127.0.0.1:8080` for this machine, a LAN address for a local network. Turn the login on (`TANDEM_DASHBOARD_LOGIN=on` and `TANDEM_ADMIN_TOKEN`) before you publish it to anything but loopback. Failed logins are throttled per client: a fronting proxy's `X-Real-IP` is believed only when the TCP peer is loopback (a proxy on this host), or names itself in `TANDEM_TRUSTED_PROXY` — the LAN shape, where every real client shares the one peer. The container runs as an unprivileged user and answers its health check on `/health`.
 
 ### The `tandem-dash` command
 
