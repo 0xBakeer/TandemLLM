@@ -268,6 +268,27 @@ def test_the_report_gives_each_phase_by_the_slots_in_the_round():
     assert R.Runner._by_e(d) == {8: {"n": 10, "tails": 5.2, "verify": 118.0}}
 
 
+def test_host_counters_change_no_token_and_cut_each_round():
+    """SPD-249 (QSE_RUNNER_COUNTERS): with the counters on, two requests through the runner write their alone texts;
+    the report cuts the 2-lane rounds into host segments and counts their kept rows by depth and accepted lengths."""
+    import gc
+    old = R.COUNTERS
+    R.COUNTERS = True
+    try:
+        out = _check(2)
+        g = R.RUNNER.report()["counters"]
+    finally:
+        R.COUNTERS = old
+        if R._gc_cb in gc.callbacks:
+            gc.callbacks.remove(R._gc_cb)
+    d = g["by_lanes"][2]
+    assert {"rest", "cut", "verify", "walk", "tail_a", "commit", "tail_b", "end"} <= set(d["seg"]), d["seg"]
+    assert all(len(v) == 4 and v[0] >= 0 for v in d["seg"].values()), d["seg"]
+    assert sum(d["deepest"].values()) == 2 * d["rounds"] and sum(d["acc"].values()) == 2 * d["rounds"], d
+    assert sum(d["depth"].values()) == sum(k * v for k, v in d["rows"].items()), d
+    return f"{out}; {d['rounds']} rounds of 2 lanes counted, segments {sorted(d['seg'])}"
+
+
 
 def test_lanes_take_the_mode_that_makes_more_tokens_a_ms():
     """SPD-233, QSE_RUNNER_LANE_PLAIN: at E lanes of joint-plain families the runner learns the drafted rounds'

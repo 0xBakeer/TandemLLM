@@ -61,6 +61,14 @@ def manifest() -> Manifest:
     return Manifest(arch="qwen4_exp", modules=MODULES, data=TABLES)
 
 
+class _DraftReadWait:
+    """SPD-249: the draft read's stream wait as a call of its own, for the runner's timer (`host_timers`)."""
+
+    @staticmethod
+    def wait() -> None:
+        torch.cuda.current_stream().synchronize()
+
+
 class _KV:
     """The `kv` the server reads: the length of the sequence the state holds (a pending chain commit
     lands first), its capacity. Setting it to zero starts a new sequence in place (`restart`: the rows
@@ -288,6 +296,31 @@ class FlashNextServing:
         self.kv.length = 0
         steps = self.idle_captures(ahead=False)       # the classes ahead are the idle windows' (SRV-713)
         return sum(1 for _ in steps) if steps is not None else 0
+
+    def host_timers(self, timed) -> None:
+        """SPD-249 (the round runner's QSE_RUNNER_COUNTERS): this engine's host calls under the runner's timer
+        (`timed(obj, attr, name)`): the MTP staging, the draft read's wait apart from the read, the joint pass's PLE
+        ids (the hashing) and rows (the table's read), the joint pass's issue and the commits' issue. The same calls
+        in the same order (the read's wait is the stream sync the read starts with), so nothing computed changes."""
+        fn = self.fn
+        timed(fn, "stage_mtp", "stage_mtp")
+        timed(fn, "path_ple_ids", "ple_hash")
+        timed(fn, "_ple_batch", "ple_batch")
+        timed(fn, "verify_multi", "verify_issue")
+        timed(fn, "commit_multi", "commit_issue")
+        for tab in {id(t): t for t in (getattr(fn, "tables", None) or {}).values()}.values():
+            timed(tab, "rows_of", "ple_rows")
+        for h in self.heads.values():
+            if getattr(h.read, "_hc", False):
+                continue
+            w = _DraftReadWait()
+            timed(w, "wait", "read_wait")
+
+            def read(_orig=h.read, _w=w):
+                _w.wait()
+                return _orig()
+            h.read = read
+            timed(h, "read", "read")
 
     def joint_stats(self) -> dict | None:
         """SPD-249: the joint passes' measured shape for /health and the runner's line: the distinct routed experts

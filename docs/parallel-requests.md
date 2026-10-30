@@ -62,6 +62,7 @@ One thread runs every decoding lane's round (`QSE_ROUND_RUNNER=1`, SPD-201): the
 | `QSE_RUNNER_HOST_BLOCKS` | 0 | a joint pass hands the families that read a block on the host (`host_blocks`) host tensors, not a device copy each lane (SPD-249) |
 | `QSE_RUNNER_SUPERVISED` | 1 | supervised requests and reasoning blocks with a budget or stall arms go with the runner, handed back to the slot's thread at SP1, SP2 and the spent budget (SPD-249; 0: the slot's own loop) |
 | `QSE_RUNNER_VERDICT_WAIT_MS` | 4 | how long a round waits for the SP1 verdicts its lanes owe before those lanes sit the round out |
+| `QSE_RUNNER_COUNTERS` | 0 | a measurement: host counters by lane count in `parallel.round_runner.counters` (segment wall, thread and process CPU, GC ms; timed drafter and family calls; kept-row depths, rows, accepted lengths). Timers only (SPD-249) |
 | `QWEN38_JOINT_GRAPHS` | 1 | the 27B's joint verify pass from CUDA graphs (0: eager) |
 | `QWEN38_JOINT_GRAPHS_MAX` | 24 | joint graphs kept; a full set is reset whole and captured again into a new pool |
 | `QWEN38_JOINT_GRAPHS_AFTER` | 4 | times a pass shape comes before it is captured (16 before SPD-245) |

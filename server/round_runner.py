@@ -103,9 +103,54 @@ SUPERVISED = os.environ.get("QSE_RUNNER_SUPERVISED", "1") == "1"
 VERDICT_WAIT_MS = float(os.environ.get("QSE_RUNNER_VERDICT_WAIT_MS", "4") or 0)
 TEST_REFUSE_AFTER = int(os.environ.get("QSE_KV_TEST_REFUSE_AFTER", "0") or 0)
 TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS") or "").split(",") if x.strip()}
+#: SPD-249 (a measurement): host counters by lane count in `report()["counters"]`: each round cut into contiguous
+#: host segments (wall, the runner thread's CPU, the process's CPU, garbage-collection ms), the timed host calls
+#: of the drafters and of the families that hand their own (`host_timers`), the verified trees' row depths, rows and
+#: accepted lengths. Timers only: what a round computes does not change. 0: off
+COUNTERS = os.environ.get("QSE_RUNNER_COUNTERS", "0") == "1"
+#: the timed host calls' sums, {name: [wall ms, thread CPU ms, calls, hits]} (`host_time`), across threads
+HOST_CALLS: dict = {}
+#: garbage-collection pauses (any thread): [ms, collections] and {generation: [ms, collections]}
+_GC = [0.0, 0]
+_GC_GEN: dict = {}
 
 #: requests the runner did not take, by reason (`why_not`), for /health
 SKIPS: dict = {}
+
+
+def host_time(obj, attr: str, name: str, hit=None) -> None:
+    """`obj.attr` (a bound method) replaced on the instance by a timed call of the same method; `hit(result)`
+    True counts a hit. Once an instance and attribute."""
+    fn = getattr(obj, attr, None)
+    if fn is None or getattr(fn, "_hc", False):
+        return
+
+    def timed(*a, **k):
+        w, c = time.perf_counter(), time.thread_time()
+        try:
+            r = fn(*a, **k)
+        finally:
+            s = HOST_CALLS.setdefault(name, [0.0, 0.0, 0, 0])
+            s[0] += 1e3 * (time.perf_counter() - w)
+            s[1] += 1e3 * (time.thread_time() - c)
+            s[2] += 1
+        if hit is not None and hit(r):
+            s[3] += 1
+        return r
+    timed._hc = True
+    setattr(obj, attr, timed)
+
+
+def _gc_cb(phase, info, _t=[0.0]) -> None:
+    if phase == "start":
+        _t[0] = time.perf_counter()
+        return
+    ms = 1e3 * (time.perf_counter() - _t[0])
+    _GC[0] += ms
+    _GC[1] += 1
+    g = _GC_GEN.setdefault(info.get("generation"), [0.0, 0])
+    g[0] += ms
+    g[1] += 1
 
 
 
@@ -214,12 +259,26 @@ class Runner:
         if MTP_PACK:
             from engine.methods import draft_meet
             draft_meet.MEET = self.mtp_meet
+        # SPD-249: this round's segments {label: [wall, cpu, process cpu, gc ms]}, the clocks at the last cut, the
+        # timed calls at the round's start, and the sums by lane count (`_hc_end`)
+        self._hc_round: dict = {}
+        self._hc_at = None
+        self._hc_c0: dict = {}
+        self._hc_e: dict = {}
+        self._hc_gpu = None                 # the last round's GPU work was done when this round's rest began
+        self._hc_gen0: dict = {}
+        if COUNTERS:
+            import gc
+            if _gc_cb not in gc.callbacks:
+                gc.callbacks.append(_gc_cb)
 
     # ---- registration (the slot's thread) ---------------------------------------------------
     def add(self, task: Task) -> None:
         js = getattr(task.eng, "joint_stats", None)
         if callable(js):
             self._joint_stats = js                # SPD-249: the family's joint-pass shape, for the report
+        if COUNTERS:
+            self._hc_wrap(task)
         with self.cv:
             self.tasks.append(task)
             self.stats["tasks"] += 1
@@ -354,6 +413,121 @@ class Runner:
         from server import slots as slots_mod
         slots_mod.bind(None if t.slot.index == 0 else t.slot)
 
+    # ---- SPD-249 host counters (QSE_RUNNER_COUNTERS=1) ------------------------------------------
+    @staticmethod
+    def _hc_wrap(task: Task) -> None:
+        """A task's drafter calls timed (the lookup with its hits, the cut, the feed, the head's launch) and the
+        family's own (`host_timers(host_time)` on its serving engine, e.g. the draft read's wait, the PLE ids and rows)."""
+        d = task.drafter
+        if d is not None:
+            host_time(d, "_look", "look", hit=lambda r: r is not None)
+            host_time(d, "_feed", "feed")
+            if getattr(d, "cut", None) is not None:
+                host_time(d.cut, "cut", "cut")
+            if getattr(d, "head", None) is not None:
+                host_time(d.head, "launch", "launch")
+        fw = getattr(task.eng, "host_timers", None)
+        if callable(fw):
+            fw(host_time)
+
+    def _hc_seg(self, label: str) -> None:
+        """The host time since the last cut into this round's segment `label`."""
+        if not COUNTERS:
+            return
+        now = (time.perf_counter(), time.thread_time(), time.process_time(), _GC[0])
+        at, self._hc_at = getattr(self, "_hc_at", None), now
+        if at is None:
+            return
+        s = self.__dict__.setdefault("_hc_round", {}).setdefault(label, [0.0, 0.0, 0.0, 0.0, 0])
+        s[0] += 1e3 * (now[0] - at[0])
+        s[1] += 1e3 * (now[1] - at[1])
+        s[2] += 1e3 * (now[2] - at[2])
+        s[3] += now[3] - at[3]
+        s[4] += 1
+
+    def _hc_start(self) -> None:
+        """At a round's start: the time since the last round's end is its `between` unless the runner was
+        idle (more than 100 ms: no round waited); the timed calls' sums noted."""
+        if not COUNTERS:
+            return
+        if self._hc_at is not None and time.perf_counter() - self._hc_at[0] > 0.1:
+            self._hc_at = None
+        self._hc_round = {}
+        self._hc_seg("between")
+        if self._hc_at is None:
+            self._hc_at = (time.perf_counter(), time.thread_time(), time.process_time(), _GC[0])
+        self._hc_c0 = {k: list(v) for k, v in HOST_CALLS.items()}
+        self._hc_gen0 = {g: list(v) for g, v in _GC_GEN.items()}
+        self._hc_gpu = None
+
+    def _hc_tree(self, trees: list) -> None:
+        """A verify's trees after its cuts: rows by depth, deepest row a tree, rows a pass, at these lanes."""
+        if not COUNTERS:
+            return
+        e = self.__dict__.setdefault("_hc_e", {}).setdefault(len(trees), {"n": 0, "seg": {}, "calls": {}, "depth": {}, "deepest": {},
+                                               "rows": {}, "acc": {}, "gc_gen": {}, "gpu_done": 0, "gpu_asked": 0})
+        rows = 0
+        for x in trees:
+            dep = x.depths()
+            rows += len(dep)
+            for k in dep:
+                e["depth"][k] = e["depth"].get(k, 0) + 1
+            m = max(dep)
+            e["deepest"][m] = e["deepest"].get(m, 0) + 1
+        e["rows"][rows] = e["rows"].get(rows, 0) + 1
+
+    def _hc_acc(self, lanes: int, accepted: int) -> None:
+        if COUNTERS and lanes in self.__dict__.get("_hc_e", {}):
+            a = self._hc_e[lanes]["acc"]
+            a[accepted] = a.get(accepted, 0) + 1
+
+    def _hc_end(self, e: int) -> None:
+        """At a round's end: its segments and the timed calls' growth into the sums of its lane count."""
+        if not COUNTERS:
+            return
+        self._hc_seg("end")
+        if e not in self.__dict__.get("_hc_e", {}):
+            return
+        d = self._hc_e[e]
+        d["n"] += 1
+        if self._hc_gpu is not None:
+            d["gpu_asked"] += 1
+            d["gpu_done"] += int(self._hc_gpu)
+        for k, v in self._hc_round.items():
+            s = d["seg"].setdefault(k, [0.0, 0.0, 0.0, 0.0, 0])
+            for i in range(5):
+                s[i] += v[i]
+        for k, v in HOST_CALLS.items():
+            v0 = self._hc_c0.get(k, [0.0, 0.0, 0, 0])
+            s = d["calls"].setdefault(k, [0.0, 0.0, 0, 0])
+            for i in range(4):
+                s[i] += v[i] - v0[i]
+        for g, v in _GC_GEN.items():
+            v0 = self._hc_gen0.get(g, [0.0, 0])
+            s = d["gc_gen"].setdefault(g, [0.0, 0])
+            s[0] += v[0] - v0[0]
+            s[1] += v[1] - v0[1]
+
+    def _hc_report(self) -> dict:
+        """By lane count (8 rounds or more): segment ms a round [wall, thread CPU, process CPU, gc], the timed calls
+        a round [wall ms, CPU ms, calls, hits], the histograms (summed), the share of rounds whose GPU had finished the
+        last round's work when the proposals' rest began."""
+        out = {}
+        for e, d in sorted(self._hc_e.items()):
+            n = d["n"]
+            if n < 8:
+                continue
+            out[e] = {"rounds": n,
+                      "seg": {k: [round(v[0] / n, 3), round(v[1] / n, 3), round(v[2] / n, 3), round(v[3] / n, 3)]
+                              for k, v in d["seg"].items()},
+                      "calls": {k: [round(v[0] / n, 3), round(v[1] / n, 3), round(v[2] / n, 3), round(v[3] / n, 3)]
+                                for k, v in d["calls"].items()},
+                      "depth": dict(sorted(d["depth"].items())), "deepest": dict(sorted(d["deepest"].items())),
+                      "rows": dict(sorted(d["rows"].items())), "acc": dict(sorted(d["acc"].items())),
+                      "gc_gen": {g: [round(v[0], 2), v[1]] for g, v in d["gc_gen"].items()},
+                      "gpu_done_at_rest": [d["gpu_done"], d["gpu_asked"]]}
+        return {"by_lanes": out, "gc_total": [round(_GC[0], 1), _GC[1]]}
+
     def report(self) -> dict:
         n = max(1, self.stats["rounds"])
         g = max(1, self.gpu_n)
@@ -372,7 +546,8 @@ class Runner:
                     lane_plain=({e: {k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
                                  for e, st in sorted(self._lane.items())} if LANE_PLAIN else None),
                     ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e),
-                    tails_by_slots=self._by_e(self._tails_e), joint_stats=self._joint_stats_now())
+                    tails_by_slots=self._by_e(self._tails_e), joint_stats=self._joint_stats_now(),
+                    **({"counters": self._hc_report()} if COUNTERS else {}))
 
     def _joint_stats_now(self):
         """SPD-249: the family's joint-pass shape (its engine's `joint_stats`, e.g. the distinct experts a layer)."""
@@ -446,6 +621,7 @@ class Runner:
         self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
         self._round_plain = False
         self._round_cap0 = self._captures(tasks)
+        self._hc_start()
         self._mark("start")
         ms0 = dict(self.ms)
         t_r = t0 = time.perf_counter()
@@ -465,6 +641,10 @@ class Runner:
             if t.pre and not t.done and t.deadline is not None and t.deadline.expired():
                 t.end("deadline")
         t0 = self._propose([t for t in tasks if not t.pre], t0)
+        if COUNTERS:
+            self._hc_seg("prop0")
+            if self._ev_last is not None:
+                self._hc_gpu = bool(self._ev_last.query())
         for t in tasks:
             t.pre = False
             if t.done:
@@ -478,6 +658,7 @@ class Runner:
             if t.tree is not None:
                 t.tree = t.tree.truncate(t.eng.max_len - t.pos)
         self._prefetch(tasks)
+        self._hc_seg("rest")
         # 2. the joint verify pass (a task without a draft takes its plain step alone)
         t0 = self._t("rest", t0)
         live = [t for t in tasks if not t.done]
@@ -513,6 +694,7 @@ class Runner:
             self.prices.note_accept(self._round_acc, self._round_exp)
         self._bind_none()
         self._t("round", t_r)
+        self._hc_end(self._round_e)
         self.ms["out_cpu"] += 1e3 * (time.thread_time() - c_r) - self._verify_cpu
         self._verify_cpu = 0.0
         me = self._ms_e.setdefault(self._round_e, {"n": 0})
@@ -553,6 +735,8 @@ class Runner:
         heads, self._mtp_collect = self._mtp_collect, None
         self._bind_none()
         t0 = self._t("prop", t0)
+        if not deadline:
+            self._hc_seg("tprop")
         if heads:
             by: dict = {}
             for h in heads:
@@ -561,6 +745,8 @@ class Runner:
                 type(grp[0]).run_packed(grp)
         if calls:
             self._packed(calls)
+        if not deadline:
+            self._hc_seg("tpacked")
         return self._t("packed", t0)
 
     def _prefetch(self, tasks: list) -> None:
@@ -719,6 +905,8 @@ class Runner:
             self._round_plain = all(len(x.tokens) == 1 for x in trees)
             self._round_rows = sum(len(x.tokens) for x in trees)
             self._round_exp += sum(sum(x.scores[1:]) for x in trees)
+        self._hc_tree(trees)
+        self._hc_seg("cut")
         t0 = time.perf_counter()
         if HOST_BLOCKS and len(group) > 1 and getattr(group[0].eng, "host_blocks", False):
             blocks = [torch.tensor(x.tokens, dtype=torch.long) for x in trees]
@@ -753,6 +941,7 @@ class Runner:
                     if ov is not None and getattr(t.drafter, "joint_priced", False):
                         ov(len(x.tokens), ms * len(x.tokens) / total)
         t0 = self._t("verify", t0)
+        self._hc_seg("verify")
         # 3. the walks in one batch, each slot's penalties first
         specs = []
         for t, x, lg in zip(group, trees, outs):
@@ -764,6 +953,7 @@ class Runner:
                           "start": len(t.ctx), "q": x.q, "picks": None})
         walked = round_walks(specs)
         t0 = self._t("walk", t0)
+        self._hc_seg("walk")
         # 4. each task's tail, as the slot loop runs it
         from engine import rowcopy
         with (rowcopy.recording() if ROWCOPY else _nothing()):
@@ -776,6 +966,7 @@ class Runner:
             halves = [self._tail_a(t, x, path, new) for t, x, path, new in self._paths(group, trees, outs, walked)]
             go = [t for t, h in zip(group, halves) if h[2] is None and t.next is None]
             t1 = time.perf_counter()
+            self._hc_seg("tail_a")
             self._propose(go, t1, deadline=False)
             for t in go:
                 t.pre = True
@@ -783,9 +974,11 @@ class Runner:
             multi = getattr(group[0].eng, "commit_tree_multi", None) if COMMIT_MULTI and len(group) > 1 else None
             if multi is not None:
                 multi([(t.eng, h[0]) for t, h in zip(group, halves)])
+            self._hc_seg("commit")
             for t, h in zip(group, halves):
                 self._bind(t)
                 self._tail_b(t, *h, committed=multi is not None)
+            self._hc_seg("tail_b")
             # SPD-239: the tails' host ms by half (the walks' paths and drafter syncs, the next draft's issue, the
             # commits), summed by the slots in the round (`report`'s tails_by_slots)
             ta = self._tails_e.setdefault(len(group), {"n": 0, "a": 0.0, "draft": 0.0, "b": 0.0})
@@ -812,6 +1005,7 @@ class Runner:
                 path, new = walk_mod.accept_tree(x, lg.argmax(-1).tolist())
             if len(group) > 1:
                 self._round_acc += len(path) - 1
+            self._hc_acc(len(group), len(path) - 1)
             yield t, x, path, new
 
     def _cut(self, t: Task, path, new) -> tuple:
