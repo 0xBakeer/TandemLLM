@@ -339,13 +339,34 @@ class NVBank:
             return w.mul_rows(v) if hasattr(w, "mul_rows") else torch.nn.functional.linear(v, w)
         return lin(self.shared["down"], NM.silu_mul(lin(self.shared["gu"], x)))
 
+    #: one side stream for every bank: the shared expert's launches beside the router's and the routed experts'
+    _side = None
+
+    def begin(self, x: torch.Tensor) -> None:
+        """The shared expert of the rows, started on a side stream before the router runs: it needs only x, and its
+        ~5 MB stream through memory while the router, the plan and the routed experts' first launches (small,
+        latency-bound) leave the bandwidth idle. `experts` joins it. A graph captures both streams."""
+        if NVBank._side is None:
+            NVBank._side = torch.cuda.Stream(device=x.device)
+        cur, side = torch.cuda.current_stream(x.device), NVBank._side
+        side.wait_stream(cur)
+        with torch.cuda.stream(side):
+            self._ysh = self._sh(x)
+        self._ysh_x = x
+
     def experts(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         """x [M, H] bf16, ids int32 [M, S] (the shared expert as id E, the last slot) -> yd [M S, H] fp32,
         unweighted."""
         from tools import nvfp4_moe as NM
         M, S = ids.shape
         yd = NM.experts(x, ids, self)
-        yd.view(M, S, self.H)[:, S - 1].copy_(self._sh(x))
+        ysh = None
+        if getattr(self, "_ysh_x", None) is x:
+            torch.cuda.current_stream(x.device).wait_stream(NVBank._side)
+            # no record_stream: the next layer's `begin` makes the side stream wait for this one (the copy included)
+            # before it allocates again
+            ysh, self._ysh, self._ysh_x = self._ysh, None, None
+        yd.view(M, S, self.H)[:, S - 1].copy_(ysh if ysh is not None else self._sh(x))
         return yd
 
     def experts_torch(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:

@@ -308,11 +308,14 @@ class FlashNextEngine(FlashNextRef):
         folds it into the next inject): (yd [M S, H] fp32, ids, wts)."""
         from tools import fn_kernels as K
         c = self.cfg
+        bank = self.banks[li]
+        if hasattr(bank, "begin"):
+            bank.begin(x)                          # work that needs only x, beside the router (nvidia.NVBank)
         logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
         ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
-        yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
+        yd = K.moe_experts(x, ids, bank, order=self._order1 if x.shape[0] == 1 else None)
         if self._moe_record is not None:
             self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), yd.clone()))
         return yd, ids, wts
