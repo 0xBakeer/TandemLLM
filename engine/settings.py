@@ -379,6 +379,12 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: a grouped MoE CTA's cap of pairs (1..8): less shared memory a CTA, more CTAs an SM
     # (a row's bits are its own; the cap only moves rows between groups)
     'FN_MOE_GR': ('8', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped MoE kernels with their rows staged once a pair and streamed beside the trellis tiles
+    # (no rows in shared memory: more CTAs an SM); a row's products and their order unchanged (the same bits)
+    'FN_MOE_AS': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped MoE kernels' groups from one block's scans (P <= 1024) instead of one thread's walk (the
+    # same groups, order and slots)
+    'FN_MOE_GPAR': ('0', 'tools/fn_kernels.py'),
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
     # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),

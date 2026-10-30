@@ -866,6 +866,7 @@ __global__ void __launch_bounds__(128) moe_gu_stage_kernel(const __nv_bfloat16* 
     pdl_wait();                                        // the mixer's x
     pdl_trigger();
     const int p = blockIdx.x, e = IDS[p], m = p / S;
+    if (e < 0) return;                                 // a joint graph's pad row routes to no expert
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     for (int mat = 0; mat < 2; ++mat) {
         const __half* suh = a.su[e * 3 + mat];
@@ -1129,6 +1130,311 @@ __global__ void __launch_bounds__(256) moe_down_group_kernel(const __nv_bfloat16
         default: break;
     }
     }
+}
+
+// SPD-249 (FN_MOE_AS): the grouped experts with their rows streamed. The grouped CTAs above keep a group's rows
+// [gr][Kin] (fp16) in shared memory for the whole K loop: 31 KB of a gate|up CTA's 42 at cap 6, so 2 CTAs (8 warps) an
+// SM stream the trellis. Here the rows are staged once a pair (gate|up: moe_gu_stage_kernel; down: moe_down_stage_kernel,
+// rot_in_silu's arithmetic) and each k tile's 16 inputs of every row ride in the warp's cp.async stage beside the
+// tile: no rows in shared memory, the warp partials over the stages after the loop, so more CTAs share an SM. A row's
+// products, their order, its K slices and its warp partials' order are RowGemmG::run_rows', its inputs the same fp16
+// values: the same bits.
+template <int KB, int ST, int WARPS>
+struct RowGemmS {
+    static constexpr int TW = tile_u32(KB), NTW = 8, SW = NTW * TW;
+    static constexpr int AW = MOE_GR * 8;              // a stage's row words: 16 fp16 inputs (8 words) a row
+    static constexpr int STW = SW + AW;
+    const uint32_t* T; int ldt, nt0, k0, k1, lane, warp, R;
+    const __half* arow;                                // the row this lane copies half of (lanes < 2 R)
+    uint32_t* stage;
+    __device__ __forceinline__ RowGemmS(const uint32_t* T_, int ldt_, int cb, int Kin, uint32_t* stage_all,
+                                        const __half* arow_, int R_)
+        : T(T_), ldt(ldt_), nt0(cb * 8), R(R_), arow(arow_) {
+        lane = threadIdx.x & 31; warp = threadIdx.x >> 5;
+        stage = stage_all + (size_t)warp * ST * STW;
+        const int kb = Kin / 16, per = (kb + WARPS - 1) / WARPS;
+        k0 = min(kb, warp * per); k1 = min(kb, k0 + per);
+    }
+    __device__ __forceinline__ void issue(int kt, int buf) {
+        if (kt < k1) {
+            const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
+            uint4* dst = reinterpret_cast<uint4*>(stage + buf * STW);
+            for (int c = lane; c < SW / 4; c += 32) cp_async16(dst + c, src + c);
+            if (lane < 2 * R)
+                cp_async16(stage + buf * STW + SW + lane * 4, arow + kt * 16 + (lane & 1) * 8);
+        }
+        cp_commit();
+    }
+    __device__ __forceinline__ void issue_first() {
+#pragma unroll
+        for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+    }
+    // the K loop (run_rows' products in run_rows' order), then the partials into RED [WARPS][gr][128] over the stages
+    __device__ __forceinline__ void run_rows(float* __restrict__ red, int gr) {
+        const int g = lane >> 2, t = lane & 3;
+        float acc[NTW][2][4];
+#pragma unroll
+        for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+        const bool live = g < R;
+        for (int kt = k0; kt < k1; ++kt) {
+            const int i = kt - k0;
+            issue(kt + ST - 1, (i + ST - 1) % ST);
+            cp_wait<ST - 1>();
+            __syncwarp();
+            const uint32_t* buf = stage + (i % ST) * STW;
+            const uint32_t* xw = buf + SW + (live ? g : 0) * 8;
+            const uint32_t a0 = live ? xw[t] : 0u, a2 = live ? xw[t + 4] : 0u;
+#pragma unroll
+            for (int j = 0; j < NTW; ++j) {
+                FragB f0, f1;
+                dq_tile<KB>(buf + j * TW, lane * 8, f0, f1);
+                mma(acc[j][0], a0, 0u, a2, 0u, f0.r[0], f0.r[1]);
+                mma(acc[j][1], a0, 0u, a2, 0u, f1.r[0], f1.r[1]);
+            }
+            __syncwarp();
+        }
+        cp_wait<0>();
+        __syncthreads();                               // every warp is done with its stages: RED lies over them
+        if (live) {
+#pragma unroll
+            for (int j = 0; j < NTW; ++j)
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int col = j * 16 + h * 8 + 2 * t;
+                    red[((size_t)warp * gr + g) * 128 + col] = acc[j][h][0];
+                    red[((size_t)warp * gr + g) * 128 + col + 1] = acc[j][h][1];
+                }
+        }
+        __syncthreads();
+    }
+};
+
+// the down projection's input of every pair once (moe_down_group_body's rot_in_silu arithmetic): grid (P), 128 threads;
+// XD [P, I] fp16. A pair routed to no expert (a joint graph's pad row) is left alone.
+__global__ void __launch_bounds__(128) moe_down_stage_kernel(const __nv_bfloat16* __restrict__ YGU,
+        const int* __restrict__ IDS, MoEArgs a, __half* __restrict__ XD, int I) {
+    pdl_wait();                                        // gate|up's outputs
+    pdl_trigger();
+    const int p = blockIdx.x, e = IDS[p];
+    if (e < 0) return;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const __half* suh = a.su[e * 3 + 2];
+    const __nv_bfloat16* yg = YGU + (size_t)p * 2 * I;
+    const __nv_bfloat16* yu = yg + I;
+    for (int blk = warp; blk * 128 < I; blk += 4) {
+        const int k = blk * 128 + 4 * lane;
+        const uint2 gr = *reinterpret_cast<const uint2*>(yg + k);
+        const uint2 ur = *reinterpret_cast<const uint2*>(yu + k);
+        const uint2 sr = *reinterpret_cast<const uint2*>(suh + k);
+        float gv[4] = {bf_lo(gr.x), bf_hi(gr.x), bf_lo(gr.y), bf_hi(gr.y)};
+        float uv[4] = {bf_lo(ur.x), bf_hi(ur.x), bf_lo(ur.y), bf_hi(ur.y)};
+        float v[4];
+#pragma unroll
+        for (int q = 0; q < 4; ++q) v[q] = bfr(bfr(gv[q] / (1.0f + ::expf(-gv[q]))) * uv[q]);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+        float v0 = v[0] * __low2float(s01), v1 = v[1] * __high2float(s01);
+        float v2 = v[2] * __low2float(s23), v3 = v[3] * __high2float(s23);
+        wht128(v0, v1, v2, v3, lane);
+        __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+        __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+        uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+        *reinterpret_cast<uint2*>(XD + (size_t)p * I + k) = o;
+    }
+}
+
+// MAT 0/1: gate|up (rows XS [P, 2, H], output Y [P, 2, I] bf16 as moe_gu_group_body's); MAT 2: down (rows XD [P, I],
+// output YD [P, H] fp32 as moe_down_group_body's). Kin: the matrix's input width, N its output width.
+template <int KB, int ST, int WARPS>
+__device__ __forceinline__ void moe_s_body(const int* __restrict__ grp, int mat, int cb, MoEArgs a,
+        const __half* __restrict__ XR, int Kin, int N, void* __restrict__ out, uint32_t* smem, int gr) {
+    const int e = grp[0], R = grp[1];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int rr = min(lane >> 1, R - 1);
+    const __half* arow = mat == 2 ? XR + (size_t)grp[2 + rr] * Kin : XR + ((size_t)grp[2 + rr] * 2 + mat) * Kin;
+    RowGemmS<KB, ST, WARPS> rg(a.tr[e * 3 + mat], N / 16, cb, Kin, smem, arow, R);
+    rg.issue_first();
+    float* red = reinterpret_cast<float*>(smem);
+    rg.run_rows(red, gr);
+    const int n = cb * 128 + 4 * lane;
+    const __half* svh = a.sv[e * 3 + mat];
+    const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+    for (int r = warp; r < R; r += WARPS) {
+        float v0, v1, v2, v3;
+        red_rot_row<WARPS>(red, r, lane, v0, v1, v2, v3, gr);
+        if (mat == 2) {
+            *reinterpret_cast<float4*>(reinterpret_cast<float*>(out) + (size_t)grp[2 + r] * N + n) = make_float4(
+                v0 * RSQRT128 * __low2float(s01), v1 * RSQRT128 * __high2float(s01),
+                v2 * RSQRT128 * __low2float(s23), v3 * RSQRT128 * __high2float(s23));
+        } else {
+            __nv_bfloat162 o01 = __floats2bfloat162_rn(v0 * RSQRT128 * __low2float(s01), v1 * RSQRT128 * __high2float(s01));
+            __nv_bfloat162 o23 = __floats2bfloat162_rn(v2 * RSQRT128 * __low2float(s23), v3 * RSQRT128 * __high2float(s23));
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+            *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(out) + ((size_t)grp[2 + r] * 2 + mat) * N + n) = o;
+        }
+    }
+}
+
+// DOWN false: grid (2 * I/128, P), gate|up (blockIdx.x: matrix, column block); true: grid (H/128, P), down.
+// blockIdx.y -> group y (past NG: nothing)
+template <int ST, int WARPS, bool DOWN>
+__global__ void __launch_bounds__(32 * WARPS) moe_s_group_kernel(const int* __restrict__ G, const int* __restrict__ NG,
+        MoEArgs a, const __half* __restrict__ XR, void* __restrict__ out, int H, int I, int gr) {
+    extern __shared__ uint32_t smem[];
+    pdl_wait();                                        // the groups, the staged rows
+    pdl_trigger();
+    if ((int)blockIdx.y >= NG[0]) return;
+    const int* grp = G + (size_t)blockIdx.y * (2 + MOE_GR);
+    const int mat = DOWN ? 2 : (int)(blockIdx.x & 1), cb = DOWN ? (int)blockIdx.x : (int)(blockIdx.x >> 1);
+    const int Kin = DOWN ? I : H, N = DOWN ? H : I;
+    switch (a.kb[grp[0] * 3 + mat]) {
+        case 2: moe_s_body<2, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 3: moe_s_body<3, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 4: moe_s_body<4, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 5: moe_s_body<5, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 6: moe_s_body<6, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 8: moe_s_body<8, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 7: moe_s_body<7, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 15: moe_s_body<15, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 25: moe_s_body<25, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        case 35: moe_s_body<35, ST, WARPS>(grp, mat, cb, a, XR, Kin, N, out, smem, gr); break;
+        default: break;
+    }
+}
+
+// SPD-249 (FN_MOE_AS=2): gate and up of one column block in one CTA, their bf16 outputs (moe_s_body's) turned into
+// the down projection's rotated input in the CTA's epilogue (moe_down_stage_kernel's arithmetic: silu, the down suh,
+// the 128-point rotation over the CTA's own column block): XD [P, I] fp16 written here, no YGU, no staging launch.
+// A row's gate and up products are moe_s_body's (same K slices, order, partials); its XD values the staging kernel's.
+template <int KB, int ST, int WARPS>
+__device__ __forceinline__ void moe_gud_body(const int* __restrict__ grp, int cb, int mat, MoEArgs a,
+        const __half* __restrict__ XS, __half* __restrict__ XD, int H, int I, uint32_t* smem,
+        __nv_bfloat162* __restrict__ gsh, int gr) {
+    const int e = grp[0], R = grp[1];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int rr = min(lane >> 1, R - 1);
+    float* red = reinterpret_cast<float*>(smem);
+    const int n = cb * 128 + 4 * lane;
+    {
+        RowGemmS<KB, ST, WARPS> rg(a.tr[e * 3 + mat], I / 16, cb, H, smem, XS + ((size_t)grp[2 + rr] * 2 + mat) * H, R);
+        rg.issue_first();
+        rg.run_rows(red, gr);
+        const __half* svh = a.sv[e * 3 + mat];
+        const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+        for (int r = warp; r < R; r += WARPS) {
+            float v0, v1, v2, v3;
+            red_rot_row<WARPS>(red, r, lane, v0, v1, v2, v3, gr);
+            __nv_bfloat162 o01 = __floats2bfloat162_rn(v0 * RSQRT128 * __low2float(s01), v1 * RSQRT128 * __high2float(s01));
+            __nv_bfloat162 o23 = __floats2bfloat162_rn(v2 * RSQRT128 * __low2float(s23), v3 * RSQRT128 * __high2float(s23));
+            if (mat == 0) {                            // the gate's bf16 outputs, read back by the same warp and lane
+                gsh[(r * 32 + lane) * 2] = o01;
+                gsh[(r * 32 + lane) * 2 + 1] = o23;
+                continue;
+            }
+            const __nv_bfloat162 g01 = gsh[(r * 32 + lane) * 2], g23 = gsh[(r * 32 + lane) * 2 + 1];
+            uint2 gr2, ur2;
+            gr2.x = *reinterpret_cast<const uint32_t*>(&g01); gr2.y = *reinterpret_cast<const uint32_t*>(&g23);
+            ur2.x = *reinterpret_cast<const uint32_t*>(&o01); ur2.y = *reinterpret_cast<const uint32_t*>(&o23);
+            const __half* suh = a.su[e * 3 + 2];
+            const uint2 sr = *reinterpret_cast<const uint2*>(suh + n);
+            float gv[4] = {bf_lo(gr2.x), bf_hi(gr2.x), bf_lo(gr2.y), bf_hi(gr2.y)};
+            float uv[4] = {bf_lo(ur2.x), bf_hi(ur2.x), bf_lo(ur2.y), bf_hi(ur2.y)};
+            float v[4];
+#pragma unroll
+            for (int q = 0; q < 4; ++q) v[q] = bfr(bfr(gv[q] / (1.0f + ::expf(-gv[q]))) * uv[q]);
+            const __half2 d01 = *reinterpret_cast<const __half2*>(&sr.x), d23 = *reinterpret_cast<const __half2*>(&sr.y);
+            float w0 = v[0] * __low2float(d01), w1 = v[1] * __high2float(d01);
+            float w2 = v[2] * __low2float(d23), w3 = v[3] * __high2float(d23);
+            wht128(w0, w1, w2, w3, lane);
+            __half2 h01 = __floats2half2_rn(w0 * RSQRT128, w1 * RSQRT128);
+            __half2 h23 = __floats2half2_rn(w2 * RSQRT128, w3 * RSQRT128);
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&h01); o.y = *reinterpret_cast<uint32_t*>(&h23);
+            *reinterpret_cast<uint2*>(XD + (size_t)grp[2 + r] * I + n) = o;
+        }
+    }
+}
+
+// grid (I/128, P): blockIdx.y -> group y (past NG: nothing). Shared: max(stages, partials), then the gate rows [gr][128] bf16
+template <int ST, int WARPS>
+__global__ void __launch_bounds__(32 * WARPS) moe_gud_kernel(const int* __restrict__ G, const int* __restrict__ NG,
+        MoEArgs a, const __half* __restrict__ XS, __half* __restrict__ XD, int H, int I, int gr, int gsh_off) {
+    extern __shared__ uint32_t smem[];
+    pdl_wait();                                        // the groups, the staged rows
+    pdl_trigger();
+    if ((int)blockIdx.y >= NG[0]) return;
+    const int* grp = G + (size_t)blockIdx.y * (2 + MOE_GR);
+    __nv_bfloat162* gsh = reinterpret_cast<__nv_bfloat162*>(smem + gsh_off);
+    const int cb = blockIdx.x;
+    for (int mat = 0; mat < 2; ++mat) {
+        if (mat) __syncthreads();                      // the gate epilogue's reads of the partials are done
+        switch (a.kb[grp[0] * 3 + mat]) {
+            case 2: moe_gud_body<2, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 3: moe_gud_body<3, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 4: moe_gud_body<4, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 5: moe_gud_body<5, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 6: moe_gud_body<6, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 8: moe_gud_body<8, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 7: moe_gud_body<7, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 15: moe_gud_body<15, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 25: moe_gud_body<25, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            case 35: moe_gud_body<35, ST, WARPS>(grp, cb, mat, a, XS, XD, H, I, smem, gsh, gr); break;
+            default: break;
+        }
+    }
+}
+
+// SPD-249 (FN_MOE_GPAR): moe_groups_kernel's groups from one block of 1024 threads, P <= 1024: the same groups in
+// the same order with the same pairs in the same slots. Pair i (launch order) is valid when its expert is >= 0; it
+// opens a run when its expert differs from the previous valid pair's (the serial walk's `e != cur`, pads skipped);
+// its place in the run is its valid count less the run start's, its group and slot that place's quotient and rest by
+// GR; groups numbered by a scan of the group starts. Three block scans instead of one thread's walk.
+__device__ __forceinline__ void block_scan_1024(int* s, int i, bool is_max) {
+    for (int o = 1; o < 1024; o <<= 1) {
+        const int x = i >= o ? s[i - o] : (is_max ? (-2147483647 - 1) : 0);
+        __syncthreads();
+        s[i] = is_max ? max(s[i], x) : s[i] + x;
+        __syncthreads();
+    }
+}
+__global__ void __launch_bounds__(1024) moe_groups_par_kernel(const int* __restrict__ IDS, const int* __restrict__ ORDER,
+        int P, int* __restrict__ G, int* __restrict__ NG, int GR) {
+    __shared__ int sa[1024], sb[1024], se[1024];
+    pdl_wait();
+    pdl_trigger();
+    const int i = threadIdx.x;
+    const int p = i < P ? (ORDER ? ORDER[i] : i) : 0;
+    const int e = i < P ? IDS[p] : -1;
+    const bool valid = e >= 0;
+    se[i] = e;
+    sa[i] = valid ? 1 : 0;                             // inclusive count of valid pairs
+    sb[i] = valid ? i : -1;                            // the last valid pair at or before i
+    __syncthreads();
+    block_scan_1024(sa, i, false);
+    block_scan_1024(sb, i, true);
+    const int C = sa[i];
+    const int pv = i > 0 ? sb[i - 1] : -1;             // the previous valid pair
+    const bool opens = valid && (pv < 0 || se[pv] != e);
+    __syncthreads();
+    sb[i] = opens ? C : (-2147483647 - 1);                       // the run start's count (max scan)
+    __syncthreads();
+    block_scan_1024(sb, i, true);
+    const int place = C - sb[i];
+    const int slot = place % GR;
+    __syncthreads();
+    sa[i] = (valid && slot == 0) ? 1 : 0;
+    __syncthreads();
+    block_scan_1024(sa, i, false);
+    const int g = sa[i] - 1;
+    int* gg = G + (size_t)(g < 0 ? 0 : g) * (2 + MOE_GR);
+    if (valid && slot == 0) { gg[0] = e; gg[1] = 0; }
+    __syncthreads();
+    if (valid) { gg[2 + slot] = p; atomicMax(&gg[1], slot + 1); }
+    if (i == 1023) NG[0] = sa[1023];
 }
 
 // grid (H/256, M), 256 threads: out[m, c] = bf16(sum over slots in ascending expert id of w * y)
@@ -2239,6 +2545,9 @@ static int g_moe_gr = MOE_GR;
 // a capped group's CTAs share an SM only with the largest shared-memory carveout (L1 smaller; the bits are the same)
 static inline int moe_carveout() { return g_moe_gr < MOE_GR ? (int)cudaSharedmemCarveoutMaxShared : (int)cudaSharedmemCarveoutDefault; }
 void fn_set_moe_gr(int64_t v) { TORCH_CHECK(v >= 1 && v <= MOE_GR, "MoE group cap 1..8"); g_moe_gr = (int)v; }
+// SPD-249: the groups from one block's scans (moe_groups_par_kernel) when P <= 1024 (0: the one-thread walk)
+static int g_moe_gpar = 0;
+void fn_set_moe_gpar(int64_t v) { g_moe_gpar = (int)(v != 0); }
 void fn_set_moe_gy(int64_t v) { TORCH_CHECK(v >= 0 && v <= 4096, "MoE grid rows 0..4096"); g_moe_gy = (int)v; }
 static inline int moe_grid_y(int P) { return g_moe_gy > 0 && g_moe_gy < P ? g_moe_gy : P; }
 // SPD-249: the levers' kernels only when a lever is set (the defaults launch the kernels as before the levers)
@@ -2317,6 +2626,12 @@ void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torc
     const int P = ids.numel();
     TORCH_CHECK(ids.dtype() == torch::kInt && (order.numel() == P || order.numel() == 0), "ids/order int32");
     TORCH_CHECK(g.dtype() == torch::kInt && g.size(0) >= P && g.size(1) == 2 + MOE_GR && ng.numel() == 1, "groups");
+    if (g_moe_gpar && P <= 1024) {
+        launch(moe_groups_par_kernel, dim3(1), dim3(1024), 0, st, (const int*)ids.data_ptr(),
+            order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
+            g_moe_gr);
+        return;
+    }
     launch(moe_groups_kernel, dim3(1), dim3(32), 0, st, (const int*)ids.data_ptr(),
         order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
         g_moe_gr);
@@ -2367,6 +2682,86 @@ void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, tor
     launch(kern, dim3(H / 128, moe_grid_y(P)), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)ygu.data_ptr(),
         (const int*)g.data_ptr(), (const int*)ng.data_ptr(), moe_args(tr, kb, su, sv), (float*)yd.data_ptr(), H, I,
         g_moe_gr);
+}
+
+// SPD-249 (FN_MOE_AS): the streamed-rows grouped kernels' shared memory: the warps' stages (tile + a stage's rows),
+// or the warp partials laid over them after the loop, whichever is larger
+static size_t moe_s_smem(int kbmax) {
+    const size_t stages = (size_t)g_moe_warps * g_moe_st * (8 * tile_u32(kbmax) + MOE_GR * 8) * 4;
+    const size_t red = (size_t)g_moe_warps * g_moe_gr * 128 * 4;
+    return stages > red ? stages : red;
+}
+#define MOE_PICK_S(DOWN) (g_moe_warps == 4                                                                   \
+    ? (g_moe_st == 2 ? moe_s_group_kernel<2, 4, DOWN> : (g_moe_st == 3 ? moe_s_group_kernel<3, 4, DOWN> : moe_s_group_kernel<4, 4, DOWN>)) \
+    : (g_moe_st == 2 ? moe_s_group_kernel<2, 8, DOWN> : (g_moe_st == 3 ? moe_s_group_kernel<3, 8, DOWN> : moe_s_group_kernel<4, 8, DOWN>)))
+
+// xs: moe_gu_stage's rows [P, 2, H] fp16; y [P, 2, I] bf16
+void fn_moe_gu_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su,
+                       torch::Tensor sv, torch::Tensor xs, torch::Tensor y, int64_t kbmax) {
+    const at::cuda::OptionalCUDAGuard guard(xs.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = y.size(0), I = y.size(2), H = xs.size(2);
+    TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.is_contiguous() && y.size(1) == 2, "y bf16 [P, 2, I]");
+    TORCH_CHECK(xs.dtype() == torch::kHalf && xs.is_contiguous() && xs.size(0) >= P && xs.size(1) == 2, "xs fp16 [P, 2, H]");
+    TORCH_CHECK(H % 128 == 0 && I % 128 == 0, "H, I multiples of 128");
+    const size_t smem = moe_s_smem((int)kbmax);
+    auto kern = MOE_PICK_S(false);
+    TORCH_CHECK(smem <= 96 * 1024, "streamed gate|up shared memory");
+    moe_group_attrs(kern, (int)cudaSharedmemCarveoutMaxShared);
+    launch(kern, dim3(2 * (I / 128), P), dim3(32 * g_moe_warps), smem, st, (const int*)g.data_ptr(),
+        (const int*)ng.data_ptr(), moe_args(tr, kb, su, sv), (const __half*)xs.data_ptr(), (void*)y.data_ptr(), H, I,
+        g_moe_gr);
+}
+
+// FN_MOE_AS=2: gate and up of a column block in one CTA, the down projection's rotated input written in its epilogue;
+// xs: moe_gu_stage's rows [P, 2, H] fp16 -> xd [P, I] fp16
+#define MOE_PICK_GUD (g_moe_warps == 4                                                                        \
+    ? (g_moe_st == 2 ? moe_gud_kernel<2, 4> : (g_moe_st == 3 ? moe_gud_kernel<3, 4> : moe_gud_kernel<4, 4>))     \
+    : (g_moe_st == 2 ? moe_gud_kernel<2, 8> : (g_moe_st == 3 ? moe_gud_kernel<3, 8> : moe_gud_kernel<4, 8>)))
+void fn_moe_gud(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su,
+                torch::Tensor sv, torch::Tensor xs, torch::Tensor xd, int64_t kbmax) {
+    const at::cuda::OptionalCUDAGuard guard(xs.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = xd.size(0), I = xd.size(1), H = xs.size(2);
+    TORCH_CHECK(xs.dtype() == torch::kHalf && xs.is_contiguous() && xs.size(0) >= P && xs.size(1) == 2, "xs fp16 [P, 2, H]");
+    TORCH_CHECK(xd.dtype() == torch::kHalf && xd.is_contiguous(), "xd fp16 [P, I]");
+    TORCH_CHECK(H % 128 == 0 && I % 128 == 0, "H, I multiples of 128");
+    const size_t base = (moe_s_smem((int)kbmax) + 15) / 16 * 16;
+    const size_t smem = base + (size_t)g_moe_gr * 32 * 2 * 4;
+    auto kern = MOE_PICK_GUD;
+    TORCH_CHECK(smem <= 96 * 1024, "fused gate|up shared memory");
+    moe_group_attrs(kern, (int)cudaSharedmemCarveoutMaxShared);
+    launch(kern, dim3(I / 128, P), dim3(32 * g_moe_warps), smem, st, (const int*)g.data_ptr(), (const int*)ng.data_ptr(),
+        moe_args(tr, kb, su, sv), (const __half*)xs.data_ptr(), (__half*)xd.data_ptr(), H, I, g_moe_gr, (int)(base / 4));
+}
+
+// ygu [P, 2, I] bf16 -> xd [P, I] fp16 (the down projection's rotated input of every pair)
+void fn_moe_down_stage(torch::Tensor ygu, torch::Tensor ids, torch::Tensor tr, torch::Tensor kb, torch::Tensor su,
+                       torch::Tensor sv, torch::Tensor xd) {
+    const at::cuda::OptionalCUDAGuard guard(ygu.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = ygu.size(0), I = ygu.size(2);
+    TORCH_CHECK(ygu.dtype() == torch::kBFloat16 && ygu.is_contiguous() && ygu.size(1) == 2, "ygu bf16 [P, 2, I]");
+    TORCH_CHECK(ids.dtype() == torch::kInt && ids.numel() == P, "ids int32 [P]");
+    TORCH_CHECK(xd.dtype() == torch::kHalf && xd.is_contiguous() && xd.size(0) >= P && xd.size(1) == I, "xd fp16 [P, I]");
+    launch(moe_down_stage_kernel, dim3(P), dim3(128), 0, st, (const __nv_bfloat16*)ygu.data_ptr(),
+        (const int*)ids.data_ptr(), moe_args(tr, kb, su, sv), (__half*)xd.data_ptr(), I);
+}
+
+// xd: moe_down_stage's rows [P, I] fp16; yd [P, H] fp32
+void fn_moe_down_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su,
+                         torch::Tensor sv, torch::Tensor xd, torch::Tensor yd, int64_t kbmax) {
+    const at::cuda::OptionalCUDAGuard guard(xd.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = yd.size(0), H = yd.size(1), I = xd.size(1);
+    TORCH_CHECK(yd.dtype() == torch::kFloat && yd.is_contiguous(), "yd fp32 [P, H]");
+    TORCH_CHECK(xd.dtype() == torch::kHalf && xd.is_contiguous() && xd.size(0) >= P, "xd fp16 [P, I]");
+    const size_t smem = moe_s_smem((int)kbmax);
+    auto kern = MOE_PICK_S(true);
+    TORCH_CHECK(smem <= 96 * 1024, "streamed down shared memory");
+    moe_group_attrs(kern, (int)cudaSharedmemCarveoutMaxShared);
+    launch(kern, dim3(H / 128, P), dim3(32 * g_moe_warps), smem, st, (const int*)g.data_ptr(), (const int*)ng.data_ptr(),
+        moe_args(tr, kb, su, sv), (const __half*)xd.data_ptr(), (void*)yd.data_ptr(), H, I, g_moe_gr);
 }
 
 void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out) {

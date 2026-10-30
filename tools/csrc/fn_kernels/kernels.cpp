@@ -10,6 +10,11 @@ void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torc
 void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t S, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax, torch::Tensor xs);
 void fn_moe_gu_stage(torch::Tensor x, torch::Tensor ids, int64_t S, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xs);
 void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);
+void fn_moe_gu_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xs, torch::Tensor y, int64_t kbmax);
+void fn_moe_gud(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xs, torch::Tensor xd, int64_t kbmax);
+void fn_set_moe_gpar(int64_t v);
+void fn_moe_down_stage(torch::Tensor ygu, torch::Tensor ids, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xd);
+void fn_moe_down_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xd, torch::Tensor yd, int64_t kbmax);
 void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps);
 void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);
 void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);

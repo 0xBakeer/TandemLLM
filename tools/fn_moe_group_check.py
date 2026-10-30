@@ -10,8 +10,8 @@ Rows: each layer's router on random inputs (bf16, the residual stream's scale), 
 the rows repeat (every pair of an expert in one group of up to 8). Timing: CUDA events around each
 call, the median of `--reps`.
 
-SPD-249 `--variants 'gy=48;stage=1;gr=4,stage=1'`: the grouped kernels with grid rows (FN_MOE_GY), the
-gate|up rows staged once (FN_MOE_STAGE) or a group cap (FN_MOE_GR) against today's grouped call, bit
+SPD-249 `--variants 'gy=48;stage=1;gr=4,stage=1;as=1,gr=6'`: the grouped kernels with grid rows (FN_MOE_GY), the
+gate|up rows staged once (FN_MOE_STAGE), a group cap (FN_MOE_GR) or the rows streamed (FN_MOE_AS) against today's grouped call, bit
 for bit, with the time and the expert bytes a second (the trellis tiles of the distinct experts).
 """
 
@@ -44,10 +44,14 @@ def timed(fn, reps: int, inner: int = 1) -> float:
     return sorted(ts)[len(ts) // 2]
 
 
+#: the cp.async stages of the server's setting (FN_MOE_ST): a variant's `st` sets its own (the bits do not depend on it)
+ST0 = int(os.environ.get("QWEN38_FN_MOE_ST") or 3)
+
+
 def parse_variants(spec: str) -> list:
     """`gy=48;stage=1;gr=4,stage=1` -> [(label, {gy, stage, gr})], today's grouped call (gy 0, no stage,
     gr 8) first; each is timed and compared with `y1`."""
-    base = {"gy": 0, "stage": 0, "gr": 8}
+    base = {"gy": 0, "stage": 0, "gr": 8, "as": 0, "st": ST0, "gp": 0}
     out = [("today", dict(base))] if spec.strip() else []
     for part in [p.strip() for p in spec.split(";") if p.strip()]:
         v = dict(base)
@@ -63,7 +67,10 @@ def set_variant(v: dict) -> None:
     mod = K._module()
     mod.fn_set_moe_gy(v["gy"])
     mod.fn_set_moe_gr(v["gr"])
+    mod.fn_set_moe_st(v.get("st", ST0))
     K.MOE_STAGE = bool(v["stage"])
+    K.MOE_AS = int(v.get("as", 0))
+    mod.fn_set_moe_gpar(int(v.get("gp", 0)))
 
 
 def expert_bytes(bank, ids) -> int:
@@ -82,7 +89,7 @@ def replay(a, fn, K) -> dict:
     grouped kernels and each variant: bit-equal to today, time and GB/s a layer, and the pass's sum (the experts
     of one verify pass)."""
     d = torch.load(a.replay)
-    variants = parse_variants(a.variants) or [("today", {"gy": 0, "stage": 0, "gr": 8})]
+    variants = parse_variants(a.variants) or [("today", {"gy": 0, "stage": 0, "gr": 8, "as": 0, "st": ST0, "gp": 0})]
     tot = {lab: {"ms": 0.0, "bytes": 0, "equal": True} for lab, _ in variants}
     us = []
     for rec in d["records"]:
@@ -91,7 +98,7 @@ def replay(a, fn, K) -> dict:
         us.append(int(torch.unique(ids[:, :-1]).numel()))
         nb = expert_bytes(bank, ids)
         K.MOE_GROUP = True
-        set_variant({"gy": 0, "stage": 0, "gr": 8})
+        set_variant({"gy": 0, "stage": 0, "gr": 8, "as": 0, "st": ST0, "gp": 0})
         y1 = K.moe_experts(x, ids, bank).clone()
         for lab, v in variants:
             set_variant(v)
@@ -101,7 +108,7 @@ def replay(a, fn, K) -> dict:
             t["ms"] += tg
             t["bytes"] += nb
             t["equal"] = t["equal"] and bool(torch.equal(yg, y1))
-    set_variant({"gy": 0, "stage": 0, "gr": 8})
+    set_variant({"gy": 0, "stage": 0, "gr": 8, "as": 0, "st": ST0, "gp": 0})
     out = {"rows": d["rows"], "layers": len(d["records"]), "distinct_routed_mean": round(sum(us) / max(1, len(us)), 1),
            "variants": {lab: {"equal": t["equal"], "pass_ms": round(t["ms"], 3), "pass_mb": round(t["bytes"] / 1e6, 1),
                               "gbs": round(t["bytes"] / t["ms"] / 1e6, 1)} for lab, t in tot.items()}}
@@ -157,7 +164,7 @@ def main() -> None:
                         tg = timed(lambda: K.moe_experts(x, ids, bank), a.reps, inner=10)
                         r_gy.append({"variant": lab, **v, "equal": bool(torch.equal(yg, y1)),
                                      "ms": round(tg, 4), "gbs": round(nb / tg / 1e6, 1)})
-                    set_variant({"gy": 0, "stage": 0, "gr": 8})
+                    set_variant({"gy": 0, "stage": 0, "gr": 8, "as": 0, "st": ST0, "gp": 0})
                 K.MOE_GROUP = False
                 experts = int(torch.unique(ids).numel())
                 r = {"layer": li, "rows": M, "kind": kind, "pairs": int(ids.numel()), "experts": experts,

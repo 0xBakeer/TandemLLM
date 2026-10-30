@@ -75,6 +75,7 @@ def _module():
         _MOD = nb.load(f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["fn_gemv", "fn_mix_up", "fn_gemv_mix", "fn_mix_up_a", "fn_router", "fn_moe_gu", "fn_moe_down",
                                   "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_gu_stage", "fn_moe_down_group",
+                                  "fn_moe_gu_group_s", "fn_moe_down_stage", "fn_moe_down_group_s", "fn_moe_gud", "fn_set_moe_gpar",
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
@@ -89,6 +90,7 @@ def _module():
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
         _MOD.fn_set_moe_gy(int(_S.get("FN_MOE_GY") or 0))
         _MOD.fn_set_moe_gr(int(_S.get("FN_MOE_GR") or MOE_GR))
+        _MOD.fn_set_moe_gpar(int(_S.get("FN_MOE_GPAR") == "1"))
     return _MOD
 
 
@@ -383,6 +385,19 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
         g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
         ng = torch.empty(1, dtype=torch.int32, device=x.device)
         mod.fn_moe_groups(flat, order, g, ng)
+        if MOE_AS:
+            # SPD-249: the rows staged once a pair and streamed beside the tiles (no rows in shared memory)
+            xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
+            mod.fn_moe_gu_stage(x, flat, S, bank.tr, bank.kb, bank.su, bank.sv, xs)
+            xd = torch.empty(M * S, bank.I, dtype=torch.float16, device=x.device)
+            if MOE_AS == 2:
+                # gate and up of a column block in one CTA, the down input written in its epilogue (no YGU)
+                mod.fn_moe_gud(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, xd, bank.ks[-1])
+            else:
+                mod.fn_moe_gu_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, ygu, bank.ks[-1])
+                mod.fn_moe_down_stage(ygu, flat, bank.tr, bank.kb, bank.su, bank.sv, xd)
+            mod.fn_moe_down_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xd, yd, bank.ks[-1])
+            return yd
         if MOE_STAGE:
             # SPD-249: every pair's gate and up rows rotated once, not in each of a group's CTAs
             xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
@@ -405,6 +420,9 @@ MOE_GROUP = False
 MOE_GR = 8
 #: SPD-249: the grouped gate|up kernel reads rows rotated once a pair (moe_gu_stage) (FN_MOE_STAGE)
 MOE_STAGE = _S.get("FN_MOE_STAGE") == "1"
+#: SPD-249: the grouped kernels with the rows staged once a pair and streamed beside the tiles (FN_MOE_AS 1), and
+#: gate and up of a column block in one CTA writing the down input in its epilogue (2); the grouped kernels' bits
+MOE_AS = int(_S.get("FN_MOE_AS") or 0)
 _EMPTY_H: dict = {}
 #: the experts' bits the MoE kernels decode (the half-integer rates as ten times the rate)
 MOE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
