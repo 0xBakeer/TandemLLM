@@ -45,6 +45,10 @@ from chatd.tools import Result, Tool, ToolError
 PROTOCOL = "2025-06-18"
 CLIENT = {"name": "tandemllm-chatd", "version": "0.1"}
 DEFAULT_TIMEOUT_S = 120.0
+INIT_GRACE_S = 60.0            # session() gives a server min(60, timeout_s) to answer
+                               # initialize — a cold uvx/npx may spend it all starting
+EXEC_FIRST_FRAME_S = INIT_GRACE_S   # the hijacked exec stream is the same cold server:
+                                    # its first frame gets the same grace, no less
 MAX_BODY = 64 << 20       # one JSON answer over this is refused BY NAME, never truncated
                          # into a json.loads failure: a screenshot result is a few MB,
                          # the cap has to clear the work, not just the hostility
@@ -76,6 +80,7 @@ def _sse_line(r, cap: int) -> bytes | None:
     if not parts:
         return None
     return b"".join(parts)
+
 
 class McpError(Exception):
     pass
@@ -292,14 +297,34 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
                 with box.lock:               # run threads vs reader threads: keep the count exact
                     box.busy += 1
                 try:
-                    demux(sock, first, data)
+                    # an exec that hijacks and never writes would otherwise sit on this
+                    # socket and the box's busy slot until its own socket dies
+                    demux(sock, first, data, first_timeout=EXEC_FIRST_FRAME_S)
                 finally:
                     with box.lock:
                         box.busy -= 1
             finally:
                 on_line(None)
+
+        def closer():
+            # a dropped or restarted server: closing the socket alone leaves its process
+            # running in the sandbox (and forever), so end the exec itself; it dies, the
+            # engine closes the stream, the reader reaps the slot. An OSError out of
+            # end_exec is logged, never re-raised: drop() calls this under a lock and
+            # session() marks the server failed after it — a raise here stopped drop()
+            # halfway and skipped the failure. The close stays a finally.
+            try:
+                sandboxes.end_exec(exec_id)
+            except OSError as exc:
+                try:
+                    from chatd.__main__ import log        # the daemon's stderr line
+                    log(f"[mcp] end_exec({exec_id}) failed: {exc}")
+                except Exception:                     # a log must never outlive its caller
+                    pass
+            finally:
+                sock.close()
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),
-                lambda: sock.close())
+                closer)
     return open_pipe
 
 
@@ -591,7 +616,7 @@ class Mcp:
         s = Session(self._transport(r, cid), on_list_changed=lambda: self.refresh(sid, cid),
                     log=self.svc.log)
         try:
-            s.initialize(timeout=min(60.0, r["timeout_s"] or DEFAULT_TIMEOUT_S))
+            s.initialize(timeout=min(INIT_GRACE_S, r["timeout_s"] or DEFAULT_TIMEOUT_S))
         except McpError as exc:
             s.close()
             self._status(sid, "failed", str(exc))
