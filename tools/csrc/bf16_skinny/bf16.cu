@@ -156,6 +156,122 @@ bf16_skinny_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __r
     }
 }
 
+// Cluster split-K (SM90+ thread-block clusters, distributed shared memory): a weight with few rows (the mixers'
+// down|inject: 324 rows = 41 CTAs of 8 rows for 48 SMs) streams its K in CS chunks, one CTA a chunk, the CS CTAs of a
+// row tile one cluster. Each CTA sums its chunk (warps in warp order); then the cluster's rank 0 adds the other ranks'
+// sums from their shared memory in rank order. One launch, no atomics; the order depends on (K, WK, CS) only, so a
+// row is the same bits alone or in a block.
+#include <cooperative_groups.h>
+template <int MT, int WK, int CS>
+__global__ void __launch_bounds__(32 * WK)
+bf16_cluster_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w, float* __restrict__ y,
+                    int M, int N, int kq, int lx, int lw, int ly) {
+    namespace cg = cooperative_groups;
+    cg::cluster_group cl = cg::this_cluster();
+    extern __shared__ float part[];                       // [WK - 1][MT][4][32], then the CTA's sum [MT][4][32]
+    float* fin = part + (WK - 1) * MT * 4 * 32;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int rank = (int)cl.block_rank(), n0 = (blockIdx.x / CS) * 8;
+    const int cper = (kq + CS - 1) / CS, c0 = rank * cper, c1 = min(kq, c0 + cper);
+    const int per = (c1 - c0 + WK - 1) / WK, k0 = min(c1, c0 + warp * per), k1 = min(c1, k0 + per);
+    const int row = n0 + g;
+    const bool wok = row < N;
+    const __nv_bfloat16* wr = w + (size_t)(wok ? row : 0) * lw + 16 * t;
+    for (int kk = k0; kk < k1 && t == 0; ++kk)
+        if (wok) prefetch_l2(wr + (size_t)kk * 64);
+    float acc[MT][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int i = 0; i < 4; ++i) acc[a][i] = 0.f;
+    uint4 nlo = make_uint4(0, 0, 0, 0), nhi = nlo;
+    if (k0 < k1 && wok) { nlo = ldw(wr + (size_t)k0 * 64); nhi = ldw(wr + (size_t)k0 * 64 + 8); }
+    pdl_wait();
+    pdl_trigger();
+    for (int kk = k0; kk < k1; ++kk) {
+        const uint4 lo = nlo, hi = nhi;
+        if (kk + 1 < k1 && wok) { nlo = ldw(wr + (size_t)(kk + 1) * 64); nhi = ldw(wr + (size_t)(kk + 1) * 64 + 8); }
+        const uint32_t B[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+        const int kx = kk * 64 + 16 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int r0 = a * 16 + g, r1 = r0 + 8;
+            uint4 x0a = make_uint4(0, 0, 0, 0), x0b = x0a, x1a = x0a, x1b = x0a;
+            if (r0 < M) { x0a = __ldg(reinterpret_cast<const uint4*>(x + (size_t)r0 * lx + kx));
+                          x0b = __ldg(reinterpret_cast<const uint4*>(x + (size_t)r0 * lx + kx + 8)); }
+            if (r1 < M) { x1a = __ldg(reinterpret_cast<const uint4*>(x + (size_t)r1 * lx + kx));
+                          x1b = __ldg(reinterpret_cast<const uint4*>(x + (size_t)r1 * lx + kx + 8)); }
+            const uint32_t X0[8] = {x0a.x, x0a.y, x0a.z, x0a.w, x0b.x, x0b.y, x0b.z, x0b.w};
+            const uint32_t X1[8] = {x1a.x, x1a.y, x1a.z, x1a.w, x1b.x, x1b.y, x1b.z, x1b.w};
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+                mma_bf16(acc[a], X0[2 * j], X1[2 * j], X0[2 * j + 1], X1[2 * j + 1], B[2 * j], B[2 * j + 1]);
+        }
+    }
+    // the CTA's sum: warps in warp order, into fin
+    if (warp > 0)
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) part[(((warp - 1) * MT + a) * 4 + i) * 32 + lane] = acc[a][i];
+    __syncthreads();
+    if (warp == 0) {
+        for (int v = 1; v < WK; ++v)
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) acc[a][i] += part[(((v - 1) * MT + a) * 4 + i) * 32 + lane];
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) fin[(a * 4 + i) * 32 + lane] = acc[a][i];
+    }
+    cl.sync();                                            // every rank's sum is in its shared memory
+    if (rank == 0 && warp == 0) {
+        for (int r = 1; r < CS; ++r) {
+            const float* rf = cl.map_shared_rank(fin, r);
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) acc[a][i] += rf[(a * 4 + i) * 32 + lane];
+        }
+        const int c = n0 + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int r0 = a * 16 + g, r1 = r0 + 8;
+            if (r0 < M) {
+                if (c < N) y[(size_t)r0 * ly + c] = acc[a][0];
+                if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = acc[a][1];
+            }
+            if (r1 < M) {
+                if (c < N) y[(size_t)r1 * ly + c] = acc[a][2];
+                if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = acc[a][3];
+            }
+        }
+    }
+    cl.sync();                                            // rank 0 has read the others' shared memory
+}
+
+template <int MT, int WK, int CS>
+void launch_cluster(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1);
+    const size_t smem = (size_t)WK * MT * 4 * 32 * 4;
+    auto kern = bf16_cluster_kernel<MT, WK, CS>;
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((N + 7) / 8 * CS); cfg.blockDim = dim3(32 * WK); cfg.dynamicSmemBytes = smem;
+    cfg.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute at[2];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    at[1].id = cudaLaunchAttributeClusterDimension;
+    at[1].val.clusterDim.x = CS; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 2;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()), y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0),
+        (int)w.stride(0), (int)y.stride(0));
+    TORCH_CHECK(e == cudaSuccess, "bf16_cluster launch: ", cudaGetErrorString(e));
+}
+
 template <int MT, int WK, int NT, int PF>
 void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
     const int M = x.size(0), N = w.size(0), K = w.size(1);
@@ -165,6 +281,24 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
     launch_pdl(kern, dim3((N + 8 * NT - 1) / (8 * NT)), dim3(32 * WK), smem, at::cuda::getCurrentCUDAStream(),
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),
         y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0), (int)w.stride(0), (int)y.stride(0));
+}
+
+void bf16_cluster(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t cs) {
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
+                "bf16_cluster: x, w bf16, y fp32");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && x.size(0) >= 1 && x.size(0) <= 32, "bf16_cluster: shapes");
+    TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && y.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0,
+                "bf16_cluster: row-major, 16-byte aligned rows");
+    const bool two = x.size(0) > 16;
+#define C(WK, CS)                                         \
+    if (wk == WK && cs == CS) {                           \
+        if (two) launch_cluster<2, WK, CS>(x, w, y);      \
+        else launch_cluster<1, WK, CS>(x, w, y);          \
+        return;                                           \
+    }
+    C(4, 2) C(8, 2) C(16, 2) C(4, 4) C(8, 4) C(16, 4) C(4, 8) C(8, 8)
+#undef C
+    TORCH_CHECK(false, "bf16_cluster: (wk, cs) not built");
 }
 
 void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nt, int64_t pf) {

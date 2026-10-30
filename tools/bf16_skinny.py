@@ -23,7 +23,7 @@ def _module():
     global _MOD
     if _MOD is None:
         _MOD = nb.load(f"tandem_bf16_skinny_{nb.tag(_CPP, _CUDA)}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["bf16_skinny"],
+                       functions=["bf16_skinny", "bf16_cluster"],
                        extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"])
     return _MOD
 
@@ -48,4 +48,13 @@ def mm(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor | None = None, wk: in
     dwk, dnt = default_split(N, K)
     _module().bf16_skinny(x.contiguous(), w, y, dwk if wk is None else wk, dnt if nt is None else nt,
                           PF if pf is None else pf)
+    return y
+
+
+def mm_cluster(x: torch.Tensor, w: torch.Tensor, wk: int = 8, cs: int = 4, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`mm` with K split across a cluster of `cs` CTAs (a weight with few rows), reduced through distributed shared
+    memory in rank order: fp32 [M, N]. Row-invariant (the order depends on the shape, wk and cs only)."""
+    M = x.shape[0]
+    y = out if out is not None else torch.empty(M, w.shape[0], dtype=torch.float32, device=x.device)
+    _module().bf16_cluster(x.contiguous(), w, y, wk, cs)
     return y

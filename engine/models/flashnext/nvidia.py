@@ -286,13 +286,16 @@ class BF16Rows:
     """A bf16 weight the engine multiplies through `mul_rows` (fp32 out): tools/bf16_skinny on the tensor cores up to
     32 rows (row-invariant: a decode row and a verify block's row are the same bits), fp32 products above."""
 
-    def __init__(self, w: torch.Tensor):
+    def __init__(self, w: torch.Tensor, cluster: tuple | None = None):
         self.w = w.contiguous()
         self.shape = self.w.shape
+        self.cluster = cluster              # (wk, cs): K split across a CTA cluster (few rows, long K: the mixers)
 
     def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[0] <= 32:
             from tools import bf16_skinny as BS
+            if self.cluster is not None:
+                return BS.mm_cluster(x, self.w, wk=self.cluster[0], cs=self.cluster[1])
             return BS.mm(x, self.w)
         # a prompt chunk: the library GEMM in bf16 (fp32 accumulate, the sums rounded once; prompt rows agree with
         # the row step on the next token, not bit for bit -- engine.forward_pre)
@@ -505,7 +508,9 @@ def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=N
         ij = site + ".block_inject_weight.weight"
         di = torch.cat([dn, idx.read(ij, device)]) if ij in idx else dn
         cs = canonical(site)
-        W[cs + ".down_inject"] = BF16Rows(di)
+        # 324 rows x 10,240: 41 CTAs of 8 rows for 48 SMs; a 4-CTA cluster a row tile streams K in 4 chunks
+        # (2.83 against 3.06 ms a step over the 97 sites, 227 GB/s)
+        W[cs + ".down_inject"] = BF16Rows(di, cluster=(16, 4))
         W[cs + ".input_mix_weight_up.weight"] = idx.read(site + ".input_mix_weight_up.weight", device).contiguous()
         W[cs + ".rank"] = dn.shape[0]
 
