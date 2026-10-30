@@ -123,15 +123,23 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     assert st["mem"] is not None and st["resident"] is None and st["sampled_tree"] == "off"
     assert (st["mem"].ws_floor, st["mem"].ws_per_token) == (3 << 30, 100)   # the engine's own workspace
     assert st["prefix_chunk"] > 0 and "weights_info" not in written
+    assert st["usage_context"] == "client"
     assert len(calls) == 1 and calls[0][1:3] == ("cfg", "w") and eng.asked == [None]
     assert any(x.startswith("[cache] session=on") for x in lines)
     assert any("verify graphs: 3 captured" in x for x in lines)
     assert KEYS_27B <= written, sorted(KEYS_27B - written)
     # SRV-475: the checkpoint's sampling (generation_config.json), read for every model
     extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem",
-                                  "card_sampling", "sampling_flags"}
+                                  "card_sampling", "sampling_flags", "usage_context"}
     assert not extra, sorted(extra)
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
+
+
+def test_engine_usage_mode_reaches_the_shared_serving_state():
+    serving = {"tree": False, "sampled_tree": "off", "relax": Relax(1.0, 1)}
+    _, st, _, _, _ = _run(Capabilities(caches=False, side_slots=False),
+                           ["--usage-context", "engine"], serving, registry_builder=True)
+    assert st["usage_context"] == "engine"
 
 
 def test_an_engine_that_cannot_be_lent_gets_the_side_lane_off():

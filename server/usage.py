@@ -131,6 +131,10 @@ class RequestRecord:
         self.finish_reason: str | None = None
         self.error_type: str | None = None
         self.prompt_tokens: int | None = None
+        # The prompt after replay/alignment and image expansion. API clients that compact
+        # from usage need this count, not just the tokens present in their request body.
+        self.context_prompt_tokens: int | None = None
+        self.usage_context = "client"
         # SRV-165: the prompt's tokens the client did not send (the router's notes, new and
         # replayed; the monitor's SP4 note; an earlier answer's hidden tokens put back), which
         # `prompt_tokens` leaves out; `usage.prompt_tokens_details.hidden_tokens` when not 0
@@ -349,10 +353,22 @@ class RequestRecord:
         return self.draft_accepted / self.draft_n if self.draft_n else None
 
     # ----------------------------------------------------------------- the three objects
+    @property
+    def context_tokens(self) -> int:
+        """Rows occupied before generation, including cached reasoning and hidden notes."""
+        if self.context_prompt_tokens is not None:
+            return int(self.context_prompt_tokens)
+        return int(self.prompt_tokens or 0) + int(self.hidden_prompt or 0)
+
     def usage(self) -> dict:
         """The OpenAI usage object, the details included."""
         p, c = int(self.prompt_tokens or 0), int(self.completion_tokens)
         details = {"cached_tokens": self.client_cached}
+        if self.usage_context == "engine":
+            p = self.context_tokens
+            details["cached_tokens"] = max(0, min(int(self.cached_tokens or 0), p))
+            if p != int(self.prompt_tokens or 0):
+                details["client_tokens"] = int(self.prompt_tokens or 0)
         if self.hidden_prompt:
             details["hidden_tokens"] = int(self.hidden_prompt)
         out = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,

@@ -291,6 +291,30 @@ def test_through_the_handler_usage_is_the_clients_and_the_resume_the_end():
     assert app.cache_stats()["end_align"]["aligned"] == 1
 
 
+def test_through_the_handler_engine_usage_counts_the_aligned_context():
+    res = _state()
+    app.STATE["usage_context"] = "engine"
+    tok = app.STATE["tok"] = ChatTok()
+    app.STATE["end_align"] = endalign.EndAlign(tb_of())
+    user = tok.decode(tokens(90, seed=81))
+    _chat([{"role": "user", "content": user}])
+    out = list(app.STATE["last_ctx"][93:])
+    e = res.end["at"]
+    msgs = [{"role": "user", "content": user},
+            {"role": "assistant", "content": tok.decode(out[:10] + [NL] + out[10:])},
+            {"role": "user", "content": tok.decode(TOOL)}]
+    sent = len(tok.apply_chat_template(msgs)["input_ids"][0])
+    r2 = _chat(msgs)
+    pre = app.STATE["last_prefill"]
+    assert pre["kind"] == "end" and pre["reused"] == e, pre
+    occupied = pre["reused"] + pre["forwarded"]
+    assert occupied != sent
+    assert r2["usage"]["prompt_tokens"] == occupied, r2["usage"]
+    assert r2["usage"]["prompt_tokens_details"]["client_tokens"] == sent
+    assert r2["usage"]["prompt_tokens_details"]["cached_tokens"] == e
+    assert app.cache_stats()["end_align"]["aligned"] == 1
+
+
 # ------------------------------------------------------------------ 8. the reasoning left out
 
 def _thinking(prompt, n=60):
