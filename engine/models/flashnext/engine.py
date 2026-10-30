@@ -189,11 +189,36 @@ class FlashNextEngine(FlashNextRef):
             # prompt chunk: the library path of tools/exl3_linear
             y = K.dense(x2, w) if x2.shape[0] <= DENSE_MAX else exl3_matmul(x2, w)
             return y.view(*lead, w.N)
+        if hasattr(w, "mul_rows"):                 # a weight that multiplies itself (nvidia.NVWeight)
+            lead = x.shape[:-1]
+            return w.mul_rows(x.reshape(-1, x.shape[-1]).contiguous()).view(*lead, -1)
         if hasattr(w, "q") or (isinstance(w, torch.Tensor) and w.dtype == torch.float16 and w.dim() == 2):
             lead = x.shape[:-1]
             y = K.gemv(x.reshape(-1, x.shape[-1]).contiguous(), w)
             return y.to(x.dtype).view(*lead, -1)
         return super().lin(x, w)
+
+    def _head(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """The served head: fp32 logits [M, vocab] (into `out` when given). EXL3: tools/fn_kernels.dense up to
+        DENSE_MAX rows, the library path above; a bf16 head (NVIDIA FP4-Local): the GEMV with bf16 sums, as `F.linear`
+        in bf16 returns them."""
+        from tools import fn_kernels as K
+        w = self.W["lm_head.weight"]
+        if isinstance(w, torch.Tensor):
+            y = K.gemv_bf16(x, w)
+            return y.float() if out is None else out.copy_(y)
+        if DENSE_MAX:
+            return K.dense(x, w, out=out) if out is not None else K.dense(x, w).float()
+        from tools.exl3_linear import exl3_matmul
+        return exl3_matmul(x, w, out=out) if out is not None else exl3_matmul(x, w).float()
+
+    def _ple_decode(self, tab, packed: torch.Tensor, heads: torch.Tensor) -> torch.Tensor:
+        """A table's packed rows -> fp32 [N, D] on the device: the table's own decoder when it has one (NVIDIA's NVFP4
+        rows), else the EXL3 trellis rows (`decode_rows`)."""
+        if hasattr(tab, "decode_dev"):
+            return tab.decode_dev(packed, heads)
+        pd = self._ple_dev()
+        return decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"])
 
     def rope(self, positions: torch.Tensor):
         p = positions.to(self.rope_cos.device).long()
@@ -588,11 +613,11 @@ class FlashNextEngine(FlashNextRef):
         p = self.pre(li) + "ple."
         H, eps = c.hidden_size, c.rms_norm_eps
         T = h.shape[0]
-        tab, pd = self.tables[li], self._ple_dev()
+        tab = self.tables[li]
         ids = self.ple_ids(tokens, li, st).reshape(-1).numpy()
         packed = torch.from_numpy(tab.rows_of(ids)).to(self.device)
         heads = torch.from_numpy(np.searchsorted(tab.offsets_np, ids, side="right") - 1).to(self.device)
-        emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(T, -1)
+        emb = self._ple_decode(tab, packed, heads).to(self.dtype).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
         val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)
         qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
@@ -868,11 +893,7 @@ class FlashNextEngine(FlashNextRef):
         n = self.trunk(h, None, st, None, step=True)
         dd = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
         x = K.mix_up(dd, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
-        if DENSE_MAX:
-            K.dense(x, self.W["lm_head.weight"], out=rb["logits"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            exl3_matmul(x, self.W["lm_head.weight"], out=rb["logits"])
+        self._head(x, out=rb["logits"])
         # the greedy tokens, and their copy into pinned host memory: the host reads them after a sync
         torch.argmax(rb["logits"], dim=-1, out=rb["next"])
         rb["next_h"].copy_(rb["next"], non_blocking=True)
@@ -1044,11 +1065,7 @@ class FlashNextEngine(FlashNextRef):
             heads.append(K.mix_up(dd, ns[j], self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc))
             x["rec"]["stack"] = hs[j]
         Xh = torch.cat(heads)
-        if DENSE_MAX:
-            logits = K.dense(Xh, self.W["lm_head.weight"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        logits = self._head(Xh)
         out = []
         for j, x in enumerate(cx):
             rb = x["rb"]
@@ -1159,11 +1176,7 @@ class FlashNextEngine(FlashNextRef):
         Xh = K.mix_up(dd, Ns, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc)
         for j, x in enumerate(cx):
             x["rec"]["stack"] = Hs[rows[j]]
-        if DENSE_MAX:
-            logits = K.dense(Xh, self.W["lm_head.weight"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        logits = self._head(Xh)
         out = []
         for j, x in enumerate(cx):
             rb = x["rb"]
@@ -1551,9 +1564,9 @@ class FlashNextEngine(FlashNextRef):
         c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "ple."
         H, eps = c.hidden_size, c.rms_norm_eps
-        tab, pd = self.tables[li], self._ple_dev()
+        tab = self.tables[li]
         M = h.shape[0]
-        emb = decode_rows(d["packed"], d["heads"], pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(M, -1)
+        emb = self._ple_decode(tab, d["packed"], d["heads"]).to(self.dtype).reshape(M, -1)
         key = K.hc_norm(K.gemv_bf16(emb, self.W[p + "key_proj.weight"]), self.W[p + "norm_key.weight"], H, eps)
         val = K.gemv_bf16(emb, self.W[p + "value_proj.weight"])
         qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
@@ -1817,7 +1830,7 @@ class FlashNextEngine(FlashNextRef):
             if self.draft_head is not None:
                 lg = K.gemv(x, self.draft_head)
             else:
-                lg = K.dense(x, self.W["lm_head.weight"]).float()
+                lg = self._head(x)
             vals, ids = torch.topk(lg, 2, dim=-1)
             z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
             prob = torch.exp(vals - vals[:, :1]) / z
@@ -1922,7 +1935,8 @@ class FlashNextEngine(FlashNextRef):
         key = hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
         if key not in heads:
             idx = torch.as_tensor(np.asarray(ids, dtype=np.int64), device=self.device)
-            w = self.W["lm_head.weight"].dequant()
+            w = self.W["lm_head.weight"]
+            w = w.dequant() if hasattr(w, "dequant") else w
             heads[key] = (Int8Rows.of(w.index_select(0, idx).half().contiguous()), idx)
             del w
             torch.cuda.empty_cache()
@@ -1949,7 +1963,7 @@ class FlashNextEngine(FlashNextRef):
                 K.gemv(x[-1:], self.draft_head, out=lg)
             else:
                 lg = b["logits"]
-                K.dense(x[-1:], self.W["lm_head.weight"], out=lg)
+                self._head(x[-1:], out=lg)
             vals, ids = torch.topk(lg[0], 2)
             z = torch.exp(lg[0] - vals[0]).sum()
             b["prob"][j].copy_(torch.exp(vals - vals[0]) / z)

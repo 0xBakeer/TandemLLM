@@ -14,7 +14,9 @@ The checkpoint is a plain Hugging Face safetensors model (21 shards, `quantizati
                         and one `ngram_embedding.weight_scale_2`; row r of the table is row r % R of shard r // R.
 
 Everything here is lossless: CSF scales decode to exactly the stored e4m3 bytes, MXFP8 and NVFP4 widen exactly to fp32
-before the cast to the compute dtype. Phase 0 (`load_reference`) feeds `ref.FlashNextRef`; the engine's kernels come later.
+before the cast to the compute dtype. `load_reference` feeds `ref.FlashNextRef`; `load_engine` feeds `engine.FlashNextEngine`
+the same weights in its forms (fused launches, a stacked expert bank, the n-gram table as packed rows), every weight
+object answering the engine's `mul_rows(x)` protocol.
 
 CSF reader after vllm-project/vllm#60646 (Apache-2.0); codec `byte-window4-fixed-stream-u24-exceptions/1`.
 """
@@ -101,13 +103,26 @@ def decode_csf_fixed(fixed: np.ndarray, exceptions: np.ndarray) -> np.ndarray:
     return out.astype(np.uint8).reshape(rows, cols)
 
 
+_LUT: dict = {}
+
+
+def _e2m1(device) -> torch.Tensor:
+    """The E2M1 table on `device`, made once (a graph may hold the dequant: no copy inside it)."""
+    k = str(device)
+    if k not in _LUT:
+        _LUT[k] = E2M1.to(device)
+    return _LUT[k]
+
+
 def nvfp4_dequant(w: torch.Tensor, scale: torch.Tensor, scale2: torch.Tensor) -> torch.Tensor:
-    """NVFP4 -> fp32 [N, K]: E2M1 codes [N, K/2] (low nibble = even column) x e4m3 block scale per 16 x fp32 global."""
-    lut = E2M1.to(w.device)
-    codes = torch.stack((w & 0xF, w >> 4), -1).reshape(w.shape[0], -1).long()
-    v = lut[codes]                                                         # [N, K]
-    s = scale.view(torch.float8_e4m3fn).float().repeat_interleave(16, dim=1) * scale2.float().reshape(())
-    return v * s[:, : v.shape[1]]
+    """NVFP4 -> fp32 [..., N, K]: E2M1 codes [..., N, K/2] (low nibble = even column) x e4m3 block scale per 16 x
+    fp32 global (a scalar, or one a leading index broadcast over [N, K])."""
+    codes = torch.stack((w & 0xF, w >> 4), -1).reshape(*w.shape[:-1], -1).long()
+    v = _e2m1(w.device)[codes]                                             # [..., N, K]
+    s = scale.view(torch.float8_e4m3fn).float().repeat_interleave(16, dim=-1)
+    s2 = scale2.float()
+    s = s * (s2.reshape(()) if s2.numel() == 1 else s2.reshape(*s2.shape, *([1] * (s.dim() - s2.dim()))))
+    return v * s[..., : v.shape[-1]]
 
 
 def mxfp8_dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -137,6 +152,27 @@ class NVWeight:
                 return w
             self._bf16 = w
         return self._bf16
+
+    def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
+        """x [M, K] bf16 -> [M, N] bf16 (the engine's weight protocol). MXFP8 up to 32 rows: tools/mxfp8_skinny (the
+        weight decoded in registers, row-invariant); more rows: the exact bf16 weight on the library GEMM."""
+        if self.kind == "mxfp8" and x.shape[0] <= 32:
+            from tools import mxfp8_skinny as S
+            return S.mm(x, self.parts["w"], self.parts["s"])
+        return torch.nn.functional.linear(x, self.dequant(x.dtype))
+
+    def rows(self, a: int, b: int) -> "NVWeight":
+        """Output rows [a, b) as a weight of their own (views: a fused launch's member)."""
+        p = self.parts
+        return NVWeight(self.kind, {"w": p["w"][a:b], "s": p["s"][a:b], **({"s2": p["s2"]} if "s2" in p else {})},
+                        self._cache)
+
+    @staticmethod
+    def cat(ws: list["NVWeight"]) -> "NVWeight":
+        """MXFP8 weights of one K stacked by output rows: exact (the scales are a row's own)."""
+        assert all(w.kind == "mxfp8" for w in ws)
+        return NVWeight("mxfp8", {"w": torch.cat([w.parts["w"] for w in ws]).contiguous(),
+                                  "s": torch.cat([w.parts["s"] for w in ws]).contiguous()})
 
 
 def projection(idx: HFIndex, base: str, device, cache: bool = True):
@@ -188,6 +224,114 @@ class NVFP4NGramTable:
         return v.reshape(*ids.shape, self.dim).to(dtype).to(device if device is not None else "cpu")
 
 
+class NVFP4RowTable(NVFP4NGramTable):
+    """The table in the engine's row interface: `rows_of(ids)` -> packed rows int16 [n, words] on the host (the 80 code
+    bytes, then the 10 scale bytes, of each row), `decode_dev(packed, heads)` -> fp32 [n, D] on the device (fixed-shape
+    torch: a graph can hold it). No head bias: `offsets_np` is one head."""
+
+    def __init__(self, idx: HFIndex, prefix: str):
+        super().__init__(idx, prefix)
+        self.cb, self.sb = self.w[0].shape[1], self.s[0].shape[1]
+        self.words = (self.cb + self.sb + 1) // 2
+        self.offsets_np = np.zeros(1, dtype=np.int64)
+        self._s2: dict = {}
+
+    def rows_of(self, ids: np.ndarray) -> np.ndarray:
+        ids = np.asarray(ids, dtype=np.int64).reshape(-1)
+        out = np.zeros((ids.size, self.words * 2), dtype=np.uint8)
+        sh, row = ids // self.rows, ids % self.rows
+        for k in np.unique(sh):
+            m = sh == k
+            out[m, :self.cb] = self.w[k][row[m]]
+            out[m, self.cb:self.cb + self.sb] = self.s[k][row[m]]
+        return out.view(np.int16)
+
+    def decode_dev(self, packed: torch.Tensor, heads: torch.Tensor | None = None) -> torch.Tensor:
+        dev = packed.device
+        if str(dev) not in self._s2:
+            self._s2[str(dev)] = torch.tensor(self.s2, dtype=torch.float32, device=dev)
+        b = packed.reshape(packed.shape[0], -1).view(torch.uint8)
+        return nvfp4_dequant(b[:, :self.cb], b[:, self.cb:self.cb + self.sb], self._s2[str(dev)])
+
+
+# ------------------------------------------------------------------------------ the expert bank
+class NVBank:
+    """One layer's routed experts stacked as stored (NVFP4: gate|up [E, 2I, H/2], down [E, H, I/2], plain e4m3 block
+    scales, one fp32 global a projection) and its shared expert (MXFP8 in the trunk, bf16 in the MTP layer) as expert E:
+    the engine's bank interface (`fn_kernels.moe_experts` and `fn_prefill_kernels.moe_grouped` hand a bank with
+    `experts` to it). `experts` is the torch path (fp32 products of the exact weights, the kernels' roundings: gate/up
+    to bf16, a = bf16(bf16(silu(g)) u), down fp32), PAIRS pairs a launch."""
+
+    PAIRS = 16
+
+    def __init__(self, gu_w, gu_s, gu_s2, d_w, d_s, d_s2, shared: dict):
+        self.gu_w, self.gu_s, self.gu_s2 = gu_w, gu_s, gu_s2          # [E, 2I, H/2], [E, 2I, H/16], [E, 2]
+        self.d_w, self.d_s, self.d_s2 = d_w, d_s, d_s2                # [E, H, I/2], [E, H, I/16], [E]
+        self.shared = shared                                          # {"gate", "up", "down"}: NVWeight or bf16
+        self.n = gu_w.shape[0]
+        self.I = gu_w.shape[1] // 2
+        self.H = d_w.shape[1]
+
+    def _sh(self, x: torch.Tensor) -> torch.Tensor:
+        def lin(w, v):
+            return w.mul_rows(v) if hasattr(w, "mul_rows") else torch.nn.functional.linear(v, w)
+        g, u = lin(self.shared["gate"], x).float(), lin(self.shared["up"], x).float()
+        a = (g / (1.0 + torch.exp(-g))).to(torch.bfloat16).float() * u
+        w = self.shared["down"]
+        wd = w.dequant(torch.float32) if hasattr(w, "dequant") else w.float()
+        return a.to(torch.bfloat16).float() @ wd.T
+
+    def experts(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """x [M, H] bf16, ids int32 [M, S] (the shared expert as id E) -> yd [M S, H] fp32, unweighted."""
+        M, S = ids.shape
+        flat = ids.reshape(-1).long()
+        rows = torch.arange(M * S, device=x.device) // S
+        yd = torch.empty(M * S, self.H, dtype=torch.float32, device=x.device)
+        I = self.I
+        for p0 in range(0, M * S, self.PAIRS):
+            e = flat[p0:p0 + self.PAIRS].clamp(max=self.n - 1)                 # the shared slot: any routed id, replaced below
+            xs = x.index_select(0, rows[p0:p0 + self.PAIRS]).float().unsqueeze(-1)   # [P, H, 1]
+            gu = nvfp4_dequant(self.gu_w[e], self.gu_s[e], torch.ones(1, device=x.device))   # [P, 2I, H]
+            gu = (gu @ xs).squeeze(-1)                                         # [P, 2I]
+            gu = gu * self.gu_s2[e].repeat_interleave(I, dim=1)
+            g, u = gu[:, :I].to(torch.bfloat16).float(), gu[:, I:].to(torch.bfloat16).float()
+            a = (g / (1.0 + torch.exp(-g))).to(torch.bfloat16).float() * u
+            a = a.to(torch.bfloat16).float().unsqueeze(-1)                     # [P, I, 1]
+            dn = nvfp4_dequant(self.d_w[e], self.d_s[e], self.d_s2[e])         # [P, H, I]
+            yd[p0:p0 + self.PAIRS] = (dn @ a).squeeze(-1)
+        sh = flat == self.n
+        ysh = self._sh(x)                                                      # [M, H]
+        return torch.where(sh[:, None], ysh.index_select(0, rows), yd)
+
+
+def load_bank(idx: HFIndex, p: str, cfg, device) -> NVBank:
+    """The NVBank of the MLP at prefix `p` (`...layers.L.mlp.`): CSF scales decoded once on the host."""
+    E = cfg.num_experts
+
+    def scales(b):
+        if b + ".weight_scale" + FIXED in idx:
+            return decode_csf_fixed(idx.numpy(b + ".weight_scale" + FIXED), idx.numpy(b + ".weight_scale" + EXC))
+        return np.asarray(idx.numpy(b + ".weight_scale"))
+
+    gu_w, gu_s, gu_s2, d_w, d_s, d_s2 = [], [], [], [], [], []
+    for e in range(E):
+        b = f"{p}experts.{e}."
+        gu_w.append(np.concatenate([idx.numpy(b + "gate_proj.weight"), idx.numpy(b + "up_proj.weight")]))
+        gu_s.append(np.concatenate([scales(b + "gate_proj"), scales(b + "up_proj")]))
+        gu_s2.append([float(idx.numpy(b + "gate_proj.weight_scale_2").reshape(-1)[0]),
+                      float(idx.numpy(b + "up_proj.weight_scale_2").reshape(-1)[0])])
+        d_w.append(np.asarray(idx.numpy(b + "down_proj.weight")))
+        d_s.append(scales(b + "down_proj"))
+        d_s2.append(float(idx.numpy(b + "down_proj.weight_scale_2").reshape(-1)[0]))
+
+    def dev(a, dt=None):
+        t = torch.from_numpy(np.ascontiguousarray(np.stack(a) if isinstance(a, list) else a))
+        return (t if dt is None else t.to(dt)).to(device)
+    shared = {x: projection(idx, f"{p}shared_expert.{x}_proj", device) for x in ("gate", "up", "down")}
+    return NVBank(dev(gu_w), dev(gu_s), dev(np.asarray(gu_s2, dtype=np.float32)), dev(d_w), dev(d_s),
+                  dev(np.asarray(d_s2, dtype=np.float32)), shared)
+
+
 # ------------------------------------------------------------------------------ the reference's weights
 def canonical(name: str) -> str:
     return name[len(PREFIX):] if name.startswith(PREFIX) else name
@@ -233,3 +377,85 @@ def load_reference(path: str, device="cuda", mtp: bool = False, log=print, layer
         if f"{pre}shard_0.weight" in idx:
             tables[li] = NVFP4NGramTable(idx, pre)
     return cfg, W, tables
+
+
+# ------------------------------------------------------------------------------ the engine's weights
+def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=None):
+    """(cfg, W, banks, tables, timing) for `engine.FlashNextEngine` from an NVIDIA FP4-Local checkpoint, in the forms
+    `load.load` gives an EXL3 pack (its docstring): the reference's names, the fused launches (`qkvz` = qkv | z,
+    `ab` = a | b, `qkv` = q | k | v: MXFP8 rows stacked, bf16 concatenated), mixers as `down_inject` + up + `rank` (bf16
+    as stored), `mlp.router` = gate ; shared_expert_gate (bf16), the experts as NVBanks, the n-gram table as an
+    NVFP4RowTable. Nothing is requantised: every weight is the stored bytes."""
+    import time
+    from engine.models.flashnext.config import load_flashnext_config
+    from engine.models.flashnext.ref import MTP
+    t0 = time.time()
+    cfg = load_flashnext_config(path)
+    idx = HFIndex(path)
+    lay = list(range(cfg.num_hidden_layers) if layers is None else layers)
+    W: dict = {}
+    mixers = set()
+    for n in idx.tensors:
+        if n.startswith("model.visual.") or (n.startswith("mtp.") and not mtp) or "ngram_embedding." in n:
+            continue
+        c = canonical(n)
+        if c.startswith("layers.") and int(c.split(".")[1]) not in lay:
+            continue
+        if ".experts." in c or ".shared_expert." in c:
+            continue                                                       # in the bank
+        if "_hyper_connection." in c or c.startswith(("hyper_connection_mixer.", "mtp.hyper_connection_mixer.")):
+            if c.endswith((".input_mix_weight_down.weight", ".input_mix_weight_up.weight", ".block_inject_weight.weight")):
+                mixers.add(n.rsplit(".", 2)[0])
+                continue
+        if n.endswith(".weight"):
+            W[c] = projection(idx, n[: -len(".weight")], device)
+        elif not any(n.endswith(x) for x in (".weight_scale", ".weight_scale_2", ".input_scale", FIXED, EXC)):
+            W[c] = idx.read(n, device)
+    for site in sorted(mixers):
+        dn = idx.read(site + ".input_mix_weight_down.weight", device)
+        ij = site + ".block_inject_weight.weight"
+        di = torch.cat([dn, idx.read(ij, device)]) if ij in idx else dn
+        cs = canonical(site)
+        W[cs + ".down_inject"] = di.contiguous()
+        W[cs + ".input_mix_weight_up.weight"] = idx.read(site + ".input_mix_weight_up.weight", device).contiguous()
+        W[cs + ".rank"] = dn.shape[0]
+
+    def fuse(names):
+        ws = [W[n] for n in names]
+        if all(isinstance(w, NVWeight) for w in ws):
+            g = NVWeight.cat(ws)
+            o = 0
+            for n, w in zip(names, ws):
+                W[n] = g.rows(o, o + w.shape[0])
+                o += w.shape[0]
+            return g
+        return torch.cat(ws).contiguous()
+    for li in lay + ([MTP] if mtp else []):
+        p = "mtp.layers.0." if li == MTP else f"layers.{li}."
+        if li != MTP and cfg.is_linear(li):
+            a = p + "linear_attn."
+            W[a + "qkvz"] = fuse([a + "in_proj_qkv.weight", a + "in_proj_z.weight"])
+            W[a + "ab"] = fuse([a + "in_proj_a.weight", a + "in_proj_b.weight"])
+        else:
+            a = p + "self_attn."
+            W[a + "qkv"] = fuse([a + f"{x}_proj.weight" for x in ("q", "k", "v")])
+        W[p + "mlp.router"] = torch.cat([W[p + "mlp.gate.weight"], W[p + "mlp.shared_expert_gate.weight"]]).contiguous()
+    timing = {"dense_s": round(time.time() - t0, 2)}
+    t1 = time.time()
+    banks = {}
+    for li in lay:
+        banks[li] = load_bank(idx, f"{PREFIX}layers.{li}.mlp.", cfg, device)
+        if log and li % 8 == 7:
+            log(f"[nv-load] experts through layer {li}: {time.time() - t1:.1f} s")
+    if mtp:
+        banks[MTP] = load_bank(idx, "mtp.layers.0.mlp.", cfg, device)
+    timing["experts_s"] = round(time.time() - t1, 2)
+    tables = {}
+    for li in cfg.ple_layers:
+        pre = f"{PREFIX}layers.{li}.ple.ple_embedding.ngram_embedding."
+        if f"{pre}shard_0.weight" in idx and li in lay:
+            tables[li] = NVFP4RowTable(idx, pre)
+    timing["total_s"] = round(time.time() - t0, 2)
+    if log:
+        log(f"[nv-load] {path}: {timing}")
+    return cfg, W, banks, tables, timing

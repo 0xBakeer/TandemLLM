@@ -136,7 +136,11 @@ class MoEBank:
 
 
 def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
-    """x [M, K] bf16 @ w^T -> fp32 [M, N]; w an fp16 tensor [N, K] or int8 rows (`pack.Int8Rows`)."""
+    """x [M, K] bf16 @ w^T -> fp32 [M, N]; w an fp16 or bf16 tensor [N, K], int8 rows (`pack.Int8Rows`), or a weight
+    with its own `mul_rows(x)` (bf16 out; NVIDIA FP4-Local's MXFP8, engine/models/flashnext/nvidia.py)."""
+    if hasattr(w, "mul_rows"):
+        y = w.mul_rows(x)
+        return y.float() if out is None else out.copy_(y)
     if hasattr(w, "q"):
         q, s = w.q, w.s
     else:
@@ -149,6 +153,9 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
 
 def gemv_bf16(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """`gemv` with the fp32 sums rounded to bf16 in the kernel (what `F.linear` returns in bf16)."""
+    if hasattr(w, "mul_rows"):
+        y = w.mul_rows(x)
+        return y if out is None else out.copy_(y)
     q, s = (w.q, w.s) if hasattr(w, "q") else (w, None)
     if out is None:
         out = torch.empty(x.shape[0], q.shape[0], dtype=torch.bfloat16, device=x.device)
@@ -277,6 +284,8 @@ def moe(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, bank: MoEBank, or
     (S = top-k + the shared slot) -> [M, H] bf16. `order` (int32 [M S]) is the launch order of the
     pairs; ascending expert id by default (`expert_order`). `bufs` holds preallocated
     intermediates for a graph."""
+    if hasattr(bank, "experts"):                       # a bank with its own experts (nvidia.NVBank)
+        return moe_combine(bank.experts(x, ids), ids, wts, out=out)
     M, S = ids.shape
     P = M * S
     mod = _module()
@@ -311,6 +320,8 @@ _EMPTY: dict = {}
 def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.Tensor | None = None) -> torch.Tensor:
     """`moe` without its combine: every pair's down-projection output yd [M S, H] fp32 (unweighted),
     for `combine_inject_norm`."""
+    if hasattr(bank, "experts"):
+        return bank.experts(x, ids)
     M, S = ids.shape
     if order is None:
         if M > 1:

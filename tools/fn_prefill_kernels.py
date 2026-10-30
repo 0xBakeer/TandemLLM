@@ -97,6 +97,8 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     """Every (row, slot) pair's expert output, unweighted: x [M, H] bf16, ids int32 [M, S] (the router's,
     the shared expert as id E) -> yd [M S, H] fp32 in the pairs' own order (`combine_inject_norm`'s
     input, as `fn_kernels.moe_experts` returns it)."""
+    if hasattr(bank, "experts"):
+        return bank.experts(x, ids)
     M, S = ids.shape
     P = M * S
     mod = _module()
@@ -191,7 +193,9 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
     group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
     dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores; tc: int8 weights
-    through `mm_i8_tc`, fp16 ones as fp32."""
+    through `mm_i8_tc`, fp16 ones as fp32. A weight with its own `mul_rows(x)` (bf16 out) multiplies itself."""
+    if hasattr(w, "mul_rows"):
+        return w.mul_rows(x).float()
     if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
         return mm_i8_tc(x.contiguous(), w)
     if MM in ("fp32", "tc"):
