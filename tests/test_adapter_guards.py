@@ -49,8 +49,14 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
 #: ENG-411: the kernel source strings leave engine/native_tree.py and the tools/ kernels (csrc/ files): v2 again
-GOLDEN_V2 = ("faf028096854cce746c42f570e94f7e04a62775902d5d3b1f75640582c427b5a",
-             "fe2e7ba3ee4fc933eff399243aa4d7d506e142be73fd4910d6611dff950c396f")
+#: SPD-249: the prefill's marked grid (engine/cache.py `Grid`, off unless a prompt has a head mark) and the
+#: store keeping a head's snapshot last, and engine/capture_lock.py's guard for CUDA work off the engine's
+#: thread, and the gate's store shed in chunks: v2's second value again (the first skips engine/cache.py)
+#: #105: engine/drafters/ngram.py skips a lookup corpus of another tokenizer instead of refusing it: v2 again
+#: SPD-249: the gate's store shed asks the heads before the next level when only heads are left or the chunks before
+#: them were too small to tell (engine/cache.py): v2's second value again
+GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
+             "6c81236626f8335d1212ea17d26d9ec80c7558f897d1ca8234661dbdd202f028")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -89,12 +95,37 @@ GOLDEN_FP4 = {
     # no row changes); Flash-Next and Ornith
     # ENG-411: the kernel sources move into csrc/ files beside their modules and count in the fingerprint (the
     # compiled text unchanged); every adapter
+    # SPD-249: Flash-Next's launch class checked on the host, no class below the state's in an idle capture (no row
+    # changes); Flash-Next and Ornith
+    # SPD-249: the expert-union count (off by default), the mixer GEMV writing the mix_up's A,
+    # the joint pass's GDN pre in one launch and the deferred GDN write-back, the grouped MoE grid rows, staged rows
+    # and group cap (all off, the bits the same); Flash-Next, Ornith and the adapters that read its kernel sources
+    # SPD-249: FN_DRAFT_FREEZE (off), the drafters' adaptive state kept at its start for A/B arms; Flash-Next, Ornith
+    # SPD-249: FN_ATTN_MULTI and FN_PLE_MULTI (off), a joint pass's attention and PLE for every lane at once;
+    # the grouped MoE's pre-lever kernels at the lever defaults; Flash-Next's kernels and the adapters that read them
+    # SPD-249: FN_JOINT_GRAPH (off), a dense joint pass from CUDA graphs; the pad rows' expert id -1 skipped by the
+    # grouped kernels and ranked by slot in the combine (no real row changes); Flash-Next and the adapters that read
+    # its kernel sources
+    # SPD-249: the round runner's CPU ms in /health and QSE_RUNNER_HOST_BLOCKS (off); the adapters that read the runner
+    # SPD-249: FN_PLE_PREFETCH (the round runner hands a lane's tree to the family before its verify) and the grouped
+    # expert kernels with their rows streamed and their groups from one block's scans (all off, the bits the same);
+    # every adapter but qwen3_5
+    # SPD-255: NemotronH's 33-row verify block on the row kernels (engine/models/nemotron_h/engine.py): nemotron_h
+    # SPD-249: comments only, the plan labels out (engine/settings.py, the round runner, Flash-Next's engine and
+    # serving, the fn_kernels sources); every adapter but qwen3_5
+    # SPD-249: an eager joint pass after one that raised starts on clean entry tables, a joint graph is kept by its
+    # lanes' KV strides too, /health copies the kept keys (engine/models/flashnext/engine.py): Flash-Next and Ornith
+    # SPD-249: Flash-Next's coupled MTP drafts for seeded sampled requests, their one-lane head, the cut calibration
+    # file and the corrector (all off by default; Flash-Next and Ornith, which reads Flash-Next's engine and knobs);
+    # the joint prefill and the MTP lanes' lookup backoff (off), the round runner's host counters, busy work and
+    # collector control (off; engine/methods/busy.py, mtp_drafter.py, staircut.py, the runner): every adapter but
+    # qwen3_5 and nemotron_h
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "25b36ced9a41d1873adba9d63f487c0a46932fb69c93ca48856c07a663c3cdc0",
-    "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
-    "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
-    "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
-    "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
+    "qwen4_exp": "97db6053996643b5530b442bf2aba5b64c258ed557ce0cfbcd4c366bd1aa7941",
+    "nemotron_h": "e0e4b9c5a88dac18997664f592d55a7ae29d46093a3ecf526a0588df9d50a051",
+    "lfm2_moe": "cd8c37de23b3dab664bdaf603d2eb5dd2aa526a52e6375746444f64372649433",
+    "qwen3_5_moe": "c41b271d33350691fc97be300184e27355dfc4eb6ec3afb2ff1d90440ffb3c99",
+    "flint": "65b48c7202a82a922f41b118b56c2bc2b243c3dd561d213cd261f10f2cdf4367",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
