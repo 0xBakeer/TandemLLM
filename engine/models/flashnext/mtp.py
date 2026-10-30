@@ -19,8 +19,13 @@ from engine.models.flashnext.ref import MTP
 
 
 class FlashNextMTPHead:
-    def __init__(self, fn: FlashNextEngine, depth: int, cap: int, pages=None):
+    """`depths` (QWEN38_FN_DEPTH_LADDER): shorter chains the drafter may ask for a round (`cur`), each with its own
+    graphs; `depth` stays the deepest (the buffers, the cut's ceiling). Empty: every round drafts `depth`."""
+
+    def __init__(self, fn: FlashNextEngine, depth: int, cap: int, pages=None, depths: tuple = ()):
         self.fn, self.depth = fn, depth
+        self.depths = tuple(sorted({d for d in depths if 0 < d < depth} | {depth}))
+        self.cur = depth
         self.st = fn.new_mtp_state(cap, pages=pages)
         self.graphs: dict = {}
         self.captures = 0               # graphs captured so far (a round that captured is not a price)
@@ -55,12 +60,18 @@ class FlashNextMTPHead:
     def capture_all(self) -> None:
         """The graphs of every feed a round can bring (1 .. depth + 1 rows) at the current context class."""
         self.fn._mtp_key = self.key
-        cls = self.fn.qsa_class(self.st.length + self.depth + 1)
-        for n in range(1, self.depth + 2):
-            if (n, cls) not in self.graphs:
-                self.graphs[(n, cls)] = MTPChainGraph(self.fn, self.st, n, self.depth, cls)
-                self.graphs[(n, cls)].capture()
-                self.captures += 1
+        for d in self.depths:
+            cls = self.fn.qsa_class(self.st.length + d + 1)
+            for n in range(1, self.depth + 2):
+                k = self._key(n, cls, d)
+                if k not in self.graphs:
+                    self.graphs[k] = MTPChainGraph(self.fn, self.st, n, d, cls)
+                    self.graphs[k].capture()
+                    self.captures += 1
+
+    def _key(self, n: int, cls: int, d: int):
+        """A graph's key: (feed rows, class) at the full depth (as the idle captures name it), with the depth below."""
+        return (n, cls) if d == self.depth else (n, cls, d)
 
     def capture_class(self, n: int, cls: int) -> None:
         """The graph of an n-row feed at context class `cls`, ahead of the round that needs it (the
@@ -78,25 +89,28 @@ class FlashNextMTPHead:
         self.fn._mtp_key = self.key
         fn = self.fn
         n = len(nexts)
-        cls = fn.qsa_class(self.st.length + n + self.depth - 1)
+        d = self.depth if draft_meet.MEET is not None else self.cur
+        self._d = d
+        cls = fn.qsa_class(self.st.length + n + d - 1)
         if draft_meet.MEET is not None and draft_meet.MEET(self):
             # SPD-235: the round runner runs this draft with its other lanes' (`run_packed`), before the read
             fn._mtp_bufs(self.depth)["stack"][:n].copy_(rows)
             assert fn.stage_mtp(self.st, nexts, self.depth) == cls
             self._n, self._cls = n, cls
             return
-        g = self.graphs.get((n, cls))
-        if (n, cls) in self.fresh:
-            self.fresh.discard((n, cls))
+        key = self._key(n, cls, d)
+        g = self.graphs.get(key)
+        if key in self.fresh:
+            self.fresh.discard(key)
             self.captures += 1          # an idle capture's first replay uploads it: the drafter skips it
         if g is None:
-            g = self.graphs[(n, cls)] = MTPChainGraph(fn, self.st, n, self.depth, cls)
+            g = self.graphs[key] = MTPChainGraph(fn, self.st, n, d, cls)
             g.capture()
             self.captures += 1          # this round's draft time is the capture's (the drafter skips it)
-        b = fn._mtp_bufs(self.depth)
+        b = fn._mtp_bufs(d)
         b["stack"][:n].copy_(rows)
         t0 = time.perf_counter()
-        assert fn.stage_mtp(self.st, nexts, self.depth) == cls
+        assert fn.stage_mtp(self.st, nexts, d) == cls
         fn.host_ms["stage_mtp"] = fn.host_ms.get("stage_mtp", 0.0) + 1e3 * (time.perf_counter() - t0)
         g.graph.replay()
         self._n = n
@@ -112,5 +126,6 @@ class FlashNextMTPHead:
         self.fn._mtp_key = self.key
         torch.cuda.current_stream().synchronize()
         self.st.length += self._n
-        b = self.fn._mtp_bufs(self.depth)
-        return b["tok_h"][:self.depth].tolist(), b["prob_h"][:self.depth].tolist()
+        d = getattr(self, "_d", self.depth)
+        b = self.fn._mtp_bufs(d)
+        return b["tok_h"][:d].tolist(), b["prob_h"][:d].tolist()

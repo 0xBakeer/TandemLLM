@@ -319,8 +319,8 @@ class FlashNextServing:
         per_token = 0 if paged else cost.view_bytes_per_token * 13 // 12      # the MTP layer's 13th
         return per_token, cost.section_bytes + SIDE_SLOT_CONST
 
-    def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
-        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len, pages=self.st.pages)
+    def add_mtp_head(self, depth: int, depths: tuple = ()) -> FlashNextMTPHead:
+        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len, pages=self.st.pages, depths=depths)
         # the head's graphs are captured now (`capture_all`): with the KV pool its first rows must be
         # mapped -- a Triton launch refuses a buffer whose first page is not ("cannot be accessed from
         # Triton", 2026-10-12)
@@ -830,7 +830,12 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                      max_depth=16, min_corpus_order=8)
                 log(f"[server] Flash-Next lookup in the cut: corpus "
                     f"{(corpus or 'none') if ngram.corpus is not None else 'none'}")
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram)
+            # the head's depth ladder (QWEN38_FN_DEPTH_LADDER; NVIDIA's profile drafts 2..depth by acceptance: a round
+            # there costs ~2.75 ms a draft, so a prose round drafting 8 paid ~16 ms for drafts the cut dropped)
+            lad = _S.get("FN_DEPTH_LADDER") or ("2,3,4,6" if nv else "")
+            depths = tuple(int(x) for x in lad.replace(" ", "").split(",") if x)
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth, depths), StairCut(prices(pack, log), siblings=False),
+                                     ngram)
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")
