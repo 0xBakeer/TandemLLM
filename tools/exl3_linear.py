@@ -67,6 +67,8 @@ from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
 
+from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
+
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
 # ENG-285: the half-integer rates of exllamav3 1.6.0's mul1 packs below 4 bpw (1.5, 2.5, 3.5), as the
@@ -259,8 +261,11 @@ class EXL3Block:
         """Wi[:, n0:n1] in fp16 (the rotated basis), decoded on the device."""
         n1 = self.N if n1 is None else n1
         wi = torch.empty(self.K, n1 - n0, dtype=torch.float16, device=self.t.device)
-        if self.t.is_cuda:
+        if self.t.is_cuda and _sm_supported(self.t.device):
             _module().exl3_recon(self.t, wi, self.kb, n0)
+        elif self.t.is_cuda:
+            from tools import exl3_ada
+            return exl3_ada.decode(self.t, n0 // 16, n1 // 16)
         else:
             wi.copy_(decode_trellis(self.t, n0 // 16, n1 // 16))
         return wi
@@ -337,9 +342,22 @@ def _tile_perm() -> torch.Tensor:
     return p
 
 
+_PERM: dict = {}
+
+
+def _tile_perm_dev(device) -> torch.Tensor:
+    """`_tile_perm()` on `device`, cached per device (a per-call host copy cannot run inside a
+    CUDA graph, and need not run eagerly either)."""
+    key = str(device)
+    if key not in _PERM:
+        _PERM[key] = _tile_perm().to(device)
+    return _PERM[key]
+
+
 def decode_trellis(t: torch.Tensor, nt0: int = 0, nt1: int | None = None) -> torch.Tensor:
     """Pure-torch decode of trellis tiles [KT, nt0:nt1] -> Wi fp16 [Kin, 16 (nt1 - nt0)].
-    Bit for bit what the kernels decode (the gate checks it); slow, for tests and the CPU path."""
+    Bit for bit what the kernels decode (the gate checks it); the 16-bit windows come from a
+    two-word gather instead of a bitstring, the same arithmetic ~16x cheaper."""
     KT, NT, W = t.shape
     kb = kb_of(W)
     nt1 = NT if nt1 is None else nt1
@@ -347,40 +365,132 @@ def decode_trellis(t: torch.Tensor, nt0: int = 0, nt1: int | None = None) -> tor
     n = nt1 - nt0
     words = tt.view(KT * n, W // 2)
     nbits = 16 * W
-    # the bit string, MSB-first per word: bit b of the string is bit (31 - b % 32) of word b // 32
-    shifts = 31 - torch.arange(32, device=t.device)
-    bitstr = ((words.unsqueeze(-1) >> shifts) & 1).view(KT * n, nbits)            # [tiles, 256 kb]
+    # the bit string, MSB-first per word: bit b of the string is bit (31 - b % 32) of word b // 32.
+    # A weight's 16-bit window ends at `end` (exclusive): it starts at a = end - 16, wrapped at the
+    # word-aligned string end, and spans its word's low end plus the next word's top (off > 16).
     p = torch.arange(256, device=t.device)
-    # exclusive end; a half-integer rate's odd weights take one bit more (exl3_linear dq8_frac)
     end = (p + 1) * kb if kb < 10 else (p + 1) * (kb // 10) + (p + 1) // 2
-    idx = (end.view(-1, 1) - 16 + torch.arange(16, device=t.device).view(1, -1)) % nbits   # [256, 16]
-    win = bitstr[:, idx]                                                             # [tiles, 256, 16]
-    weights = (1 << (15 - torch.arange(16, device=t.device)))
-    v = (win * weights).sum(-1)                                                      # 16-bit windows
+    a = (end - 16) % nbits                                                          # [256]
+    off = a % 32                                                                    # inside word a // 32
+    w0i = a // 32
+    w0 = words[:, w0i]                                                              # [tiles, 256]
+    w1 = words[:, (w0i + 1) % (W // 2)]
+    single = (w0 >> (16 - off).clamp(0, 63)) & 0xFFFF
+    split = ((w0 & ((1 << (32 - off).clamp(0, 63)) - 1)) << (off - 16).clamp(0, 63)) | \
+            ((w1 >> (48 - off).clamp(0, 63)) & ((1 << (off - 16).clamp(0, 63)) - 1))
+    v = torch.where((off <= 16)[None, :], single, split)                            # 16-bit windows
     x = (v * MUL1) & 0xFFFFFFFF
     s = (x & 0xFF) + ((x >> 8) & 0xFF) + ((x >> 16) & 0xFF) + ((x >> 24) & 0xFF)
     h = (1024 + s).float()                                                           # fp16 0x6400 + s
     k_inv = torch.tensor(0x1eee, dtype=torch.int16).view(torch.float16).float()
     k_bias = torch.tensor(0xc931 - 0x10000, dtype=torch.int16).view(torch.float16).float()
     val = (h * k_inv + k_bias).to(torch.float16)                                     # exact in fp32
-    perm = _tile_perm().to(t.device)
+    perm = _tile_perm_dev(t.device)
     tile = torch.empty(KT * n, 256, dtype=torch.float16, device=t.device)
     tile[:, perm] = val
     tile = tile.view(KT, n, 16, 16).permute(0, 2, 1, 3).reshape(KT * 16, n * 16)
     return tile
 
 
-def reference_matmul(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
+def _fallback_matmul(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     """The product the kernels mean, in fp32 except for the two roundings the kernels make on
     purpose (the rotated input to fp16, the output to bf16/fp32): the correctness gate's yardstick."""
+    from tools import exl3_ada
+    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
+    H = hadamard128(x.device)
+    M = x.shape[0]
+    outs = []
+    for g, n0, n1 in segments(w):
+        if ada:
+            xh = exl3_ada.rot_in(x, w.suh[g])
+        else:
+            xs = x.float() * w.suh[g].float()
+            xh = (xs.view(M, -1, 128) @ H).view(M, w.K).to(torch.float16)
+        y = None
+        if ada and x.is_cuda:
+            y = exl3_ada.try_gemv_rot(xh, w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1],
+                                      w.out_fp32)
+        if y is None:
+            yp = exl3_ada.try_gemv(xh, w.t[:, n0 // 16:n1 // 16]) if x.is_cuda else None
+            if yp is None:
+                yp = xh.float() @ w.inner(n0, n1).float()
+            y = (exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32) if ada else
+                 (yp.view(M, -1, 128) @ H).view(M, n1 - n0) * w.svh[n0:n1].float())
+        outs.append(y)
+    y = torch.cat(outs, 1)
+    return y if w.out_fp32 else y.to(torch.bfloat16)
+
+
+def reference_matmul(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
+    """Independent torch oracle: pure trellis decode and explicit rotation roundings."""
     H = hadamard128(x.device)
     M = x.shape[0]
     outs = []
     for g, n0, n1 in segments(w):
         xs = x.float() * w.suh[g].float()
-        xh = (xs.view(M, -1, 128) @ H).view(M, w.K).to(torch.float16).float()
-        yp = xh @ w.inner(n0, n1).float()
+        xh = (xs.view(M, -1, 128) @ H).view(M, w.K).to(torch.float16)
+        wi = decode_trellis(w.t, n0 // 16, n1 // 16).float()
+        yp = xh.float() @ wi
         y = (yp.view(M, -1, 128) @ H).view(M, n1 - n0) * w.svh[n0:n1].float()
+        outs.append(y)
+    y = torch.cat(outs, 1)
+    return y if w.out_fp32 else y.to(torch.bfloat16)
+
+
+def _reference_xh(xh: torch.Tensor, w: EXL3Block) -> torch.Tensor:
+    """reference_matmul's tail for an input already rotated (`rotate_in`'s [G, M, K] fp16):
+    the products, the output rotation, svh."""
+    from tools import exl3_ada
+    ada = xh.is_cuda and exl3_ada.rot_ok(xh.device)
+    H = hadamard128(xh.device)
+    M = xh.shape[1]
+    outs = []
+    for g, n0, n1 in segments(w):
+        y = exl3_ada.try_gemv_rot(xh[g], w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1],
+                                  w.out_fp32) if ada and xh.is_cuda else None
+        if y is None:
+            yp = exl3_ada.try_gemv(xh[g], w.t[:, n0 // 16:n1 // 16]) if xh.is_cuda else None
+            if yp is None:
+                wi = w.inner(n0, n1).float()
+                yp = torch.cat([xh[g, m:m + 1].float() @ wi for m in range(M)])
+            y = (exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32) if ada else
+                 torch.cat([(yp[m:m + 1].view(1, -1, 128) @ H).view(1, n1 - n0)
+                            for m in range(M)]) * w.svh[n0:n1].float())
+        outs.append(y)
+    y = torch.cat(outs, 1)
+    return y if w.out_fp32 else y.to(torch.bfloat16)
+
+
+def _reference_rows(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
+    """reference_matmul a row at a time: a row's bits are its lone-row call's. The batched GEMM's
+    summation order depends on M, so a verify row would not be the decode step's bit for bit
+    (ENG-287). The Ada kernels are row-invariant by construction, so the whole batch goes in one
+    call; the torch fallback keeps the row loop."""
+    from tools import exl3_ada
+    if x.shape[0] == 1:
+        return _fallback_matmul(x, w)
+    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
+    H = hadamard128(x.device)
+    M = x.shape[0]
+    outs = []
+    for g, n0, n1 in segments(w):
+        if ada:
+            xhs = exl3_ada.rot_in(x, w.suh[g])
+        else:
+            xhs = torch.empty(M, w.K, dtype=torch.float16, device=x.device)
+            for m in range(M):
+                xs = x[m:m + 1].float() * w.suh[g].float()
+                xhs[m] = (xs.view(1, -1, 128) @ H).view(w.K).to(torch.float16)
+        y = exl3_ada.try_gemv_rot(xhs, w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1],
+                                  w.out_fp32) if ada and x.is_cuda else None
+        if y is None:
+            yp = exl3_ada.try_gemv(xhs, w.t[:, n0 // 16:n1 // 16]) if x.is_cuda else None
+            if yp is None:
+                wi = w.inner(n0, n1).float()
+                yp = torch.cat([xhs[m:m + 1].float() @ wi for m in range(M)])
+            y = (exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32) if ada else
+                 torch.cat([(yp[m:m + 1].view(1, -1, 128) @ H).view(1, n1 - n0)
+                            for m in range(M)]) * w.svh[n0:n1].float())
         outs.append(y)
     y = torch.cat(outs, 1)
     return y if w.out_fp32 else y.to(torch.bfloat16)
@@ -390,6 +500,12 @@ def reference_matmul(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
 def rotate_in(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     G = w.suh.shape[0]
     xh = torch.empty(G, x.shape[0], w.K, dtype=torch.float16, device=x.device)
+    if not _sm_supported(x.device):
+        H = hadamard128(x.device)
+        for g in range(G):
+            xs = x.float() * w.suh[g].float()
+            xh[g] = (xs.view(-1, w.K // 128, 128) @ H).view(-1, w.K).to(torch.float16)
+        return xh
     _module().exl3_rot_in(x, w.suh, xh)
     return xh
 
@@ -408,6 +524,28 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     assert y.dtype == torch.bfloat16 and y.dim() == 2 and y.shape[1] == 2 * w.K and w.suh.shape[0] == 1
     if y.stride(1) != 1 or y.stride(0) % 4 or y.data_ptr() % 8:
         y = y.contiguous()
+    if not _sm_supported(y.device):
+        from tools import exl3_ada
+        if exl3_ada.rot_ok(y.device):
+            xh = exl3_ada.rot_in_silu(y, w.suh[0])
+            outs = []
+            for g, n0, n1 in segments(w):
+                y = exl3_ada.try_gemv_rot(xh, w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1],
+                                          w.out_fp32)
+                if y is None:
+                    yp = exl3_ada.try_gemv(xh, w.t[:, n0 // 16:n1 // 16])
+                    if yp is None:
+                        wi = w.inner(n0, n1).float()
+                        yp = torch.cat([xh[m:m + 1].float() @ wi
+                                        for m in range(xh.shape[0])])
+                    y = exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32)
+                outs.append(y)
+            r = torch.cat(outs, 1)
+            return r if w.out_fp32 else r.to(torch.bfloat16)
+        g = y[:, : w.K].float()
+        u = y[:, w.K :].float()
+        a = (g / (1.0 + torch.exp(-g))).to(torch.bfloat16).float() * u
+        return _fallback_matmul(a.to(torch.bfloat16), w)
     xh = torch.empty(1, y.shape[0], w.K, dtype=torch.float16, device=y.device)
     _module().exl3_rot_in_silu(y, w.suh, xh)
     return exl3_matmul(None, w, xh=xh, M=y.shape[0], dev=y.device)
@@ -423,6 +561,8 @@ def exl3_mlp_slab(x: torch.Tensor, gu: EXL3Block, wd: EXL3Block) -> torch.Tensor
             and wd.suh.shape[0] == 1 and x.shape[0] > CHUNK_UNTIL):
         return None
     if _mm_out_fp32() is False:
+        return None
+    if not _sm_supported(x.device):
         return None
     mod = _module()
     M = x.shape[0]
@@ -462,6 +602,12 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
     if out is None:
         out = torch.empty(M, w.N, dtype=odt, device=dev)
+    if not _sm_supported(dev):
+        if M > CHUNK_UNTIL:
+            return _slab_matmul_ada(x, w, out, xh=xh)
+        r = _reference_rows(x, w) if xh is None else _reference_xh(xh, w)
+        out.copy_(r.view(M, w.N))
+        return out
     mod = _module()
     # the skinny GEMM decodes integer rates; a half-integer one (an LFM2.5 pack's, ENG-285) takes the
     # slab at any row count (its rows <= 32 run on tools/fn_kernels.dense)
@@ -540,6 +686,25 @@ def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
         wi = w.inner(n0, n1)
         yp = _mm_fp32(xh[g], wi)
         mod.exl3_rot_out(yp, w.svh[n0:n1], out[:, n0:n1])
+        del wi, yp
+    return out
+
+
+def _slab_matmul_ada(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
+                     xh: torch.Tensor | None = None) -> torch.Tensor:
+    """`_slab_matmul` for archs without the sm_121a GEMM: the Triton decode fills the fp16 slab,
+    the library GEMM keeps the fp32 product (`_mm_fp32`), `_exl3_rot_out_kernel` rotates the
+    output. Decode+GEMM amortizes the weight read over M rows -- the right shape for prefill."""
+    from tools import exl3_ada
+    if xh is None:
+        G = w.suh.shape[0]
+        xh = torch.empty(G, x.shape[0], w.K, dtype=torch.float16, device=x.device)
+        for g in range(G):
+            xh[g] = exl3_ada.rot_in(x, w.suh[g])
+    for g, n0, n1 in segments(w, SLAB_N):
+        wi = w.inner(n0, n1)
+        yp = _mm_fp32(xh[g], wi)
+        out[:, n0:n1] = exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32)
         del wi, yp
     return out
 

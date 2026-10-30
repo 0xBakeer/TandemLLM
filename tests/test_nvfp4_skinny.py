@@ -39,8 +39,15 @@ def test_off_by_default_and_the_switch_switches():
     sk = _reload()
     assert not any(sk.use_skinny(m) for m in (1, 8, 16, 32)), "on without the flag"
     sk = _reload(QWEN38_NVFP4_SKINNY="1")
-    assert all(sk.use_skinny(m) for m in (1, 2, 8, 15, 16, 17, 32)), "flag on, a row count off"
+    from unittest import mock
+    import torch
+    with mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 1)):
+        assert all(sk.use_skinny(m) for m in (1, 2, 8, 15, 16, 17, 32)), "flag on, a row count off"
     assert not sk.use_skinny(33) and not sk.use_skinny(0), "outside 1..32"
+    with mock.patch.object(torch.cuda, "get_device_capability", return_value=(8, 9)):
+        assert not any(sk.use_skinny(m) for m in (1, 8, 32)), "Ada is not the skinny arch"
+    with mock.patch.object(torch.cuda, "get_device_capability", side_effect=RuntimeError("no device")):
+        assert not any(sk.use_skinny(m) for m in (1, 8, 32)), "no capability query, no skinny"
     _reload()
     return "off by default; on for 1..32 with QWEN38_NVFP4_SKINNY=1, never above"
 
@@ -62,7 +69,10 @@ def test_one_row_and_a_verified_block_take_the_same_kernel():
     from tools import nvfp4_linear
     sk = _reload(QWEN38_NVFP4_SKINNY="1")
     try:
-        routed = {m: nvfp4_linear.use_skinny(m) for m in (1, 2, 4, 8, 11, 14, 15, 16, 24, 32)}
+        from unittest import mock
+        import torch
+        with mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 1)):
+            routed = {m: nvfp4_linear.use_skinny(m) for m in (1, 2, 4, 8, 11, 14, 15, 16, 24, 32)}
         assert set(routed.values()) == {True}, routed
     finally:
         _reload()

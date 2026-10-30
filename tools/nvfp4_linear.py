@@ -72,12 +72,37 @@ prmt.b32 $3, t2, t3, 0x7632;
 """)
 
 
+# set by nvfp4_matmul on the first call: cvt.rn.f16x2.e2m1x2 is sm_120+; anything older decodes
+# the nibble in integer arithmetic instead (the e2m1 grid is affine in fp16 bits, see below)
+_E2M1_HW = tl.constexpr(False)
+
+
+def _e2m1_hw_ok(device) -> bool:
+    try:
+        _E2M1_HW.value = torch.cuda.get_device_capability(device) >= (12, 0)
+    except Exception:
+        _E2M1_HW.value = False
+    return _E2M1_HW.value
+
+
 @triton.jit
 def _fp4_decode(packed):
     """Uint8 tile [..., 16] -> (even fp16 tile, odd fp16 tile), same shape, values on the e2m1 grid."""
-    return tl.inline_asm_elementwise(
-        _FP4_DECODE_ASM, "=r,=r,=r,=r,r", [packed], dtype=(tl.float16, tl.float16),
-        is_pure=True, pack=4)
+    if _E2M1_HW:
+        return tl.inline_asm_elementwise(
+            _FP4_DECODE_ASM, "=r,=r,=r,=r,r", [packed], dtype=(tl.float16, tl.float16),
+            is_pure=True, pack=4)
+    # software e2m1 on pre-sm_120: rebias the nibble into fp16 bits. magnitude i (nibble & 7) is
+    # s|ee|m: subnormal 0.5 at i = 1, else fp16 exponent (i>>1) + 14 with mantissa bit i&1 << 9,
+    # giving the grid 0.5, 1, 1.5, 2, 3, 4, 6. nibble bit 3 is the fp16 sign bit << 12.
+    p = packed.to(tl.int32)
+    il = p & 7
+    ml = tl.where(il < 2, il * 0x3800, ((il >> 1) + 14) << 10 | (il & 1) << 9)
+    we = (ml | ((p & 8) << 12)).to(tl.uint16).to(tl.float16, bitcast=True)
+    ih = (p >> 4) & 7
+    mh = tl.where(ih < 2, ih * 0x3800, ((ih >> 1) + 14) << 10 | (ih & 1) << 9)
+    wo = (mh | ((p & 0x80) << 8)).to(tl.uint16).to(tl.float16, bitcast=True)
+    return we, wo
 
 
 @triton.jit
@@ -286,6 +311,7 @@ def nvfp4_matmul(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = None,
     x = x.contiguous()
     if x.device.type != "cuda":
         return torch.nn.functional.linear(x, w.dequant())
+    _e2m1_hw_ok(x.device)
     if block_n is None and split_k is None and prefill_v2(M):
         from tools.nvfp4_linear_v2 import nvfp4_matmul_v2
         return nvfp4_matmul_v2(x, w, out=out, **PREFILL_V2_TILE)
@@ -458,6 +484,22 @@ _SPLIT_K_OVERRIDE = int(_S.get("NVFP4_SPLITK"))
 # and that is worth more, in the engine, than the tile shape the isolated sweep prefers.
 _BLOCK_TILES = _S.get("NVFP4_BLOCK_TILES")
 
+_HW_BLOCK = None
+
+
+def _hw_block() -> bool:
+    # the measured  tiles were verified bit-identical to the decode tile on sm_121a, which
+    # is the only thing that lets a verify block and a decode row share the same accumulation
+    # order. Until a table is measured on an older part, the block bucket keeps the decode tile
+    # there; NVFP4_BLOCK_TILES=all/splitk opts back in.
+    global _HW_BLOCK
+    if _HW_BLOCK is None:
+        try:
+            _HW_BLOCK = torch.cuda.get_device_capability() >= (12, 0)
+        except Exception:
+            _HW_BLOCK = False
+    return _HW_BLOCK
+
 # Above this row count a projection is unpacked to bf16 once and handed to the library GEMM instead
 # of being decoded in registers. 0 turns it off, which restores the W4A16 path at every M.
 #
@@ -505,7 +547,8 @@ def pick_config(N: int, K: int, M: int) -> dict:
     if bucket == "block":
         cand = _CONFIG.get((N, K), {}).get("block")
         if (_BLOCK_TILES == "0" or cand is None
-                or (_BLOCK_TILES == "splitk" and cand.get("split_k", 1) < 2)):
+                or (_BLOCK_TILES == "splitk" and cand.get("split_k", 1) < 2)
+                or (_BLOCK_TILES is None and not _hw_block())):
             bucket = "decode"
     cfg = dict(_CONFIG.get((N, K), _FALLBACK).get(bucket, _FALLBACK[bucket]))
     cfg.setdefault("block_m", 16 if M <= 16 else (32 if M <= 32 else 64))

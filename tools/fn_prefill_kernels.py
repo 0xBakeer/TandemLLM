@@ -40,6 +40,7 @@ import torch  # noqa: E402
 from engine import native_build as nb  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
+from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
 
 _HELPERS = X._CUDA[: X._CUDA.index("constexpr float RSQRT128")]
 
@@ -99,6 +100,12 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     input, as `fn_kernels.moe_experts` returns it)."""
     M, S = ids.shape
     P = M * S
+    if not _sm_supported(x.device):
+        try:
+            from tools.moe_ada import moe_grouped_ada
+            return moe_grouped_ada(x, ids, bank)
+        except Exception:
+            return moe_grouped_reference(x, ids, bank)
     mod = _module()
     g = group_plan(ids.reshape(-1), bank.n, rows)
     R, prow = g["R"], g["prow"]

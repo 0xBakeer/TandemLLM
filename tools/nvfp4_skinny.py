@@ -304,7 +304,12 @@ def scale_runs(s: torch.Tensor) -> torch.Tensor:
 
 
 def use_skinny(M: int) -> bool:
-    return SKINNY and 1 <= M <= SKINNY_MAX
+    if not (SKINNY and 1 <= M <= SKINNY_MAX):
+        return False
+    try:
+        return torch.cuda.get_device_capability() >= (12, 0)
+    except Exception:
+        return False
 
 
 # ------------------------------------------------------------------ gate and bench

@@ -108,7 +108,7 @@ V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
 V2_0150 = "58a0f1a95d3c8187"
 #: ENG-411: the 27B's v2 with SAME_ROWS once the kernel sources left the modules (tests/test_adapter_guards.py
 #: GOLDEN_V2[0])
-V2_NOW = "faf028096854cce7"
+V2_NOW = "b2e0162810f192ca"
 #: 0.15.0's fp4 by adapter (extra {}): what no family adopts after ENG-411
 FP4_0150 = {"qwen3_5": "be7b55433345d94d", "qwen4_exp": "b41ebca1bd94daf9", "nemotron_h": "d3e365f847df2f74",
             "lfm2_moe": "eae9da4634edd3fa", "qwen3_5_moe": "c3db84a3452b9cbb", "flint": "be812ac05a869010"}

@@ -209,11 +209,29 @@ def pick_config_v2(N: int, K: int, M: int) -> dict:
     return cfg
 
 
+_HW_V2 = None
+
+
+def _hw_v2() -> bool:
+    # the shipped 1..32 default was measured on sm_121a; on older parts the software e2m1
+    # decode makes v2 several times slower than v1, so the default goes back to v1 there.
+    # NVFP4_V2=1/all still turns it on.
+    global _HW_V2
+    if _HW_V2 is None:
+        try:
+            _HW_V2 = torch.cuda.get_device_capability() >= (12, 0)
+        except Exception:
+            _HW_V2 = False
+    return _HW_V2
+
+
 def use_v2(M: int) -> bool:
     if V2 == "0":
         return False
     if V2 == "all":
         return True
+    if V2 is None and not _hw_v2():
+        return False
     return V2_MIN <= M <= V2_MAX
 
 
@@ -226,6 +244,9 @@ def nvfp4_matmul_v2(x: torch.Tensor, w: NVFP4Block, *, block_m: int | None = Non
     assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.shape, w.shape)
     M = x.shape[0]
     x = x.contiguous()
+    if x.device.type == "cuda":
+        from tools.nvfp4_linear import _e2m1_hw_ok
+        _e2m1_hw_ok(x.device)
     cfg = pick_config_v2(w.N, w.K, M)
     block_m = cfg["block_m"] if block_m is None else block_m
     block_n = cfg["block_n"] if block_n is None else block_n

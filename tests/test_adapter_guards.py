@@ -49,8 +49,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
 #: ENG-411: the kernel source strings leave engine/native_tree.py and the tools/ kernels (csrc/ files): v2 again
-GOLDEN_V2 = ("faf028096854cce746c42f570e94f7e04a62775902d5d3b1f75640582c427b5a",
-             "fe2e7ba3ee4fc933eff399243aa4d7d506e142be73fd4910d6611dff950c396f")
+#: frozen for #77: the Ada/GGUF hardening intentionally invalidates the previous code
+#: identities; SAME_ROWS is unchanged
+GOLDEN_V2 = ("b2e0162810f192cabebc933cff9a84926c1f7f93c0178dca7eb5ca27bb6ff1b3",
+             "23bd81713d5682934793a855a5177daca98df58bb5eb649a755251f7652fdf46")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -95,6 +97,12 @@ GOLDEN_FP4 = {
     "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
     "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
     "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
+    "qwen3_5": "7d8eb79b63cf6520596620aba55869aeb06e7e6f502f0292ca3ee2b60f2b0840",
+    "qwen4_exp": "6ed7aa8ee5b520ae376151a0ced6b5d03f3f2dfb2524815d9fbbbb7c012d7c57",
+    "nemotron_h": "99d8c6e861f7b16505e775aa784005ae3d86d1b274b60e0b6466907d17ace7ad",
+    "lfm2_moe": "e6b998eff9b67fef1444475a2ce986102e3cd4a107e2e7f3d3a5f1ebaa4e6be1",
+    "qwen3_5_moe": "9bc466b55ab7bae87624969c0e17549c17ca9feae4a485ca3dcc11630bc2e59d",
+    "flint": "4c2585f06e2ffff2827856b06cf247730f9923f632591d537af4a19826e0eb67",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
