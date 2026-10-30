@@ -66,6 +66,7 @@ from server import sampling_defaults  # noqa: E402  (SPD-245 a request's filters
 from server import prefill_burst  # noqa: E402  (SPD-245 the prefills of requests that arrive together)
 from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
 from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
+from server import health_cache  # noqa: E402  (SPD-249 /health's parts and reuse)
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
@@ -298,6 +299,8 @@ class ClientGone(ConnectionResetError):
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
 INFLIGHT = {"waiting": 0, "running": 0, "lane": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
+#: SPD-249: `/health`'s full body, its parts timed and reused for QSE_HEALTH_TTL_MS (server/health_cache.py)
+HEALTH = health_cache.HealthCache()
 
 # S1: who waits for the engine, in what order, and who holds it. Every waiter has a rank: a short
 # side request (a client's title call, capped and without thinking) goes first, because it holds
@@ -543,11 +546,67 @@ def _lane_room(job, where: str) -> bool:
         return where != "prefill"
 
 
-def _par_status() -> dict:
+def _health_body(part) -> dict:
+    """`/health`'s full body but the fields `HEALTH.answer`'s caller builds fresh (status, fault,
+    uptime, in flight, engine busy); `part(name, fn)` times each report (server/health_cache.py)."""
+    return {
+        "status_port": _status_port(),
+        "model": served_name(), "base_model": STATE.get("model"),
+        "version": STATE.get("version", ""), "weights": part("weights", weights_profile),
+        "max_queue": STATE.get("max_queue"),
+        "request_timeout_s": STATE.get("request_timeout"),
+        "max_len": STATE.get("max_len"),
+        "sampling": part("sampling", _health_sampling),
+        "penalty": {"rep": STATE["pen_spec"].rep,
+                    "presence": STATE["pen_spec"].presence,
+                    "freq": STATE["pen_spec"].freq,
+                    "no_repeat": STATE["pen_spec"].no_repeat},
+        "default_max_tokens": STATE.get("default_max_tokens"),
+        "cache": part("cache", cache_stats),
+        "memory": part("memory", _memory),
+        # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
+        **({"kv_pool": part("kv_pool", kv_pool_report)} if kvpool.POOL is not None else {}),
+        # the small models and the memory governor (server/rolemem.py)
+        "roles": part("roles", _safe, roles_report),
+        **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
+        # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
+        **_par_status(part),
+    }
+
+
+def _health_sampling() -> dict:
+    return {"temperature": STATE.get("temperature", 0.0),
+            "top_p": STATE.get("top_p", 1.0),
+            "top_k": STATE.get("top_k", 0),
+            # SPD-245: what a sampled request that names no filter runs with
+            "unnamed_filters": sampling_defaults.resolve(
+                None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
+            # SPD-245: whether an unseeded sampled request draws its own seed
+            "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
+                         "keyed": sampling_defaults.keys_unseeded(
+                             _S.get("FRESH_SEED"), _sampled_q_free())},
+            # SRV-241: what a regenerate samples with, and how many there were
+            "regenerate": (STATE["regenerate"].report()
+                           if STATE.get("regenerate") is not None
+                           else {"mode": "off"}),
+            # SRV-475: the checkpoint's sampling and the loop escape's counts
+            "card": STATE.get("card_sampling"),
+            "loop_escape": (STATE["escapes"].report()
+                            if STATE.get("escapes") is not None else None),
+            # SRV-477: `--reasoning-effort none|off` turns thinking off
+            "thinking_default": STATE.get("thinking_default", "on")}
+
+
+def _untimed(name, fn, *args):
+    return fn(*args)
+
+
+def _par_status(part=_untimed) -> dict:
     """`/health`'s `parallel` key: the pool's report with side slots, the one slot and why when `--parallel N`
-    asked for more than the model's engine builds (#104), nothing otherwise."""
+    asked for more than the model's engine builds (#104), nothing otherwise. `part(name, fn)` times a
+    report (SPD-249, server/health_cache.py)."""
     if dict.get(STATE, "pool") is not None:
-        return {"parallel": _par_health()}
+        return {"parallel": _par_health(part)}
     n = dict.get(STATE, "parallel_unbuilt")
     if n:
         return {"parallel": {"n": 1, "running": INFLIGHT["running"], "decoding": [], "requested": n,
@@ -556,28 +615,29 @@ def _par_status() -> dict:
     return {}
 
 
-def _par_health() -> dict:
+def _par_health(part=_untimed) -> dict:
     """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
     (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader), and the
     joint decode graphs the engine keeps (`joint_graphs`, engine/models/graph_lru.py; None without)."""
-    out = dict.get(STATE, "pool").report()
+    out = part("par_pool", dict.get(STATE, "pool").report)
     r = dict.get(STATE, "disk_side")
-    out["side_disk"] = r.report() if r is not None else None
+    out["side_disk"] = part("par_side_disk", r.report) if r is not None else None
     eng = dict.get(STATE, "engine")
     jg = getattr(getattr(eng, "fn", None), "__dict__", {}).get("joint_graphs")
-    out["joint_graphs"] = jg.report() if hasattr(jg, "report") else None
+    out["joint_graphs"] = part("par_joint_graphs", jg.report) if hasattr(jg, "report") else None
     rep = getattr(eng, "joint_graphs_report", None)
     if out["joint_graphs"] is None and callable(rep):
-        out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
+        out["joint_graphs"] = part("par_joint_graphs", rep)      # SPD-163: the 27B's joint verify graphs
     js = getattr(eng, "joint_stats", None)
-    out["joint_stats"] = js() if callable(js) else None              # SPD-249: the family's joint-pass shape
+    out["joint_stats"] = part("par_joint_stats", js) if callable(js) else None   # SPD-249: the joint-pass shape
     rr = _round_runner.RUNNER
-    out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
+    out["round_runner"] = part("par_runner", rr.report) if rr is not None else None      # SPD-201
     pool = dict.get(STATE, "pool")
     pl = getattr(getattr(pool, "meeting", None), "planner", None)
-    out["planner"] = pl.report() if pl is not None and hasattr(pl, "report") else None   # SPD-187
+    out["planner"] = (part("par_planner", pl.report)
+                      if pl is not None and hasattr(pl, "report") else None)   # SPD-187
     if kvpool.POOL is not None:
-        out["kv_pool"] = kv_pool_report()
+        out["kv_pool"] = part("par_kv_pool", kv_pool_report)
     # SRV-709: lanes that gave their memory back mid-answer and went on (`Handler._recomputing`)
     out["recompute"] = {"on": KV_RECOMPUTE, "admit_rows": KV_ADMIT_ROWS,
                         **(dict.get(STATE, "kv_recompute") or {"gave_way": 0, "resumed": 0,
@@ -7585,52 +7645,12 @@ class Handler(BaseHTTPRequestHandler):
                 # through the proxy, the status and nothing about the configuration (a page there
                 # reaches the status responder through the same proxy, OPS-175)
                 return self._json(code, {"status": status, **failed})
-            return self._json(code, {
-                "status": status, **failed,
-                "status_port": _status_port(),
-                "model": served_name(), "base_model": STATE.get("model"),
-                "version": STATE.get("version", ""), "weights": weights_profile(),
-                "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
-                "engine_busy": LOCK.locked(),
-                "inflight": dict(INFLIGHT),
-                "max_queue": STATE.get("max_queue"),
-                "request_timeout_s": STATE.get("request_timeout"),
-                "max_len": STATE.get("max_len"),
-                "sampling": {"temperature": STATE.get("temperature", 0.0),
-                             "top_p": STATE.get("top_p", 1.0),
-                             "top_k": STATE.get("top_k", 0),
-                             # SPD-245: what a sampled request that names no filter runs with
-                             "unnamed_filters": sampling_defaults.resolve(
-                                 None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
-                             # SPD-245: whether an unseeded sampled request draws its own seed
-                             "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
-                                          "keyed": sampling_defaults.keys_unseeded(
-                                              _S.get("FRESH_SEED"), _sampled_q_free())},
-                             # SRV-241: what a regenerate samples with, and how many there were
-                             "regenerate": (STATE["regenerate"].report()
-                                            if STATE.get("regenerate") is not None
-                                            else {"mode": "off"}),
-                             # SRV-475: the checkpoint's sampling and the loop escape's counts
-                             "card": STATE.get("card_sampling"),
-                             "loop_escape": (STATE["escapes"].report()
-                                             if STATE.get("escapes") is not None else None),
-                             # SRV-477: `--reasoning-effort none|off` turns thinking off
-                             "thinking_default": STATE.get("thinking_default", "on")},
-                "penalty": {"rep": STATE["pen_spec"].rep,
-                            "presence": STATE["pen_spec"].presence,
-                            "freq": STATE["pen_spec"].freq,
-                            "no_repeat": STATE["pen_spec"].no_repeat},
-                "default_max_tokens": STATE.get("default_max_tokens"),
-                "cache": cache_stats(),
-                "memory": _memory(),
-                # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
-                **({"kv_pool": kv_pool_report()} if kvpool.POOL is not None else {}),
-                # the small models and the memory governor (server/rolemem.py)
-                "roles": _safe(roles_report),
-                **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
-                # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
-                **_par_status(),
-            })
+            # SPD-249: the full body from HEALTH (server/health_cache.py): its parts timed, built at most
+            # once a QSE_HEALTH_TTL_MS; what a watchdog decides on is built fresh on every call
+            fresh = {"status": status, **failed,
+                     "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                     "engine_busy": LOCK.locked(), "inflight": dict(INFLIGHT)}
+            return self._send_bytes(code, HEALTH.answer(fresh, _health_body))
         if path == "/metrics/up":
             # a public page with one number and nothing else, so the scrape can tell an
             # engine that is down from a metrics token that is wrong (the real page's 401).
