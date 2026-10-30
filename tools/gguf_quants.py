@@ -63,6 +63,64 @@ def _padn(a, nbp):
     return np.pad(a, ((0, 0), (0, nbp - a.shape[1]))) if a.shape[1] != nbp else a
 
 
+def _pk_q6k(b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """element-order planes for Q6_K: LO [n, 32] int32 = low-4 code (word e//8, bits 4*(e%8)),
+    HI [n, 16] int32 = high-2 code (word e//16, bits 2*(e%16))."""
+    s = np.arange(256) // 32
+    t = np.arange(256) % 32
+    h, c = s // 4, s % 4
+    ql = b[..., :128].astype(np.int32)
+    qh = b[..., 128:192].astype(np.int32)
+    lo = np.ascontiguousarray((ql[..., 64 * h + 32 * (c & 1) + t] >> (4 * (c // 2))) & 0xF).astype(np.uint32)
+    hi = np.ascontiguousarray((qh[..., 32 * h + t] >> (2 * c)) & 3).astype(np.uint32)
+    lo32 = (lo.reshape(*lo.shape[:-1], 32, 8) << (4 * np.arange(8, dtype=np.uint32))).sum(-1) \
+        .astype(np.uint32).view(np.int32)
+    hi16 = (hi.reshape(*hi.shape[:-1], 16, 16) << (2 * np.arange(16, dtype=np.uint32))).sum(-1) \
+        .astype(np.uint32).view(np.int32)
+    return lo32, hi16
+
+
+_IQ_LUT = {}
+
+
+def _iq_luts() -> dict:
+    """The IQ gemms' decode LUTs, built once: the grid values as bf16 bit patterns in int16
+    [entries, W] so one gather replaces the SWAR/magic decode, and int16 sign masks (0x8000
+    where a sign bit is set) keyed by the KSIGNS byte (parity bit included) or a raw sign
+    byte. `iq1` is one [2048, 8] table; its kernels add +/- DELTA in fp32."""
+    if not _IQ_LUT:
+        from tools import gguf_grids as GR
+        from tools.iq2_linear import KSIGNS
+
+        def bits(v: np.ndarray) -> np.ndarray:
+            return torch.tensor(np.ascontiguousarray(v, dtype=np.float32),
+                                dtype=torch.bfloat16).view(torch.int16).numpy()
+
+        bit = np.arange(8, dtype=np.uint8)[None, :]
+        sgn8 = ((KSIGNS[:, None] >> bit) & 1).astype(np.uint16) * 0x8000
+        sgn256 = ((np.arange(256, dtype=np.uint8)[:, None] >> bit) & 1).astype(np.uint16) * 0x8000
+        g1 = bits(GR.IQ1_GRID)
+        _IQ_LUT.update(iq2xs=(bits(GR.IQ2_XS_GRID), sgn8.view(np.int16)),
+                       iq3xxs=(bits(GR.IQ3_XXS_GRID), sgn8.view(np.int16)),
+                       iq3s=(bits(GR.IQ3_S_GRID), sgn256.view(np.int16)),
+                       iq2s=(bits(GR.IQ2_S_GRID), sgn256.view(np.int16)),
+                       iq1=(g1,))
+    return _IQ_LUT
+
+
+_IQ_LUT_DEV = {}
+
+
+def _iq_lut(name: str, device) -> tuple:
+    """The IQ decode LUTs as device tensors, built once per (table, device) and shared by
+    every packed linear instead of each instance uploading its own copy."""
+    key = (name, torch.device(device))
+    if key not in _IQ_LUT_DEV:
+        _IQ_LUT_DEV[key] = tuple(torch.from_numpy(np.ascontiguousarray(t)).to(device)
+                                 for t in _iq_luts()[name])
+    return _IQ_LUT_DEV[key]
+
+
 def dq_f32(b):  return b.view(np.float32)
 def dq_f16(b):  return _f16(b)
 def dq_bf16(b): return (b.view(np.uint16).astype(np.uint32) << np.uint32(16)).view(np.float32)
@@ -427,19 +485,19 @@ def dequant(tid: int, raw: np.ndarray, shape) -> torch.Tensor:
 if HAVE_TRITON:
 
     @triton.jit
-    def _q40_gemm(X, s_x, D, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr):
+    def _q40_gemm(X, s_x, D, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q4_0, plane-major: each group of 8 blocks is 32 int32 words a row (one 128 B line); word j
         # packs element j's 4-bit codes of blocks 8g..8g+7 at bits 4i. Scales zero-pad blocks
         # contribute nothing (x zero-padded by the caller past K). w = (q-8)*d decoded to bf16,
         # one K=256 tl.dot a group, fp32 accumulate, K in order -> same row-invariance contract.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -457,16 +515,16 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _q4k_gemm(X, s_x, QS, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _q4k_gemm(X, s_x, QS, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q4_K: 256 weights a super-block, eight 32-wide sub-blocks with a 6-bit scale and min each
         # (decoded once at load into DS/DM fp16 [N, nb, 8]). Same row-invariance contract as _q40_gemm.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             for s in tl.static_range(8):
                 byte = (s // 2) * 32 + t
@@ -484,52 +542,50 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
     @triton.jit
-    def _q6k_gemm(X, s_x, QL, QH, DL, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
-        # Q6_K: 256 weights a super-block; ql[128] low nibbles, qh[64] high pairs, 16 int8 scales folded
-        # into DL fp16 [N, nb, 16] at load. Sub s (32 elems, h = s//4 half, c = s%4 chunk):
-        #   code = ((ql[64h + 32(c&1) + t] >> 4*(c>>1)) & 0xF) | (((qh[32h + t] >> 2c) & 3) << 4) - 32
-        #   scale index s*2 + t//16 — same contract as _q40_gemm.
+    def _q6k_gemm(X, s_x, QL, QH, DL, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
+        # Q6_K: 256 weights a super-block, codes in element-order planes: LO int32 [BN,32]
+        # (word e//8, low nibble at bits 4*(e%8)), HI int32 [BN,16] (high pair at bits 2*(e%16));
+        # DL fp16 [16] one per 16 weights. w = (bf16(0x4300|c) - 160) * dl, one K=256 tl.dot a
+        # super-block, fp32 accumulate, K in order -> same row-invariance contract as _q40_gemm.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
-        t = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        t = tl.arange(0, 256)
+        w32 = tl.arange(0, 32)
+        e16 = tl.arange(0, 16)
+        e8 = tl.arange(0, 8)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
-            for s in tl.static_range(8):
-                h = s // 4
-                c = s % 4
-                ql = tl.load(QL + (cols[:, None] * NB + kb) * 128 + h * 64 + (c % 2) * 32 + t[None, :],
-                             mask=cm[:, None], other=0)
-                qh = tl.load(QH + (cols[:, None] * NB + kb) * 64 + h * 32 + t[None, :],
-                             mask=cm[:, None], other=0)
-                code = ((ql >> (4 * (c // 2))) & 0xF) | (((qh >> (2 * c)) & 3) << 4)
-                base = (cols * NB + kb) * 16 + s * 2
-                dl0 = tl.load(DL + base, mask=cm, other=0.0)
-                dl1 = tl.load(DL + base + 1, mask=cm, other=0.0)
-                # magic int->bf16: bf16(0x4300|c) == 128+c; -160 gives the signed c-32 code
-                c6 = ((code | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True)
-                dl = tl.where((t // 16)[None, :] == 1, dl1[:, None], dl0[:, None]).to(tl.bfloat16)
-                w = (c6 - 160.0) * dl
-                x = tl.load(X + rows[:, None] * s_x + kb * 256 + s * 32 + t[None, :],
-                            mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+            b = cols * NB + kb
+            lo = tl.load(QL + b[:, None] * 32 + w32[None, :], mask=cm[:, None], other=0)
+            hi = tl.load(QH + b[:, None] * 16 + e16[None, :], mask=cm[:, None], other=0)
+            dl = tl.load(DL + b[:, None] * 16 + e16[None, :], mask=cm[:, None], other=0.0)
+            c = tl.reshape((lo[:, :, None] >> (4 * e8)[None, None, :]) & 0xF, (BN, 256))
+            c = c | tl.reshape(((hi[:, :, None] >> (2 * e16)[None, None, :]) & 3) << 4, (BN, 256))
+            dle = tl.reshape(tl.broadcast_to(dl[:, :, None], (BN, 16, 16)), (BN, 256))
+            # magic int->bf16: bf16(0x4300|c) == 128+c; -160 gives the signed c-32 code
+            cb = ((c | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True)
+            w = (cb - 160.0) * dle.to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
     @triton.jit
-    def _q41_gemm(X, s_x, D, M_, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr):
+    def _q41_gemm(X, s_x, D, M_, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q4_1: Q4_0's plane-major pack with Q4_1's min: w = q*d + m decoded to bf16, one dot a group.
         # Same layout and contract as _q40_gemm.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -548,17 +604,17 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _q50_gemm(X, s_x, D, QH, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr):
+    def _q50_gemm(X, s_x, D, QH, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q5_0: plane-major nibbles + a per-block u32 of fifth bits (bit j = element j, zero-padded
         # like the codes): w = (code-16)*d to bf16, one dot a group. Same contract as _q40_gemm.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -578,17 +634,17 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _q51_gemm(X, s_x, D, M_, QH, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr):
+    def _q51_gemm(X, s_x, D, M_, QH, QP, Y, s_y, M, N, NG, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q5_1: Q5_0's codes with Q4_1's scale+min: w = code*d + m to bf16, one dot a group.
         # Same contract as _q40_gemm.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -609,17 +665,17 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _q2k_gemm(X, s_x, QS, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _q2k_gemm(X, s_x, QS, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q2_K: 256 weights a super-block; qs[64] hold the 2-bit codes of sub s at byte
         # (s//4)*32 + t, shift 2*(s%4); scales are 16 4-bit pairs folded to DS/DM fp16 [N, nb, 16]
         # at load (index s*2 + t//16). Same contract as _q40_gemm.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             for s in tl.static_range(8):
                 q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + (s // 4) * 32 + t[None, :],
@@ -642,16 +698,16 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
     @triton.jit
-    def _q3k_gemm(X, s_x, QS, HM, DL, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _q3k_gemm(X, s_x, QS, HM, DL, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q3_K: 2-bit codes like Q2_K plus one hmask bit per element (0 -> subtract 4);
         # 16 signed 6-bit scales folded to DL fp16 [N, nb, 16] at load. Same contract.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             for s in tl.static_range(8):
                 q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + (s // 4) * 32 + t[None, :],
@@ -673,16 +729,16 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
     @triton.jit
-    def _q5k_gemm(X, s_x, QS, QH, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _q5k_gemm(X, s_x, QS, QH, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # Q5_K: Q4_K's nibbles + one high bit per element from qh[32] (bit s of byte t in sub s);
         # DS/DM fp16 [N, nb, 8] predecoded from the 6-bit pack at load. Same contract.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             for s in tl.static_range(8):
                 byte = (s // 2) * 32 + t
@@ -701,19 +757,19 @@ if HAVE_TRITON:
     @triton.jit
     def _iq4nl_gemm(X, s_x, D, QP, Y, s_y, M, N, NG,
                     W0: tl.constexpr, W1: tl.constexpr, W2: tl.constexpr, W3: tl.constexpr,
-                    BN: tl.constexpr, F32: tl.constexpr):
+                    BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # IQ4_NL on the P8 layout: the same 32-word groups as _q40_gemm, but the nibble codes
         # index a fixed 16-entry value table kept in registers as four int32s of four
         # 2's-complement bytes (word c>>2, byte c&3). w = v*d decoded to bf16, one K=256 tl.dot
         # a group, fp32 accumulate, K in order -> same row-invariance contract.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -736,18 +792,18 @@ if HAVE_TRITON:
     @triton.jit
     def _iq4xs_gemm(X, s_x, QP, DL, Y, s_y, M, N, NG,
                     W0: tl.constexpr, W1: tl.constexpr, W2: tl.constexpr, W3: tl.constexpr,
-                    BN: tl.constexpr, F32: tl.constexpr):
+                    BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # IQ4_XS on the P8 layout: each 256-super-block is one 8-sub-block group of 32 int32
         # words; the codes index the same register value table as _iq4nl_gemm, scaled by the
         # folded sub-block scale DL fp16. Same contract as _q40_gemm.
         pm, pn = tl.program_id(0), tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
         i8 = tl.arange(0, 8)
         e = tl.arange(0, 256)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for g in range(0, NG):
             w32 = tl.load(QP + (cols[:, None] * NG + g) * 32 + t[None, :],
                           mask=cm[:, None], other=0)
@@ -768,40 +824,33 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq2xs_gemm(X, s_x, D, QS16, SC, GR, KS, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _iq2xs_gemm(X, s_x, D, QS16, SC, GRB, SGN, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # IQ2_XS: 256 a block; 32 u16 (QS16 view) — low 9 bits the 512-entry 8-elem grid, top 7 the
-        # sign index. Signs applied SWAR on each packed grid half (GR as int32 pairs): the sign
-        # nybble becomes a 4-byte mask M, gs = (ge ^ M) + (M & 0x01010101) is 2's-complement negation
-        # a byte (grid bytes >= 8, no cross-byte carry); (b ^ 0x80) - 128 is then the signed value.
-        # w = d*(0.5+s)*0.25 * v, whole block [BN,256] one tl.dot — the row-invariance contract.
+        # sign index. GRB holds the grid values as bf16 bits and SGN a 0x8000 mask a sign bit, so
+        # one gather + an XOR of the sign bit decodes; w = d*(0.5+s)*0.25 * v, whole block
+        # [BN,256] one tl.dot — the row-invariance contract.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
         t = tl.arange(0, 256)
         e = tl.arange(0, 32)
-        e2 = tl.arange(0, 2)
-        e4 = tl.arange(0, 4)
         s8 = tl.arange(0, 8)
         l4 = tl.arange(0, 4)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             u = tl.load(QS16 + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32) & 0xFFFF
-            ge = tl.load(GR + (u & 511)[:, :, None] * 2 + e2[None, None, :])               # [BN,32,2] i32
-            ks = tl.load(KS + (u >> 9))                                                 # [BN,32]
-            sn = (ks[:, :, None] >> (4 * e2)[None, None, :]) & 0xF
-            tm = (sn * 0x01010101) & 0x08040201
-            msk = (((tm + 0x7F7F7F7F) | tm) >> 7 & 0x01010101) * 0xFF                   # [BN,32,2]
-            gs = (ge ^ msk) + (msk & 0x01010101)
-            vb = ((gs[:, :, :, None] >> (8 * e4)[None, None, None, :]) & 0xFF) ^ 0x80   # [BN,32,2,4]
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of((u & 511) * 8, [8, 8])[:, :, None] + s8[None, None, :], [1, 1, 8]))
+            sg = tl.load(SGN + tl.max_contiguous(tl.multiple_of((u >> 9) * 8, [8, 8])[:, :, None] + s8[None, None, :], [1, 1, 8]))
             sc8 = tl.load(SC + b[:, None] * 8 + s8[None, :], mask=cm[:, None], other=0).to(tl.int32)
             sc4 = tl.reshape((sc8[:, :, None] >> (4 * (l4 // 2))[None, None, :]) & 0xF, (BN, 32))
             d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
             db = d[:, None] * (0.5 + sc4.to(tl.float32)) * 0.25                         # [BN,32]
-            w = ((vb.to(tl.float32) - 128.0) * db[:, :, None, None]).to(tl.bfloat16)
+            w = ((gb ^ sg).to(tl.bfloat16, bitcast=True).to(tl.float32)
+                 * db[:, :, None]).to(tl.bfloat16)
             w = tl.reshape(w, (BN, 256))
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
@@ -812,14 +861,14 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq3xxs_gemm(X, s_x, D, QS32, SC, GR, KS, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _iq3xxs_gemm(X, s_x, D, QS32, SC, GRB, SGN, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # IQ3_XXS: 256 a block; 64 qs bytes (QS32 word view) index the 256-entry 4-elem grid; eight
         # u32 sc words — four 7-bit sign indices + a 4-bit scale each, a sign index covering two
-        # adjacent entries (its low nybble the first, high nybble the second). Signs applied SWAR
-        # on the packed int32 entry exactly like _iq2xs_gemm. w = d*(0.5+s)*0.5 * v, one tl.dot.
+        # adjacent entries (its low nybble the first, high nybble the second). GRB/SGN tables like
+        # _iq2xs_gemm: one gather + a sign-bit XOR decodes. w = d*(0.5+s)*0.5 * v, one tl.dot.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
@@ -829,24 +878,20 @@ if HAVE_TRITON:
         g8 = tl.arange(0, 8)
         e8 = tl.arange(0, 8)
         l4 = tl.arange(0, 4)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             w4 = tl.load(QS32 + b[:, None] * 16 + e16[None, :], mask=cm[:, None], other=0)
             idx = tl.reshape((w4[:, :, None] >> (8 * e4)[None, None, :]) & 0xFF, (BN, 64))
-            ge = tl.load(GR + idx)                                                       # [BN,64] i32
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of(idx * 4, [4, 4])[:, :, None] + e4[None, None, :], [1, 1, 4]))
             scw = tl.load(SC + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0).to(tl.int32)
             si = (scw[:, :, None] >> (7 * l4)[None, None, :]) & 0x7F                     # [BN,8,4]
-            ks = tl.load(KS + si)
-            sn = tl.reshape(tl.join(ks & 0xF, (ks >> 4) & 0xF), (BN, 8, 8))              # sign nybble a entry
-            tm = (sn * 0x01010101) & 0x08040201
-            msk = (((tm + 0x7F7F7F7F) | tm) >> 7 & 0x01010101) * 0xFF                    # [BN,8,8]
-            ger = tl.reshape(ge, (BN, 8, 8))
-            gs = (ger ^ msk) + (msk & 0x01010101)
-            vb = ((gs[:, :, :, None] >> (8 * e4)[None, None, None, :]) & 0xFF) ^ 0x80    # [BN,8,8,4]
+            sg = tl.load(SGN + tl.max_contiguous(tl.multiple_of(si * 8, [8, 8, 8])[:, :, :, None] + e8[None, None, None, :], [1, 1, 1, 8]))
             d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
             db = d[:, None] * (0.5 + ((scw >> 28) & 0xF).to(tl.float32)) * 0.5           # [BN,8]
-            w = ((vb.to(tl.float32) - 128.0) * db[:, :, None, None]).to(tl.bfloat16)
+            w = tl.reshape(gb, (BN, 8, 8, 4)) ^ tl.reshape(sg, (BN, 8, 8, 4))
+            w = (w.to(tl.bfloat16, bitcast=True).to(tl.float32)
+                 * db[:, :, None, None]).to(tl.bfloat16)
             w = tl.reshape(w, (BN, 256))
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
@@ -857,12 +902,13 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq3s_gemm(X, s_x, D, QS, QH, SG, SC, GR, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+    def _iq3s_gemm(X, s_x, D, QS, QH, SG, SC, GRB, SGN, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
         # IQ3_S: 256 a block; 64 qs bytes | one qh bit each index the 512-entry 4-elem grid; 32 sg
-        # bytes sign each weight; eight 4-bit group scales. w = d*(1+2s)*grid*sign.
+        # bytes sign each weight; eight 4-bit group scales. w = d*(1+2s)*grid*sign — the grid
+        # bf16-bits table GRB and the sign-mask table SGN turn the decode into gathers + XOR.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
@@ -872,23 +918,21 @@ if HAVE_TRITON:
         e4 = tl.arange(0, 4)
         j8 = tl.arange(0, 8)
         b32 = tl.arange(0, 32)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             lo = tl.load(QS + b[:, None] * 64 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
             hmb = tl.load(QH + b[:, None] * 8 + (e // 8)[None, :], mask=cm[:, None], other=0).to(tl.int32)
             idx = lo | (((hmb >> (e % 8)[None, :]) & 1) << 8)                                 # [BN,64]
-            ge = tl.load(GR + idx).to(tl.int64)                                                   # [BN,64] i32
-            gr = ((ge[:, :, None] >> (8 * e4[None, None, :])) & 0xFF).to(tl.float32)              # [BN,64,4]
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of(idx * 4, [4, 4])[:, :, None] + e4[None, None, :], [1, 1, 4]))
             sgb = tl.load(SG + b[:, None] * 32 + b32[None, :], mask=cm[:, None], other=0).to(tl.int32)
-            neg = ((sgb[:, :, None] >> j8[None, None, :]) & 1) == 1                           # [BN,32,8]
+            sg = tl.load(SGN + tl.max_contiguous(tl.multiple_of(sgb * 8, [8, 8])[:, :, None] + j8[None, None, :], [1, 1, 8]))
             scb = tl.load(SC + b[:, None] * 4 + (g8 // 2)[None, :], mask=cm[:, None], other=0).to(tl.int32)
             sc4 = (scb >> (4 * (g8 % 2))[None, :]) & 0xF                                      # [BN,8]
             d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
             db = (d[:, None] * (1.0 + 2.0 * sc4.to(tl.float32)))[:, :, None]                  # [BN,8,1]
-            w = tl.reshape(tl.where(neg, -1.0, 1.0), (BN, 8, 32))
-            w = (w * tl.reshape(gr, (BN, 8, 32)) * db)
-            w = tl.reshape(w, (BN, 256)).to(tl.bfloat16)
+            w = tl.reshape(gb ^ tl.reshape(sg, (BN, 64, 4)), (BN, 8, 32))
+            w = tl.reshape(w.to(tl.bfloat16, bitcast=True).to(tl.float32) * db, (BN, 256)).to(tl.bfloat16)
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
             acc += tl.dot(x, tl.trans(w))
@@ -898,13 +942,13 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq2s_gemm(X, s_x, D, QS32, QH, SG, SC, GR, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
-        # IQ2_S: 256 a block; 32 qs bytes | two qh bits each index the 1024-entry 8-elem grid (GR as
-        # int32 pairs); 32 sg bytes, one sign byte an 8-elem entry — SWAR sign application per int32
-        # half like _iq2xs_gemm; a 4-bit scale a 16-elem group. w = d*(0.5+s)*0.25*grid*sign.
+    def _iq2s_gemm(X, s_x, D, QS32, QH, SG, SC, GRB, SGN, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
+        # IQ2_S: 256 a block; 32 qs bytes | two qh bits each index the 1024-entry 8-elem grid; 32
+        # sg bytes, one sign byte an 8-elem entry — GRB/SGN gathers + XOR like _iq2xs_gemm; a
+        # 4-bit scale a 16-elem group. w = d*(0.5+s)*0.25*grid*sign.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
@@ -914,10 +958,9 @@ if HAVE_TRITON:
         g8 = tl.arange(0, 8)
         c4 = tl.arange(0, 4)
         e4 = tl.arange(0, 4)
-        e2 = tl.arange(0, 2)
         s8 = tl.arange(0, 8)
         l4 = tl.arange(0, 4)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             w4 = tl.load(QS32 + b[:, None] * 8 + e8[None, :], mask=cm[:, None], other=0)
@@ -925,18 +968,15 @@ if HAVE_TRITON:
             qhb = tl.load(QH + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0).to(tl.int32)
             hbv = (qhb[:, :, None] >> (2 * c4)[None, None, :]) & 3                       # [BN,8,4]
             idx = lo | (tl.reshape(hbv, (BN, 32)) << 8)
-            ge = tl.load(GR + idx[:, :, None] * 2 + e2[None, None, :])                   # [BN,32,2] i32
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of(idx * 8, [8, 8])[:, :, None] + s8[None, None, :], [1, 1, 8]))
             sgb = tl.load(SG + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
-            sn = (sgb[:, :, None] >> (4 * e2)[None, None, :]) & 0xF                      # [BN,32,2]
-            tm = (sn * 0x01010101) & 0x08040201
-            msk = (((tm + 0x7F7F7F7F) | tm) >> 7 & 0x01010101) * 0xFF
-            gs = (ge ^ msk) + (msk & 0x01010101)
-            vb = ((gs[:, :, :, None] >> (8 * e4)[None, None, None, :]) & 0xFF) ^ 0x80    # [BN,32,2,4]
+            sg = tl.load(SGN + tl.max_contiguous(tl.multiple_of(sgb * 8, [8, 8])[:, :, None] + s8[None, None, :], [1, 1, 8]))
             sc8 = tl.load(SC + b[:, None] * 8 + s8[None, :], mask=cm[:, None], other=0).to(tl.int32)
             sc4 = tl.reshape((sc8[:, :, None] >> (4 * (l4 // 2))[None, None, :]) & 0xF, (BN, 32))
             d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
             db = d[:, None] * (0.5 + sc4.to(tl.float32)) * 0.25                          # [BN,32]
-            w = ((vb.to(tl.float32) - 128.0) * db[:, :, None, None]).to(tl.bfloat16)
+            w = ((gb ^ sg).to(tl.bfloat16, bitcast=True).to(tl.float32)
+                 * db[:, :, None]).to(tl.bfloat16)
             w = tl.reshape(w, (BN, 256))
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
@@ -947,14 +987,14 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq1s_gemm(X, s_x, D, QS32, QH, GR, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
-                   F32: tl.constexpr):
+    def _iq1s_gemm(X, s_x, D, QS32, QH, GRB, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
+                   F32: tl.constexpr, BM: tl.constexpr):
         # IQ1_S: 256 a block; 32 qs bytes | 3 bits of the group's u16 qh word index the 2048-entry
         # 8-elem grid; qh bits 12..14 the group scale, bit 15 the constant delta's sign.
-        # w = d*(2*sc+1) * (grid +- DELTA); grid bytes (value+1) decode via the 0x4300 magic.
+        # w = d*(2*sc+1) * (grid +- DELTA); GRB holds the grid as bf16 bits, delta added in fp32.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
@@ -963,20 +1003,18 @@ if HAVE_TRITON:
         e4 = tl.arange(0, 4)
         g8 = tl.arange(0, 8)
         j8 = tl.arange(0, 8)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             w4 = tl.load(QS32 + b[:, None] * 8 + e8[None, :], mask=cm[:, None], other=0)
             lo = tl.reshape((w4[:, :, None] >> (8 * e4)[None, None, :]) & 0xFF, (BN, 32))
             qw8 = tl.load(QH + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0)      # [BN,8]
             idx = lo | (tl.reshape((qw8[:, :, None] >> (3 * e4)[None, None, :]) & 7, (BN, 32)) << 8)
-            ge = tl.load(GR + idx)                                                            # [BN,32] i64
-            b8 = (ge[:, :, None] >> (8 * j8)[None, None, :]) & 0xFF
-            cb = ((b8 | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True).to(tl.float32) - 129.0
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of(idx * 8, [8, 8])[:, :, None] + j8[None, None, :], [1, 1, 8]))
             delta = tl.where((qw8 & 0x8000) == 0, DELTA, -DELTA)[:, :, None]                    # [BN,8,1]
             d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
             dl = d[:, None] * (2.0 * ((qw8 >> 12) & 7).to(tl.float32) + 1.0)                    # [BN,8]
-            w = tl.reshape(cb, (BN, 8, 32)) + delta
+            w = tl.reshape(gb.to(tl.bfloat16, bitcast=True).to(tl.float32), (BN, 8, 32)) + delta
             w = tl.reshape(w * dl[:, :, None], (BN, 256)).to(tl.bfloat16)
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
@@ -987,14 +1025,14 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _iq1m_gemm(X, s_x, QS32, QH, DL, GR, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
-                   F32: tl.constexpr):
+    def _iq1m_gemm(X, s_x, QS32, QH, DL, GRB, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
+                   F32: tl.constexpr, BM: tl.constexpr):
         # IQ1_M: 256 a block; 32 qs bytes | a qh nibble's low three bits index the 2048-entry grid,
         # its high bit flips DELTA; the 16 scales folded into DL fp16 at init. w = dl*(grid+-DELTA),
-        # grid bytes (value+1) via the 0x4300 magic.
+        # the grid as bf16 bits in one 2048-entry table, delta added in fp32.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         brow = cols * NB
@@ -1004,7 +1042,7 @@ if HAVE_TRITON:
         e2 = tl.arange(0, 2)
         s16 = tl.arange(0, 16)
         j8 = tl.arange(0, 8)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
             b = brow + kb
             w4 = tl.load(QS32 + b[:, None] * 8 + e8[None, :], mask=cm[:, None], other=0)
@@ -1012,12 +1050,10 @@ if HAVE_TRITON:
             hm = tl.load(QH + b[:, None] * 16 + s16[None, :], mask=cm[:, None], other=0).to(tl.int32)
             hb = tl.reshape((hm[:, :, None] >> (4 * e2)[None, None, :]) & 0xF, (BN, 32))
             idx = lo | ((hb & 7) << 8)
-            ge = tl.load(GR + idx)                                                            # [BN,32] i64
-            b8 = (ge[:, :, None] >> (8 * j8)[None, None, :]) & 0xFF
-            cb = ((b8 | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True).to(tl.float32) - 129.0
+            gb = tl.load(GRB + tl.max_contiguous(tl.multiple_of(idx * 8, [8, 8])[:, :, None] + j8[None, None, :], [1, 1, 8]))
             delta = tl.where((hb & 8) == 0, DELTA, -DELTA)[:, :, None]                          # [BN,32,1]
             dl = tl.load(DL + b[:, None] * 16 + s16[None, :], mask=cm[:, None], other=0.0).to(tl.float32)
-            w = tl.reshape(cb + delta, (BN, 16, 16))
+            w = tl.reshape(gb.to(tl.bfloat16, bitcast=True).to(tl.float32) + delta, (BN, 16, 16))
             w = tl.reshape(w * dl[:, :, None], (BN, 256)).to(tl.bfloat16)
             x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
                         mask=rows[:, None] < M, other=0.0)
@@ -1137,12 +1173,12 @@ if HAVE_TRITON:
 
     @triton.jit
     def _dq_q6k(DL, QL, QH, Y):
+        # the element-order planes of the new Q6_K layout: low nibble at word e//8 bits 4*(e%8),
+        # high pair at word e//16 bits 2*(e%16)
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
-        ql = tl.load(QL + pid * 128 + (e // 128) * 64 + (e % 64)).to(tl.int32)
-        lo = (ql >> (4 * ((e // 64) % 2))) & 0xF
-        qh = tl.load(QH + pid * 64 + (e // 128) * 32 + (e % 32)).to(tl.int32)
-        hb = (qh >> (2 * ((e // 32) % 4))) & 3
+        lo = (tl.load(QL + pid * 32 + e // 8).to(tl.int32) >> (4 * (e % 8))) & 0xF
+        hb = (tl.load(QH + pid * 16 + e // 16).to(tl.int32) >> (2 * (e % 16))) & 3
         code = ((lo | (hb << 4)) - 32).to(tl.float32)
         dl = tl.load(DL + pid * 16 + e // 16).to(tl.float32)
         tl.store(Y + pid * 256 + e, (dl * code).to(tl.bfloat16))
@@ -1175,7 +1211,7 @@ if HAVE_TRITON:
 
 
     @triton.jit
-    def _dq_iq2xs(D, QS16, SC, GR, KS, Y):
+    def _dq_iq2xs(D, QS16, SC, GRB, SGN, Y):
         # sixteen 16-weight groups; QS16 = the block's 32 u16 grid|sign-index words
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
@@ -1183,46 +1219,46 @@ if HAVE_TRITON:
         i2 = (e % 16) // 8
         j = e % 8
         u = tl.load(QS16 + pid * 32 + 2 * g + i2).to(tl.int32) & 0xFFFF
-        mag = ((tl.load(GR + (u & 511)) >> (8 * j)) & 0xFF).to(tl.float32)
-        neg = ((tl.load(KS + (u >> 9)) >> j) & 1) == 1
+        v = (tl.load(GRB + tl.multiple_of((u & 511) * 8, 8) + tl.max_contiguous(j, 8))
+          ^ tl.load(SGN + tl.multiple_of((u >> 9) * 8, 8) + tl.max_contiguous(j, 8)))
+        v = v.to(tl.bfloat16, bitcast=True).to(tl.float32)
         s4 = (tl.load(SC + pid * 8 + (g // 2)).to(tl.int32) >> (4 * (g % 2))) & 0xF
         d = tl.load(D + pid).to(tl.float32)
-        w = (d * (0.5 + s4.to(tl.float32))) * 0.25 * mag
-        tl.store(Y + pid * 256 + e, tl.where(neg, -w, w).to(tl.bfloat16))
+        w = (d * (0.5 + s4.to(tl.float32))) * 0.25 * v
+        tl.store(Y + pid * 256 + e, w.to(tl.bfloat16))
 
     @triton.jit
-    def _dq_iq3xxs(D, QS, SC, GR, KS, Y):
+    def _dq_iq3xxs(D, QS, SC, GRB, SGN, Y):
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
         s = e // 32
         ee = e % 32
-        mag = ((tl.load(GR + tl.load(QS + pid * 64 + s * 8 + ee // 4).to(tl.int32)) >> (8 * (e % 4)))
-               & 0xFF).to(tl.float32)
+        gb = tl.load(GRB + tl.load(QS + pid * 64 + s * 8 + ee // 4).to(tl.int32) * 4 + tl.max_contiguous(e % 4, 4))
         scw = tl.load(SC + pid * 8 + s)
-        ks = tl.load(KS + ((scw >> (7 * (ee // 8))) & 0x7F))
-        neg = ((ks >> (e % 8)) & 1) == 1
+        sg = tl.load(SGN + ((scw >> (7 * (ee // 8))) & 0x7F) * 8 + tl.max_contiguous(e % 8, 8))
+        v = (gb ^ sg).to(tl.bfloat16, bitcast=True).to(tl.float32)
         d = tl.load(D + pid).to(tl.float32)
-        w = (d * (0.5 + ((scw >> 28) & 0xF).to(tl.float32))) * 0.5 * mag
-        tl.store(Y + pid * 256 + e, tl.where(neg, -w, w).to(tl.bfloat16))
+        w = (d * (0.5 + ((scw >> 28) & 0xF).to(tl.float32))) * 0.5 * v
+        tl.store(Y + pid * 256 + e, w.to(tl.bfloat16))
 
     @triton.jit
-    def _dq_iq3s(D, QS, QH, SG, SC, GR, Y):
+    def _dq_iq3s(D, QS, QH, SG, SC, GRB, SGN, Y):
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
         s = e // 32
         ee = e % 32
         lo = tl.load(QS + pid * 64 + s * 8 + ee // 4).to(tl.int32)
         hmb = tl.load(QH + pid * 8 + s).to(tl.int32)
-        mag = ((tl.load(GR + (lo | (((hmb >> (ee // 4)) & 1) << 8))) >> (8 * (e % 4)))
-               & 0xFF).to(tl.float32)
-        neg = ((tl.load(SG + pid * 32 + s * 4 + ee // 8).to(tl.int32) >> (e % 8)) & 1) == 1
+        gb = tl.load(GRB + (lo | (((hmb >> (ee // 4)) & 1) << 8)) * 4 + tl.max_contiguous(e % 4, 4))
+        sg = tl.load(SGN + tl.load(SG + pid * 32 + s * 4 + ee // 8).to(tl.int32) * 8 + tl.max_contiguous(e % 8, 8))
+        v = (gb ^ sg).to(tl.bfloat16, bitcast=True).to(tl.float32)
         s4 = (tl.load(SC + pid * 4 + (s // 2)).to(tl.int32) >> (4 * (s % 2))) & 0xF
         d = tl.load(D + pid).to(tl.float32)
-        w = (d * (1.0 + 2.0 * s4.to(tl.float32))) * mag
-        tl.store(Y + pid * 256 + e, tl.where(neg, -w, w).to(tl.bfloat16))
+        w = (d * (1.0 + 2.0 * s4.to(tl.float32))) * v
+        tl.store(Y + pid * 256 + e, w.to(tl.bfloat16))
 
     @triton.jit
-    def _dq_iq2s(D, QS, SG, QH, SC, GR, Y):
+    def _dq_iq2s(D, QS, SG, QH, SC, GRB, SGN, Y):
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
         g = e // 16
@@ -1231,39 +1267,42 @@ if HAVE_TRITON:
         h = 2 * g + i2
         lo = tl.load(QS + pid * 32 + 2 * g + i2).to(tl.int32)
         hb = (tl.load(QH + pid * 8 + (h // 4)).to(tl.int32) >> (2 * (h % 4))) & 3
-        mag = ((tl.load(GR + (lo | (hb << 8))) >> (8 * j)) & 0xFF).to(tl.float32)
-        neg = ((tl.load(SG + pid * 32 + 2 * g + i2).to(tl.int32) >> j) & 1) == 1
+        gb = tl.load(GRB + tl.multiple_of((lo | (hb << 8)) * 8, 8) + tl.max_contiguous(j, 8))
+        sg = tl.load(SGN + tl.load(SG + pid * 32 + 2 * g + i2).to(tl.int32) * 8 + tl.max_contiguous(j, 8))
+        v = (gb ^ sg).to(tl.bfloat16, bitcast=True).to(tl.float32)
         s4 = (tl.load(SC + pid * 8 + (g // 2)).to(tl.int32) >> (4 * (g % 2))) & 0xF
         d = tl.load(D + pid).to(tl.float32)
-        w = (d * (0.5 + s4.to(tl.float32))) * 0.25 * mag
-        tl.store(Y + pid * 256 + e, tl.where(neg, -w, w).to(tl.bfloat16))
+        w = (d * (0.5 + s4.to(tl.float32))) * 0.25 * v
+        tl.store(Y + pid * 256 + e, w.to(tl.bfloat16))
 
     @triton.jit
-    def _dq_iq1s(D, QS, QH, GR, Y, DELTA: tl.constexpr):
+    def _dq_iq1s(D, QS, QH, GRB, Y, DELTA: tl.constexpr):
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
         s = e // 32
         l = (e % 32) // 8
         qh = tl.load(QH + pid * 8 + s)
         idx = tl.load(QS + pid * 32 + s * 4 + l).to(tl.int32) | (((qh >> (3 * l)) & 7) << 8)
-        mag = ((tl.load(GR + idx) >> (8 * (e % 8))) & 0xFF).to(tl.float32) - 1.0
+        v = tl.load(GRB + tl.multiple_of(idx * 8, 8) + tl.max_contiguous(e % 8, 8))
+        v = v.to(tl.bfloat16, bitcast=True).to(tl.float32)
         d = tl.load(D + pid).to(tl.float32)
         dl = d * (2.0 * ((qh >> 12) & 7).to(tl.float32) + 1.0)
         delta = tl.where((qh & 0x8000) == 0, DELTA, -DELTA)
-        tl.store(Y + pid * 256 + e, (dl * (mag + delta)).to(tl.bfloat16))
+        tl.store(Y + pid * 256 + e, (dl * (v + delta)).to(tl.bfloat16))
 
     @triton.jit
-    def _dq_iq1m(QS, QH, DL, GR, Y, DELTA: tl.constexpr):
+    def _dq_iq1m(QS, QH, DL, GRB, Y, DELTA: tl.constexpr):
         pid = tl.program_id(0)
         e = tl.arange(0, 256)
         i = e // 8
         j = e % 8
         hb = (tl.load(QH + pid * 16 + (i // 2)).to(tl.int32) >> (4 * (i % 2))) & 0xF
         idx = tl.load(QS + pid * 32 + i).to(tl.int32) | ((hb & 7) << 8)
-        mag = ((tl.load(GR + idx) >> (8 * j)) & 0xFF).to(tl.float32) - 1.0
+        v = tl.load(GRB + tl.multiple_of(idx * 8, 8) + tl.max_contiguous(j, 8))
+        v = v.to(tl.bfloat16, bitcast=True).to(tl.float32)
         dl = tl.load(DL + pid * 16 + i // 2).to(tl.float32)
         delta = tl.where((hb & 8) == 0, DELTA, -DELTA)
-        tl.store(Y + pid * 256 + e, (dl * (mag + delta)).to(tl.bfloat16))
+        tl.store(Y + pid * 256 + e, (dl * (v + delta)).to(tl.bfloat16))
 
 
 #: tid -> (dequant kernel, ((attr, int16-view?)...), constexpr attr -> param, blocks/program):
@@ -1281,19 +1320,19 @@ if HAVE_TRITON:
            13: (_dq_q5k, (("ds", 1, 0), ("dm", 1, 0), ("qs", 1, 0), ("qh", 1, 0)), {}, 1),
            14: (_dq_q6k, (("dl", 1, 0), ("ql", 1, 0), ("qh", 1, 0)), {}, 1),
            17: (_dq_iq2xs, (("d", 1, 0), ("qs", 1, torch.int16), ("sc", 1, 0),
-                            ("gr", 0, 0), ("ks", 0, 0)), {}, 1),
+                            ("grb", 0, 0), ("sgn", 0, 0)), {}, 1),
            18: (_dq_iq3xxs, (("d", 1, 0), ("qs", 1, 0), ("sc", 1, 0),
-                             ("gr", 0, 0), ("ks", 0, 0)), {}, 1),
-           19: (_dq_iq1s, (("d", 1, 0), ("qs", 1, 0), ("qh", 1, 0), ("gr", 0, 0)),
+                             ("grb", 0, 0), ("sgn", 0, 0)), {}, 1),
+           19: (_dq_iq1s, (("d", 1, 0), ("qs", 1, 0), ("qh", 1, 0), ("grb", 0, 0)),
                 {"DELTA": "_delta"}, 1),
            20: (_dq_iq4nl, (("d", 1, 0), ("q", 1, 0), ("lut", 0, 0)),
                 {"NB": "_nb", "NBP": "_nbp"}, 8),
            21: (_dq_iq3s, (("d", 1, 0), ("qs", 1, 0), ("qh", 1, 0), ("sg", 1, 0),
-                           ("sc", 1, 0), ("gr", 0, 0)), {}, 1),
+                           ("sc", 1, 0), ("grb", 0, 0), ("sgn", 0, 0)), {}, 1),
            22: (_dq_iq2s, (("d", 1, 0), ("qs", 1, 0), ("sg", 1, 0), ("qh", 1, 0),
-                           ("sc", 1, 0), ("gr", 0, 0)), {}, 1),
+                           ("sc", 1, 0), ("grb", 0, 0), ("sgn", 0, 0)), {}, 1),
            23: (_dq_iq4xs, (("qs", 1, 0), ("dl", 1, 0), ("lut", 0, 0)), {}, 1),
-           29: (_dq_iq1m, (("qs", 1, 0), ("qh", 1, 0), ("dl", 1, 0), ("gr", 0, 0)),
+           29: (_dq_iq1m, (("qs", 1, 0), ("qh", 1, 0), ("dl", 1, 0), ("grb", 0, 0)),
                 {"DELTA": "_delta"}, 1)}
 
 
@@ -1383,11 +1422,12 @@ class Q40Linear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
         ng = self.q.shape[1]
         if ng * 256 != self.K:
             x2 = torch.cat([x2, x2.new_zeros(M, ng * 256 - self.K)], 1)  # pad block tail -> 0
-        _q40_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.q, out,
-               out.stride(0), M, self.N, ng, BN=bn, F32=f32, num_warps=wp, num_stages=st)
+        _q40_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.q, out,
+               out.stride(0), M, self.N, ng, BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class Q4KLinear(_Packed):
@@ -1414,9 +1454,10 @@ class Q4KLinear(_Packed):
         self.nbytes = N * nb * 144
 
     def _kernel(self, x2, out, M, f32):
-        _q4k_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.qs, self.ds,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _q4k_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.qs, self.ds,
                                                                self.dm, out, out.stride(0), M, self.N,
-                                                               self.K // 256, BN=32, F32=f32,
+                                                               self.K // 256, BN=32, BM=bm, F32=f32,
                                                                num_warps=2, num_stages=3)
 
 
@@ -1430,8 +1471,9 @@ class Q6KLinear(_Packed):
         nb = K // 256
         b = np.ascontiguousarray(raw).reshape(N, nb, 210)
         self._raw = b.copy()
-        self.ql = torch.from_numpy(np.ascontiguousarray(b[..., :128])).to(device)
-        self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 128:192])).to(device)
+        _lo, _hi = _pk_q6k(b)
+        self.ql = torch.from_numpy(_lo).to(device)
+        self.qh = torch.from_numpy(_hi).to(device)
         d = _f16(b[..., 208:210])
         dl = d * b[..., 192:208].view(np.int8).astype(np.float32)   # [N, nb, 16]
         self.dl = torch.from_numpy(np.ascontiguousarray(dl.astype(np.float16))).to(device)
@@ -1439,10 +1481,11 @@ class Q6KLinear(_Packed):
         self.nbytes = N * nb * 210
 
     def _kernel(self, x2, out, M, f32):
-        bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 1, 2))
-        _q6k_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.ql, self.qh,
+        bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _q6k_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.ql, self.qh,
                                                                self.dl, out, out.stride(0), M, self.N,
-                                                               self.K // 256, BN=bn, F32=f32,
+                                                               self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                num_warps=wp, num_stages=st)
 
 
@@ -1467,11 +1510,12 @@ class Q41Linear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
         ng = self.q.shape[1]
         if ng * 256 != self.K:
             x2 = torch.cat([x2, x2.new_zeros(M, ng * 256 - self.K)], 1)  # pad block tail -> 0
-        _q41_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.m, self.q, out,
-               out.stride(0), M, self.N, ng, BN=bn, F32=f32, num_warps=wp, num_stages=st)
+        _q41_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.m, self.q, out,
+               out.stride(0), M, self.N, ng, BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class Q50Linear(_Packed):
@@ -1495,11 +1539,12 @@ class Q50Linear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
         ng = self.q.shape[1]
         if ng * 256 != self.K:
             x2 = torch.cat([x2, x2.new_zeros(M, ng * 256 - self.K)], 1)  # pad block tail -> 0
-        _q50_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qh, self.q, out,
-               out.stride(0), M, self.N, ng, BN=bn, F32=f32, num_warps=wp, num_stages=st)
+        _q50_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qh, self.q, out,
+               out.stride(0), M, self.N, ng, BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class Q51Linear(_Packed):
@@ -1525,11 +1570,12 @@ class Q51Linear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
         ng = self.q.shape[1]
         if ng * 256 != self.K:
             x2 = torch.cat([x2, x2.new_zeros(M, ng * 256 - self.K)], 1)  # pad block tail -> 0
-        _q51_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.m, self.qh, self.q, out,
-               out.stride(0), M, self.N, ng, BN=bn, F32=f32, num_warps=wp, num_stages=st)
+        _q51_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.m, self.qh, self.q, out,
+               out.stride(0), M, self.N, ng, BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class Q2KLinear(_Packed):
@@ -1555,9 +1601,10 @@ class Q2KLinear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 2, 3))
-        _q2k_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.ds,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _q2k_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.ds,
                                                                self.dm, out, out.stride(0), M, self.N,
-                                                               self.K // 256, BN=bn, F32=f32,
+                                                               self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                num_warps=wp, num_stages=st)
 
 
@@ -1585,9 +1632,10 @@ class Q3KLinear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 2, 3))
-        _q3k_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.hm,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _q3k_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.hm,
                                                                self.dl, out, out.stride(0), M, self.N,
-                                                               self.K // 256, BN=bn, F32=f32,
+                                                               self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                num_warps=wp, num_stages=st)
 
 
@@ -1615,9 +1663,10 @@ class Q5KLinear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 2, 3))
-        _q5k_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.qh,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _q5k_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs, self.qh,
                                                                self.ds, self.dm, out, out.stride(0),
-                                                               M, self.N, self.K // 256, BN=bn,
+                                                               M, self.N, self.K // 256, BN=bn, BM=bm,
                                                                F32=f32, num_warps=wp, num_stages=st)
 
 
@@ -1643,12 +1692,13 @@ class IQ4NLLinear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
         ng = self.q.shape[1]
         if ng * 256 != self.K:
             x2 = torch.cat([x2, x2.new_zeros(M, ng * 256 - self.K)], 1)  # pad block tail -> 0
-        _iq4nl_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](
+        _iq4nl_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](
             x2, x2.stride(0), self.d, self.q, out, out.stride(0), M, self.N, ng,
-            *_IQ4_LUT_WORDS, BN=bn, F32=f32, num_warps=wp, num_stages=st)
+            *_IQ4_LUT_WORDS, BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class IQ4XSLinear(_Packed):
@@ -1678,10 +1728,11 @@ class IQ4XSLinear(_Packed):
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 2))
-        _iq4xs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq4xs_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](
             x2, x2.stride(0), self.qs, self.dl, out, out.stride(0), M, self.N,
             self.qs.shape[1], *_IQ4_LUT_WORDS,
-            BN=bn, F32=f32, num_warps=wp, num_stages=st)
+            BN=bn, BM=bm, F32=f32, num_warps=wp, num_stages=st)
 
 
 class IQ2XSLinear(_Packed):
@@ -1691,8 +1742,6 @@ class IQ2XSLinear(_Packed):
     tid = 17
 
     def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
-        from tools import gguf_grids as GR
-        from tools.iq2_linear import KSIGNS
         nb = K // 256
         b = np.ascontiguousarray(raw).reshape(N, nb, 74)
         self._raw = b.copy()
@@ -1700,18 +1749,17 @@ class IQ2XSLinear(_Packed):
         self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
         self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:66])).to(device)
         self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
-        self.gr = torch.from_numpy((GR.IQ2_XS_GRID.astype(np.int64) << (8 * np.arange(8))).sum(1)).to(device)
         self.qs16 = self.qs.view(torch.int16)
-        self.gr32 = self.gr.view(torch.int32)
-        self.ks = torch.from_numpy(np.ascontiguousarray(KSIGNS.astype(np.int32))).to(device)
+        self.grb, self.sgn = _iq_lut("iq2xs", device)
         self.nbytes = N * nb * 74
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq2xs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs16,
-                                                                  self.sc, self.gr32, self.ks, out,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq2xs_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs16,
+                                                                  self.sc, self.grb, self.sgn, out,
                                                                   out.stride(0), M, self.N,
-                                                                  self.K // 256, BN=bn, F32=f32,
+                                                                  self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                   num_warps=wp, num_stages=st)
 
 
@@ -1722,8 +1770,6 @@ class IQ3XXSLinear(_Packed):
     tid = 18
 
     def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
-        from tools import gguf_grids as GR
-        from tools.iq2_linear import KSIGNS
         nb = K // 256
         b = np.ascontiguousarray(raw).reshape(N, nb, 98)
         self._raw = b.copy()
@@ -1731,18 +1777,17 @@ class IQ3XXSLinear(_Packed):
         self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
         self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:66])).to(device)
         self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 66:98]).view(np.uint32).astype(np.int32)).to(device)
-        self.gr = torch.from_numpy((GR.IQ3_XXS_GRID.astype(np.int32) << (8 * np.arange(4))).sum(1)).to(device)
         self.qs32 = self.qs.view(torch.int32)
-        self.ks = torch.from_numpy(np.ascontiguousarray(KSIGNS.astype(np.int32))).to(device)
+        self.grb, self.sgn = _iq_lut("iq3xxs", device)
         self.nbytes = N * nb * 98
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq3xxs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs32,
-                                                                   self.sc, self.gr, self.ks, out,
-                                                                   out.stride(0), M, self.N,
-                                                                   self.K // 256, BN=bn, F32=f32,
-                                                                   num_warps=wp, num_stages=st)
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq3xxs_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](
+                x2, x2.stride(0), self.d, self.qs32, self.sc, self.grb, self.sgn, out,
+                out.stride(0), M, self.N, self.K // 256, BN=bn, BM=bm, F32=f32,
+                num_warps=wp, num_stages=st)
 
 
 class IQ3SLinear(_Packed):
@@ -1752,7 +1797,6 @@ class IQ3SLinear(_Packed):
     tid = 21
 
     def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
-        from tools import gguf_grids as GR
         nb = K // 256
         b = np.ascontiguousarray(raw).reshape(N, nb, 110)
         self._raw = b.copy()
@@ -1762,15 +1806,16 @@ class IQ3SLinear(_Packed):
         self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
         self.sg = torch.from_numpy(np.ascontiguousarray(b[..., 74:106])).to(device)
         self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 106:110])).to(device)
-        self.gr = torch.from_numpy((GR.IQ3_S_GRID.astype(np.int32) << (8 * np.arange(4))).sum(1)).to(device)
+        self.grb, self.sgn = _iq_lut("iq3s", device)
         self.nbytes = N * nb * 110
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq3s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs,
-                                                                self.qh, self.sg, self.sc, self.gr,
-                                                                out, out.stride(0), M, self.N,
-                                                                self.K // 256, BN=bn, F32=f32,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq3s_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs,
+                                                                self.qh, self.sg, self.sc, self.grb,
+                                                                self.sgn, out, out.stride(0), M, self.N,
+                                                                self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                 num_warps=wp, num_stages=st)
 
 
@@ -1781,7 +1826,6 @@ class IQ2SLinear(_Packed):
     tid = 22
 
     def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
-        from tools import gguf_grids as GR
         nb = K // 256
         b = np.ascontiguousarray(raw).reshape(N, nb, 82)
         self._raw = b.copy()
@@ -1791,17 +1835,17 @@ class IQ2SLinear(_Packed):
         self.sg = torch.from_numpy(np.ascontiguousarray(b[..., 34:66])).to(device)
         self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
         self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 74:82])).to(device)
-        self.gr = torch.from_numpy((GR.IQ2_S_GRID.astype(np.int64) << (8 * np.arange(8))).sum(1)).to(device)
         self.qs32 = self.qs.view(torch.int32)
-        self.gr32 = self.gr.view(torch.int32)
+        self.grb, self.sgn = _iq_lut("iq2s", device)
         self.nbytes = N * nb * 82
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq2s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs32,
-                                                                 self.qh, self.sg, self.sc, self.gr32,
-                                                                 out, out.stride(0), M, self.N,
-                                                                 self.K // 256, BN=bn, F32=f32,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq2s_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs32,
+                                                                 self.qh, self.sg, self.sc, self.grb,
+                                                                 self.sgn, out, out.stride(0), M, self.N,
+                                                                 self.K // 256, BN=bn, BM=bm, F32=f32,
                                                                  num_warps=wp, num_stages=st)
 
 
@@ -1820,18 +1864,19 @@ class IQ1SLinear(_Packed):
         self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
         self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:34])).to(device)
         self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 34:50]).view(np.uint16).astype(np.int32)).to(device)
-        self.gr = torch.from_numpy(((GR.IQ1_GRID.astype(np.int64) + 1) << (8 * np.arange(8))).sum(1)).to(device)
         self.qs32 = self.qs.view(torch.int32)
+        self.grb, = _iq_lut("iq1", device)
         self.nbytes = N * nb * 50
         self._delta = float(GR.IQ1_DELTA)
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq1s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs32,
-                                                                self.qh, self.gr, out,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq1s_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.d, self.qs32,
+                                                                self.qh, self.grb, out,
                                                                 out.stride(0), M, self.N,
                                                                 self.K // 256, DELTA=self._delta,
-                                                                BN=bn, F32=f32,
+                                                                BN=bn, BM=bm, F32=f32,
                                                                 num_warps=wp, num_stages=st)
 
 
@@ -1857,19 +1902,36 @@ class IQ1MLinear(_Packed):
         self.dl = torch.from_numpy(np.ascontiguousarray(dl.astype(np.float16))).to(device)
         self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 0:32])).to(device)
         self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 32:48])).to(device)
-        self.gr = torch.from_numpy(((GR.IQ1_GRID.astype(np.int64) + 1) << (8 * np.arange(8))).sum(1)).to(device)
         self.qs32 = self.qs.view(torch.int32)
+        self.grb, = _iq_lut("iq1", device)
         self.nbytes = N * nb * 56
         self._delta = float(GR.IQ1_DELTA)
 
     def _kernel(self, x2, out, M, f32):
         bn, wp, st = _GEMM_CFG.get((self.tid, self.N, self.K), (32, 4, 1))
-        _iq1m_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs32, self.qh,
-                                                                self.dl, self.gr, out,
+        bm = min(_bm(M), _cap(self.tid, self.N, self.K))
+        _iq1m_gemm[(triton.cdiv(M, bm), triton.cdiv(self.N, bn))](x2, x2.stride(0), self.qs32, self.qh,
+                                                                self.dl, self.grb, out,
                                                                 out.stride(0), M, self.N,
                                                                 self.K // 256, DELTA=self._delta,
-                                                                BN=bn, F32=f32,
+                                                                BN=bn, BM=bm, F32=f32,
                                                                 num_warps=wp, num_stages=st)
+
+
+def _bm(M: int) -> int:
+    # verify-width row tile: decode the weight once for all rows a call brings (M <= 33 -> one tile)
+    return 16 if M <= 16 else 32 if M <= 32 else 64
+
+
+# max row tile where the wide verify tile loses, keyed by tid or (tid, N, K): Q4_0, Q4_K,
+# Q5_K, IQ4_NL, IQ4_XS stay at 16 (one program cannot fill the board on these decode shapes);
+# IQ1_M stays at 16 on the long-K shapes where the wide accumulator spills registers.
+_BM_CAP = {2: 16, 10: 16, 11: 16, 12: 16, 13: 16, 20: 16, 23: 16,
+           (29, 14336, 4096): 16, (29, 4096, 14336): 16}
+
+
+def _cap(tid: int, N: int, K: int) -> int:
+    return _BM_CAP.get((tid, N, K), _BM_CAP.get(tid, 64))
 
 
 # (tid, N, K) -> (BN, num_warps, num_stages) on Ada: interleaved-A/B winners over the default
@@ -1878,13 +1940,11 @@ class IQ1MLinear(_Packed):
 _GEMM_CFG = {
     (10, 14336, 4096): (32, 4, 1),   # Q2_K
     (11, 14336, 4096): (32, 2, 2),   # Q3_K
-    (14, 4096, 14336): (16, 1, 2),   # Q6_K
-    (18, 14336, 4096): (16, 4, 1),   # IQ3_XXS
-    (18, 4096, 14336): (16, 2, 1),   # IQ3_XXS
-    (21, 4096, 4096): (16, 4, 1),    # IQ3_S
-    (19, 14336, 4096): (16, 4, 2),   # IQ1_S
-    (29, 14336, 4096): (32, 4, 1),   # IQ1_M
-    (29, 4096, 14336): (16, 1, 1),   # IQ1_M
+    (14, 4096, 4096): (64, 8, 2),    # Q6_K
+    (14, 14336, 4096): (32, 4, 3),   # Q6_K
+    (14, 4096, 14336): (32, 4, 3),   # Q6_K
+    (14, 5120, 17408): (32, 4, 2),   # Q6_K
+    (14, 17408, 5120): (32, 4, 2),   # Q6_K
 }
 
 #: 2-D tensors of these types load as packed GPU linears (Tier A); every other `TYPES` entry

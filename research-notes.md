@@ -516,3 +516,65 @@ within run-to-run noise.
 
 Plus the two fixes that aren't kernel speed: prefill 109 ms -> ~0.35-0.45 ms per 4096x4096
 chunk, and a 33-row verify block now takes the decode kernel (bitwise row invariance).
+
+### Update — verify-width tiles, Q6_K repack, FP8 verify fix, bf16 IQ tables
+Warm interleaved A/B against the stage-5 commit (5 shapes x M=1/9/33), in
+`/home/user/tandem-opt/ab_s8_cumulative.json`. Sub-0.98 cells were re-measured
+(`ab_s8_remeasure.json`). All of them were on code identical or equivalent to stage 5, at 4096^2,
+where repeat runs of unchanged kernels (Q8Linear, Q4_K) swing 0.93-1.05x.
+
+- **FP8Linear: a 33-row verify block now takes the row kernel.** nemotron_h verify blocks go up to
+  ROWS_MAX + 1 = 33 rows, but FP8Linear switched to cuBLAS on a bf16-widened weight above 32 rows.
+  So the head's logits for a 33-row verify came from a different summation than decode's, on a path
+  3.7x slower (119 vs 33 us at 4096^2). The cutoff is now `M > ROWS_MAX + 1`, the rule
+  IQ2Linear/Q8Linear already used. `tests/test_fp8_linear.py` checks M=1..33 bitwise. An Ada launch
+  table was swept too; only (17408, 5120) held >= 1.03x at both M=1 and M=9, so it is the only
+  entry. Non-Ada builds keep the stage-5 launch exactly.
+- **Decode the weight once per verify block (BM = 16/32/64).** A 17-33-row call used to launch 2-3
+  row-tile programs per column tile, and each one decoded the whole weight again. The row tile now
+  covers the whole call (x `[BM, 256]`, acc `[BM, BN]`, one dot per K step). It relies on tl.dot
+  giving a row the same bits at BM = 32/64 as at 16; the M=1..33 bitwise tests confirm that. It
+  pays off where decode dominates. Formats whose decode is cheap (Q4_0, Q4_K, Q5_K, IQ4_NL, IQ4_XS,
+  Q2_K, Q3_K) lost with one program per column tile, because the extra row-tile programs were their
+  occupancy, so `_BM_CAP` keeps them at 16. IQ2Linear/Q8Linear lost badly (0.45x / 0.32x) and are
+  unchanged. Precedent: llama.cpp MMVQ's `ncols_y`, where one block decodes a weight tile for
+  several activation columns.
+- **Q6_K element-order repack.** At init the 4-bit low and 2-bit high codes are regrouped into
+  element-order int32 planes (LO `[N, nb, 32]`, HI `[N, nb, 16]`). That gives one contiguous read
+  per row per super-block and one K=256 dot, instead of eight K=32 steps over byte loads. Same bytes,
+  no standing VRAM. The same repack for Q2_K/Q3_K was correct but failed the gate and was reverted.
+- **IQ lattice decode from bf16 tables.** The grids are stored as bf16 bit patterns (int16
+  `[entries, 8|4]`) and the signs as int16 masks with 0x8000 on the negative lanes (`[128, 8]` from
+  KSIGNS for IQ2_XS/IQ3_XXS, `[256, 8]` from the raw sign byte for IQ2_S/IQ3_S). Decoding is now a
+  vectorized gather plus an XOR, replacing unpack, SWAR sign, magic int->bf16 and subtract. IQ1_S/IQ1_M
+  use one `[2048, 8]` table and add +/-DELTA in fp32; a folded +/- copy (64 KB) was tried and lost.
+  The tables are built once per device and shared by every linear. This works where stage 5's
+  register LUTs lost on these formats: the table is read once per 8 (or 4) weights, as one 16-byte
+  vector, not once per element. Precedent: FLUTE's LUTs stored in the target dtype; exllamav2/v3
+  codebooks.
+- **Rejected: deterministic split-K.** At equal weight bytes, 4x more column programs lifted Q6_K
+  from 40% to 62% of 620 GB/s, so occupancy at N=4096 is real. But a two-pass split-K (S from
+  (N, K) only, fixed-order reduce) lost or broke even once the second launch was counted.
+- **Rejected: int8 activations (llama.cpp MMVQ numerics) for the IQ lattice formats.** It was built
+  behind an opt-in flag: per-row, per-32 int8 quantization inside the GEMM, int8 grid values via the
+  SWAR sign, one batched int8 `tl.dot` per super-block, and IQ1's delta folded as
+  `delta * wscale * sum(x8) * xs`. It was exact against a reference using the same quantization
+  (rel 1.4e-7) and row-invariant. Its error vs the bf16 twin was 0.5-0.6% (gaussian x) and 0.9-1.25%
+  (1% outlier channels x20). But it ran at 0.14-0.62x of the bf16 path (`ab_s8_int8.log`): the
+  small batched int8 dots and per-chunk scaling cost far more than the conversion they remove.
+  llama.cpp gets its win from hand-written dp4a CUDA, which a Triton dot does not reproduce. Removed.
+
+Stage 5 -> now, geomean over the 5 shapes:
+
+| format | M=1 | M=9 | M=33 | % of 620 GB/s at M=1 | % at M=33: before -> after |
+|---|---|---|---|---|---|
+| IQ3S | 1.74x | 1.73x | 2.65x | 24-40% | 6-7% -> 12-21% |
+| IQ3XXS | 1.48x | 1.48x | 2.10x | 28-38% | 8-9% -> 13-21% |
+| IQ2XS | 1.40x | 1.31x | 2.04x | 23-34% | 7-9% -> 12-19% |
+| IQ1S | 1.28x | 1.25x | 2.08x | 14-18% | 4-5% -> 7-12% |
+| IQ2S | 1.15x | 1.26x | 2.16x | 21-27% | 7-8% -> 12-19% |
+| IQ1M | 1.10x | 1.12x | 1.47x | 14-20% | 4-7% -> 7-11% |
+| Q6K | 1.14x | 1.17x | 1.28x | 46-71% | 23-35% -> 30-38% |
+| Q41 / Q50 / Q51 | 0.99-1.02x | 1.00x | 1.23-1.29x | 43-65% | 20-27% -> 24-34% |
+| FP8 | 1.00x | 1.00x | 3.99x | 82-92% | 17-23% -> 61-81% |
+| Q40, Q2K, Q3K, Q4K, Q5K, IQ4NL, IQ4XS, Q8, IQ2 | 0.98-1.01x | 0.98-1.01x | 1.00x | unchanged | unchanged |

@@ -36,8 +36,32 @@ except ImportError:                                  # pragma: no cover (the CPU
     HAVE_TRITON = False
 
 FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
-#: rows a program of FP8Linear covers; the row-invariant limit of both classes
+#: rows a program of FP8Linear covers; a verify block is ROWS_MAX + 1 rows and still takes the row kernel
 ROWS_MAX = 32
+
+
+_SM89 = None
+
+
+def _sm89() -> bool:
+    """True on Ada sm_89: the wide row tile and the tuned launch table there; other builds keep 16."""
+    global _SM89
+    if _SM89 is None:
+        _SM89 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 9)
+    return _SM89
+
+
+def _bm(M: int) -> int:
+    # verify-width row tile: one program covers all of the call's rows (M <= 33)
+    return 16 if M <= 16 else 32 if M <= 32 else 64
+
+
+# Ada-only launch tuning for _fp8_rows, (N, K) -> (BN, BK, num_warps, num_stages); every entry was
+# swept warm/interleaved and confirmed >= 1.03x on its shape with no M=33 regression. Shapes not
+# listed keep the default rule below (they still get the verify-width row tile).
+_FP8_CFG_SM89 = {
+    (17408, 5120): (32, 256, 4, 2),
+}
 
 
 def e4m3_table(device) -> torch.Tensor:
@@ -100,15 +124,15 @@ if HAVE_TRITON:
 
     @triton.jit
     def _fp8_rows(X, s_x, W, scale, Y, s_y, M, N, K: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                  F32: tl.constexpr):
+                  F32: tl.constexpr, BM: tl.constexpr):
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         rm = rows < M
         cm = cols < N
         kk = tl.arange(0, BK)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for k0 in range(0, K, BK):
             x = tl.load(X + rows[:, None] * s_x + k0 + kk[None, :], mask=rm[:, None], other=0.0)
             w = tl.load(W + cols[:, None] * K + k0 + kk[None, :], mask=cm[:, None], other=0.0)
@@ -212,9 +236,15 @@ class FP8Linear:
         self.N, self.K = self.w.shape
         self.shape = (self.N, self.K)
         self.scale = torch.tensor([float(scale)], dtype=torch.float32, device=self.w.device)
-        self.bk = 128 if self.K % 128 == 0 else 64
-        # the N tile, fixed by the shape (never by the row count): narrow enough to fill the board at one row
-        self.bn = bn or (32 if self.N <= 8192 else 64)
+        cfg = _FP8_CFG_SM89.get((self.N, self.K)) if _sm89() and bn is None else None
+        if cfg is not None:
+            self.bn, self.bk, self.warps, self.stages = cfg
+        else:
+            self.bk = 128 if self.K % 128 == 0 else 64
+            # the N tile, fixed by the shape (never by the row count): narrow enough to fill the board at one row
+            self.bn = bn or (32 if self.N <= 8192 else 64)
+            self.warps, self.stages = 4, None
+        self._bmt = _bm if _sm89() else (lambda M: 16)
 
     @property
     def nbytes(self) -> int:
@@ -228,7 +258,7 @@ class FP8Linear:
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         M = x2.shape[0]
-        if not x2.is_cuda or M > ROWS_MAX:
+        if not x2.is_cuda or M > ROWS_MAX + 1:
             # a prompt chunk: the codes widened to bf16 (exact) for cuBLAS, the scale on the fp32 product
             y = torch.nn.functional.linear(x2.float() if not x2.is_cuda else x2, self.w.to(x2.dtype if x2.is_cuda else torch.float32))
             y = y.float() * self.scale.to(y.device)
@@ -236,9 +266,13 @@ class FP8Linear:
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        _fp8_rows[(triton.cdiv(M, 16), triton.cdiv(self.N, self.bn))](x2, x2.stride(0), self.w, self.scale, out,
-                                                                      out.stride(0), M, self.N, K=self.K, BN=self.bn,
-                                                                      BK=self.bk, F32=f32, num_warps=4)
+        bm = self._bmt(M)
+        kw = dict(num_warps=self.warps)
+        if self.stages is not None:
+            kw["num_stages"] = self.stages
+        _fp8_rows[(triton.cdiv(M, bm), triton.cdiv(self.N, self.bn))](
+            x2, x2.stride(0), self.w, self.scale, out, out.stride(0), M, self.N, K=self.K,
+            BN=self.bn, BK=self.bk, F32=f32, BM=bm, **kw)
         return out.view(*x.shape[:-1], self.N)
 
 
