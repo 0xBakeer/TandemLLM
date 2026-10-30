@@ -259,8 +259,9 @@ class NVBank:
     """One layer's routed experts stacked as stored (NVFP4: gate|up [E, 2I, H/2], down [E, H, I/2], plain e4m3 block
     scales, one fp32 global a projection) and its shared expert (MXFP8 in the trunk, bf16 in the MTP layer) as expert E:
     the engine's bank interface (`fn_kernels.moe_experts` and `fn_prefill_kernels.moe_grouped` hand a bank with
-    `experts` to it). `experts` is the torch path (fp32 products of the exact weights, the kernels' roundings: gate/up
-    to bf16, a = bf16(bf16(silu(g)) u), down fp32), PAIRS pairs a launch."""
+    `experts` to it). Up to tools/nvfp4_moe.PMAX pairs: the grouped NVFP4 kernels (tools/nvfp4_moe.py); more (a prompt
+    chunk): `experts_torch`, fp32 products of the exact weights with the kernels' roundings (gate/up to bf16,
+    a = bf16(bf16(silu(g)) u), down fp32), PAIRS pairs a launch. The shared expert: its gate|up as one weight."""
 
     PAIRS = 16
 
@@ -268,21 +269,34 @@ class NVBank:
         self.gu_w, self.gu_s, self.gu_s2 = gu_w, gu_s, gu_s2          # [E, 2I, H/2], [E, 2I, H/16], [E, 2]
         self.d_w, self.d_s, self.d_s2 = d_w, d_s, d_s2                # [E, H, I/2], [E, H, I/16], [E]
         self.shared = shared                                          # {"gate", "up", "down"}: NVWeight or bf16
+        g, u = shared["gate"], shared["up"]
+        self.shared["gu"] = NVWeight.cat([g, u]) if isinstance(g, NVWeight) else torch.cat([g, u]).contiguous()
         self.n = gu_w.shape[0]
         self.I = gu_w.shape[1] // 2
         self.H = d_w.shape[1]
 
     def _sh(self, x: torch.Tensor) -> torch.Tensor:
+        """The shared expert of the rows: fp32 [M, H] (gate|up one launch, the activation, down)."""
         def lin(w, v):
             return w.mul_rows(v) if hasattr(w, "mul_rows") else torch.nn.functional.linear(v, w)
-        g, u = lin(self.shared["gate"], x).float(), lin(self.shared["up"], x).float()
+        gu = lin(self.shared["gu"], x).float()
+        g, u = gu[:, :self.I], gu[:, self.I:]
         a = (g / (1.0 + torch.exp(-g))).to(torch.bfloat16).float() * u
-        w = self.shared["down"]
-        wd = w.dequant(torch.float32) if hasattr(w, "dequant") else w.float()
-        return a.to(torch.bfloat16).float() @ wd.T
+        return lin(self.shared["down"], a.to(torch.bfloat16)).float()
 
     def experts(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
-        """x [M, H] bf16, ids int32 [M, S] (the shared expert as id E) -> yd [M S, H] fp32, unweighted."""
+        """x [M, H] bf16, ids int32 [M, S] (the shared expert as id E, the last slot) -> yd [M S, H] fp32,
+        unweighted."""
+        from tools import nvfp4_moe as NM
+        M, S = ids.shape
+        if M * S > NM.PMAX:
+            return self.experts_torch(x, ids)
+        yd = NM.experts(x, ids, self)
+        yd.view(M, S, self.H)[:, S - 1].copy_(self._sh(x))
+        return yd
+
+    def experts_torch(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """`experts` in torch, any number of pairs."""
         M, S = ids.shape
         flat = ids.reshape(-1).long()
         rows = torch.arange(M * S, device=x.device) // S
