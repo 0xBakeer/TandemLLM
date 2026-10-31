@@ -7842,8 +7842,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("POST", body)
         if path == "/v1/tokenize":
             # SRV-347: exact counts with the model's own template (server/tokenize_api.py)
+            # SPD-249: a text through build_prompt's own text path, as /v1/completions reads its prompt
             return tokenize_api.handle(self, body, lambda b: build_prompt(b, count=True),
-                                       lambda t: len(STATE["tok"](t)["input_ids"]))
+                                       lambda t: build_prompt({"prompt": t}, count=True),
+                                       lambda b: build_prompt(b, count="ids"),
+                                       lambda t: build_prompt({"prompt": t}, count="ids"))
         if path in ("/v1/cache/peek", "/v1/cache/prewarm"):
             # SRV-349: where a conversation's rows are, and the NVMe read back while idle
             if not self._allowed("cache_read"):

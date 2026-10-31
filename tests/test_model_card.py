@@ -146,6 +146,30 @@ def test_tokenize_parts_add_up_and_count_tools_as_rendered():
         pass
 
 
+def test_tokenize_gives_the_ids_when_asked():
+    """SPD-249: `"ids": true` gives the chat prompt's ids (the render with the request's tools) and a text's ids as
+    /v1/completions reads it; without it no ids; a server that serves no ids refuses the ask."""
+    seen = []
+
+    def ids_fn(b):
+        seen.append(b)
+        return list(range(_render(b)))
+    body = {"messages": [{"role": "user", "content": "one two"}], "ids": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "tools": [{"type": "function", "function": {"name": "bash"}}]}
+    out = tokenize_api.count(body, _render, len, ids_fn, lambda t: [ord(c) for c in t])
+    assert out["ids"] == list(range(out["tokens"])) and seen[-1]["tools"] and "ids" not in seen[-1], seen
+    assert seen[-1]["chat_template_kwargs"] == {"enable_thinking": False}
+    t = tokenize_api.count({"text": "abc", "ids": True}, _render, len, ids_fn, lambda t: [ord(c) for c in t])
+    assert t["ids"] == [97, 98, 99] and t["tokens"] == 3, t
+    assert "ids" not in tokenize_api.count({"text": "abc"}, _render, len, ids_fn, lambda t: [1])
+    try:
+        tokenize_api.count({"text": "abc", "ids": True}, _render, len)
+        raise AssertionError("no ids function: refused")
+    except ValueError:
+        pass
+
+
 def test_tokenize_is_rate_limited():
     who = "test-rate"
     assert all(tokenize_api.allowed(who, now=100.0) for _ in range(tokenize_api.RATE_PER_MIN))

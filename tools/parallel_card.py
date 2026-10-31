@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A weight card's speed row (SPD-245): decode, prefill and 1/2/4/8 requests at once, against the
-server that runs now, with the proof that N requests decoded together.
+engine that runs now, with the proof that N requests decoded together.
 
     python tools/parallel_card.py --model-id qwen3.8-27b --profile exl3-4.0 \\
         --env-name live8-cold --env-file run/setup.env --commit "$(git rev-parse --short HEAD)" \\
+        --tokenizer ~/models/<the profile's weights> \\
         --out models/qwen3.8-27b/measurements/parallel-2026-10-26-exl3-4.0.json
 
 The server is started beforehand on the profile (ops/use-profile.sh); the tool only sends requests
@@ -11,6 +12,16 @@ and reads /health. It writes one raw file: every request's record, the /health s
 the server's limit knobs, and `row`, the entry for the `parallel.rows` list of the model's
 model.yaml (the registry holds the two equal, server/setup/registry.py). `--row-out` also writes the
 row alone as YAML.
+
+THE ENGINE, NOT THE CHAT LAYER (SPD-249): every request goes to `/v1/completions` with the prompt as
+text and `X-Tandem: raw`, so no conductor, router or chat-layer step runs; `/v1/chat/completions` is
+not measured. Each prompt is the model's chat template over the card's messages with thinking off:
+the tool asks `/v1/tokenize` for that template's ids (`"ids": true`, rendered as the chat endpoint
+renders them, with any line the model's spec adds for thinking off), turns them into text with the
+model's own tokenizer (`--tokenizer`, the weights' directory; default the env file's QSE_WEIGHTS_DIR;
+a leading id the tokenizer adds to any text is left out of the text), and checks that `/v1/tokenize`
+reads that text as the same ids, the ones `/v1/completions` reads. A prompt whose ids differ stops the
+run. Run it with the engine's Python (transformers).
 
 WHAT IT RUNS (bench/card-prompts-v1.json; thinking off, `X-Tandem: raw`, cache_prompt false, a nonce
 line at the start of every request, the sampling of `--temperature/--top-k/--top-p`, a seed of its
@@ -21,7 +32,8 @@ own for every request):
            A workload whose text arrives in one event has no decode window, and the row leaves it out
            (LFM2.5's code answer, 2026-10-26: one stream event a run, one run ending as tool_calls).
   prefill  prompts of 2,048, 8,192 and 32,768 tokens (counted with the server's /v1/tokenize and
-           checked against the request's prompt_tokens), `--prefill-runs` each, 1 token out;
+           checked against the request's prompt_tokens: `tokenize_offset` is 0), `--prefill-runs`
+           each, 1 token out;
            TTFT = send to first token; prefill tok/s = prompt tokens / TTFT; medians.
   levels   N = 1, 2, 4, 8 prose requests released together, `--warm-rounds` discarded and
            `--rounds` measured. Per round: wall tok/s = all completion tokens / (last end - send),
@@ -42,6 +54,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import statistics
 import sys
 import threading
@@ -53,6 +66,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TOOL = "tools/parallel_card.py"
 SCHEMA = 1
+#: SPD-249: where every request goes (the engine; the chat endpoint is in beta and not measured)
+ENDPOINT = "/v1/completions"
 
 
 # --- requests ---------------------------------------------------------------------------------
@@ -69,19 +84,47 @@ def _post_json(url: str, body: dict, timeout: float = 60.0) -> dict:
         return json.loads(r.read())
 
 
+class PromptMismatch(RuntimeError):
+    """A rendered prompt's text that `/v1/completions` would read as other ids than the chat template's."""
+
+
 class Client:
-    def __init__(self, base: str, model: str, sampling: dict, headers: dict):
+    def __init__(self, base: str, model: str, sampling: dict, headers: dict, tok=None):
         self.base, self.model, self.sampling, self.headers = base.rstrip("/"), model, sampling, headers
-        self.extra = {"chat_template_kwargs": {"enable_thinking": False}, "cache_prompt": False}
+        self.tok = tok                          # the model's tokenizer: ids -> text (`render`)
+        self.extra = {"cache_prompt": False}
+        self.rendered = 0                       # prompts rendered and checked id for id
+        self._lead: list | None = None
 
     def messages(self, system: str, user: str) -> list:
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    def stream(self, messages: list, max_tokens: int, seed: int, t_send: float | None = None) -> dict:
-        """One streamed chat request: its times (monotonic), usage and finish reason."""
-        body = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "stream": True,
+    def _ids(self, body: dict) -> list:
+        return [int(t) for t in _post_json(self.base + "/v1/tokenize", {**body, "ids": True})["ids"]]
+
+    def render(self, messages: list) -> str:
+        """The text `/v1/completions` gets for these messages: the chat template's ids with thinking off (from
+        `/v1/tokenize`) as text, checked to tokenize to the same ids (see the module)."""
+        want = self._ids({"messages": messages, "chat_template_kwargs": {"enable_thinking": False}})
+        if self._lead is None:
+            self._lead = self._ids({"text": ""})            # what the tokenizer puts before any text (a BOS)
+        lead = self._lead
+        body = want[len(lead):] if lead and want[:len(lead)] == lead else want
+        text = self.tok.decode(body, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        got = self._ids({"text": text})
+        if got != want:
+            i = next((k for k, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
+            raise PromptMismatch(f"the prompt's text reads as other ids than the chat template's: {len(got)} ids "
+                                 f"against {len(want)}, the first difference at {i}")
+        self.rendered += 1
+        return text
+
+    def stream(self, prompt: str, max_tokens: int, seed: int, t_send: float | None = None) -> dict:
+        """One streamed completion of a rendered prompt (`render`): its times (monotonic), usage and finish
+        reason."""
+        body = {"model": self.model, "prompt": prompt, "max_tokens": max_tokens, "stream": True,
                 "stream_options": {"include_usage": True}, "seed": seed, **self.sampling, **self.extra}
-        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
+        req = urllib.request.Request(self.base + ENDPOINT, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", **self.headers})
         t0 = time.monotonic() if t_send is None else t_send
         first = last = None
@@ -101,9 +144,7 @@ class Client:
                 for c in ev.get("choices") or []:
                     if c.get("finish_reason") is not None:
                         finish = c["finish_reason"]
-                    d = c.get("delta") or {}
-                    piece = "".join(v for k in ("content", "reasoning_content", "reasoning")
-                                    if isinstance((v := d.get(k)), str))
+                    piece = c.get("text") if isinstance(c.get("text"), str) else ""
                     if piece:
                         now = time.monotonic()
                         first = first or now
@@ -252,13 +293,13 @@ def run_decode(cl: Client, pj: dict, a, log) -> dict:
     out = {"warmups": [], "runs": {"code": [], "prose": []}}
     for i in range(a.warmups):
         for w in ("code", "prose"):
-            r = cl.stream(cl.messages(pj["system"], pj["nonce_line"].format(nonce=nonce("w", w, i)) + pj["workloads"][w]),
-                          256, 9000 + i)
+            r = cl.stream(cl.render(cl.messages(pj["system"], pj["nonce_line"].format(nonce=nonce("w", w, i))
+                                                + pj["workloads"][w])), 256, 9000 + i)
             out["warmups"].append(r)
     for i in range(a.decode_runs):
         for w in ("code", "prose"):
-            r = cl.stream(cl.messages(pj["system"], pj["nonce_line"].format(nonce=nonce("d", w, i)) + pj["workloads"][w]),
-                          a.max_tokens, 100 + 10 * i + (w == "prose"))
+            r = cl.stream(cl.render(cl.messages(pj["system"], pj["nonce_line"].format(nonce=nonce("d", w, i))
+                                                + pj["workloads"][w])), a.max_tokens, 100 + 10 * i + (w == "prose"))
             out["runs"][w].append(r)
             log(f"decode {w} {i + 1}: {r['decode_tok_s']} tok/s, {r['completion_tokens']} tokens, "
                 f"TTFT {r['ttft_s']} s, prompt {r['prompt_tokens']}, {r['finish_reason']}")
@@ -271,7 +312,7 @@ def run_prefill(cl: Client, pj: dict, a, log) -> dict:
     # the offset between /v1/tokenize and the request's prompt_tokens, from one probe
     probe = [{"role": "user", "content": f"Probe {nonce('probe')}. " + pj["_filler"][:2000]}]
     n_tok = count_tokens(cl.base, probe)
-    pr = cl.stream(probe, 1, 7)
+    pr = cl.stream(cl.render(probe), 1, 7)
     offset = (pr["prompt_tokens"] - n_tok) if (n_tok is not None and pr["prompt_tokens"]) else 0
     out = {"tokenize_offset": offset, "probe": pr, "depths": {}}
     log(f"prefill: /v1/tokenize offset {offset}")
@@ -281,7 +322,7 @@ def run_prefill(cl: Client, pj: dict, a, log) -> dict:
         words = filler_words(pj, depth)
         for i in range(a.prefill_runs):
             text = f"Cold prefill {nonce('p', depth, i)}.\n" + " ".join(words[:k])
-            r = cl.stream([{"role": "user", "content": text}], 1, 200 + i)
+            r = cl.stream(cl.render([{"role": "user", "content": text}]), 1, 200 + i)
             r["planned_tokens"] = planned
             r["prefill_tok_s"] = round(r["prompt_tokens"] / r["ttft_s"], 1) if r["ttft_s"] and r["prompt_tokens"] else None
             runs.append(r)
@@ -295,6 +336,7 @@ def run_prefill(cl: Client, pj: dict, a, log) -> dict:
 
 def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int) -> dict:
     user = [pj["nonce_line"].format(nonce=nonce("c", n, tag, i)) + pj["workloads"]["prose"] for i in range(n)]
+    prompts = [cl.render(cl.messages(pj["system"], u)) for u in user]      # before the release: no request waits
     gate = threading.Barrier(n + 1)
     res: dict = {}
     errs: list = []
@@ -302,8 +344,7 @@ def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int) -> dict:
     def go(i):
         try:
             gate.wait()
-            res[i] = cl.stream(cl.messages(pj["system"], user[i]), max_tokens,
-                               zlib.crc32(f"{n}|{tag}|{i}".encode()) & 0x7FFFFFFF)
+            res[i] = cl.stream(prompts[i], max_tokens, zlib.crc32(f"{n}|{tag}|{i}".encode()) & 0x7FFFFFFF)
         except BaseException as exc:                                  # noqa: BLE001
             errs.append(repr(exc))
 
@@ -421,12 +462,28 @@ def row_yaml(row: dict) -> str:
 
 def envfile(path: str) -> dict:
     out = {}
-    for line in open(path):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            out[k] = v.strip("'\"")
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k] = v.strip("'\"")
     return out
+
+
+def weights_dir(env: dict) -> str | None:
+    """The env file's QSE_WEIGHTS_DIR with its ${NAME} references filled from the file, then the environment."""
+    v = env.get("QSE_WEIGHTS_DIR")
+    if not v:
+        return None
+    for _ in range(4):
+        v = re.sub(r"\$\{(\w+)\}", lambda m: env.get(m.group(1), os.environ.get(m.group(1), m.group(0))), v)
+    return None if "${" in v else os.path.expanduser(v)
+
+
+def load_tokenizer(path: str):
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(path)
 
 
 def main(argv=None) -> int:
@@ -437,6 +494,9 @@ def main(argv=None) -> int:
     ap.add_argument("--profile", required=True)
     ap.add_argument("--env-name", required=True, help="the setup the server runs (a name for the row)")
     ap.add_argument("--env-file", required=True, help="the server's run/setup.env (recorded as is)")
+    ap.add_argument("--tokenizer", default=None,
+                    help="the served weights' directory, for the model's tokenizer (default: the env file's "
+                         "QSE_WEIGHTS_DIR)")
     ap.add_argument("--commit", required=True)
     ap.add_argument("--build", default=None, help="default: the VERSION file")
     ap.add_argument("--out", required=True)
@@ -461,7 +521,12 @@ def main(argv=None) -> int:
     log = lambda *x: print(f"[card {time.strftime('%H:%M:%S')}]", *x, flush=True)   # noqa: E731
     pj = load_prompts(Path(a.prompts))
     sampling = {"temperature": a.temperature, "top_k": a.top_k, "top_p": a.top_p, "min_p": 0.0}
-    cl = Client(a.base, a.model, sampling, {"X-Tandem": "raw"})
+    env = envfile(a.env_file)
+    tok_dir = a.tokenizer or weights_dir(env)
+    if not tok_dir or not os.path.isdir(tok_dir):
+        print(f"no tokenizer: pass --tokenizer (the served weights' directory); got {tok_dir!r}", file=sys.stderr)
+        return 2
+    cl = Client(a.base, a.model, sampling, {"X-Tandem": "raw"}, tok=load_tokenizer(tok_dir))
     h0 = health(a.base)
     if "error" in h0:
         print(f"no server at {a.base}: {h0['error']}", file=sys.stderr)
@@ -473,7 +538,6 @@ def main(argv=None) -> int:
         print(f"refused: the server's live slot limit is {hr['max_running']} ({hr['max_running_reason']}), "
               f"under {top} requests at once", file=sys.stderr)
         return 2
-    env = envfile(a.env_file)
     log(f"server {hr['version']} lanes {hr['lanes']} max_running {hr['max_running']} windows {hr['windows']} "
         f"store {hr['suffix_store']} response cache {hr['response_cache']}")
     if not wait_idle(a.base, 300):
@@ -482,8 +546,9 @@ def main(argv=None) -> int:
     raw: dict = {"schema": SCHEMA, "tool": TOOL, "model": a.model_id, "profile": a.profile,
                  "build": a.build or (REPO / "VERSION").read_text().strip(), "commit": a.commit,
                  "date": time.strftime("%Y-%m-%d"), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                 "args": {k: (os.path.basename(v) if k in ("env_file", "out", "row_out", "prompts") and v else v)
-                          for k, v in vars(a).items()},
+                 "args": {k: (os.path.basename(v) if k in ("env_file", "out", "row_out", "prompts", "tokenizer")
+                                  and v else v) for k, v in vars(a).items()},
+                 "endpoint": ENDPOINT,
                  "health_start": hr,
                  "env": {k: v for k, v in env.items() if "${HOME}" not in v and not v.startswith("/")}}
     raw["raw_path"] = os.path.relpath(os.path.abspath(a.out), REPO) if os.path.abspath(a.out).startswith(str(REPO)) \
@@ -497,9 +562,10 @@ def main(argv=None) -> int:
     h1 = health(a.base)
     raw["health_end"] = health_record(h1)
     raw["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    raw["prompts_checked"] = cl.rendered          # every prompt's text read as the chat template's ids
     pt = (raw.get("decode") or {}).get("prompt_tokens") or {}
     raw["setup"] = {"env": a.env_name, "lanes": hr["lanes"], "window": max(hr["windows"] or [hr["max_len"] or 0]),
-                    "max_tokens": a.max_tokens, "suffix_store": hr["suffix_store"],
+                    "max_tokens": a.max_tokens, "suffix_store": hr["suffix_store"], "endpoint": ENDPOINT,
                     "response_cache": hr["response_cache"], "sampling": {**sampling, "seed": "one per request"},
                     "prompts": {"set": pj["version"], "sha256": pj["_sha256"], "filler_sha256": pj["_filler_sha256"],
                                 "prompt_tokens": {w: int(v) for w, v in pt.items() if v}}}
