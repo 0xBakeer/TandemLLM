@@ -626,7 +626,16 @@ def read_job(jid: str) -> dict | None:
     starting = job["state"] == "queued" and time.time() - job.get("created_at", 0) < 30
     if job["state"] in ("queued", "running") and not starting and not _alive(
             job.get("pid"), job.get("pid_start"), job.get("boot_id")):
-        job.update(state="failed", message="interrupted: the job's process is gone",
+        message = "interrupted: the job's process is gone"
+        # a death during the fetch has one usual suspect worth naming: the fetch buffers
+        # add up, and on a box that already carries an engine the kernel's oom-killer is
+        # what removes the job. "process is gone" alone sends people hunting through dmesg.
+        # It is the LIKELY cause, not the only one: _alive() is also false after a reboot
+        # or a manual kill, so the message says "most often" and names the next step.
+        if any(s["state"] == "running" and s["id"] == "fetch" for s in job.get("steps") or []):
+            message += (" during the download -- most often the out-of-memory killer "
+                        "(check dmesg): free memory and retry")
+        job.update(state="failed", message=message,
                    ended_at=job.get("ended_at") or time.time())
     return job
 
