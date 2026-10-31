@@ -2055,6 +2055,23 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
     return task if task.back is not None else None
 
 
+def _end_generation(source) -> None:
+    """SPD-249: the generation's own end before the request's bookkeeping. A stream that stops at its end token, a
+    stop string or an argument loop leaves its generation open (a generation that runs to its length has ended by
+    then); closing it here runs that end now: a slot whose decode went to the round runner takes the GPU turn back
+    (`_runner_decode`), so the bookkeeping after it (`_remember`'s state snapshot: the engine's `settle` and the
+    clone of its rows) never runs beside the runner's passes or a graph capture the runner makes. On 2026-10-31 a
+    copy ask ending at its end token cloned its rows while the runner captured a joint graph: the capture failed
+    (cudaErrorStreamCaptureInvalidated) and every lane of that round ended in an error. `_serve`'s finally closes
+    it again (a no-op)."""
+    if source is None:
+        return
+    try:
+        source.close()
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+
+
 def _runner_back(back: dict, eng, drafter, think, ctx, pos, device, pen, pstop, sampler, sup, eos,
                  start: int, n_out: int, max_new: int):
     """SPD-249: the request the runner handed back, at the point where `_generate_stream`'s tree loop
@@ -10271,6 +10288,7 @@ class Handler(BaseHTTPRequestHandler):
                 failed = exc
                 finish = "error"
                 logbuf.print_exc()
+            _end_generation(source)
             mem_taken = _memory_close(plan, mf[-1] if len(mf) > 1 else mf[0], ids, n_prompt,
                                       comp is None and mm is None)
             if cached_ids is None and failed is None and not micro:

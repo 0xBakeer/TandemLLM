@@ -960,6 +960,45 @@ def test_spd249_a_turn_that_would_wait_takes_the_held_tokens_first():
     return "free turn: held for the GPU wait; taken turn: on the queue and the windows given up before the wait"
 
 
+def test_spd249_a_stream_that_stops_early_ends_its_generation_before_the_bookkeeping():
+    """SPD-249: `_serve`'s streamed loop breaks at the end token (a stop string, an argument loop) with the generation
+    still open; `_end_generation` closes it right after the loop, before `_remember` (the state snapshot), so a
+    runner-decoded slot has its GPU turn back (`_runner_decode`'s finally) while it clones its rows. 2026-10-31: the
+    clone ran beside a joint graph capture and failed it (cudaErrorStreamCaptureInvalidated)."""
+    import ast
+    from server import app
+    seen = []
+
+    def gen():
+        try:
+            for t in (1, 2, 3, 99, 4):
+                yield t
+        finally:
+            seen.append("end")                  # `_runner_decode`: the turn back
+    g = gen()
+    for t in g:
+        if t == 99:
+            break
+    assert seen == []
+    app._end_generation(g)
+    assert seen == ["end"]
+    app._end_generation(g)                      # closed already: nothing
+    app._end_generation(None)
+    assert seen == ["end"]
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server", "app.py")).read()
+    tree = ast.parse(src)
+    loops = [n for n in ast.walk(tree) if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
+             and n.iter.id == "source" and any(isinstance(b, ast.Break) for b in ast.walk(n))]
+    assert loops, "the streamed loop over `source` with its breaks"
+    calls = [(c.lineno, c.func.id) for c in ast.walk(tree) if isinstance(c, ast.Call)
+             and isinstance(c.func, ast.Name) and c.func.id in ("_remember", "_end_generation")]
+    for lp in loops:
+        after = sorted(x for x in calls if x[0] > lp.end_lineno)
+        first_rem = next(n for n, f in after if f == "_remember")
+        assert any(f == "_end_generation" and lp.end_lineno < n < first_rem for n, f in after), (lp.lineno, after[:4])
+    return f"the generation's end runs at once; {len(loops)} breaking stream loop(s) close it before `_remember`"
+
+
 def test_spd249_task_messages_keep_their_order():
     t = R.Task(None, None, None, None, None, None, [], 0, 0, 0, 8, set(), None, 1, None, "cpu")
     t.hold([1, 2], 3)
