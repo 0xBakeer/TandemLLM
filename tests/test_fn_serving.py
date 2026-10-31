@@ -958,6 +958,121 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
     assert read == ["tuple", "tuple"] and eng.rec is vg.rec and st.length == 2, (read, eng.rec)
     return "verify replay, an inline MTP capture, an inline commit capture: the commit reads both layers' records"
 
+
+class _Look:
+    """A lookup whose match the test sets (`cont`: its continuation, None: nothing matches); counts its calls."""
+
+    alpha, min_order = 1.0, 3
+
+    def __init__(self):
+        self.cont, self.calls = None, 0
+
+    def candidates(self, ctx, depth):
+        self.calls += 1
+        return (3, [(list(self.cont), 9.0)]) if self.cont else (0, [])
+
+    def reset(self):
+        pass
+
+    def prime(self, tokens):
+        pass
+
+    def observe(self, tokens):
+        pass
+
+
+def _backoff_rounds(d, ng, n, lanes, path=lambda tree: tree.tokens[:2]):
+    """n rounds of `d` at `lanes` lanes, each synced with `path(tree)` (the anchor and what the walk took): the rounds
+    (1-based) whose lookup ran."""
+    ctx = list(range(40, 60))
+    d.reset()
+    d.sync(ctx, _rows(0, len(ctx)), 0)
+    looked = []
+    for r in range(1, n + 1):
+        d.lanes = lanes
+        c0 = ng.calls
+        tree = d.propose_tree(ctx, 16)
+        tree.check()
+        if ng.calls > c0:
+            looked.append(r)
+        toks = path(tree)
+        d.sync(toks, _rows(len(ctx) - 1, len(toks)), len(ctx) - 1)
+        d.observe(toks[1:])
+        ctx = ctx + toks[1:]
+    return looked
+
+
+def test_spd249_the_lookup_backs_off_on_shared_rounds_while_it_misses():
+    """SPD-249: at 8 lanes a lookup that finds nothing is skipped 1, 2, 4 .. up to `mtp_look_backoff` rounds; a
+    lone round always looks; with the knob 0 every round looks. The tree is the head's own either way."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = _Look()
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False), ng)
+    assert d.mtp_look_backoff == 0
+    assert _backoff_rounds(d, ng, 12, 8) == list(range(1, 13))                  # off: every round
+    d.mtp_look_backoff = 4
+    looked = _backoff_rounds(d, ng, 26, 8)
+    assert looked == [1, 3, 6, 11, 16, 21, 26], looked                      # skips 1, 2, 4, 4, 4 ..
+    assert d.stats["look_skips"] == 26 - len(looked) and "look_skips=" in d.report()
+    assert _backoff_rounds(d, ng, 10, 1) == list(range(1, 11))                   # a lone round always looks
+    return f"misses at 8 lanes: looked at rounds {looked}; lone rounds and knob 0: every round"
+
+
+def test_spd249_a_taken_lookup_row_starts_the_backoff_over():
+    """A lookup row the walk accepted is a hit (the next shared round looks again), and so is a spine row the
+    lookup agreed with (its continuation the head's own chain: the merged cut's shared rows, whose q the agreement
+    raised); a lookup whose rows the walk did not take is a miss."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = _Look()
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False), ng)
+    d.mtp_look_backoff = 8
+    ng.cont = [77, 78, 79]                                                   # off the head's chain (10, 11, 12)
+
+    def take_look(tree):
+        i = tree.tokens.index(77, 1)
+        assert tree.parents[i] == 0, (tree.tokens, tree.parents)
+        return [tree.tokens[0], 77]
+    assert _backoff_rounds(d, ng, 6, 8, take_look) == [1, 2, 3, 4, 5, 6]          # taken: every round looks
+    assert d._ml_streak == 0
+    looked = _backoff_rounds(d, ng, 7, 8, lambda tree: [tree.tokens[0], 10])      # the walk took the head's token
+    assert looked == [1, 3, 6], looked
+    ng.cont = [10, 11, 12]                                                   # the head's own chain: shared rows
+    tree = None
+
+    def take_shared(t):
+        nonlocal tree
+        tree = t
+        return [t.tokens[0], 10, 11]
+    looked = _backoff_rounds(d, ng, 7, 8, take_shared)
+    kinds = [k[0] for k in d.cut.last[1][1:]]
+    assert tree.tokens[1:4] == [10, 11, 12] and kinds == ["both"] * 3, (tree.tokens, kinds)
+    assert looked == list(range(1, 8)), looked                              # the agreement taken: a hit
+    ng.cont = [10, 11, 77]                                                   # agrees two deep, then its own row
+    looked = _backoff_rounds(d, ng, 7, 8, lambda t: [t.tokens[0], 10, 11, 12])
+    assert looked == list(range(1, 8)), looked
+    ng.cont = [10, 11, 12]
+    looked = _backoff_rounds(d, ng, 7, 8, lambda t: [t.tokens[0], 99])           # the walk took none of its rows
+    assert looked == [1, 3, 6], looked
+    return ("a taken lookup row or a taken spine row it agreed with: every round looks; rows the walk did not take: "
+            "back off")
+
+
+def test_spd249_a_side_slot_takes_the_lookup_backoff():
+    fn = _FN()
+    s0 = FlashNextServing(fn, 64)
+    d0 = MTPTreeDrafter(s0, s0.add_mtp_head(3), StairCut(PriceModel(), siblings=False),
+                        types.SimpleNamespace(corpus=object()))
+    d0.mtp_look_backoff = 16
+    real = MTPTreeDrafter.capture_all
+    MTPTreeDrafter.capture_all = lambda self: None
+    try:
+        _, d2 = s0.side_slot(32, d0)
+    finally:
+        MTPTreeDrafter.capture_all = real
+    assert d2.mtp_look_backoff == 16
+    return "a side slot's drafter backs off as slot 0's"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

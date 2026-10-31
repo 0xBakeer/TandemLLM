@@ -357,6 +357,7 @@ class FlashNextServing:
             d2 = MTPTreeDrafter(e2, e2.add_mtp_head(drafter0.depth),
                                 StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=c0.siblings), ng,
                                 freeze=getattr(drafter0, "freeze", False))
+            d2.mtp_look_backoff = getattr(drafter0, "mtp_look_backoff", 0)      # SPD-249
             d2.capture_all()
         return e2, d2
 
@@ -954,6 +955,11 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                      freeze=_S.get("FN_DRAFT_FREEZE") == "1")
             if drafter.freeze:
                 log("[server] Flash-Next drafter state frozen (FN_DRAFT_FREEZE): the cut learns nothing")
+            # SPD-249: the lookup's backoff on rounds other lanes share (0: off)
+            drafter.mtp_look_backoff = int(_S.get("FN_LOOK_BACKOFF") or 0)
+            if drafter.mtp_look_backoff and ngram is not None:
+                log(f"[server] Flash-Next lookup backoff on shared rounds: up to {drafter.mtp_look_backoff} rounds "
+                    f"(FN_LOOK_BACKOFF)")
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")

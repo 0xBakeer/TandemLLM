@@ -66,6 +66,11 @@ KNOBS: dict[str, tuple] = {
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone
     'FN_JOINT_PREFILL': ('0', 'engine/models/flashnext/joint_prefill.py'),
+    # SPD-249: the MTP lanes' lookup backs off where other lanes share the round (its host time comes after their
+    # drafts are done): after a round the lookup gave the walk nothing, up to N rounds skip it (1, 2, 4 .. N), a round
+    # that took a row the lookup shaped (its own, or a spine row it agreed with) starts over, a lone round always looks
+    # (engine/methods/mtp_drafter.py `mtp_look_backoff`; the lookup only adds rows to the verified tree); 0: off
+    'FN_LOOK_BACKOFF': ('0', 'engine/models/flashnext/serving.py'),
     # SPD-249: the joint graphs kept (the least recently replayed go first)
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)

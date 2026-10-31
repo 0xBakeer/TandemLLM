@@ -133,6 +133,18 @@ class MTPTreeDrafter:
         self.look_backoff = 0
         self._look_streak = 0
         self._look_left = 0
+        # SPD-249, opt-in, a draft head's lanes: the lookup runs after the draft is queued and before its read, so
+        # where other lanes share the round (their drafts long done when the rests run) it is host time the GPU waits
+        # through. After a round whose lookup gave the walk nothing (nothing matched, or no row it shaped was accepted:
+        # neither its own branch nor a spine row it agreed with, whose kept depth its agreement raised), the next rounds
+        # shared by other lanes skip it, 1, 2, 4 .. up to `mtp_look_backoff` of them as such rounds repeat; a round that
+        # took such a row starts over, and a lone round always looks (its lookup runs under its draft). The lookup only
+        # adds rows to the verified tree: the text is the verify's. 0: off
+        self.mtp_look_backoff = 0
+        self._ml_streak = 0
+        self._ml_left = 0
+        self._ml_tree = None                # the last lookup round's (tokens, parents, its own rows), until its sync
+        self._ml_skip = False               # this round's lookup was skipped
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
@@ -151,7 +163,8 @@ class MTPTreeDrafter:
                 f"plain_ms={round(c.plain[self.cls], 2) if self.cls in c.plain else None} "
                 f"draft_ms={c.draft_ms if c.draft_ms is None else round(c.draft_ms, 2)} delta={round(delta, 2)} "
                 f"V={ {r: round(v, 1) for r, v in sorted(V.items())} } "
-                f"spine_cal={[round(c.cal.q('spine', (b + 0.5) / 10), 2) for b in range(10)]}")
+                f"spine_cal={[round(c.cal.q('spine', (b + 0.5) / 10), 2) for b in range(10)]}"
+                + (f" look_skips={self.stats.get('look_skips', 0)}" if self.mtp_look_backoff else ""))
 
     @staticmethod
     def _req() -> dict:
@@ -196,6 +209,8 @@ class MTPTreeDrafter:
         self.req = self._req()
         self._turn = None
         self._anchor_streak = self._backoff_left = 0
+        self._ml_streak = self._ml_left = 0
+        self._ml_tree = None
 
     def prime(self, tokens: list[int]) -> None:
         # the prompt's rows come through `sync`; the lookup indexes its tokens
@@ -209,6 +224,8 @@ class MTPTreeDrafter:
         if self._turn is False:
             return                          # a plain turn: the head reads nothing (`_start_turn`)
         toks = [int(t) for t in tokens]
+        if self._ml_tree is not None:
+            self._ml_took(toks)
         h = streams.reshape(len(toks), -1)
         if h.shape[0] <= 64:
             h = h.clone()                   # a static buffer the next forward writes again
@@ -340,7 +357,7 @@ class MTPTreeDrafter:
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()
         if self.head.depth:
-            look = self._look(context)
+            look = self._mtp_look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
         # SPD-225: the rows' calibrated path probabilities as the tree's scores (a joint round's cut ranks
@@ -359,6 +376,8 @@ class MTPTreeDrafter:
                 self._look_miss()
             else:
                 self._look_streak = 0
+        if self.mtp_look_backoff and self.head.depth:
+            self._ml_note(tree, look)
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
         # less the backlog's prime (rows a skipped round left: owed whether this round drafts or not);
@@ -395,6 +414,59 @@ class MTPTreeDrafter:
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
+
+    def _mtp_look(self, context: list[int]) -> tuple | None:
+        """A draft head's round: the lookup (`_look`), or None when the lookup backoff skips it (`mtp_look_backoff`: a
+        round other lanes share, inside the skips its misses earned)."""
+        self._ml_skip = False
+        if self.mtp_look_backoff and self._ml_left > 0 and self.lanes > 1:
+            self._ml_left -= 1
+            self._ml_skip = True
+            self.stats["look_skips"] = self.stats.get("look_skips", 0) + 1
+            return None
+        return self._look(context)
+
+    def _ml_note(self, tree: DraftTree, look) -> None:
+        """After the cut: a round whose lookup shaped kept rows waits for its sync (`_ml_took`); one that found
+        nothing or shaped none is a miss now. The lookup shapes a merged cut's rows of its own ("look") and the spine
+        rows it agrees with ("both": their q is 1 - both wrong, above the spine's alone, so the cut keeps the spine
+        deeper with them); copy-like text is where it does the second."""
+        self._ml_tree = None
+        if getattr(self, "_ml_skip", False):
+            return
+        last = getattr(self.cut, "last", None)
+        own = set()
+        if look is not None and isinstance(last, tuple) and last and last[0] == "merged":
+            kind = last[1]
+            own = {r for r in range(1, min(len(tree.tokens), len(kind)))
+                   if kind[r] is not None and kind[r][0] in ("look", "both")}
+        if own:
+            self._ml_tree = ([int(t) for t in tree.tokens], [int(p) for p in tree.parents], own)
+        else:
+            self._ml_miss()
+
+    def _ml_took(self, toks: list[int]) -> None:
+        """At the sync of a lookup round: the accepted path (`toks`, the anchor first) followed down that round's
+        tree; a row the lookup shaped on it ("look" or "both") is a hit (the streak starts over), else a miss."""
+        tokens, parents, own = self._ml_tree
+        self._ml_tree = None
+        hit, row = False, 0
+        if toks and tokens and toks[0] == tokens[0]:
+            for t in toks[1:]:
+                row = next((c for c in range(row + 1, len(tokens)) if parents[c] == row and tokens[c] == t), None)
+                if row is None:
+                    break
+                if row in own:
+                    hit = True
+                    break
+        if hit:
+            self._ml_streak = self._ml_left = 0
+        else:
+            self._ml_miss()
+
+    def _ml_miss(self) -> None:
+        self._ml_streak += 1
+        self._ml_left = min(1 << min(self._ml_streak - 1, 30), self.mtp_look_backoff)
 
     def _look_miss(self) -> None:
         if self.look_backoff:
@@ -445,6 +517,7 @@ class MTPTreeDrafter:
         n = int(n)
         self.head.resume(max(0, n - 1))
         self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self._ml_tree = None
         self._t_prev, self._obs, self._plain = None, None, None
         self.held = ([0], self.s.last_streams().clone()) if n > 0 else None
 
@@ -460,6 +533,7 @@ class MTPTreeDrafter:
             t.narrow(ax, 0, L).copy_(x)
         self.head.resume(L)
         self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self._ml_tree = None
         self._t_prev, self._obs, self._plain = None, None, None
         self.held = ([0], self.s.last_streams().clone())
 
