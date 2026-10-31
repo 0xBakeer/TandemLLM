@@ -52,7 +52,7 @@ CAL = _S.get("FN_MTP_COUPLED_CAL") == "1"
 #: taken over them: the draft's q, not the target's, so only acceptance moves)
 KP = 64
 #: the row parameters' layout (`keyed_for`, the kernel): tau, top_k (0: none), top_p (1: none), sibling margin
-#: (< 0: no sibling), on (0: the plain pair stays)
+#: (< 0: no sibling), on (0: the plain pair stays), the corrector flag (corrector.py FLAG; 0: the plain coupled pick stays)
 NPAR = 8
 STAT_Q, STAT_MARGIN = 0, 1
 
@@ -148,11 +148,14 @@ def stat() -> int:
 
 
 def pick(lg: torch.Tensor, hids, keys: torch.Tensor, par: torch.Tensor, z: torch.Tensor, tok: torch.Tensor,
-         prob: torch.Tensor, V: int, kp: int = KP) -> None:
+         prob: torch.Tensor, V: int, kp: int = KP, x: torch.Tensor | None = None, depth: int = 0) -> None:
     """The coupled pick of each keyed row of `lg` [R, Vh] (the draft head's fp32 row; `hids` [Vh] its token ids, None:
     the full vocabulary), written over `tok` / `prob` [R, 2] (the plain chain's pairs) where the row's `on` is set.
     `keys` [R] int64 (a strided view is fine), `par` [R, NPAR] fp32, `z` [R] or [R, 1]: the plain chain's softmax
-    sum at T 1 (sum of exp(lg - max)). Graph-capturable: no host reads."""
+    sum at T 1 (sum of exp(lg - max)). Graph-capturable: no host reads.
+    SPD-249: `x` [R, H] (the MTP layer's output, the head's input) and `depth` (0: the first draft): with
+    FN_MTP_CORRECTOR on, the rows whose corrector flag is set re-pick over the head's top candidates
+    (engine/models/flashnext/corrector.py) after the coupled pick; a hot head only (the corrector's table is by hot index)."""
     from engine import keyed_noise as KN
     R = lg.shape[0]
     v, i = torch.topk(lg, kp, dim=-1, sorted=True)
@@ -161,6 +164,11 @@ def pick(lg: torch.Tensor, hids, keys: torch.Tensor, par: torch.Tensor, z: torch
     zf = z.reshape(R, -1)
     _pick[(R,)](v, t, keys, keys.stride(0), par, par.stride(0), zf, zf.stride(0), tok, tok.stride(0), prob,
                 prob.stride(0), S, STAT=stat(), KP=kp, num_warps=2)
+    if x is not None and hids is not None:
+        from engine.models.flashnext import corrector as CR
+        c = CR.get()
+        if c is not None and hids.numel() <= c.T.shape[0]:      # its table covers the head's hot ids (a prefix)
+            c.apply(v, i, t, keys, par, zf, tok, prob, S, x, depth)
 
 
 @torch.no_grad()
@@ -278,7 +286,15 @@ def keyed_for(sampler, start: int, depth: int) -> tuple | None:
            float(sampler.top_k) if FILTER else 0.0,
            float(sampler.top_p) if FILTER else 1.0,
            SIB_MARGIN if SIB else -1.0, 1.0, 0.0, 0.0, 0.0]
+    if _corrector_on():
+        from engine.models.flashnext import corrector as CR
+        par[CR.FLAG] = CR.flag_for(sampler)
     return keys, par
+
+
+def _corrector_on() -> bool:
+    from engine.models.flashnext import corrector as CR
+    return CR.ON
 
 
 class CalInputs:

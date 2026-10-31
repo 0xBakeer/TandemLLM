@@ -64,6 +64,13 @@ class FlashNextMTPHead:
             return None
         ci = CP.CalInputs.get()
         cal, prices, draft = ci.inputs(self.keyed_hot, lanes, cls) if ci is not None else (None, None, None)
+        if self.keyed is not None and len(self.keyed[1]) > 5 and self.keyed[1][5]:
+            # SPD-249: the corrector picked this round's drafts: its own calibration where its file has one
+            from engine.models.flashnext import corrector as CR
+            cr = CR.get()
+            cc = cr.calibration(self.keyed_hot) if cr is not None else None
+            if cc is not None:
+                cal = cc
         return {"cal": cal, "prices": prices, "draft_ms": draft, "sib1": CP.SIB}
 
     def reset(self) -> None:

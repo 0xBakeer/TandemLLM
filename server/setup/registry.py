@@ -164,7 +164,11 @@ _PAR_SETUP = _obj({"env": _STR, "lanes": _INT1, "window": _INT1, "max_tokens": _
                    "sampling": _obj({"temperature": _NUM0, "top_k": {"type": "integer", "minimum": 0},
                                      "top_p": _NUM0, "min_p": _NUM0, "seed": _STR}),
                    "prompts": _obj({"set": _STR, "sha256": {"type": "string", "pattern": r"^[0-9a-f]{16}$"},
-                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())})})
+                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())}),
+                   # SPD-249: whether a family's draft corrector ran (the raw file has its file and sha256)
+                   "corrector": {"type": "boolean"}},
+                  required=("env", "lanes", "window", "max_tokens", "suffix_store", "response_cache", "thinking",
+                            "sampling", "prompts"))
 _PAR_LEVEL = _obj({"wall_tok_s": _NUM0, "decode_tok_s": {"type": ["number", "null"], "minimum": 0},
                    "ttft_s": {"type": ["number", "null"], "minimum": 0},
                    "at_once": {"type": "integer", "minimum": 0}, "rounds": _INT1})

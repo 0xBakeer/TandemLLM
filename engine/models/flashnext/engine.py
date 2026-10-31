@@ -2607,9 +2607,10 @@ class FlashNextEngine(FlashNextRef):
                     # lanes of both kinds: the keyed lanes' pick over their head's own rows
                     lgc = K.gemv(x, kh)
                     zc = torch.exp(lgc - lgc.amax(-1, keepdim=True)).sum(-1, keepdim=True)
-                    CP.pick(lgc, kids, KEYS[:, j], PAR, zc, tok, prob, c.vocab_size)
+                    CP.pick(lgc, kids, KEYS[:, j], PAR, zc, tok, prob, c.vocab_size, x=x, depth=j)
                 else:
-                    CP.pick(lg, hids if head is not None else None, KEYS[:, j], PAR, z, tok, prob, c.vocab_size)
+                    CP.pick(lg, hids if head is not None else None, KEYS[:, j], PAR, z, tok, prob, c.vocab_size,
+                            x=x, depth=j)
             for i, b in enumerate(bs):
                 b["prob"][j].copy_(prob[i])
                 b["tok"][j].copy_(tok[i])
@@ -2831,7 +2832,7 @@ class FlashNextEngine(FlashNextRef):
             b["tok"][j].copy_(hids.index_select(0, ids) if head is not None else ids)
             if keyed:
                 CP.pick(lg, hids if head is not None else None, b["ckeys"][j:j + 1], b["cpar"].view(1, -1), z,
-                        b["tok"][j:j + 1], b["prob"][j:j + 1], c.vocab_size)
+                        b["tok"][j:j + 1], b["prob"][j:j + 1], c.vocab_size, x=x[-1:], depth=j)
             if j + 1 == depth:
                 break
             self._rows_buffers(1, ("mtp", self._mtp_key, j + 1, 1))["d"]["tok"].copy_(b["tok"][j, :1])

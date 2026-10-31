@@ -26,6 +26,9 @@ The test matrix:
   9  the tokenizer's directory from the env file's QSE_WEIGHTS_DIR          test_the_weights_dir_of_the_env_file
  10  against the server (fake engine): `/v1/tokenize` gives the chat prompt's ids, their text reads back as them,
      and `/v1/completions` streams an answer whose prompt_tokens is their count       test_the_tool_against_the_server
+ 11  SPD-249: a family's draft corrector (/health weights.corrector) goes to the raw file's /health records and
+     setup, and the row says whether it ran (`setup.corrector`); a row without one is as before
+                                                        test_the_corrector_is_recorded
 
 Run: python tests/test_parallel_card.py
 """
@@ -159,6 +162,28 @@ def test_the_schema():
     del bad["levels"]["1"]
     assert any("missing '1'" in e for e in validate(bad, registry._PAR_ROW))
     assert any("commit" in e for e in validate(dict(row, commit="HEAD"), registry._PAR_ROW))
+
+
+def test_the_corrector_is_recorded():
+    st = {"loaded": True, "why": None, "file": "flashnext-3.05.corrector.safetensors", "sha256": "ab" * 32, "kc": 8,
+          "hh": 256, "D": 4, "hot_rows": 65536, "stat": "q", "tau": 0.85,
+          "sampling": {"temperature": 1.0, "top_k": 20, "top_p": 0.95}, "heads": {"65536": True, "32768": True}}
+    h = {"version": "0.15.1", "weights": {"name": "flashnext-3.05", "corrector": st}, "parallel": {}, "cache": {}}
+    assert pc.health_record(h)["corrector"] == st
+    assert pc.health_record({"weights": {"name": "exl3-4.0"}})["corrector"] is None
+    for loaded in (True, False):
+        raw = _raw()
+        raw["setup"]["corrector"] = dict(st, loaded=loaded, why=None if loaded else "no file")
+        row = pc.build_row(raw)
+        assert row["setup"]["corrector"] is loaded
+        assert not validate(row, registry._PAR_ROW), validate(row, registry._PAR_ROW)
+        assert yaml.safe_load("rows:\n" + pc.row_yaml(row))["rows"][0] == row
+    raw = _raw()
+    raw["setup"]["corrector"] = None
+    assert "corrector" not in pc.build_row(raw)["setup"]
+    assert any("corrector" in e for e in validate(dict(row, setup=dict(row["setup"], corrector="yes")),
+                                                   registry._PAR_ROW))
+    return "/health's corrector in the raw records; the row's setup.corrector true/false; none: no key"
 
 
 def test_the_shipped_rows():

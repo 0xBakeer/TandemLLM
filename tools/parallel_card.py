@@ -188,7 +188,10 @@ def health_record(h: dict) -> dict:
             "windows": sorted({s.get("max_len") for s in p.get("slots") or [] if s.get("max_len")}),
             "max_queue": h.get("max_queue"),
             "suffix_store": bool(c.get("suffix_store")), "response_cache": bool(c.get("response_cache")),
-            "prefix_cache": c.get("prefix_cache"), "prefix_chunk": c.get("prefix_chunk")}
+            "prefix_cache": c.get("prefix_cache"), "prefix_chunk": c.get("prefix_chunk"),
+            # SPD-249: a family's draft corrector, where its loader reports one (loaded or not and why, the file's
+            # name and sha256, its sizes and trained sampling); None for the others
+            "corrector": w.get("corrector")}
 
 
 class Poller:
@@ -421,6 +424,9 @@ def build_row(raw: dict) -> dict:
                      "prompts": {"set": s["prompts"]["set"], "sha256": s["prompts"]["sha256"][:16],
                                  "prompt_tokens": s["prompts"]["prompt_tokens"]}},
            "rounds": raw["args"]["rounds"]}
+    if s.get("corrector") is not None:
+        # SPD-249: whether the drafts' corrector ran (its file, sha256 and sizes are in the raw file's setup)
+        row["setup"]["corrector"] = bool(s["corrector"].get("loaded"))
     if raw.get("decode"):
         # a workload whose stream gave no decode window (its text arrived in one event) is left out
         row["decode"] = {w: _r(raw["decode"]["median"][w], 1) for w in ("code", "prose")
@@ -567,6 +573,7 @@ def main(argv=None) -> int:
     raw["setup"] = {"env": a.env_name, "lanes": hr["lanes"], "window": max(hr["windows"] or [hr["max_len"] or 0]),
                     "max_tokens": a.max_tokens, "suffix_store": hr["suffix_store"], "endpoint": ENDPOINT,
                     "response_cache": hr["response_cache"], "sampling": {**sampling, "seed": "one per request"},
+                    "corrector": hr["corrector"],
                     "prompts": {"set": pj["version"], "sha256": pj["_sha256"], "filler_sha256": pj["_filler_sha256"],
                                 "prompt_tokens": {w: int(v) for w, v in pt.items() if v}}}
     raw["valid"] = all(v["valid"] for v in (raw.get("levels") or {}).values())

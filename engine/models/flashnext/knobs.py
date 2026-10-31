@@ -99,4 +99,11 @@ KNOBS: dict[str, tuple] = {
     # (ops/prices/<model>/<profile>.<device>.coupled.json): per-depth calibration of the reported draft statistic, and
     # at one lane the re-measured class-0 prices and draft cost; 0: the cut's own inputs as for any round
     'FN_MTP_COUPLED_CAL': ('0', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: a learned corrector re-scores the coupled draft's top candidates of the head at each depth (a draft
+    # logit plus an MLP correction on the MTP layer's output and the candidates; engine/models/flashnext/corrector.py),
+    # the pick still argmax over the target's keyed noise; only proposals change. Needs FN_MTP_COUPLED and a hot head;
+    # requests sampled otherwise than the file was trained for keep the plain coupled pick. 0: the plain coupled pick
+    'FN_MTP_CORRECTOR': ('0', 'engine/models/flashnext/corrector.py'),
+    # SPD-249: the corrector's file (safetensors); auto: ops/correctors/<model>/<profile>.corrector.safetensors; without it the coupled drafts stay plain
+    'FN_MTP_CORRECTOR_FILE': ('auto', 'engine/models/flashnext/corrector.py'),
 }

@@ -918,6 +918,14 @@ def prices(pack: str, log=print) -> PriceModel:
                            log=log)
 
 
+def corrector_heads(fn, rows: int) -> dict:
+    """SPD-249: the keyed heads' hot ids -> whether a corrector table of `rows` hot rows covers that head (its table is
+    by hot index, the heads are prefixes of ops/fn-hot-vocab.npy). The keyed heads are `keyed_head`'s: the coupled
+    head and its one-lane rows, else the draft head; {}: keyed drafts read the full head."""
+    ids = [fn.coupled_ids, fn.lone_ids] if fn.coupled_head is not None else [fn.draft_ids]
+    return {int(i.numel()): int(i.numel()) <= rows for i in ids if i is not None}
+
+
 def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print,
           corpus: str | None = None, kv_pool=None):
     """Flash-Next for the server (`serve` below): the pack's weights, the engine in the loop's
@@ -939,7 +947,7 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
         kv_pool()
     eng = FlashNextServing(fn, max_len)
     mark("engine")
-    drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
+    drafter, check, hot, corrector = None, None, int(_S.get("FN_DRAFT_HOT")), None
     if spec:
         if hot:
             fn.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
@@ -960,6 +968,22 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                 f"{'hot ' + str(CP.HOT) if CP.HOT else 'the draft head'}{lone}, sibling "
                 f"{'margin <= ' + str(CP.SIB_MARGIN) if CP.SIB else 'off'}, cut inputs "
                 f"{'from ' + ci.file if ci is not None else 'the cut own'}")
+            from engine.models.flashnext import corrector as CR
+            heads = None
+            if CR.ON:
+                # SPD-249: the corrector on the device before any draft graph is captured (its launch is in them),
+                # its file checked against this model's MTP output width
+                cr = CR.get(pack=pack, hidden=idx.cfg.hidden_size)
+                if cr is not None:
+                    heads = corrector_heads(fn, int(cr.T.shape[0]))
+                    if not heads:
+                        log("[server] FN_MTP_CORRECTOR needs a hot draft head (its table is by hot index): keyed "
+                            "drafts over the full head keep the plain coupled pick")
+                    for n, ok in heads.items():
+                        if not ok:
+                            log(f"[server] FN_MTP_CORRECTOR: its table has {cr.T.shape[0]} hot rows, the keyed head "
+                                f"{n}: that head's drafts keep the plain coupled pick")
+            corrector = CR.status(heads)
         text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
@@ -991,6 +1015,9 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
         info["draft_head"] += f", coupled hot {fn.coupled_ids.numel()}"
         if fn.lone_head is not None:
             info["draft_head"] += f" (one lane {fn.lone_ids.numel()})"
+    if corrector is not None:
+        # SPD-249: whether the coupled drafts' corrector loaded, its file and why not (/health weights.corrector)
+        info["corrector"] = corrector
     return eng, drafter, info
 
 
@@ -1037,4 +1064,5 @@ def serve(a, ctx) -> dict:
                         "weights_info": {"format": "exl3", "weights": a.model,
                                          "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
                                          "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"]}}}
+                                         "self_check": info["self_check"],
+                                         **({"corrector": info["corrector"]} if "corrector" in info else {})}}}

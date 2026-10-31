@@ -1307,6 +1307,9 @@
               "setup": {
                 "additionalProperties": false,
                 "properties": {
+                  "corrector": {
+                    "type": "boolean"
+                  },
                   "env": {
                     "maxLength": 2000,
                     "type": "string"
