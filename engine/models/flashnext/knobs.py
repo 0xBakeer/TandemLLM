@@ -133,4 +133,10 @@ KNOBS: dict[str, tuple] = {
     'FN_MTP_CORRECTOR': ('0', 'engine/models/flashnext/corrector.py'),
     # SPD-249: the corrector's file (safetensors); auto: ops/correctors/<model>/<profile>.corrector.safetensors; without it the coupled drafts stay plain
     'FN_MTP_CORRECTOR_FILE': ('auto', 'engine/models/flashnext/corrector.py'),
+    # SPD-249 (T1): a packed MTP draft's steps after the feed (each lane's draft head and top-2, the one-row steps) from a
+    # CUDA graph a lane count, the lanes' MTP caches and staged rows through its attention entry tables (each row's own
+    # arithmetic: the same drafts); captured on the round runner when its joint pass could capture; 0: eager
+    'FN_PACK_GRAPH': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 (T1): a packed draft graph's key is captured at its n-th draft (the eager drafts before it load what it runs)
+    'FN_PACK_GRAPH_AFTER': ('2', 'engine/models/flashnext/engine.py'),
 }

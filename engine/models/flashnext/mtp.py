@@ -4,7 +4,8 @@
 The head keeps its own cache (the MTP layer's KV and state, `FlashNextEngine.new_mtp_state`). A
 round's draft -- the feed of the rows committed since the last one, `depth` - 1 deeper steps, every
 head and its top-2 -- is one replay of a captured graph for that feed's row count and context class
-(`MTPChainGraph`); the host reads the drafts once.
+(`MTPChainGraph`); the host reads the drafts once. A round's lanes draft together (`run_packed`): the
+feed eager, and with QWEN38_FN_PACK_GRAPH (SPD-249, T1) the steps after it from the lane count's graph.
 
 SPD-249: a seeded sampled request's rounds draft coupled (engine/models/flashnext/coupled.py): the drafter sets
 `keyed` from `keyed_for(sampler, start)` before each launch; the round's chain is then the keyed graph of its feed
@@ -40,6 +41,7 @@ class FlashNextMTPHead:
         self.keyed = None               # SPD-249: this round's keys and parameters (`keyed_for`), or None
         self._keyed = False             # the staged draft is keyed
         self._khot = 0                  # the vocabulary size of the head the last keyed chain read (0: full)
+        self._pk = None                 # SPD-249 (T1): (the packed draft graph's replay, this head's lane) to read
 
     # --- SPD-249 ---------------------------------------------------------------------
     def keyed_for(self, sampler, start: int):
@@ -127,6 +129,7 @@ class FlashNextMTPHead:
         self.fn._mtp_key = self.key
         fn = self.fn
         n = len(nexts)
+        self._pk = None
         cls = fn.qsa_class(self.st.length + n + self.depth - 1)
         kd = self.keyed if CP.ON else None
         self._keyed = kd is not None
@@ -158,16 +161,21 @@ class FlashNextMTPHead:
 
     @staticmethod
     def run_packed(heads: list) -> None:
-        """SPD-235: the staged drafts of these heads (one engine) in one packed chain."""
+        """SPD-235: the staged drafts of these heads (one engine) in one packed chain. SPD-249 (T1): from the lane
+        count's draft graph, each head reads its lane of that replay's picks."""
         keyed = [h._keyed for h in heads]
         items = [(h.key, h.st, h._n, h.depth, h._cls) for h in heads]
         if any(keyed):
-            heads[0].fn.mtp_chain_multi(items, keyed=keyed)
+            out = heads[0].fn.mtp_chain_multi(items, keyed=keyed)
             hot = heads[0]._hot_of(len(heads))
             for h in heads:
                 h._khot = hot
         else:
-            heads[0].fn.mtp_chain_multi(items)
+            out = heads[0].fn.mtp_chain_multi(items)
+        for i, h in enumerate(heads):
+            h._pk = None if out is None else (out, i)
+            if out is not None and out.captured:
+                h.captures += 1         # this round's draft time is the capture's (a price skips it)
 
     def read(self) -> tuple[list, list]:
         """After `launch`: per depth the (first, second) token and their probabilities; the fed rows
@@ -175,5 +183,8 @@ class FlashNextMTPHead:
         self.fn._mtp_key = self.key
         torch.cuda.current_stream().synchronize()
         self.st.length += self._n
+        pk, self._pk = self._pk, None
+        if pk is not None:
+            return pk[0].read(pk[1], self.depth)
         b = self.fn._mtp_bufs(self.depth)
         return b["tok_h"][:self.depth].tolist(), b["prob_h"][:self.depth].tolist()
