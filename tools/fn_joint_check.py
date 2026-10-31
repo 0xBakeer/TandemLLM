@@ -22,6 +22,15 @@ state's lone verify and commit (its graphs, as a slot alone runs them), at every
 tools/fn_moe_group_check.py --replay).
 `--commit-multi` (SPD-239): the joint states commit in one call (`FlashNextServing.commit_tree_multi`, every
 lane's copies in one launch); their next rounds and end states are then held to the lone twins' own commits.
+`--joint-prefill` (SPD-249): instead of the verify rounds, the joint prefill of a burst against each prompt's lone
+prefill (`FlashNextServing.prefill_joint` vs `forward`), on twin states. Bursts: the prompts of `--prompts-json` (a
+bench JSON's first row's `prompts`, tokenized as the server does) if given, then `--tokens` (class prompts of those
+lengths, with a one-token prompt and a prompt resumed past a prefix), then three prompts of `--long` rows (more than
+FN_PREFILL_CHUNK rows: cut into runs). Per prompt: logits, streams (`hidden_post_norm`), every section (GDN states,
+conv tails, PLE conv and context, mtp.h_last), the K, V and indexer-key rows, the pooled indexer keys and the length,
+each `torch.equal`; then `--steps` greedy decode steps and a verify block with its commit on both twins, logits
+equal at each. `--timing R`: the first burst's lone prefills (summed) and its joint prefill, R times each on fresh
+states, a device sync around each (median s).
 `--graph` (SPD-249): the joint passes from the joint graphs (QWEN38_FN_JOINT_GRAPH, captures allowed every pass):
 each lane's block width varies by round (1..`--block` rows, a tree on odd rounds) and every fourth round only the
 first five lanes run, so the keys' padding, the lanes' row cuts and other lane sets are replayed; per round whether it
@@ -56,6 +65,142 @@ def block_of(cont: list[int], at: int, n: int, tree: bool) -> tuple[list[int], l
     return toks, parents
 
 
+def _twin_diff(s_l, s_j) -> dict:
+    """SPD-249: where two slots' states differ: the sections (GDN states, conv tails, PLE conv and context,
+    mtp.h_last), the K / V / indexer-key rows below the length, the pooled indexer keys below the length's blocks and
+    their counts, the length."""
+    s_l._settle_chain()
+    s_j._settle_chain()
+    a, b = s_l.st, s_j.st
+    s_l.fn.flush(a)                                           # parked GDN rows (the folded commit) into the states
+    s_j.fn.flush(b)
+    secs_l, secs_j = s_l.state.sections(), s_j.state.sections()
+    bad = [k for k in secs_l if not torch.equal(secs_l[k], secs_j[k])]
+    views = [n for (n, t, ax), (_, u, _) in zip(s_l.state.views(), s_j.state.views())
+             if not torch.equal(t.narrow(ax, 0, a.length), u.narrow(ax, 0, b.length))]
+    nb = a.length // a.pool_ratio
+    pool = [li for li in sorted(a.pool) if not torch.equal(a.pool[li][:nb], b.pool[li][:nb])]
+    ctx = [li for li in sorted(set(a.ple_ctx) | set(b.ple_ctx))
+           if li not in a.ple_ctx or li not in b.ple_ctx or not torch.equal(a.ple_ctx[li], b.ple_ctx[li])]
+    return {"length": [a.length, b.length], "sections_differ": bad, "views_differ": views, "pool_differ": pool,
+            "pool_n_equal": a.pool_n == b.pool_n, "ple_ctx_differ": ctx,
+            "equal": a.length == b.length and not bad and not views and not pool and a.pool_n == b.pool_n and not ctx}
+
+
+@torch.no_grad()
+def joint_prefill_check(a) -> None:
+    """SPD-249: `--joint-prefill` (the module docstring)."""
+    from engine.models.flashnext import engine as E
+    from engine.models.flashnext import joint_prefill as JP
+    from engine.models.flashnext.serving import FlashNextServing, build
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(a.pack)
+    bursts = []
+    if a.prompts_json:
+        texts = json.load(open(a.prompts_json))["rows"][0]["prompts"]
+        bursts.append(("bench", [(tok(t, add_special_tokens=False)["input_ids"], 0) for t in texts]))
+    lens = [int(x) for x in a.tokens.split(",") if x.strip()]
+    if lens:
+        mixed = [(class_prompt(tok, ("prose", "code", "chat")[i % 3], n)[:n], 0) for i, n in enumerate(lens)]
+        mixed.append((class_prompt(tok, "chat", 3)[:1], 0))                       # a one-token prompt (start 0)
+        body = class_prompt(tok, "prose", 700)[:700]
+        mixed.append((body, 500))                                                # rows 500.. after a 500-row prefix
+        bursts.append(("mixed", mixed))
+    if a.long:
+        bursts.append(("long", [(class_prompt(tok, ("code", "prose", "chat")[i], a.long)[:a.long], 0) for i in range(3)]))
+    L = max(len(ids) for _, b in bursts for ids, _ in b) + a.steps + 64 + 16
+    eng, _, _ = build(a.pack, L, tok, spec=False, log=lambda s: print(s, flush=True))
+    fn = eng.fn
+    print(f"[jp] chunk {E.PREFILL_CHUNK}, path {fn.prefill_path}, knob FN_JOINT_PREFILL {int(JP.ON)} (the tool calls the "
+          f"joint prefill itself), max_len {L}", flush=True)
+    report = {"bursts": [], "timing": None, "chunk": E.PREFILL_CHUNK}
+    ok_all = True
+    for name, burst in bursts:
+        lone = [FlashNextServing(fn, L) for _ in burst]
+        joint = [FlashNextServing(fn, L) for _ in burst]
+        items, lone_lg = [], []
+        for (ids, start), s_l, s_j in zip(burst, lone, joint):
+            t = torch.tensor(ids, device="cuda")
+            if start:                                     # the prefix alone on both twins, then the rest
+                s_l.forward(t[:start], 0)
+                s_j.forward(t[:start], 0)
+            assert s_j.prefill_joint_ok(len(ids) - start, start) or not JP.ON
+            assert JP.ok(fn, len(ids) - start, start, s_j.st), (name, len(ids), start)
+            lone_lg.append(s_l.forward(t[start:], start).clone())
+            items.append((s_j, t[start:], start))
+        out = FlashNextServing.prefill_joint(items)
+        torch.cuda.synchronize()
+        rows = []
+        for k, ((ids, start), s_l, s_j, lg_l, lg_j) in enumerate(zip(burst, lone, joint, lone_lg, out)):
+            r = {"rows": len(ids) - start, "start": start, "logits_equal": bool(torch.equal(lg_l, lg_j)),
+                 "logits_max_diff": float((lg_l - lg_j).abs().max()),
+                 "hidden_equal": bool(torch.equal(s_l.hidden_post_norm, s_j.hidden_post_norm)),
+                 "argmax": [int(lg_l.view(-1).argmax()), int(lg_j.view(-1).argmax())]}
+            r.update(_twin_diff(s_l, s_j))
+            # then the same greedy decode steps and one verify block + commit on both twins
+            nxt = int(lg_l.view(-1).argmax())
+            steps_eq, toks = [], [nxt]
+            for _ in range(a.steps):
+                x_l = s_l.forward(torch.tensor([nxt], device="cuda"), s_l.st.length)
+                x_j = s_j.forward(torch.tensor([nxt], device="cuda"), s_j.st.length)
+                steps_eq.append(bool(torch.equal(x_l, x_j)))
+                nxt = int(x_l.view(-1).argmax())
+                toks.append(nxt)
+            blk = [nxt, toks[1], toks[2], toks[3]]                    # a chain block (its tokens need not be greedy)
+            v_l = s_l.forward_tree(torch.tensor(blk, device="cuda"), [-1, 0, 1, 2], s_l.st.length).clone()
+            v_j = s_j.forward_tree(torch.tensor(blk, device="cuda"), [-1, 0, 1, 2], s_j.st.length).clone()
+            s_l.commit_tree([0, 1])
+            s_j.commit_tree([0, 1])
+            r.update(steps_equal=steps_eq, verify_equal=bool(torch.equal(v_l, v_j)), after=_twin_diff(s_l, s_j))
+            r["all_equal"] = bool(r["logits_equal"] and r["hidden_equal"] and r["equal"] and all(steps_eq)
+                                  and r["verify_equal"] and r["after"]["equal"])
+            ok_all = ok_all and r["all_equal"]
+            rows.append(r)
+            print(f"[jp] {name} {k}: rows {r['rows']} start {start}: logits {r['logits_equal']} hidden "
+                  f"{r['hidden_equal']} state {r['equal']} (sections {r['sections_differ']} views {r['views_differ']} "
+                  f"pool {r['pool_differ']} ctx {r['ple_ctx_differ']}) steps {steps_eq} verify {r['verify_equal']} "
+                  f"after {r['after']['equal']} max diff {r['logits_max_diff']}", flush=True)
+        report["bursts"].append({"name": name, "prompts": len(burst), "rows": sum(len(i) - s for i, s in burst),
+                                 "runs": JP.runs([len(i) - s for i, s in burst], E.PREFILL_CHUNK), "per_prompt": rows,
+                                 "all_equal": all(r["all_equal"] for r in rows)})
+        del lone, joint, items, out
+        torch.cuda.empty_cache()
+    if a.timing and bursts:
+        # the first burst's lone prefills (one after another, summed) against its joint prefill, on fresh states
+        name, burst = bursts[0]
+        ss = [FlashNextServing(fn, L) for _ in burst]
+        ids_ = [torch.tensor(i, device="cuda") for i, _ in burst]
+        tl, tj = [], []
+        for rep in range(a.timing + 1):
+            for s in ss:
+                s.kv.length = 0
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for s, t in zip(ss, ids_):
+                s.forward(t, 0)
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            for s in ss:
+                s.kv.length = 0
+            torch.cuda.synchronize()
+            t2 = time.perf_counter()
+            FlashNextServing.prefill_joint([(s, t, 0) for s, t in zip(ss, ids_)])
+            torch.cuda.synchronize()
+            t3 = time.perf_counter()
+            if rep:                                          # the first pair warms
+                tl.append(t1 - t0)
+                tj.append(t3 - t2)
+        med = lambda v: sorted(v)[len(v) // 2]               # noqa: E731
+        report["timing"] = {"burst": name, "prompts": len(burst), "rows": sum(i.numel() for i in ids_),
+                            "lone_sum_s": [round(x, 4) for x in tl], "joint_s": [round(x, 4) for x in tj],
+                            "lone_sum_median_s": round(med(tl), 4), "joint_median_s": round(med(tj), 4)}
+        print(f"[jp] timing {report['timing']}", flush=True)
+    report["all_equal"] = ok_all
+    print(f"[jp] ALL EQUAL {ok_all}", flush=True)
+    if a.json:
+        json.dump(report, open(a.json, "w"), indent=1)
+
+
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -74,8 +219,14 @@ def main() -> None:
     ap.add_argument("--dump-moe", help="SPD-249: one more joint pass; every layer's expert input rows and ids to this "
                     "file (torch.save), for tools/fn_moe_group_check.py --replay")
     ap.add_argument("--graph", action="store_true", help="SPD-249: the joint passes from the joint graphs")
+    ap.add_argument("--joint-prefill", action="store_true", help="SPD-249: joint prefill vs each prompt's lone prefill")
+    ap.add_argument("--prompts-json", help="SPD-249: a bench JSON whose first row's prompts are the first burst")
+    ap.add_argument("--long", type=int, default=1800, help="SPD-249: the rows of the last burst's three prompts")
+    ap.add_argument("--steps", type=int, default=6, help="SPD-249: greedy decode steps after the prefill")
     ap.add_argument("--json")
     a = ap.parse_args()
+    if a.joint_prefill:
+        return joint_prefill_check(a)
     global FlashNextServing, build
     if a.arch == "qwen3_5_moe":
         # SPD-217: Ornith's trunk (Qwen3.5 MoE), the same checks over `Qwen35MoeEngine.verify_multi`

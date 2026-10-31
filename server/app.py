@@ -1572,13 +1572,33 @@ def _joint_forward(eng, tokens, start: int, whole: bool):
     i = _par_index()
     if not pool.burst.member(i):
         return None
-    ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+    # SPD-249: an adapter with its own joint prefill (`prefill_joint_ok(T, start)` and a static
+    # `prefill_joint(items)` of the same contract) runs the burst through it; else engine/model.py's
+    own_ok = getattr(eng, "prefill_joint_ok", None)
+    err = None
+    if own_ok is not None:
+        ok = bool(whole and tokens is not None and own_ok(int(tokens.numel()), int(start)))
+        run = type(eng).prefill_joint
+        prep = getattr(eng, "prefill_joint_prepare", None)
+        if ok and prep is not None:
+            # SPD-249: the member's own steps before the forward (its chain, its start, its KV pages) on its
+            # own thread: what fails there is this member's alone. It joins with no job (out of the joint forward,
+            # which the others run without it) and raises it after the join, as its own forward would.
+            try:
+                prep(int(tokens.numel()), int(start))
+            except BaseException as e:             # noqa: BLE001 - raised below, after the join
+                ok, err = False, e
+    else:
+        ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+        run = model_mod.prefill_joint
     held = pool.turn is not None and pool.turn.held_by(i)
     done, logits = pool.burst.join(
-        i, (eng, tokens, int(start)) if ok else None, model_mod.prefill_joint,
+        i, (eng, tokens, int(start)) if ok else None, run,
         release=(lambda: pool.turn.release(i)) if held else None,
         acquire=(lambda: pool.turn.acquire(i)) if held else None,
         rows=int(tokens.numel()) if ok else 0)
+    if err is not None:
+        raise err
     return logits if done else None
 
 

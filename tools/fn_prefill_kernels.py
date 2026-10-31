@@ -187,6 +187,39 @@ def mm_i8_tc(x: torch.Tensor, w) -> torch.Tensor:
     return y
 
 
+# SPD-249: while it is on, `mm_rows`' fp32 weight forms are kept from a weight's first call to `wf_cache_clear`, so
+# the prompts of a joint prefill (engine/models/flashnext/joint_prefill.py) that pass one layer's weights convert each
+# weight once instead of once a prompt. The fp32 form is the same tensor either way and every GEMM keeps its shape:
+# bit for bit the uncached calls. Holds one layer's mixers, router, GDN a|b and PLE projections between clears.
+_WF_CACHE: dict | None = None
+
+
+def wf_cache_on() -> None:
+    global _WF_CACHE
+    _WF_CACHE = {}
+
+
+def wf_cache_clear() -> None:
+    if _WF_CACHE is not None:
+        _WF_CACHE.clear()
+
+
+def wf_cache_off() -> None:
+    global _WF_CACHE
+    _WF_CACHE = None
+
+
+def _wf(w) -> torch.Tensor:
+    """The fp32 form of an int8-rows or fp16 weight (`mm_rows`' exact weights); cached while the cache is on."""
+    c = _WF_CACHE
+    if c is None:
+        return w.dequant() if hasattr(w, "q") else w.float()
+    got = c.get(id(w))
+    if got is None or got[0] is not w:
+        got = c[id(w)] = (w, w.dequant() if hasattr(w, "q") else w.float())
+    return got[1]
+
+
 def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
     group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
@@ -195,7 +228,7 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
         return mm_i8_tc(x.contiguous(), w)
     if MM in ("fp32", "tc"):
-        wf = w.dequant() if hasattr(w, "q") else w.float()
+        wf = _wf(w)
         return x.float() @ wf.T
     if hasattr(w, "q"):
         N = w.q.shape[0]

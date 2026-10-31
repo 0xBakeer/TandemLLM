@@ -62,6 +62,10 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the round runner hands a lane's tree over when its tokens are known (before its cuts and staging): its PLE
     # rows are read into the table's row cache on the reader thread, the verify's own read finds them there; 0: off
     'FN_PLE_PREFETCH': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a prefill burst's prompts in one forward (`FlashNextServing.prefill_joint`, joint_prefill.py): each
+    # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
+    # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone
+    'FN_JOINT_PREFILL': ('0', 'engine/models/flashnext/joint_prefill.py'),
     # SPD-249: the joint graphs kept (the least recently replayed go first)
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)

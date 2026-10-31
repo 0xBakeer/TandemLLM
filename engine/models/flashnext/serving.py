@@ -51,7 +51,7 @@ MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/confi
            "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
            "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py",
            "engine/models/flashnext/vision.py", "engine/models/flashnext/knobs.py",
-           "engine/settings.py")
+           "engine/models/flashnext/joint_prefill.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 
@@ -672,6 +672,55 @@ class FlashNextServing:
         self._h_last.copy_(self._hidden[0, T - 1:T])
         self.stats["prefill_rows"] += T
         return lg.view(1, 1, -1)
+
+    def prefill_joint_ok(self, T: int, start: int) -> bool:
+        """SPD-249 (QWEN38_FN_JOINT_PREFILL): whether a prefill burst's joint forward (`prefill_joint`) takes this
+        slot's prompt of `T` rows from `start`: its `forward` would run them as one chunk on the prefill kernels (not a
+        decode step, no images). Off: never (each prompt prefills alone). A family built on this adapter (Ornith's
+        Qwen35MoeServing) runs its own trunk, which this joint forward does not hold: never."""
+        if type(self) is not FlashNextServing:
+            return False
+        from engine.models.flashnext import joint_prefill as JP
+        return JP.ON and JP.ok(self.fn, T, start, self.st)
+
+    @torch.no_grad()
+    def prefill_joint_prepare(self, T: int, start: int) -> None:
+        """SPD-249: this slot's own part of its prefill before it joins a burst's joint forward, the steps its
+        `forward(tokens, start)` takes first, in its order: its open chain committed, the state at `start`, the pages of
+        rows [0, start + T) committed (`_ensure`). The server's burst hook runs it on the member's own thread before
+        `Burst.join`, so what fails here (the KV pool full, a start off the state's length) fails this member alone, as
+        its own `forward` would, and it stays out of the joint forward; the leader's thread runs only the forward.
+        Again on a prepared slot (`prefill_joint` runs it for a caller that did not): no work (no open chain, one compare
+        each)."""
+        self._settle_chain()
+        self._at(start)
+        self._ensure(int(start) + int(T))
+
+    @staticmethod
+    @torch.no_grad()
+    def prefill_joint(items: list) -> list:
+        """SPD-249: [(serving, tokens, start)] of a prefill burst's slots over one engine, each `prefill_joint_ok`
+        and prepared (`prefill_joint_prepare`, on its own thread): their prompts in one forward
+        (engine/models/flashnext/joint_prefill.py: each layer's experts once for every prompt's rows, each prompt's rows
+        its own prefill's bits). Each slot is left as its `forward(tokens, start)` leaves it; returns each one's logits
+        [1, 1, vocab] (fp32), in order. A failure inside the forward fails every slot of it: their states are left
+        part-way (the next prefill on each slot starts from a reset or an anchor, engine/cache.py)."""
+        from engine.models.flashnext import joint_prefill as JP
+        fn = items[0][0].fn
+        assert all(s.fn is fn for s, _, _ in items), "a joint prefill over one engine's slots"
+        jobs = []
+        for s, toks, start in items:
+            s.prefill_joint_prepare(int(toks.numel()), int(start))
+            jobs.append((toks, s.st))
+        outs = JP.prefill_joint(fn, jobs)
+        res = []
+        for (s, toks, start), (lg, stack) in zip(items, outs):
+            T = int(toks.numel())
+            s._hidden = stack.unsqueeze(0)
+            s._h_last.copy_(stack[T - 1:T])
+            s.stats["prefill_rows"] += T
+            res.append(lg.view(1, 1, -1))
+        return res
 
     @torch.no_grad()
     def forward_tree(self, block: torch.Tensor, parents: list[int], start: int) -> torch.Tensor:
