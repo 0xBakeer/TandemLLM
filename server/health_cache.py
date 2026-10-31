@@ -25,8 +25,15 @@ import os
 import threading
 import time
 
+try:
+    from engine.methods import busy          # SPD-249: the round runner's GPU-wait windows
+except ImportError:                          # the standalone proxy ships `server` without the engine (#108)
+    busy = None
+
 #: SPD-249: `/health`'s full body is rebuilt at most once in this many ms (0: every call builds it)
 TTL_MS = float(os.environ.get("QSE_HEALTH_TTL_MS", "0") or 0)
+#: SPD-249: the longest a build waits for the round runner's next GPU-wait window (engine/methods/busy.py)
+GATE_S = 0.15
 
 
 class Parts:
@@ -87,11 +94,17 @@ class HealthCache:
         """The JSON bytes of `fresh` (built by the caller on every call) and the full body
         (`build(part)` -> dict; its keys that `fresh` also has are dropped)."""
         if self.ttl_ms <= 0:
+            if busy is not None:
+                busy.gate(GATE_S)              # SPD-249: as below
             self._build(build, fresh)
         else:
             stale = self._body is None or (self._clock() - self._t) * 1e3 >= self.ttl_ms
             if stale and self._lock.acquire(blocking=self._body is None):
                 try:
+                    if self._body is not None and busy is not None:
+                        # SPD-249: the rebuild waits for the round runner's next GPU-wait window while it holds
+                        # windows (QSE_RUNNER_BUSY_WORK; others answer the last body meanwhile); else at once
+                        busy.gate(GATE_S)
                     if self._body is None or (self._clock() - self._t) * 1e3 >= self.ttl_ms:
                         self._build(build, fresh)
                     else:

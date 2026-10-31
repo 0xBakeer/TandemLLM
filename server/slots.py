@@ -337,6 +337,19 @@ class Turn:
             self.stats["waits"] += 1
             self._wait_for_turn(who)
 
+    def try_acquire(self, who) -> bool:
+        """`acquire` when it would not wait (the turn free, nobody waiting or owed it): True, the turn held. Else
+        False and nothing taken: the caller does what must not wait through another holder, then `acquire`s."""
+        with self._cv:
+            if self._owner is None and not self._waiting and self._grant is None:
+                if who not in self._v:
+                    self._v[who] = self._floor(but=who)
+                self._owner = who
+                self._mark = self.clock()
+                self.stats["acquires"] += 1
+                return True
+            return False
+
     def release(self, who) -> None:
         if self.settle is not None and self._waiting:
             self.settle()

@@ -33,6 +33,7 @@ import time
 import numpy as np
 import torch
 
+from engine.methods import busy
 from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
@@ -794,6 +795,9 @@ class FlashNextServing:
             outs = fn.verify_multi(jobs)
         finally:
             fn.joint_capture_ok = False
+        # SPD-249: the pass is queued: the round runner's host work no round waits for runs in the wait
+        # (engine/methods/busy.py; nothing without a runner hook)
+        busy.busy()
         torch.cuda.current_stream().synchronize()
         res = []
         for (s, block, parents, start), (logits, picks, stack) in zip(items, outs):

@@ -87,6 +87,29 @@ def test_pause_by_a_thread_that_does_not_hold_it_is_a_no_op():
     t.release(0)
 
 
+def test_try_acquire_takes_a_free_turn_and_never_waits():
+    """SPD-249: `try_acquire` holds a free turn (True); with another holder, or a waiter owed it next, it takes
+    nothing and returns at once (False)."""
+    t = slots.Turn(quantum_s=0.0)
+    assert t.try_acquire("runner") and t.held_by("runner")
+    t.release("runner")
+    t.acquire(1)
+    t0 = time.monotonic()
+    assert not t.try_acquire("runner") and time.monotonic() - t0 < 0.05
+    assert t.held_by(1) and t.waiting() == 0
+    got = []
+    th = threading.Thread(target=lambda: (t.acquire(2), got.append(2), t.release(2)))
+    th.start()
+    while not t.waiting():
+        time.sleep(0.001)
+    t.release(1)
+    th.join(2)
+    assert got == [2] and t.owner is None
+    assert t.try_acquire("runner")
+    t.release("runner")
+    return "a free turn taken; held or owed: nothing taken, no wait"
+
+
 # ------------------------------------------------------------------ the barrier
 class _Req:
     pass

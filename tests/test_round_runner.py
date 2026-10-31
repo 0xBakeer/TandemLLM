@@ -796,6 +796,269 @@ def test_spd249_a_client_that_leaves_during_a_hand_back_frees_the_turn():
     assert _acted[0] and len(run[1][0]) < len(loop[1][0]), (len(run[1][0]), len(loop[1][0]))
     return f"slot 1 left after {len(run[1][0])} tokens inside a hand-back; the turn free, slot 0's text kept"
 
+
+def _hooked_multi(extra=None):
+    """engine.model's joint pass with the family's GPU-wait hook after it (`busy.busy()`, as Flash-Next calls it between
+    its pass's issue and its wait); `extra()` runs first. Returns (module, the real pass)."""
+    import engine.model as M
+    from engine.methods import busy
+    real = M.forward_tree_multi
+
+    def multi(items):
+        out = real(items)
+        if extra is not None:
+            extra()
+        busy.busy()
+        return out
+    M.forward_tree_multi = multi
+    return M, real
+
+
+def _knobs_off(M, real):
+    from engine.methods import busy
+    M.forward_tree_multi = real
+    R.BUSY_WORK = R.GC_CTL = False
+    busy.HOOK = None
+    busy.hold(False)
+
+
+def test_spd249_busy_work_hands_the_tokens_over_in_the_gpu_wait():
+    """SPD-249 (QSE_RUNNER_BUSY_WORK): a joint round's tokens are held and handed to the slots' threads in the next
+    pass's GPU wait (the family's `busy()`), a gated thread waits for that window; every request writes its alone text.
+    A family that never calls the hook: nothing is held."""
+    from engine.methods import busy
+    M, real = _hooked_multi()
+    R.BUSY_WORK = True
+    try:
+        out = _check(3)
+        hk = dict(R.RUNNER.stats["busy"])
+        rep = R.RUNNER.report()["host_work"]
+        w0 = busy.report()["windows"]
+    finally:
+        _knobs_off(M, real)
+    assert hk["waits"] > 0 and hk["flushed"] > 0, hk
+    assert rep["busy_work"] and w0 > 0, (rep, w0)
+    R.BUSY_WORK = True
+    try:
+        _check(2)
+        hk2 = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, M.forward_tree_multi)
+    assert hk2["waits"] == 0 and hk2["flushed"] == 0, hk2
+    return f"{out}; held tokens handed over in {hk['waits']} GPU waits ({hk['flushed']} pushes, {hk['late']} late)"
+
+
+def test_spd249_a_held_task_ends_hands_back_and_marks_in_order():
+    """Busy work with the supervisor's hand-backs and SP1 markers: every message after the tokens held before it, no
+    deadlock, the slot loop's texts."""
+    M, real = _hooked_multi()
+    R.BUSY_WORK = True
+    try:
+        out = test_spd249_a_supervisor_that_never_acts_writes_the_slot_loops_text()
+        hk = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, real)
+    assert hk["waits"] > 0, hk
+    return f"{out}; {hk}"
+
+
+def test_spd249_held_tokens_go_before_another_holder_takes_the_turn():
+    """Busy work with a holder waiting for the turn (a prefill chunk, a burst, a lane job): before the runner releases the
+    turn to it, the tokens it holds are on the slots' queues and its windows are given up, so neither a stream nor a
+    gated thread waits through the other holder's work; the texts stay the alone texts."""
+    import threading
+    import time
+    from engine.methods import busy
+    from server import app
+    seen: dict = {}
+    th: list = []
+
+    def holder(turn):
+        turn.acquire("prefill")             # waits behind the runner's round
+        try:
+            r = R.RUNNER
+            seen["held"] = sum(len(t.held) for t in list(r.tasks) + list(r._held.values()))
+            seen["busy_held"] = busy.report()["held"]
+            t0 = time.perf_counter()
+            seen["gate"] = busy.gate(1.0)
+            seen["gate_ms"] = 1e3 * (time.perf_counter() - t0)
+            seen["round"] = r.stats["rounds"]
+            time.sleep(0.05)                # the other holder's work
+        finally:
+            turn.release("prefill")
+
+    def extra():
+        r = R.RUNNER
+        if th or r is None or r.stats["rounds"] < 3 or not r._held:
+            return
+        turn = app.LOCK.turn
+        th.append(threading.Thread(target=holder, args=(turn,)))
+        th[0].start()
+        t_end = time.perf_counter() + 2.0
+        while "prefill" not in turn._waiting and time.perf_counter() < t_end:
+            time.sleep(0.001)                   # the holder queued behind this round before the round goes on
+        seen["waiting"] = int("prefill" in turn._waiting)
+    M, real = _hooked_multi(extra)
+    R.BUSY_WORK = True
+    try:
+        out = _check(3)
+        hk = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, real)
+        for x in th:
+            x.join(5.0)
+    assert th and seen.get("waiting", 0) >= 1, seen
+    assert seen["held"] == 0 and not seen["busy_held"], seen
+    assert seen["gate"] and seen["gate_ms"] < 50, seen
+    assert hk["handoff"] > 0 and hk["waits"] > 0, hk
+    return (f"{out}; the other holder got the turn after round {seen['round']} with 0 tokens held, its gate at once "
+            f"({seen['gate_ms']:.1f} ms); {hk['handoff']} pushes handed over before hand-offs")
+
+
+def test_spd249_a_turn_that_would_wait_takes_the_held_tokens_first():
+    """Busy work, the runner's acquire: a free turn keeps the held tokens for the next GPU wait; a turn another holder took
+    between the rounds gets them onto the queues (and the windows given up) before the runner waits for it."""
+    import threading
+    import time
+    import types
+    from engine.methods import busy, draft_meet
+    from server import slots
+    R.BUSY_WORK, meet0 = True, draft_meet.MEET
+    try:
+        turn = slots.Turn(quantum_s=0.0)
+        r = R.Runner(types.SimpleNamespace(turn=turn), None)
+        t = R.Task(None, None, None, None, None, None, [], 0, 0, 0, 8, set(), None, 1, None, "cpu")
+        t.hold([1, 2], 1)
+        r._held[id(t)] = t
+        r._busy_on = True
+        busy.hold(True)
+        r._acquire(turn)                                # free: no hand-off, the tokens wait for the GPU wait
+        assert turn.held_by("runner") and t.held and t.q.empty() and busy.report()["held"]
+        turn.release("runner")
+        turn.acquire("prefill")                         # another holder between the rounds
+        got = []
+        th = threading.Thread(target=lambda: (r._acquire(turn), got.append(turn.held_by("runner"))), daemon=True)
+        th.start()
+        t_end = time.perf_counter() + 2.0
+        while not turn.waiting() and time.perf_counter() < t_end:
+            time.sleep(0.001)
+        assert turn.waiting() == 1 and not got
+        assert not t.held and t.q.get_nowait() == ("tokens", [1, 2]), t.held
+        assert not busy.report()["held"] and busy.gate(1.0) and r.stats["busy"]["handoff"] == 1, (
+            busy.report(), r.stats["busy"])                 # one held message (a push of two tokens)
+        turn.release("prefill")
+        th.join(2.0)
+        assert got == [True], got
+        turn.release("runner")
+    finally:
+        for who in ("prefill", "runner"):
+            if turn.held_by(who):
+                turn.release(who)
+        R.BUSY_WORK, draft_meet.MEET = False, meet0
+        busy.HOOK = None
+        busy.hold(False)
+    return "free turn: held for the GPU wait; taken turn: on the queue and the windows given up before the wait"
+
+
+def test_spd249_task_messages_keep_their_order():
+    t = R.Task(None, None, None, None, None, None, [], 0, 0, 0, 8, set(), None, 1, None, "cpu")
+    t.hold([1, 2], 3)
+    t.hold([3], 3)
+    assert t.q.empty() and t.held_at == 3
+    t.push([4])
+    t.hold([5], 4)
+    t.put(("sp1", None))
+    t.hold([6], 5)
+    t.end("eos")
+    got = []
+    while not t.q.empty():
+        got.append(t.q.get())
+    assert got == [("tokens", [1, 2]), ("tokens", [3]), ("tokens", [4]), ("tokens", [5]), ("sp1", None),
+                   ("tokens", [6]), ("end", "eos")], got
+    return "held, pushed, marked and ended: one order"
+
+
+def test_spd249_a_gated_thread_waits_for_the_next_window():
+    import threading
+    import time
+    from engine.methods import busy
+    assert busy.gate(5.0)                               # no runner holds windows: at once
+    busy.hold(True)
+    busy.opened()                                       # an open window does not count: the next one does
+    got = []
+    th = threading.Thread(target=lambda: got.append((busy.gate(5.0), time.perf_counter())))
+    th.start()
+    time.sleep(0.05)
+    assert not got
+    t0 = time.perf_counter()
+    busy.closed()
+    busy.opened()
+    th.join(2.0)
+    assert got and got[0][0] and got[0][1] - t0 < 1.0, got
+    assert not busy.gate(0.02)                          # held, no window: the timeout
+    th = threading.Thread(target=lambda: got.append((busy.gate(5.0), 0)))
+    th.start()
+    time.sleep(0.02)
+    busy.hold(False)                                    # the runner gives windows up: every waiter goes
+    th.join(2.0)
+    assert len(got) == 2 and got[1][0], got
+    return "at once while not held; the next window; the timeout; a release lets waiters go"
+
+
+class _Cyc:
+    """Cyclic garbage the collector alone frees."""
+
+    alive = 0
+
+    def __init__(self):
+        _Cyc.alive += 1
+        self.me = self
+
+    def __del__(self):
+        _Cyc.alive -= 1
+
+
+def test_spd249_no_automatic_collection_in_the_rounds_and_memory_stays_bounded():
+    """SPD-249 (QSE_RUNNER_GC): the load frozen; no automatic collection while the rounds run, the young
+    generations collected in the GPU waits, the full one every GC_FULL_ROUNDS rounds and in the idle gap, Python's
+    collector back on when the runner idles; 300 cyclic objects a pass never pile up; every text its alone text."""
+    import gc
+    import time
+    seen = {"auto_on": 0, "passes": 0, "peak": 0}
+
+    def garbage():
+        seen["passes"] += 1
+        seen["auto_on"] += int(gc.isenabled())
+        for _ in range(300):
+            _Cyc()
+        seen["peak"] = max(seen["peak"], _Cyc.alive)
+    M, real = _hooked_multi(garbage)
+    R.GC_CTL, full0, R.GC_FULL_ROUNDS = True, R.GC_FULL_ROUNDS, 7
+    for k in [k for k in R.GC_STATS if k not in ("frozen", "load_ms")]:
+        del R.GC_STATS[k]
+    try:
+        R.gc_after_load(log=lambda s: None)
+        frozen = R.GC_STATS["frozen"]
+        out = _check(3)
+        t_end = time.perf_counter() + 5.0
+        while time.perf_counter() < t_end and ("full_idle" not in R.GC_STATS or not gc.isenabled()):
+            time.sleep(0.05)
+        st = {k: v for k, v in R.GC_STATS.items()}
+        rep = R.RUNNER.report()["host_work"]
+    finally:
+        gc.unfreeze()
+        R.GC_FULL_ROUNDS = full0
+        _knobs_off(M, real)
+        gc.enable()
+    assert frozen and frozen > 1000, frozen
+    assert seen["passes"] > 0 and seen["auto_on"] == 0, seen
+    assert st.get("young_busy", [0])[0] > 0 and st.get("full_busy", [0])[0] > 0, st
+    assert "full_idle" in st and rep["gc_enabled"], (st, rep)
+    gc.collect()
+    assert seen["peak"] <= 300 * 4 and _Cyc.alive == 0, (seen, _Cyc.alive)
+    return (f"{out}; {frozen} frozen, young in {st['young_busy'][0]} waits, full {st['full_busy'][0]} in waits + "
+            f"{st['full_idle'][0]} idle, peak {seen['peak']} live cyclic objects")
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

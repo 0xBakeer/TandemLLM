@@ -12299,6 +12299,8 @@ def _serve(a, led) -> None:
     # the singletons' reference counts (server/refwatch.py): a C extension that drops their
     # references kills the process at 0 (bool_dealloc, 2026-10-05 13:12); this says so hours ahead
     STATE["refwatch"] = refwatch_mod.start(log=lambda s: print(s, flush=True))
+    # SPD-249 (QSE_RUNNER_GC): what the load and the warm-up left is frozen out of every later collection
+    _round_runner.gc_after_load(log=lambda s: print(s, flush=True))
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)

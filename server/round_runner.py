@@ -110,6 +110,26 @@ TEST_REFUSE_SLOTS = {int(x) for x in (os.environ.get("QSE_KV_TEST_REFUSE_SLOTS")
 COUNTERS = os.environ.get("QSE_RUNNER_COUNTERS", "0") == "1"
 #: the timed host calls' sums, {name: [wall ms, thread CPU ms, calls, hits]} (`host_time`), across threads
 HOST_CALLS: dict = {}
+#: SPD-249: the host work no round waits for runs while the GPU runs the next joint pass, not in the host phases the
+#: GPU waits through. A joint round's token pushes are held and handed to the slots' threads in the next pass's GPU wait
+#: (engine/methods/busy.py: the family calls `busy()` between a pass's issue and its wait); a task that ends, goes back
+#: or reaches an SP1 marker gets its held tokens at once, and tokens no wait took go at the next round's end. Before the
+#: runner waits for anything but its own next pass (the turn to another holder, slot 0's lane job, SP1 verdicts) the
+#: held tokens go and the windows are given up (`_hand_off`). The runner's report line is printed in that wait, and
+#: /health's full body and the live sampler's ticks wait for it (`busy.gate`). The same tokens, in the same order,
+#: later on the wire by up to a round's own work. 0: off
+BUSY_WORK = os.environ.get("QSE_RUNNER_BUSY_WORK", "0") == "1"
+#: SPD-249: the collector kept out of the rounds. The objects the server holds after its load are frozen
+#: (`gc_after_load`: never scanned again); while the runner's rounds run there is no automatic collection: the young
+#: generations are collected in a joint pass's GPU wait at Python's own thresholds (at a round's end when no wait
+#: came), the full collection when the runner goes idle and, under load with no idle gap, in a GPU wait every
+#: QSE_RUNNER_GC_FULL_ROUNDS rounds. What a round computes does not change. 0: off (Python's own collector)
+GC_CTL = os.environ.get("QSE_RUNNER_GC", "0") == "1"
+GC_FULL_ROUNDS = max(1, int(os.environ.get("QSE_RUNNER_GC_FULL_ROUNDS", "200") or 200))
+#: the full collection of an idle gap waits this long after the runner's last round (and for no request in flight)
+IDLE_GC_S = 0.25
+#: the collections the runner made, {kind: [count, ms, max ms]}, and what the load froze
+GC_STATS: dict = {"frozen": None, "load_ms": None}
 #: garbage-collection pauses (any thread): [ms, collections] and {generation: [ms, collections]}
 _GC = [0.0, 0]
 _GC_GEN: dict = {}
@@ -154,6 +174,40 @@ def _gc_cb(phase, info, _t=[0.0]) -> None:
 
 
 
+def gc_after_load(log=print) -> None:
+    """SPD-249 (QSE_RUNNER_GC): after the server's load and warm-up, one full collection and the survivors frozen
+    (`gc.freeze`: the weights' Python side, the tokenizer, the tables; a full collection scanned them all, ~216 ms
+    a pause at 8 lanes). Nothing with the knob off."""
+    if not GC_CTL:
+        return
+    import gc
+    from engine import capture_lock
+    t0 = time.perf_counter()
+    with capture_lock.off_thread("runner_gc"):      # a finalizer's CUDA call never lands inside an idle capture
+        n = gc.collect()
+    gc.freeze()
+    GC_STATS["frozen"] = gc.get_freeze_count()
+    GC_STATS["load_ms"] = round(1e3 * (time.perf_counter() - t0), 1)
+    log(f"[runner] gc: {GC_STATS['frozen']} objects frozen after the load (collection {GC_STATS['load_ms']} ms, "
+        f"{n} unreachable); no automatic collection while the rounds run")
+
+
+def _gc_note(kind: str, ms: float) -> None:
+    s = GC_STATS.setdefault(kind, [0, 0.0, 0.0])
+    s[0] += 1
+    s[1] += ms
+    s[2] = max(s[2], ms)
+
+
+def _gc_old() -> None:
+    """After a full collection: the objects left in the old generation (what the load froze is not there),
+    the last count and the most, the memory check of a long run."""
+    import gc
+    n = len(gc.get_objects(2))
+    GC_STATS["old_after_full"] = n
+    GC_STATS["old_after_full_max"] = max(GC_STATS.get("old_after_full_max", 0), n)
+
+
 def why_not(*, sup, probe, lpr, think, ahead, drafter, lane, turn) -> str | None:
     """None when the runner may take this slot's decode, else the reason it may not (counted)."""
     keep = not SUPERVISED                   # SPD-249: else handed back at SP1, SP2 and the budget
@@ -188,11 +242,32 @@ class Task:
         self.pre = False                    # PIPE: the last round's tails queued this task's draft
         self.tree = None
         self.err = None
+        self.held: list = []                # SPD-249: messages held for the next GPU wait (the runner's thread)
+        self.held_at = 0                    # the round the oldest of them is from
 
     def push(self, toks) -> None:
+        self.flush()
         self.q.put(("tokens", list(toks)))
 
+    def hold(self, toks, rnd: int) -> None:
+        """SPD-249: tokens for the slot's thread, handed over later (`flush`), in order."""
+        if not self.held:
+            self.held_at = rnd
+        self.held.append(("tokens", list(toks)))
+
+    def flush(self) -> None:
+        if self.held:
+            held, self.held = self.held, []
+            for m in held:
+                self.q.put(m)
+
+    def put(self, msg) -> None:
+        """A message after every held one."""
+        self.flush()
+        self.q.put(msg)
+
     def end(self, why: str) -> None:
+        self.flush()
         self.done = True
         self.q.put(("end", why))
 
@@ -271,6 +346,20 @@ class Runner:
             import gc
             if _gc_cb not in gc.callbacks:
                 gc.callbacks.append(_gc_cb)
+        # SPD-249: the GPU-wait hook (engine/methods/busy.py) and its state
+        self._held: dict = {}               # tasks with held tokens, by id
+        self._defer = False                 # this round's pushes are held (its pass had a GPU wait)
+        self._busy_at = -1                  # the round whose pass last called the hook
+        self._busy_on = False               # the runner holds windows (`busy.hold`)
+        self._report_due = False            # the report line waits for the next GPU wait
+        self._gc_off = False                # the runner turned automatic collection off for its rounds
+        self._gc_rounds = 0                 # rounds since the last full collection
+        self._gc_full_due = False           # the full collection waits for an idle gap
+        self._gc_idle_at = 0.0              # when the runner went idle
+        if BUSY_WORK or GC_CTL:
+            self.stats["busy"] = {"waits": 0, "flushed": 0, "late": 0, "handoff": 0}
+            from engine.methods import busy as busy_mod
+            busy_mod.HOOK = self._busy
 
     # ---- registration (the slot's thread) ---------------------------------------------------
     def add(self, task: Task) -> None:
@@ -342,7 +431,7 @@ class Runner:
         elif nxt == "sp1":
             self.stats["sp1_marks"] += 1
             t.gate = True
-            t.q.put(("sp1", (t.n_out, t.eng.max_len - t.pos, len(t.ctx))))
+            t.put(("sp1", (t.n_out, t.eng.max_len - t.pos, len(t.ctx))))
 
     # ---- the draft hook (dflash2.DRAFT_MEET, from the runner thread) -------------------------
     def meet(self, drafter, anchor, pos0):
@@ -367,21 +456,31 @@ class Runner:
         turn = self.pool.turn
         owed = None                         # SPD-249: since when the round waits for SP1 verdicts
         while True:
+            idle = False
             with self.cv:
                 live = [t for t in self.tasks if not t.done]
                 for t in self.tasks:
                     if t.cancel and not t.done:
                         t.end("cancelled")
                 self.tasks = [t for t in self.tasks if not t.done]
-                if not self.tasks:
+                if not self.tasks and (self._gc_off or self._busy_on or self._held or self._gc_full_due):
+                    idle = True                 # SPD-249: the idle work, after the lock (`_idle`)
+                elif not self.tasks:
                     self.cv.wait(timeout=0.05)
                     if not self.tasks:
                         continue
+            if idle:
+                self._idle()
+                continue
+            with self.cv:
+                if not self.tasks:
+                    continue
                 if VERDICT_WAIT_MS > 0 and any(t.gate and t.verdict is None for t in self.tasks):
                     now = time.perf_counter()
                     owed = now if owed is None else owed
                     left = VERDICT_WAIT_MS / 1e3 - (now - owed)
                     if left > 0:
+                        self._hand_off()            # nothing held through the wait
                         self.cv.wait(timeout=left)
                         continue
                 if owed is not None:
@@ -390,10 +489,11 @@ class Runner:
                 live = [t for t in self.tasks if not t.done and self._ready(t)]
                 if not live:
                     # SPD-249: every task waits for its SP1 verdict (or went back): no round, no turn
+                    self._hand_off()
                     self.cv.wait(timeout=0.005)
                     continue
             if turn is not None:
-                turn.acquire("runner")
+                self._acquire(turn)
             try:
                 self._round(live)
             except BaseException as exc:                                # noqa: BLE001
@@ -407,11 +507,153 @@ class Runner:
                         t.end("error")
             finally:
                 if turn is not None:
+                    if BUSY_WORK and turn.waiting():
+                        self._hand_off()            # another holder takes the turn next
                     turn.release("runner")
 
     def _bind(self, t):
         from server import slots as slots_mod
         slots_mod.bind(None if t.slot.index == 0 else t.slot)
+
+    # ---- SPD-249: the GPU's wait and the idle gaps ------------------------------------
+    def _busy(self) -> None:
+        """`busy.HOOK`: a joint pass of this runner's round is queued and its thread is about to wait for it. The
+        young generations collected and, owed, the full collection; the held tokens to the slots' threads, the
+        report line, and a window for the gated work of other threads."""
+        if threading.current_thread() is not self.thread:
+            return
+        self._busy_at = self.stats["rounds"]
+        self.stats["busy"]["waits"] += 1
+        if GC_CTL and self._gc_off:
+            self._gc_collect(full=self._gc_rounds >= GC_FULL_ROUNDS, kind="busy")
+        if BUSY_WORK:
+            for t in self._held.values():
+                self.stats["busy"]["flushed"] += len(t.held)
+                t.flush()
+            self._held.clear()
+            if self._report_due:
+                self._report_due = False
+                print(f"[runner] {self.report()}", flush=True)
+            from engine.methods import busy as busy_mod
+            if not self._busy_on:
+                self._busy_on = True
+                busy_mod.hold(True)
+            busy_mod.opened()
+
+    def _acquire(self, turn) -> None:
+        """The turn for a round. With QSE_RUNNER_BUSY_WORK, when it would wait (another holder has it or is owed it next), the held tokens
+        and the windows go first (`_hand_off`), so no stream waits through a prefill chunk, a burst or a lane job."""
+        if BUSY_WORK and (self._held or self._busy_on or self._report_due):
+            try_ = getattr(turn, "try_acquire", None)
+            if try_ is not None and try_("runner"):
+                return
+            self._hand_off()
+        turn.acquire("runner")
+
+    def _hand_off(self) -> None:
+        """The runner is about to wait for something other than its own next pass: the tokens it holds go to the
+        slots' threads now, in order, a due report line is printed, and its windows are given up (`busy.hold(False)`:
+        every gated thread goes at once). The next pass's GPU wait holds windows again."""
+        if not BUSY_WORK:
+            return
+        if self._held:
+            for t in self._held.values():
+                self.stats["busy"]["handoff"] += len(t.held)
+                t.flush()
+            self._held.clear()
+        if self._report_due:
+            self._report_due = False
+            print(f"[runner] {self.report()}", flush=True)
+        if self._busy_on:
+            from engine.methods import busy as busy_mod
+            self._busy_on = False
+            busy_mod.hold(False)
+
+    def _push(self, t: Task, toks) -> None:
+        """A tail's tokens: held for the next GPU wait when this round's pass had one, else onto the queue."""
+        if self._defer:
+            t.hold(toks, self.stats["rounds"])
+            self._held[id(t)] = t
+        else:
+            t.push(toks)
+
+    def _round_end_busy(self) -> None:
+        """At a round's end: tokens held since an earlier round (no GPU wait took them) go now; a round that
+        had no GPU wait gives its windows up, prints a due report line and collects as Python would have."""
+        r = self.stats["rounds"]
+        if self._held:
+            for k, t in list(self._held.items()):
+                if not t.held:
+                    del self._held[k]
+                elif t.held_at < r or t.done:
+                    self.stats["busy"]["late"] += len(t.held)
+                    t.flush()
+                    del self._held[k]
+        if self._busy_at != r:
+            if self._busy_on:
+                from engine.methods import busy as busy_mod
+                self._busy_on = False
+                busy_mod.hold(False)
+            if self._report_due:
+                self._report_due = False
+                print(f"[runner] {self.report()}", flush=True)
+            if GC_CTL and self._gc_off:
+                self._gc_collect(full=self._gc_rounds >= GC_FULL_ROUNDS, kind="late")
+
+    def _gc_collect(self, full: bool, kind: str) -> None:
+        """The full collection when `full`, else the young generations at Python's own thresholds (generation 0
+        past its threshold, generation 1 when its count is past its own), never generation 2 on its own."""
+        import gc
+        if full:
+            t0 = time.perf_counter()
+            gc.collect(2)
+            self._gc_rounds = 0
+            _gc_note("full_" + kind, 1e3 * (time.perf_counter() - t0))
+            _gc_old()
+            return
+        c0, c1, _ = gc.get_count()
+        th0, th1, _ = gc.get_threshold()
+        if c0 <= th0:
+            return
+        t0 = time.perf_counter()
+        gc.collect(1 if c1 > th1 else 0)
+        _gc_note("young_" + kind, 1e3 * (time.perf_counter() - t0))
+
+    def _idle(self) -> None:
+        """The runner's tasks all gone: held tokens out, the windows given up, Python's own collector back on
+        at once (whatever runs while no round does, e.g. a prefill, collects as before); the full collection once the
+        runner has been idle IDLE_GC_S and no request is in flight (a burst's prefill is not held up by it)."""
+        for t in self._held.values():
+            t.flush()
+        self._held.clear()
+        if self._busy_on:
+            from engine.methods import busy as busy_mod
+            self._busy_on = False
+            busy_mod.hold(False)
+        if self._report_due:
+            self._report_due = False
+            print(f"[runner] {self.report()}", flush=True)
+        import gc
+        now = time.perf_counter()
+        if self._gc_off:
+            gc.enable()
+            self._gc_off = False
+            self._gc_full_due, self._gc_idle_at = True, now
+        if self._gc_full_due:
+            inflight = int((getattr(self.app, "INFLIGHT", None) or {}).get("running", 0) or 0)
+            if now - self._gc_idle_at >= IDLE_GC_S and inflight == 0:
+                self._gc_full_due = False
+                from engine import capture_lock
+                t0 = time.perf_counter()
+                with capture_lock.off_thread("runner_gc"):   # the idle thread's captures run in these gaps
+                    gc.collect(2)
+                self._gc_rounds = 0
+                _gc_note("full_idle", 1e3 * (time.perf_counter() - t0))
+                _gc_old()
+                return
+        with self.cv:
+            if not self.tasks:
+                self.cv.wait(timeout=0.05)
 
     # ---- SPD-249 host counters (QSE_RUNNER_COUNTERS=1) ------------------------------------------
     @staticmethod
@@ -547,7 +789,20 @@ class Runner:
                                  for e, st in sorted(self._lane.items())} if LANE_PLAIN else None),
                     ms_by_slots=self._by_e(self._ms_e), gpu_ms_by_slots=self._by_e(self._gpu_e),
                     tails_by_slots=self._by_e(self._tails_e), joint_stats=self._joint_stats_now(),
-                    **({"counters": self._hc_report()} if COUNTERS else {}))
+                    **({"counters": self._hc_report()} if COUNTERS else {}),
+                    **({"host_work": self._busy_report()} if BUSY_WORK or GC_CTL else {}))
+
+    def _busy_report(self) -> dict:
+        """SPD-249: the knobs, the GPU waits the hook ran in and the tokens it handed over (`late`: at a
+        round's end instead), the gated work's windows, and the collections (`young_busy` / `full_busy` in a GPU wait,
+        `*_late` at a round's end, `full_idle` in an idle gap: [count, ms, max ms]; the objects in the old generation
+        after the last full collection, and the most)."""
+        import gc
+        from engine.methods import busy as busy_mod
+        gs = {k: ([v[0], round(v[1], 1), round(v[2], 2)] if isinstance(v, list) else v) for k, v in GC_STATS.items()}
+        return {"busy_work": BUSY_WORK, "gc": GC_CTL, "gc_full_rounds": GC_FULL_ROUNDS, "hook": dict(self.stats["busy"]),
+                "windows": busy_mod.report(), "gc_stats": gs, "gc_count": list(gc.get_count()),
+                "gc_enabled": gc.isenabled()}
 
     def _joint_stats_now(self):
         """SPD-249: the family's joint-pass shape (its engine's `joint_stats`, e.g. the distinct experts a layer)."""
@@ -621,6 +876,13 @@ class Runner:
         self._round_rows, self._round_exp, self._round_acc, passes = 0, 0.0, 0, 0
         self._round_plain = False
         self._round_cap0 = self._captures(tasks)
+        self._defer = False
+        if GC_CTL:
+            import gc
+            if gc.isenabled():
+                gc.disable()                # no automatic collection while the rounds run
+                self._gc_off = True
+            self._gc_rounds += 1
         self._hc_start()
         self._mark("start")
         ms0 = dict(self.ms)
@@ -636,6 +898,7 @@ class Runner:
                     if t.pre:
                         # PIPE: the draft the last tails queued is read before the lane runs on this slot
                         t.tree, t.steps = app._collect(t.steps, t.tree), None
+                    self._hand_off()                # no stream waits through the lane's job
                     self.stats["lane_jobs"] += lane.serve("decode")
         for t in tasks:
             if t.pre and not t.done and t.deadline is not None and t.deadline.expired():
@@ -693,6 +956,8 @@ class Runner:
         if self._round_exp > 0:
             self.prices.note_accept(self._round_acc, self._round_exp)
         self._bind_none()
+        if BUSY_WORK or GC_CTL:
+            self._round_end_busy()
         self._t("round", t_r)
         self._hc_end(self._round_e)
         self.ms["out_cpu"] += 1e3 * (time.thread_time() - c_r) - self._verify_cpu
@@ -706,7 +971,10 @@ class Runner:
                                   self._round_plain, self._captures(tasks) != self._round_cap0))
             self._ev_last = self._ev[-1][1]
         if self.stats["rounds"] % 200 == 0:
-            print(f"[runner] {self.report()}", flush=True)
+            if BUSY_WORK and self._busy_at == self.stats["rounds"]:
+                self._report_due = True     # printed in the next GPU wait (`_busy`)
+            else:
+                print(f"[runner] {self.report()}", flush=True)
 
     def _propose(self, tasks: list, t0: float, deadline: bool = True) -> float:
         """Each task's proposal to its draft, then one packed draft for them (queued, not read). `deadline`
@@ -930,6 +1198,12 @@ class Runner:
             c_v = time.thread_time()
             outs = multi([(t.eng, b, x.parents, t.pos) for t, b, x in zip(group, blocks, trees)])
             self._verify_cpu += 1e3 * (time.thread_time() - c_v)
+            if self._busy_at == self.stats["rounds"]:
+                # SPD-249: the pass's GPU wait is over: no new gated work, this round's pushes held for the next
+                self._defer = BUSY_WORK
+                if BUSY_WORK:
+                    from engine.methods import busy as busy_mod
+                    busy_mod.closed()
             self.stats["joint"] += 1
             if JOINT_PRICE:
                 # a drafter that prices its rounds by its verify (the MTP tree drafter's StairCut) gets its
@@ -1054,7 +1328,7 @@ class Runner:
         t.n_out += len(new)
         self._round_tok += len(new)
         t.tok = t.ctx[-1]
-        t.push(new)
+        self._push(t, new)
         if stop_now:
             t.end("stop")
         elif any(x in t.eos for x in new) or t.n_out >= t.max_new or t.pos >= t.eng.max_len - 1:
@@ -1119,7 +1393,7 @@ class Runner:
         if t.pen is not None:
             t.pen.commit(new)
         stop_now = t.pstop is not None and t.pstop.observe(new)
-        t.push(new)
+        self._push(t, new)
         if stop_now:
             t.next = None
             t.end("stop")

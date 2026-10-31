@@ -1073,6 +1073,33 @@ def test_spd249_a_side_slot_takes_the_lookup_backoff():
     return "a side slot's drafter backs off as slot 0's"
 
 
+def test_spd249_the_joint_pass_calls_the_busy_hook_between_its_issue_and_its_wait():
+    """SPD-249: `forward_tree_multi` calls `busy.busy()` after `verify_multi` queued the pass and before
+    the stream wait; without a hook nothing happens."""
+    from engine.methods import busy
+    fn = _FN()
+    order = []
+
+    def verify_multi(jobs):
+        order.append("issue")
+        return [(torch.zeros(len(t), 4), torch.arange(len(t)), torch.zeros(len(t), 3)) for t, p, st in jobs]
+    fn.verify_multi = verify_multi
+    a, b = FlashNextServing(fn, 64), FlashNextServing(fn, 64)
+    a.st.length, b.st.length = 5, 9
+    real = torch.cuda.current_stream
+    torch.cuda.current_stream = lambda: types.SimpleNamespace(synchronize=lambda: order.append("wait"))
+    try:
+        FlashNextServing.forward_tree_multi([(a, torch.tensor([7, 8]), [-1, 0], 5), (b, torch.tensor([1]), [-1], 9)])
+        assert order == ["issue", "wait"], order
+        busy.HOOK = lambda: order.append("hook")
+        order.clear()
+        FlashNextServing.forward_tree_multi([(a, torch.tensor([7, 8]), [-1, 0], 5), (b, torch.tensor([1]), [-1], 9)])
+    finally:
+        torch.cuda.current_stream = real
+        busy.HOOK = None
+    assert order == ["issue", "hook", "wait"], order
+    return "issue, the hook, the wait; no hook: issue, wait"
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
