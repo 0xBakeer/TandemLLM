@@ -6618,7 +6618,34 @@ def _proxy_backends() -> list | None:
         return None
 
 
+# The framing -- BodyError, the body cap, the Content-Length spine, the chunked parser --
+# lives in server/http_body.py, stdlib-only, shared with proxy/app.py: the two servers
+# carried it line for line and a fix had to land twice. The cap stays a per-request
+# lookup through the module global (QSE_MAX_BODY_MB at import), and the answer is
+# written with the body either read to its end or the connection closed.
+from server import http_body                                   # noqa: E402
+
+BodyError = http_body.BodyError
+
+# The socket timeout of one connection, seconds (2026-10-17, the timeout half of the
+# unbounded-read issue). socketserver's BaseRequestHandler.setup applies it to the connection
+# before rfile/wfile exist, so it governs every socket op: the wait for the next request line
+# (a keep-alive client that stops talking), the headers, the body read, and a write to a
+# client that stopped draining. A live-but-slow client is never cut off mid-request: the
+# clock restarts at every socket op that makes progress, as nginx's *_{read,send}_timeout.
+# 60 s is the value nginx ships for client_header_timeout and client_body_timeout, and the
+# one this server's own proxies use; QSE_HANDLER_TIMEOUT_S overrides, a test may set
+# Handler.timeout directly.
+HANDLER_TIMEOUT_S = float(os.environ.get("QSE_HANDLER_TIMEOUT_S", 60.0))
+
+
 class Handler(BaseHTTPRequestHandler):
+    # None, as every stdlib server, until now: headers + a stalled body meant a handler
+    # thread held forever (ThreadingHTTPServer is one thread per connection). With a
+    # timeout the stdlib does the right thing already -- handle_one_request catches
+    # TimeoutError, logs one line and closes the connection -- and a timeout inside the
+    # body read is answered as a 408 by _read_body below.
+    timeout = HANDLER_TIMEOUT_S
     protocol_version = "HTTP/1.1"
     server_version = "TandemLLM"
     # 2026-10-05: no Nagle, as uvicorn's servers. The headers and the first frame
@@ -6737,10 +6764,52 @@ class Handler(BaseHTTPRequestHandler):
                                                      "code": code}}).encode(),
                          extra_headers=(("Retry-After", str(retry)),))
 
+    def _body_error(self, exc) -> None:
+        """A framing/body refusal: 400, 408 or 413 with the error's own message. The connection
+        closes afterwards (handle_one_request): the unread body would be the next request."""
+        self._json(exc.code, {"error": {"type": exc.type, "message": exc.message}})
+
     def _read(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
-        self._raw = self.rfile.read(n)
+        self._raw = self._read_body()
         return json.loads(self._raw or b"{}")
+
+    _body_done = False               # the request in hand has had its body read to the end
+
+    def handle_one_request(self):
+        self.connection.settimeout(self.timeout)   # a chat forward
+        # (chat_forward._relay) lifts the timeout to None while it streams and nothing
+        # put it back: a stalled body on the next request of that keep-alive connection
+        # was waited on forever. Re-arm here, as proxy/app.py does.
+        self._body_done = False
+        BaseHTTPRequestHandler.handle_one_request(self)
+        # 2026-10-17: a chunked body the handler never read stayed on the wire and the next
+        # request on the keep-alive connection was parsed from the middle of it (the size line
+        # as a request line). A body the framing did not let us finish closes the connection
+        # instead of desyncing it; a chunked body this handler never touched at all likewise.
+        if (not self.close_connection and not self._body_done
+                and "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()):
+            self.close_connection = True
+
+    def _read_body(self) -> bytes:
+        """The request's body, consumed whole or not at all -- server/http_body.py owns
+        the framing, shared with proxy/app.py. An answer written with the body still
+        unread is a desync one request away: every path out of here has read to the end
+        of the framing, and BodyError (or handle_one_request) closes the connection."""
+        try:
+            body = http_body.read_body(self.rfile, self.headers)
+        except TimeoutError:
+            # the stalled mid-body client of the timeout issue: headers, a promise, a few
+            # bytes, silence. The framing is unfinished, so the connection closes; a
+            # response is still writable (a stalled reader does not block our writer
+            # until its window fills), so the 408 says what happened, and the handler
+            # thread is free after Handler.timeout seconds instead of forever.
+            self.close_connection = True
+            raise BodyError(408, "timeout", "the request body stopped arriving") from None
+        except BodyError:
+            self.close_connection = True  # the promised bytes, if they ever come,
+            raise                        # would be read as the next request
+        self._body_done = True
+        return body
 
     # -------------------------------------------------------------- access
     def _peer(self) -> str:
@@ -7505,6 +7574,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/config" or path.startswith("/v1/config/"):
             try:
                 body = self._read()
+            except BodyError as exc:
+                return self._body_error(exc)
             except Exception as exc:                              # noqa: BLE001
                 return self._json(400, {"error": {"message": f"bad json: {exc}",
                                                   "type": "invalid_request_error"}})
@@ -7514,6 +7585,8 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "not_found"}})
         try:
             body = self._read()
+        except BodyError as exc:
+            return self._body_error(exc)
         except Exception as exc:                                  # noqa: BLE001
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
@@ -7537,6 +7610,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
+        except BodyError as exc:
+            return self._body_error(exc)
         except Exception as exc:
             if path in ("/v1/chat/completions", "/v1/completions"):
                 rec = usage_mod.RequestRecord("-", "chat" if path.endswith("chat/completions")
@@ -12004,6 +12079,8 @@ class SetupHandler(Handler):
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
+        except BodyError as exc:
+            return self._body_error(exc)
         except Exception as exc:                                  # noqa: BLE001
             return self._json(400, {"error": {"message": f"bad json: {exc}",
                                               "type": "invalid_request_error"}})
