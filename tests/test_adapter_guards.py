@@ -269,7 +269,10 @@ BASELINE = {
     "server/setup/wren.py": 17,
     # the 27B's own config and drafters (engine/*.py is its package by history, ENG-221)
     "engine/config.py": 2, "engine/drafters/dflash2.py": 1, "engine/drafters/dspark.py": 1,
-    # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new)
+    # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new). The FN_* knobs of the
+    # shared kernel libraries (tools/fn_kernels.py, tools/fn_prefill_kernels.py: FN_MOE_*, FN_GEMV_*, FN_PDL, ...)
+    # live in this table by their library, which Flash-Next and Ornith both read; their owner is that library, never a
+    # model package (test_family_knobs_live_in_their_package holds both)
     "engine/methods/manifest.py": 13, "engine/settings.py": 16,
     # the default --served-model name, the API's own since 0.1 (clients address it)
     "server/app.py": 1,
@@ -405,6 +408,10 @@ def test_family_knobs_live_in_their_package():
     shared = _knob_table(os.path.join(ROOT, "engine", "settings.py"))
     fam = {k for k, v in shared.items() if len(v) > 1 and str(v[1]).startswith("engine/models/")}
     assert fam == LEGACY_FAMILY_KNOBS, f"a family knob in engine/settings.py: {sorted(fam - LEGACY_FAMILY_KNOBS)}"
+    # a model-prefixed knob in the shared table that is not legacy belongs to a shared kernel library under tools/
+    lib = {k: str(v[1]) for k, v in shared.items() if k.startswith(("FN_", "Q35M_")) and k not in LEGACY_FAMILY_KNOBS}
+    bad = {k: o for k, o in lib.items() if not (o.startswith("tools/") and o.endswith(".py"))}
+    assert not bad, f"a model's knob in engine/settings.py whose owner is no tools/ library: {bad}"
     for path in glob.glob(os.path.join(ROOT, "engine", "models", "*", "knobs.py")):
         pkg = os.path.relpath(os.path.dirname(path), ROOT) + "/"
         for k, v in _knob_table(path).items():
@@ -415,7 +422,7 @@ def test_family_knobs_live_in_their_package():
             own = os.path.join(ROOT, "engine", a.package or "", "knobs.py")
             if a.package and os.path.isfile(own):
                 assert os.path.relpath(own, ROOT) in a.manifest_of().modules, f"{name}: knobs.py not in its manifest"
-    return f"{len(LEGACY_FAMILY_KNOBS)} legacy family knobs in the shared table, none new"
+    return f"{len(LEGACY_FAMILY_KNOBS)} legacy family knobs in the shared table, none new; {len(lib)} library knobs"
 
 
 if __name__ == "__main__":
