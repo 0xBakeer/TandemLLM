@@ -27,7 +27,7 @@ def _module():
     if _MOD is None:
         tag = nb.tag(_CPP, _CUDA)
         _MOD = nb.load(f"tandem_mxfp8_skinny_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["mxfp8_skinny"],
+                       functions=["mxfp8_skinny", "mxfp8_tiled"],
                        extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"])
     return _MOD
 
@@ -47,6 +47,13 @@ def default_nt(M: int) -> int:
 #: the next K step's weights loaded during this one's products (0: off); same bits either way
 PF = 1
 
+#: rows (and weight rows) from which `mm` takes the column-split kernel (`mxfp8_tiled`: the activations staged once a
+#: CTA, not reread by every 16-row weight tile; the same bits). At 56 rows, us old -> tiled: qkvz 257 -> 227, qkv
+#: 220 -> 184, out_proj 127 -> 100; below 48 rows or under 2,560 weight rows the skinny kernel is as fast or faster
+TILED_FROM, TILED_N = 48, 2560
+#: (warps a CTA, 8-row tiles a warp, K steps of weights in flight) of the tiled kernel: K = 2,560 / other K
+TILED_K2560, TILED_OTHER = (2, 2, 4), (4, 2, 4)
+
 
 def mm(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor, wk: int | None = None, out: torch.Tensor | None = None,
        nt: int | None = None, pf: int | None = None):
@@ -56,6 +63,10 @@ def mm(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor, wk: int | None = None,
     M, K = x.shape
     N = w.shape[0]
     y = out if out is not None else torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
+    if M >= TILED_FROM and N >= TILED_N and wk is None and nt is None and pf is None and default_wk(K) == 16:
+        # many rows of a large weight: the column-split kernel, this one's bits (the same K slices, in order)
+        _module().mxfp8_tiled(x.contiguous(), w, s, y, 16, *(TILED_K2560 if K == 2560 else TILED_OTHER))
+        return y
     _module().mxfp8_skinny(x.contiguous(), w, s, y, default_wk(K) if wk is None else wk,
                             default_nt(M) if nt is None else nt, PF if pf is None else pf)
     return y

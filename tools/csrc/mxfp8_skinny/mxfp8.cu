@@ -208,6 +208,191 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor&
         (int)s.stride(0), (int)y.stride(0));
 }
 
+// Tiled (many rows, 33..64): the warps of a CTA split the output columns, not K. Each warp walks all of K in
+// mxfp8_skinny_kernel's order: the K steps in WK contiguous slices (a function of K and WK), each slice summed from
+// zero with the same lane layout and k16 instructions, the slices added in slice order (warp 0's + warp 1's + ...,
+// an empty slice adding 0) -- mxfp8_skinny_kernel's bits for every row, so a joint pass above 32 rows and a decode
+// step (mxfp8_skinny) agree bit for bit. The activations
+// of a K step are staged once a CTA in shared memory (an S-deep cp.async ring) and read by every warp: X crosses L2
+// once a CTA instead of once a 16-row weight tile (mxfp8_skinny at 56 rows: L2 64 % busy with X, the weight stream
+// starved). The weights stream through D steps of registers in flight. No cross-warp sums, no atomics.
+__device__ __forceinline__ void cp_async16(void* smem, const void* g, bool ok) {
+    const uint32_t a = (uint32_t)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" :: "r"(a), "l"(g), "r"(ok ? 16 : 0));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
+template <int N_>
+__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" :: "n"(N_)); }
+
+template <int MT, int NW, int NT, int D, int S, int WK>
+__global__ void __launch_bounds__(32 * NW)
+mxfp8_tiled_kernel(const __nv_bfloat16* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
+                   __nv_bfloat16* __restrict__ y, int M, int N, int kq, int lx, int lw, int ls, int ly) {
+    constexpr int ROWS = MT * 16, XP = 64 + 8;           // a staged row: 64 K (+16 bytes: the banks)
+    extern __shared__ __align__(16) unsigned char smem[];
+    __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem);   // [S][ROWS][XP]
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int n0 = (blockIdx.x * NW + warp) * 8 * NT;
+    const int per = (kq + WK - 1) / WK;                    // mxfp8_skinny_kernel's slice of K steps a warp
+    float acc[MT][NT][4], tot[MT][NT][4];                  // the slice being summed; the slices before it, in order
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) acc[a][n][i] = tot[a][n][i] = 0.f;
+    const uint8_t* wr[NT];
+    const uint8_t* sr[NT];
+    bool wok[NT];
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int row = n0 + 8 * n + g;
+        wok[n] = row < N;
+        wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
+        sr[n] = s + (size_t)(wok[n] ? row : 0) * ls + (t >> 1);
+    }
+    uint4 nw[D][NT];
+    uint32_t ns[D][NT];
+#pragma unroll
+    for (int d = 0; d < D; ++d)
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const bool ok = wok[n] && d < kq;
+            nw[d][n] = ok ? ldg16(wr[n] + (size_t)d * 64) : make_uint4(0, 0, 0, 0);
+            ns[d][n] = ok ? sr[n][d * 2] : 0u;
+        }
+    pdl_wait();                                            // the activations are the predecessor's
+    pdl_trigger();
+    // stage step k: ROWS x 64 bf16 = ROWS * 8 chunks of 16 bytes (rows past M: zeros)
+    auto stage = [&](int k) {
+        __nv_bfloat16* b = xs + (k % S) * ROWS * XP;
+        for (int c = threadIdx.x; c < ROWS * 8; c += 32 * NW) {
+            const int r = c >> 3, q = c & 7;
+            const bool ok = r < M && k < kq;
+            cp_async16(b + r * XP + 8 * q, x + (size_t)(ok ? r : 0) * lx + (size_t)(ok ? k : 0) * 64 + 8 * q, ok);
+        }
+    };
+#pragma unroll
+    for (int k = 0; k < S - 1; ++k) {
+        stage(k);
+        cp_commit();
+    }
+    for (int k0 = 0; k0 < kq; k0 += D) {
+#pragma unroll
+        for (int d = 0; d < D; ++d) {
+            const int kk = k0 + d;
+            if (kk >= kq) break;
+            if (kk > 0 && kk % per == 0) {                 // a slice done: slice 0 is the total, later ones add to it
+#pragma unroll
+                for (int a = 0; a < MT; ++a)
+#pragma unroll
+                    for (int n = 0; n < NT; ++n)
+#pragma unroll
+                        for (int i = 0; i < 4; ++i) {
+                            tot[a][n][i] = kk == per ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                            acc[a][n][i] = 0.f;
+                        }
+            }
+            cp_wait<S - 2>();
+            __syncthreads();                               // step kk staged; step kk - 1's buffer free
+            stage(kk + S - 1);
+            cp_commit();
+            uint32_t B[NT][8];
+#pragma unroll
+            for (int n = 0; n < NT; ++n) {
+                const uint4 wb = nw[d][n];
+                const float sc = wok[n] ? e8m0(ns[d][n]) : 0.f;
+                const bool ok = wok[n] && kk + D < kq;
+                nw[d][n] = ok ? ldg16(wr[n] + (size_t)(kk + D) * 64) : make_uint4(0, 0, 0, 0);
+                ns[d][n] = ok ? sr[n][(kk + D) * 2] : 0u;
+                const uint32_t wv[4] = {wb.x, wb.y, wb.z, wb.w};
+#pragma unroll
+                for (int q = 0; q < 4; ++q) {
+                    B[n][2 * q] = dec2(wv[q] & 0xffffu, sc);
+                    B[n][2 * q + 1] = dec2(wv[q] >> 16, sc);
+                }
+            }
+            const __nv_bfloat16* b = xs + (kk % S) * ROWS * XP + 16 * t;
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                const __nv_bfloat16* p0 = b + (a * 16 + g) * XP;
+                const __nv_bfloat16* p1 = p0 + 8 * XP;
+                const uint4 x0a = *reinterpret_cast<const uint4*>(p0), x0b = *reinterpret_cast<const uint4*>(p0 + 8);
+                const uint4 x1a = *reinterpret_cast<const uint4*>(p1), x1b = *reinterpret_cast<const uint4*>(p1 + 8);
+                const uint32_t X0[8] = {x0a.x, x0a.y, x0a.z, x0a.w, x0b.x, x0b.y, x0b.z, x0b.w};
+                const uint32_t X1[8] = {x1a.x, x1a.y, x1a.z, x1a.w, x1b.x, x1b.y, x1b.z, x1b.w};
+#pragma unroll
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int j = 0; j < 4; ++j)
+                        mma_bf16(acc[a][n], X0[2 * j], X1[2 * j], X0[2 * j + 1], X1[2 * j + 1], B[n][2 * j], B[n][2 * j + 1]);
+            }
+        }
+    }
+    // the last slice, then the empty slices' zeros (mxfp8_skinny_kernel's warps past K add 0.0 too)
+    const int used = (kq + per - 1) / per;
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                float v = used == 1 ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                for (int e = used; e < WK; ++e) v += 0.f;
+                acc[a][n][i] = v;
+            }
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int c = n0 + 8 * n + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int r0 = a * 16 + g, r1 = r0 + 8;
+            if (r0 < M) {
+                if (c < N) y[(size_t)r0 * ly + c] = __float2bfloat16_rn(acc[a][n][0]);
+                if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = __float2bfloat16_rn(acc[a][n][1]);
+            }
+            if (r1 < M) {
+                if (c < N) y[(size_t)r1 * ly + c] = __float2bfloat16_rn(acc[a][n][2]);
+                if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = __float2bfloat16_rn(acc[a][n][3]);
+            }
+        }
+    }
+}
+
+template <int MT, int NW, int NT, int D, int S, int WK>
+void launch_tiled(const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& s, torch::Tensor& y) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1);
+    const int smem = S * MT * 16 * (64 + 8) * 2;
+    auto kern = mxfp8_tiled_kernel<MT, NW, NT, D, S, WK>;
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    dim3 grid((N + 8 * NT * NW - 1) / (8 * NT * NW));
+    launch_pdl(kern, grid, dim3(32 * NW), smem, at::cuda::getCurrentCUDAStream(),
+        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), w.data_ptr<uint8_t>(), s.data_ptr<uint8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), M, N, K / 64, (int)x.stride(0), (int)w.stride(0),
+        (int)s.stride(0), (int)y.stride(0));
+}
+
+void mxfp8_tiled(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk, int64_t nw, int64_t nt, int64_t d) {
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kByte && s.scalar_type() == at::kByte,
+                "mxfp8_tiled: x bf16, w uint8 (e4m3 bytes), s uint8 (E8M0)");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && s.size(1) * 32 == w.size(1), "mxfp8_tiled: K");
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 64, "mxfp8_tiled: 1..64 rows");
+    TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && s.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0
+                && reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "mxfp8_tiled: row-major, 16-byte aligned rows");
+    const int mt = (int)(x.size(0) + 15) / 16;
+#define L(WK, NW, NT, D)                                                   \
+    if (wk == WK && nw == NW && nt == NT && d == D) {                      \
+        if (mt == 4) launch_tiled<4, NW, NT, D, 3, WK>(x, w, s, y);        \
+        else if (mt == 3) launch_tiled<3, NW, NT, D, 3, WK>(x, w, s, y);   \
+        else if (mt == 2) launch_tiled<2, NW, NT, D, 3, WK>(x, w, s, y);   \
+        else launch_tiled<1, NW, NT, D, 3, WK>(x, w, s, y);                \
+        return;                                                            \
+    }
+    L(16, 4, 1, 8) L(16, 4, 2, 4) L(16, 2, 2, 4) L(16, 8, 1, 4) L(2, 4, 1, 8) L(2, 4, 2, 4) L(2, 8, 1, 4) L(8, 4, 1, 8)
+#undef L
+    TORCH_CHECK(false, "mxfp8_tiled: (nw, nt, d) not built");
+}
+
 void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tensor y, int64_t wk, int64_t nt,
                   int64_t pf) {
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kByte && s.scalar_type() == at::kByte,

@@ -294,10 +294,21 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
 __device__ __forceinline__ float bfr_(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
 __device__ __forceinline__ float silu_(float v) { return v / (1.0f + ::expf(-v)); }
 
-template <int JG>
+// A = bf16(silu(bf16(bf16(D) / hc))) [M, 320] once for every CTA of mixup_bf16_kernel<JG, true> (many rows: 80 CTAs
+// each computing it was the kernel's growth with M); the same expression, so the same bits
+__global__ void mixup_a_kernel(const float* __restrict__ D, int ldd, __nv_bfloat16* __restrict__ A, int M, float inv_hc) {
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    pdl_wait();                                           // D is the predecessor's (launched with PDL like the rest)
+    pdl_trigger();
+    if (e >= M * MXU_R) return;
+    const int m = e / MXU_R, k = e % MXU_R;
+    A[e] = __float2bfloat16_rn(silu_(bfr_(bfr_(D[(size_t)m * ldd + k]) * inv_hc)));
+}
+
+template <int JG, bool PRE = false>
 __global__ void __launch_bounds__(128 * JG) mixup_bf16_kernel(const float* __restrict__ D, int ldd,
         const __nv_bfloat16* __restrict__ Nn, int ldn, const __nv_bfloat16* __restrict__ W,
-        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, float inv_hc) {
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, float inv_hc, const __nv_bfloat16* __restrict__ Ap) {
     extern __shared__ __align__(16) unsigned char sm_raw[];
     __nv_bfloat16* as = reinterpret_cast<__nv_bfloat16*>(sm_raw);   // [mr][MXU_LDS]
     const int mr = (M + 15) / 16 * 16;
@@ -315,10 +326,18 @@ __global__ void __launch_bounds__(128 * JG) mixup_bf16_kernel(const float* __res
     }
     pdl_wait();
     pdl_trigger();
-    for (int e = threadIdx.x; e < mr * MXU_R; e += blockDim.x) {
-        const int m = e / MXU_R, k = e % MXU_R;
-        as[m * MXU_LDS + k] = m < M ? __float2bfloat16_rn(silu_(bfr_(bfr_(D[(size_t)m * ldd + k]) * inv_hc)))
-                                    : __float2bfloat16_rn(0.f);
+    if (PRE) {                                            // A staged by mixup_a_kernel: 8-byte copies
+        for (int e = threadIdx.x; e < mr * (MXU_R / 4); e += blockDim.x) {
+            const int m = e / (MXU_R / 4), q = e % (MXU_R / 4);
+            *reinterpret_cast<uint2*>(as + m * MXU_LDS + 4 * q) =
+                m < M ? *reinterpret_cast<const uint2*>(Ap + (size_t)m * MXU_R + 4 * q) : make_uint2(0u, 0u);
+        }
+    } else {
+        for (int e = threadIdx.x; e < mr * MXU_R; e += blockDim.x) {
+            const int m = e / MXU_R, k = e % MXU_R;
+            as[m * MXU_LDS + k] = m < M ? __float2bfloat16_rn(silu_(bfr_(bfr_(D[(size_t)m * ldd + k]) * inv_hc)))
+                                        : __float2bfloat16_rn(0.f);
+        }
     }
     __syncthreads();
     for (int r0 = 0; r0 < M; r0 += 16) {
@@ -354,7 +373,7 @@ __global__ void __launch_bounds__(128 * JG) mixup_bf16_kernel(const float* __res
     }
 }
 
-void mixup_bf16(torch::Tensor d, torch::Tensor n, torch::Tensor w, torch::Tensor x, int64_t hc, int64_t jg) {
+void mixup_bf16(torch::Tensor d, torch::Tensor n, torch::Tensor w, torch::Tensor x, int64_t hc, int64_t jg, torch::Tensor a) {
     const int M = d.size(0), H = x.size(1);
     TORCH_CHECK(hc == 4 && w.scalar_type() == at::kBFloat16 && w.is_contiguous() && w.size(0) == 4 * H && w.size(1) == MXU_R,
                 "mixup_bf16: w bf16 [4 H, 320]");
@@ -367,13 +386,22 @@ void mixup_bf16(torch::Tensor d, torch::Tensor n, torch::Tensor w, torch::Tensor
     TORCH_CHECK(jg == 1 || jg == 2 || jg == 4, "mixup_bf16: jg 1, 2 or 4");
     TORCH_CHECK(H % (8 * jg) == 0, "mixup_bf16: H % (8 jg)");
     const size_t smem = (size_t)mr * MXU_LDS * 2 + (size_t)jg * 4 * M * 8 * 4;
-    auto k = jg == 1 ? mixup_bf16_kernel<1> : jg == 2 ? mixup_bf16_kernel<2> : mixup_bf16_kernel<4>;
-    static bool once[3] = {false, false, false};
-    const int ki = jg == 1 ? 0 : jg == 2 ? 1 : 2;
+    // `a` non-empty (bf16 [M, 320], contiguous): A computed once by mixup_a_kernel, then copied by every CTA
+    const bool pre = a.numel() > 0;
+    TORCH_CHECK(!pre || (a.scalar_type() == at::kBFloat16 && a.is_contiguous() && a.size(0) == M && a.size(1) == MXU_R),
+                "mixup_bf16: a bf16 [M, 320]");
+    auto k = pre ? (jg == 1 ? mixup_bf16_kernel<1, true> : jg == 2 ? mixup_bf16_kernel<2, true> : mixup_bf16_kernel<4, true>)
+                 : (jg == 1 ? mixup_bf16_kernel<1> : jg == 2 ? mixup_bf16_kernel<2> : mixup_bf16_kernel<4>);
+    static bool once[6] = {false, false, false, false, false, false};
+    const int ki = (jg == 1 ? 0 : jg == 2 ? 1 : 2) + (pre ? 3 : 0);
     if (!once[ki]) { cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024); once[ki] = true; }
+    if (pre)
+        launch_pdl(mixup_a_kernel, dim3((M * MXU_R + 255) / 256), dim3(256), 0, at::cuda::getCurrentCUDAStream(),
+            (const float*)d.data_ptr(), (int)d.stride(0), (__nv_bfloat16*)a.data_ptr(), M, 1.0f / (float)hc);
     launch_pdl(k, dim3(H / (8 * jg)), dim3(128 * jg), smem, at::cuda::getCurrentCUDAStream(),
         (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0),
-        (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, 1.0f / (float)hc);
+        (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, 1.0f / (float)hc,
+        (const __nv_bfloat16*)(pre ? a.data_ptr() : nullptr));
 }
 
 void bf16_cluster(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t cs) {
@@ -394,6 +422,369 @@ void bf16_cluster(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk,
     C(4, 2) C(8, 2) C(16, 2) C(4, 4) C(8, 4) C(16, 4) C(4, 8) C(8, 8)
 #undef C
     TORCH_CHECK(false, "bf16_cluster: (wk, cs) not built");
+}
+
+// Tiled (many rows, 33..64; the head): bf16_skinny_kernel's products with the warps of a CTA splitting the output
+// columns instead of K. Each warp walks all of K in bf16_skinny_kernel's order -- WK contiguous slices of K steps,
+// each summed from zero with the same lane layout and k16 instructions, added in slice order (an empty slice adding
+// 0) -- so a row gets bf16_skinny_kernel's bits. The activations of a K step are staged once a CTA in shared memory
+// (an S-deep cp.async ring) instead of being reread from L2 by every 8-row weight tile.
+__device__ __forceinline__ void cp_async16(void* smem, const void* g, bool ok) {
+    const uint32_t a = (uint32_t)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" :: "r"(a), "l"(g), "r"(ok ? 16 : 0));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
+template <int N_>
+__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" :: "n"(N_)); }
+
+template <int MT, int NW, int NT, int D, int S, int WK>
+__global__ void __launch_bounds__(32 * NW)
+bf16_tiled_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w, float* __restrict__ y,
+                  int M, int N, int kq, int lx, int lw, int ly) {
+    constexpr int ROWS = MT * 16, XP = 64 + 8;
+    extern __shared__ __align__(16) unsigned char smem[];
+    __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem);   // [S][ROWS][XP]
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int n0 = (blockIdx.x * NW + warp) * 8 * NT;
+    const int per = (kq + WK - 1) / WK;
+    float acc[MT][NT][4], tot[MT][NT][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) acc[a][n][i] = tot[a][n][i] = 0.f;
+    const __nv_bfloat16* wr[NT];
+    bool wok[NT];
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int row = n0 + 8 * n + g;
+        wok[n] = row < N;
+        wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
+    }
+    uint4 nlo[D][NT], nhi[D][NT];
+#pragma unroll
+    for (int d = 0; d < D; ++d)
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const bool ok = wok[n] && d < kq;
+            nlo[d][n] = ok ? ldw(wr[n] + (size_t)d * 64) : make_uint4(0, 0, 0, 0);
+            nhi[d][n] = ok ? ldw(wr[n] + (size_t)d * 64 + 8) : make_uint4(0, 0, 0, 0);
+        }
+    pdl_wait();
+    pdl_trigger();
+    auto stage = [&](int k) {
+        __nv_bfloat16* b = xs + (k % S) * ROWS * XP;
+        for (int c = threadIdx.x; c < ROWS * 8; c += 32 * NW) {
+            const int r = c >> 3, q = c & 7;
+            const bool ok = r < M && k < kq;
+            cp_async16(b + r * XP + 8 * q, x + (size_t)(ok ? r : 0) * lx + (size_t)(ok ? k : 0) * 64 + 8 * q, ok);
+        }
+    };
+#pragma unroll
+    for (int k = 0; k < S - 1; ++k) {
+        stage(k);
+        cp_commit();
+    }
+    for (int k0 = 0; k0 < kq; k0 += D) {
+#pragma unroll
+        for (int d = 0; d < D; ++d) {
+            const int kk = k0 + d;
+            if (kk >= kq) break;
+            if (kk > 0 && kk % per == 0) {
+#pragma unroll
+                for (int a = 0; a < MT; ++a)
+#pragma unroll
+                    for (int n = 0; n < NT; ++n)
+#pragma unroll
+                        for (int i = 0; i < 4; ++i) {
+                            tot[a][n][i] = kk == per ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                            acc[a][n][i] = 0.f;
+                        }
+            }
+            cp_wait<S - 2>();
+            __syncthreads();
+            stage(kk + S - 1);
+            cp_commit();
+            uint32_t B[NT][8];
+#pragma unroll
+            for (int n = 0; n < NT; ++n) {
+                const uint4 lo = nlo[d][n], hi = nhi[d][n];
+                const bool ok = wok[n] && kk + D < kq;
+                nlo[d][n] = ok ? ldw(wr[n] + (size_t)(kk + D) * 64) : make_uint4(0, 0, 0, 0);
+                nhi[d][n] = ok ? ldw(wr[n] + (size_t)(kk + D) * 64 + 8) : make_uint4(0, 0, 0, 0);
+                B[n][0] = lo.x; B[n][1] = lo.y; B[n][2] = lo.z; B[n][3] = lo.w;
+                B[n][4] = hi.x; B[n][5] = hi.y; B[n][6] = hi.z; B[n][7] = hi.w;
+            }
+            const __nv_bfloat16* b = xs + (kk % S) * ROWS * XP + 16 * t;
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                const __nv_bfloat16* p0 = b + (a * 16 + g) * XP;
+                const __nv_bfloat16* p1 = p0 + 8 * XP;
+                const uint4 x0a = *reinterpret_cast<const uint4*>(p0), x0b = *reinterpret_cast<const uint4*>(p0 + 8);
+                const uint4 x1a = *reinterpret_cast<const uint4*>(p1), x1b = *reinterpret_cast<const uint4*>(p1 + 8);
+                const uint32_t X0[8] = {x0a.x, x0a.y, x0a.z, x0a.w, x0b.x, x0b.y, x0b.z, x0b.w};
+                const uint32_t X1[8] = {x1a.x, x1a.y, x1a.z, x1a.w, x1b.x, x1b.y, x1b.z, x1b.w};
+#pragma unroll
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int j = 0; j < 4; ++j)
+                        mma_bf16(acc[a][n], X0[2 * j], X1[2 * j], X0[2 * j + 1], X1[2 * j + 1], B[n][2 * j], B[n][2 * j + 1]);
+            }
+        }
+    }
+    const int used = (kq + per - 1) / per;
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                float v = used == 1 ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                for (int e = used; e < WK; ++e) v += 0.f;
+                acc[a][n][i] = v;
+            }
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int c = n0 + 8 * n + 2 * t;
+#pragma unroll
+        for (int a = 0; a < MT; ++a) {
+            const int r0 = a * 16 + g, r1 = r0 + 8;
+            if (r0 < M) {
+                if (c < N) y[(size_t)r0 * ly + c] = acc[a][n][0];
+                if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = acc[a][n][1];
+            }
+            if (r1 < M) {
+                if (c < N) y[(size_t)r1 * ly + c] = acc[a][n][2];
+                if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = acc[a][n][3];
+            }
+        }
+    }
+}
+
+template <int MT, int NW, int NT, int D, int S, int WK>
+void launch_tiled(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1);
+    const int smem = S * MT * 16 * (64 + 8) * 2;
+    auto kern = bf16_tiled_kernel<MT, NW, NT, D, S, WK>;
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    dim3 grid((N + 8 * NT * NW - 1) / (8 * NT * NW));
+    launch_pdl(kern, grid, dim3(32 * NW), smem, at::cuda::getCurrentCUDAStream(),
+        reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),
+        y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0), (int)w.stride(0), (int)y.stride(0));
+}
+
+// The cluster split-K above, column-split (many rows, 33..64; the mixers' down|inject): CTA `rank` of a cluster
+// still sums K chunk `rank`, but its NW warps split NW * NT * 8 weight rows instead of the chunk, and each warp walks
+// the chunk in bf16_cluster_kernel's order -- the chunk's WK contiguous warp slices, each from zero, added in slice
+// order (an empty slice adding 0) -- with the chunk's activations staged once a CTA (cp.async ring). Rank 0 then adds
+// the ranks' sums in rank order: bf16_cluster_kernel's bits, a quarter of the CTAs rereading X from L2.
+template <int MT, int NW, int NT, int D, int S, int WK, int CS>
+__global__ void __launch_bounds__(32 * NW)
+bf16_tiledc_kernel(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ w, float* __restrict__ y,
+                   int M, int N, int kq, int lx, int lw, int ly) {
+    namespace cg = cooperative_groups;
+    cg::cluster_group cl = cg::this_cluster();
+    constexpr int ROWS = MT * 16, XP = 64 + 8;
+    extern __shared__ __align__(16) unsigned char smem[];
+    __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem);              // [S][ROWS][XP]
+    float* fin = reinterpret_cast<float*>(smem + S * ROWS * XP * 2);         // [NW][NT][MT][4][32]
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int rank = (int)cl.block_rank();
+    const int n0 = ((blockIdx.x / CS) * NW + warp) * 8 * NT;
+    const int cper = (kq + CS - 1) / CS, c0 = rank * cper, c1 = min(kq, c0 + cper);
+    const int nk = max(0, c1 - c0), per = (nk + WK - 1) / WK;
+    float acc[MT][NT][4], tot[MT][NT][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) acc[a][n][i] = tot[a][n][i] = 0.f;
+    const __nv_bfloat16* wr[NT];
+    bool wok[NT];
+#pragma unroll
+    for (int n = 0; n < NT; ++n) {
+        const int row = n0 + 8 * n + g;
+        wok[n] = row < N;
+        wr[n] = w + (size_t)(wok[n] ? row : 0) * lw + 16 * t;
+    }
+    uint4 nlo[D][NT], nhi[D][NT];
+#pragma unroll
+    for (int d = 0; d < D; ++d)
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const bool ok = wok[n] && d < nk;
+            nlo[d][n] = ok ? ldw(wr[n] + (size_t)(c0 + d) * 64) : make_uint4(0, 0, 0, 0);
+            nhi[d][n] = ok ? ldw(wr[n] + (size_t)(c0 + d) * 64 + 8) : make_uint4(0, 0, 0, 0);
+        }
+    pdl_wait();
+    pdl_trigger();
+    auto stage = [&](int j) {                              // the chunk's step j
+        __nv_bfloat16* b = xs + (j % S) * ROWS * XP;
+        for (int c = threadIdx.x; c < ROWS * 8; c += 32 * NW) {
+            const int r = c >> 3, q = c & 7;
+            const bool ok = r < M && j < nk;
+            cp_async16(b + r * XP + 8 * q, x + (size_t)(ok ? r : 0) * lx + (size_t)(ok ? c0 + j : 0) * 64 + 8 * q, ok);
+        }
+    };
+#pragma unroll
+    for (int j = 0; j < S - 1; ++j) {
+        stage(j);
+        cp_commit();
+    }
+    for (int j0 = 0; j0 < nk; j0 += D) {
+#pragma unroll
+        for (int d = 0; d < D; ++d) {
+            const int j = j0 + d;
+            if (j >= nk) break;
+            if (j > 0 && j % per == 0) {
+#pragma unroll
+                for (int a = 0; a < MT; ++a)
+#pragma unroll
+                    for (int n = 0; n < NT; ++n)
+#pragma unroll
+                        for (int i = 0; i < 4; ++i) {
+                            tot[a][n][i] = j == per ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                            acc[a][n][i] = 0.f;
+                        }
+            }
+            cp_wait<S - 2>();
+            __syncthreads();
+            stage(j + S - 1);
+            cp_commit();
+            uint32_t B[NT][8];
+#pragma unroll
+            for (int n = 0; n < NT; ++n) {
+                const uint4 lo = nlo[d][n], hi = nhi[d][n];
+                const bool ok = wok[n] && j + D < nk;
+                nlo[d][n] = ok ? ldw(wr[n] + (size_t)(c0 + j + D) * 64) : make_uint4(0, 0, 0, 0);
+                nhi[d][n] = ok ? ldw(wr[n] + (size_t)(c0 + j + D) * 64 + 8) : make_uint4(0, 0, 0, 0);
+                B[n][0] = lo.x; B[n][1] = lo.y; B[n][2] = lo.z; B[n][3] = lo.w;
+                B[n][4] = hi.x; B[n][5] = hi.y; B[n][6] = hi.z; B[n][7] = hi.w;
+            }
+            const __nv_bfloat16* b = xs + (j % S) * ROWS * XP + 16 * t;
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                const __nv_bfloat16* p0 = b + (a * 16 + g) * XP;
+                const __nv_bfloat16* p1 = p0 + 8 * XP;
+                const uint4 x0a = *reinterpret_cast<const uint4*>(p0), x0b = *reinterpret_cast<const uint4*>(p0 + 8);
+                const uint4 x1a = *reinterpret_cast<const uint4*>(p1), x1b = *reinterpret_cast<const uint4*>(p1 + 8);
+                const uint32_t X0[8] = {x0a.x, x0a.y, x0a.z, x0a.w, x0b.x, x0b.y, x0b.z, x0b.w};
+                const uint32_t X1[8] = {x1a.x, x1a.y, x1a.z, x1a.w, x1b.x, x1b.y, x1b.z, x1b.w};
+#pragma unroll
+                for (int n = 0; n < NT; ++n)
+#pragma unroll
+                    for (int jj = 0; jj < 4; ++jj)
+                        mma_bf16(acc[a][n], X0[2 * jj], X1[2 * jj], X0[2 * jj + 1], X1[2 * jj + 1], B[n][2 * jj], B[n][2 * jj + 1]);
+            }
+        }
+    }
+    // the chunk's sum (the warp slices in order, the empty ones adding 0), into this warp's part of fin
+    const int used = per ? (nk + per - 1) / per : 0;
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int n = 0; n < NT; ++n)
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                float v = used <= 1 ? acc[a][n][i] : tot[a][n][i] + acc[a][n][i];
+                for (int e = max(used, 1); e < WK; ++e) v += 0.f;
+                fin[(((warp * NT + n) * MT + a) * 4 + i) * 32 + lane] = v;
+            }
+    cl.sync();
+    if (rank == 0) {
+#pragma unroll
+        for (int a = 0; a < MT; ++a)
+#pragma unroll
+            for (int n = 0; n < NT; ++n)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    float v = fin[(((warp * NT + n) * MT + a) * 4 + i) * 32 + lane];
+                    for (int r = 1; r < CS; ++r) v += cl.map_shared_rank(fin, r)[(((warp * NT + n) * MT + a) * 4 + i) * 32 + lane];
+                    acc[a][n][i] = v;
+                }
+#pragma unroll
+        for (int n = 0; n < NT; ++n) {
+            const int c = n0 + 8 * n + 2 * t;
+#pragma unroll
+            for (int a = 0; a < MT; ++a) {
+                const int r0 = a * 16 + g, r1 = r0 + 8;
+                if (r0 < M) {
+                    if (c < N) y[(size_t)r0 * ly + c] = acc[a][n][0];
+                    if (c + 1 < N) y[(size_t)r0 * ly + c + 1] = acc[a][n][1];
+                }
+                if (r1 < M) {
+                    if (c < N) y[(size_t)r1 * ly + c] = acc[a][n][2];
+                    if (c + 1 < N) y[(size_t)r1 * ly + c + 1] = acc[a][n][3];
+                }
+            }
+        }
+    }
+    cl.sync();
+}
+
+template <int MT, int NW, int NT, int D, int S, int WK, int CS>
+void launch_tiledc(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
+    const int M = x.size(0), N = w.size(0), K = w.size(1);
+    const int smem = S * MT * 16 * (64 + 8) * 2 + NW * NT * MT * 4 * 32 * 4;
+    auto kern = bf16_tiledc_kernel<MT, NW, NT, D, S, WK, CS>;
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    const int groups = (N + 8 * NT * NW - 1) / (8 * NT * NW);
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(groups * CS); cfg.blockDim = dim3(32 * NW); cfg.dynamicSmemBytes = smem;
+    cfg.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute at[2];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    at[1].id = cudaLaunchAttributeClusterDimension;
+    at[1].val.clusterDim.x = CS; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 2;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, kern, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()), y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0),
+        (int)w.stride(0), (int)y.stride(0));
+    TORCH_CHECK(e == cudaSuccess, "bf16_tiledc launch: ", cudaGetErrorString(e));
+}
+
+void bf16_tiledc(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t cs, int64_t nw, int64_t nt,
+                 int64_t d) {
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
+                "bf16_tiledc: x, w bf16, y fp32");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && x.size(0) >= 1 && x.size(0) <= 64, "bf16_tiledc: shapes");
+    TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0
+                && reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "bf16_tiledc: row-major, 16-byte aligned rows");
+    const int mt = (int)(x.size(0) + 15) / 16;
+#define L(WK, CS, NW, NT, D)                                                    \
+    if (wk == WK && cs == CS && nw == NW && nt == NT && d == D) {               \
+        if (mt == 4) launch_tiledc<4, NW, NT, D, 3, WK, CS>(x, w, y);           \
+        else if (mt == 3) launch_tiledc<3, NW, NT, D, 3, WK, CS>(x, w, y);      \
+        else if (mt == 2) launch_tiledc<2, NW, NT, D, 3, WK, CS>(x, w, y);      \
+        else launch_tiledc<1, NW, NT, D, 3, WK, CS>(x, w, y);                   \
+        return;                                                                 \
+    }
+    L(16, 4, 4, 1, 4) L(16, 4, 2, 2, 4) L(16, 4, 4, 1, 8) L(16, 4, 2, 1, 8) L(16, 4, 8, 1, 4)
+#undef L
+    TORCH_CHECK(false, "bf16_tiledc: (wk, cs, nw, nt, d) not built");
+}
+
+void bf16_tiled(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nw, int64_t nt, int64_t d) {
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
+                "bf16_tiled: x, w bf16, y fp32");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && x.size(0) >= 1 && x.size(0) <= 64, "bf16_tiled: shapes");
+    TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0
+                && reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "bf16_tiled: row-major, 16-byte aligned rows");
+    const int mt = (int)(x.size(0) + 15) / 16;
+#define L(WK, NW, NT, D)                                                    \
+    if (wk == WK && nw == NW && nt == NT && d == D) {                       \
+        if (mt == 4) launch_tiled<4, NW, NT, D, 3, WK>(x, w, y);            \
+        else if (mt == 3) launch_tiled<3, NW, NT, D, 3, WK>(x, w, y);       \
+        else if (mt == 2) launch_tiled<2, NW, NT, D, 3, WK>(x, w, y);       \
+        else launch_tiled<1, NW, NT, D, 3, WK>(x, w, y);                    \
+        return;                                                             \
+    }
+    L(32, 4, 1, 4) L(32, 4, 2, 4) L(32, 8, 1, 4) L(32, 4, 1, 8) L(32, 2, 2, 4) L(16, 2, 2, 4)
+#undef L
+    TORCH_CHECK(false, "bf16_tiled: (wk, nw, nt, d) not built");
 }
 
 void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t nt, int64_t pf) {
