@@ -2,11 +2,21 @@
 // server/setup_api.py: the sign-in after a 401, setup mode without error spam, the plan's error codes
 // with the step that fixes them, apply's refusals, Wren's page state, the reset items' actions and
 // level 2 as a job, and the header and memory bar that nothing shows through. @mock
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setupMock } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
+
+// This file drives the ADVANCED flow — the folded pages, the security card on Review,
+// Wren's per-step fields — so a fresh context asks for it explicitly, exactly like the
+// guide's default for a new browser is the simple flow, so this file opts out.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const MODEL = 'qwen3.8-27b';
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 1100;

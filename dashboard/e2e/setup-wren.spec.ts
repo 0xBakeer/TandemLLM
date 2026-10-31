@@ -1,11 +1,18 @@
 // QA VIS-81 (VIS-80): Wren, the setup guide's chat, against the mock's scripted model. @mock
 // QA VIS-92 (VIS-91): the live loop of 0.7.1 (refused calls asked again four times, a notice per
 // call, no answer, the phone's sheet dropping per call), with the mock playing the 2B's calls.
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setupMock } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the Wren specs drive the mock (POST /__mock/setup)');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const MODEL = 'qwen3.8-27b';
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 1100;
