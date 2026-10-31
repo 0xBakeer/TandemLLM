@@ -629,7 +629,8 @@ def _par_health(part=_untimed) -> dict:
     if out["joint_graphs"] is None and callable(rep):
         out["joint_graphs"] = part("par_joint_graphs", rep)      # SPD-163: the 27B's joint verify graphs
     js = getattr(eng, "joint_stats", None)
-    out["joint_stats"] = part("par_joint_stats", js) if callable(js) else None   # SPD-249: the joint-pass shape
+    # SPD-249: the joint-pass shape; a family's report that raises gives an error entry, not a failed /health
+    out["joint_stats"] = part("par_joint_stats", _safe, js) if callable(js) else None
     rr = _round_runner.RUNNER
     out["round_runner"] = part("par_runner", rr.report) if rr is not None else None      # SPD-201
     pool = dict.get(STATE, "pool")

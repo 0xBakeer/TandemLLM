@@ -79,7 +79,7 @@ ATTN_MULTI = _S.get("FN_ATTN_MULTI") == "1"
 #: dilated conv over each lane's own state a lane at a time; 0: the whole PLE step a lane at a time
 PLE_MULTI = _S.get("FN_PLE_MULTI") == "1"
 #: SPD-249: a dense joint pass (every lane's context within the dense class) from a CUDA graph keyed by (lanes, the
-#: rows padded to JG_ROWS, class 0): the lanes' rows contiguous in one rows buffer, every lane's state reached through
+#: rows padded to JG_ROWS, class 0, the lanes' KV strides): the lanes' rows contiguous in one rows buffer, every lane's state reached through
 #: the graph's entry tables, the pad rows routed to no expert; a key the server has not let capture yet runs eager.
 #: 0: every joint pass eager
 JOINT_GRAPH = _S.get("FN_JOINT_GRAPH") == "1"
@@ -1214,16 +1214,23 @@ class FlashNextEngine(FlashNextRef):
         stream, and the counts for /health (replays, captures, eager passes by reason)."""
         g = self.__dict__.get("_jgs")
         if g is None:
-            g = self._jgs = {"graphs": {}, "seen": {}, "pool": None, "stream": None, "bufs": {},
-                             "stats": {"replays": 0, "captures": 0, "capture_ms": 0.0, "evicted": 0, "eager": {},
-                                       "stage_ms": 0.0, "plan_ms": 0.0, "stage_parts_ms": {}, "stage_cpu_ms": 0.0,
-                                       "plan_cpu_ms": 0.0}}
+            # setdefault, one C call: /health's thread and the runner's thread both get the first dict made
+            g = self.__dict__.setdefault("_jgs", {
+                "graphs": {}, "seen": {}, "pool": None, "stream": None, "bufs": {},
+                "stats": {"replays": 0, "captures": 0, "capture_ms": 0.0, "evicted": 0, "eager": {},
+                          "stage_ms": 0.0, "plan_ms": 0.0, "stage_parts_ms": {}, "stage_cpu_ms": 0.0,
+                          "plan_cpu_ms": 0.0}})
         return g
 
     def joint_graph_stats(self) -> dict:
-        """SPD-249: the joint graphs' counts (kept keys, replays, captures and their ms, eager passes by reason)."""
+        """SPD-249: the joint graphs' counts (kept keys, replays, captures and their ms, eager passes by reason). /health
+        calls it from its own thread while the runner reorders the kept graphs on every replay: the keys and the counts
+        are copied first, each in one C call, and only the copies are walked."""
         g = self._jg_state()
-        out = {**g["stats"], "kept": [list(k) for k in g["graphs"]]}
+        keys = list(g["graphs"])
+        stats = dict(g["stats"])
+        out = {**{k: dict(v) if isinstance(v, dict) else v for k, v in stats.items()},
+               "kept": [[*k[:3], list(k[3])] if len(k) > 3 else list(k) for k in keys]}
         if PLE_PREFETCH:
             out["ple_prefetch"] = dict(self._pf_stats())
         return out
@@ -1261,6 +1268,19 @@ class FlashNextEngine(FlashNextRef):
                 elif ks != k0:
                     return "layout"
         return None
+
+    def _jg_key(self, items: list, R: int) -> tuple:
+        """A joint graph's key: (lanes, padded rows, class 0, the lanes' K/V strides). `attn_rows_multi` takes the
+        strides as scalars, so a captured graph holds them: slot 0's caches and a side slot's of another cap have other
+        strides, and a graph of one read the other's keys at the wrong rows (`_jg_why` checked that a pass's lanes
+        agree)."""
+        c = self.cfg
+        kv = ()
+        if c.attention_layers:
+            st, li = items[0][2], c.attention_layers[0]
+            kc, vc = st.k[li], st.v[li]
+            kv = (kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1))
+        return (len(items), R, 0, kv)
 
     def _jg_buffers(self, R: int) -> dict:
         """The rows buffer of an R-row joint graph (every lane's rows contiguous, `_rows_buffers`' layout) and its pad
@@ -1501,7 +1521,7 @@ class FlashNextEngine(FlashNextRef):
             self._jg_eager(why)
             return None
         R = next(r for r in JG_ROWS if r >= n)
-        key = (E, R, 0)
+        key = self._jg_key(items, R)
         js = self._jg_state()
         G = js["graphs"].get(key)
         if G is None:
@@ -1623,6 +1643,7 @@ class FlashNextEngine(FlashNextRef):
         caches. Each row's bits are its own (the kernels are row-wise; tools/fn_joint_check.py compares
         every state with its lone verify)."""
         c = self.cfg
+        self._joint_tables_begin()
         Hs = torch.cat([self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc)
                         for x in cx])
         Ns = None
@@ -2321,6 +2342,20 @@ class FlashNextEngine(FlashNextRef):
             ent["lane_dd"][:M].copy_(ent["lane_h"][:M], non_blocking=True)
         ent["lane_d"] = ent["lane_dd"][:M]
         return ent
+
+    def _joint_tables_begin(self) -> None:
+        """An eager joint pass starts on clean entry tables. Only a pass that ended puts `k` back at the tables' end;
+        one that raised after its first attention or GDN layer (an allocation, the PLE reader, an entry's check) left
+        it short, and the next pass then kept that pass's row-to-lane map for its first attention layers: its rows
+        attended over another lane's caches. Such tables are closed here as `_attn_multi_end` / `_gdn_multi_end`
+        close them (the copies the failed pass queued recorded, the next pass waits for them before it rewrites the
+        host rows); after a pass that ended nothing is recorded or waited for."""
+        La = sum(1 for li in range(self.cfg.num_hidden_layers) if not self.cfg.is_linear(li))
+        for name, n in (("_aent", La), ("_gent", len(self.cfg.linear_layers))):
+            ent = self.__dict__.get(name)
+            if ent is not None and ent["k"] < n:
+                ent["copied"].record()
+                ent["k"] = n
 
     def _attn_multi_end(self) -> None:
         """After a joint pass's last layer: the attention entry tables' copies are recorded, the next pass starts over."""

@@ -164,8 +164,10 @@ def main() -> None:
             if info["graph"]:
                 # the pad rows route to no expert, the real rows to their own (SPD-249: U and every expert's rows are
                 # the unpadded pass's)
-                key = (len(on), next(x for x in E_mod.JG_ROWS if x >= rows), 0)
-                G = fn._jg_state()["graphs"][key]
+                R = next(x for x in E_mod.JG_ROWS if x >= rows)
+                graphs = fn._jg_state()["graphs"]                  # the one this pass replayed: used last
+                key = next(k for k in reversed(list(graphs)) if k[:3] == (len(on), R, 0))
+                G = graphs[key]
                 ids = [G.t[("ids", li)] for li in range(fn.cfg.num_hidden_layers)]
                 info["pad_ids_masked"] = all(bool((t[rows:] == -1).all()) for t in ids)
                 info["real_ids_routed"] = all(bool((t[:rows] >= 0).all()) for t in ids)

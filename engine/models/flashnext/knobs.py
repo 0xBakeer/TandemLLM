@@ -48,8 +48,8 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: a joint pass's PLE layer: decode, projections, norms and gate once over every lane's rows, the conv a lane
     # at a time (each row's own arithmetic); 0: the PLE step a lane at a time
     'FN_PLE_MULTI': ('0', 'engine/models/flashnext/engine.py'),
-    # SPD-249: a dense joint pass from a CUDA graph keyed by (lanes, rows padded to 16/24/32, class 0), the lanes'
-    # states through its entry tables, the pad rows routed to no expert; captured on the round runner only while no
+    # SPD-249: a dense joint pass from a CUDA graph keyed by (lanes, rows padded to 16/24/32, class 0, the lanes' KV
+    # strides), the lanes' states through its entry tables, the pad rows routed to no expert; captured on the round runner only while no
     # request waits; 0: every joint pass eager
     'FN_JOINT_GRAPH': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: stage_rows' tree arrays (depth, paths, ancestor cells, GDN tree control, window sources) kept by tree
