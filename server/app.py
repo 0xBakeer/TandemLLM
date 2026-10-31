@@ -1179,7 +1179,9 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
 
     SPD-249: TandemLLM's own raw question short enough for the side lane (`own`, `lane_kind` raw) gets
     a side window (`why["lane_side"]`): it has no conversation of its own, and an idle side slot
-    serves it where the lane would serve it after the questions ahead of it, from row 0 on slot 0."""
+    serves it where the lane would serve it after the questions ahead of it, from row 0 on slot 0.
+    A guest of slot 0's conversation is said as before (`why["guest"]`), so the handler tries
+    an idle side slot before an idle slot 0 and slot 0's rows stay that conversation's."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
@@ -1202,7 +1204,19 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         why.update(ids=ids, lane_side=True)
         need = rows + int(max_new) + SIDE_MARGIN
         why["need"] = need
-        return need if any(need <= s.max_len for s in pool.side()) else None
+        if not any(need <= s.max_len for s in pool.side()):
+            return None
+        res = dict.get(STATE, "resident")
+        if res is not None and SIDE_GUESTS == "on":
+            # with slot 0 free, a guest of its conversation still takes an idle side slot first
+            try:
+                valid = int(getattr(res, "valid", 0) or 0)
+                chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
+                if valid and _guest_of_slot0(res, rows, res.common(ids), chunk):
+                    why["guest"] = valid
+            except Exception:                                      # noqa: BLE001
+                pass
+        return need
     if images:
         # SRV-629: the window holds the expanded rows, not one placeholder an image (8
         # screenshots: about 7,700 rows), and every test below runs on the key ids, as the caches

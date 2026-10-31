@@ -409,13 +409,13 @@ def test_a_long_side_request_waits_past_the_queue_timeout_and_is_served():
 
 # ------------------------------------------------------------------ 8. side slots (SPD-249)
 
-def _own_need(n_rows=300, max_new=24, own=True, lane_kind="raw", side_len=8192):
+def _own_need(n_rows=300, max_new=24, own=True, lane_kind="raw", side_len=8192, resident=None):
     """`_par_side_need` for a raw question of `n_rows` rendered tokens beside a busy slot 0."""
     from server import app as A
     from server import slots as S
     pool = S.Pool([S.Slot(0, 65_536), S.Slot(1, side_len), S.Slot(2, side_len)])
     saved = {k: A.STATE.get(k) for k in ("pool", "resident", "slot0_view")}
-    A.STATE["pool"], A.STATE["resident"] = pool, None
+    A.STATE["pool"], A.STATE["resident"] = pool, resident
     A.STATE.pop("slot0_view", None)
     real = A.build_prompt
     A.build_prompt = lambda body, client=None, *, count=False, left_out=0: list(range(n_rows))
@@ -450,6 +450,41 @@ def test_spd249_an_own_lane_question_gets_a_side_window():
         assert need is None and "lane_side" not in why
     finally:
         A.OWN_SIDE = was
+
+
+class _Resident:
+    """Slot 0's resident rows: `valid` rows of a conversation that shares `common` rows with any prompt."""
+
+    def __init__(self, valid, common=0, chunk=1024, guest_max=4096):
+        self.valid, self._common, self.chunk, self.guest_max = valid, common, chunk, guest_max
+
+    def common(self, ids):
+        return self._common
+
+
+def test_spd249_an_own_question_is_still_a_guest_of_slot0s_conversation():
+    """The guest rule for the side-window own question: with slot 0 holding a conversation the question shares nothing with,
+    it is a guest (`why["guest"]`), so the handler tries an idle side slot before an idle slot 0 and slot 0's rows
+    stay that conversation's; no resident conversation, one it shares a chunk with, or SIDE_GUESTS off: no guest."""
+    from server import app as A
+    need, why, _ = _own_need(resident=_Resident(valid=8192))
+    assert need == 300 + 24 + A.SIDE_MARGIN and why["lane_side"] and why["guest"] == 8192, why
+    need, why, _ = _own_need(resident=_Resident(valid=8192, common=2048))
+    assert need and "guest" not in why, "it continues slot 0's rows: no guest"
+    need, why, _ = _own_need(resident=_Resident(valid=1024))
+    assert need and "guest" not in why, "slot 0 holds less than two chunks"
+    need, why, _ = _own_need(resident=None)
+    assert need and "guest" not in why
+    need, why, _ = _own_need(side_len=256, resident=_Resident(valid=8192))
+    assert need is None and "guest" not in why, "no side slot holds it: the lane, no guest"
+    was = A.SIDE_GUESTS
+    A.SIDE_GUESTS = "off"
+    try:
+        need, why, _ = _own_need(resident=_Resident(valid=8192))
+        assert need and "guest" not in why
+    finally:
+        A.SIDE_GUESTS = was
+    return "a guest of slot 0's conversation: an idle side slot first"
 
 
 def test_spd249_the_routers_estimate_counts_an_idle_side_slot():
