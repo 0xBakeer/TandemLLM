@@ -196,7 +196,7 @@ def test_t1_a_kept_graph_rewrites_its_entries_only_for_other_lanes():
         _run(eng, b)
         fills = [c for c in eng.calls if c[0] == "fill"]
         assert [f[1] for f in fills] == [0, 1, 2] and G.done.waits == 1, (fills, G.done.waits)
-        assert all(f[2][1] == (0, 3, 2) for f in fills), fills
+        assert all(f[2] == (0, 3, 2) for f in fills), fills
         c = [b[2], b[0], b[1]]                                # the same lanes in another order
         _run(eng, c)
         assert len([x for x in eng.calls if x[0] == "fill"]) == 6 and G.done.waits == 2

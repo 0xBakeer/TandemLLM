@@ -171,8 +171,6 @@ class FlashNextEngine(FlashNextRef):
         self._joint: dict = {}          # id(state) -> (block, rec, class) of its block in the last joint pass
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
         self._multi = None              # SPD-235: [(rows buffers, MTP state, rows, class)] of a packed MTP step
-        self._mtp_pg = None             # SPD-249 (T1): a packed draft graph's step (its tokens, lanes, graph)
-        self.pack_capture_ok = False    # SPD-249 (T1): a packed draft graph may be captured now (the server's word)
         self.joint_timing = {} if JOINT_TIMING else None  # a dict: `verify_multi` adds each part's GPU ms (a measurement)
         from engine.models.flashnext.union import ExpertUnion
         self.union = ExpertUnion(cfg.num_hidden_layers, cfg.num_experts, UNION_EVERY, device)   # SPD-249
@@ -375,6 +373,8 @@ class FlashNextEngine(FlashNextRef):
 
     _moe_record = None
     spec_ok = False            # the load-time self-check passed (speculation may run)
+    _mtp_pg = None             # SPD-249 (T1): a packed draft graph's step (its tokens, lanes, graph)
+    pack_capture_ok = False    # SPD-249 (T1): a packed draft graph may be captured now (the server's word)
     MOE_ROWS = 2048            # rows the MoE takes in one call (11 pairs a row on the grid's y axis)
     TREE_ROWS = (0, 1, 2, 3, 5, 6, 8, 11)
     CHAIN_WIDTHS = (2, 4, 8, 12, 16, 32)
