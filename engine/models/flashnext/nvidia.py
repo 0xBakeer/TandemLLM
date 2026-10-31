@@ -180,9 +180,9 @@ class NVWeight:
         return self._bf16
 
     def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
-        """x [M, K] bf16 -> [M, N] bf16 (the engine's weight protocol). MXFP8 up to 32 rows: tools/mxfp8_skinny (the
-        weight decoded in registers, row-invariant); more rows: the exact bf16 weight on the library GEMM."""
-        if self.kind == "mxfp8" and x.shape[0] <= 32:
+        """x [M, K] bf16 -> [M, N] bf16 (the engine's weight protocol). MXFP8 up to ROW_MAX rows: tools/mxfp8_skinny
+        (the weight decoded in registers, row-invariant); more rows: the exact bf16 weight on the library GEMM."""
+        if self.kind == "mxfp8" and x.shape[0] <= ROW_MAX:
             from tools import mxfp8_skinny as S
             return S.mm(x, self.parts["w"], self.parts["s"])
         if self.kind == "mxfp8" and x.dtype == torch.bfloat16:
@@ -282,9 +282,14 @@ class NVFP4RowTable(NVFP4NGramTable):
         return nvfp4_dequant(b[:, :self.cb], b[:, self.cb:self.cb + self.sb], self._s2[str(dev)])
 
 
+#: rows up to which this checkpoint's kernels (tools/mxfp8_skinny, tools/bf16_skinny, tools/nvfp4_moe) give a row its
+#: lone bits: four 16-row tiles a CTA. A joint pass of 8 lanes can verify 8 rows each (FlashNextEngine.row_max)
+ROW_MAX = 64
+
+
 class BF16Rows:
     """A bf16 weight the engine multiplies through `mul_rows` (fp32 out): tools/bf16_skinny on the tensor cores up to
-    32 rows (row-invariant: a decode row and a verify block's row are the same bits), fp32 products above."""
+    ROW_MAX rows (row-invariant: a decode row and a verify block's row are the same bits), fp32 products above."""
 
     def __init__(self, w: torch.Tensor, cluster: tuple | None = None):
         self.w = w.contiguous()
@@ -292,7 +297,7 @@ class BF16Rows:
         self.cluster = cluster              # (wk, cs): K split across a CTA cluster (few rows, long K: the mixers)
 
     def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[0] <= 32:
+        if x.shape[0] <= ROW_MAX:
             from tools import bf16_skinny as BS
             if self.cluster is not None:
                 return BS.mm_cluster(x, self.w, wk=self.cluster[0], cs=self.cluster[1])
@@ -311,6 +316,26 @@ class BF16Lin(BF16Rows):
 
     def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
         return super().mul_rows(x).to(torch.bfloat16)
+
+
+class BF16Up:
+    """A mixer's bf16 up weight [hc H, 320]: `mix_up` on the tensor cores at every row count (tools/bf16_skinny.mix_up;
+    row-invariant, so a decode row and a joint pass's row are the same bits), `mul_rows` for the prefill kernels
+    (`fn_prefill_kernels.mm_rows`: the library GEMM, fp32 out)."""
+
+    def __init__(self, w: torch.Tensor):
+        self.w = w.contiguous()
+        self.shape = self.w.shape
+
+    def mix_up(self, d: torch.Tensor, n: torch.Tensor, hc: int, out: torch.Tensor | None = None) -> torch.Tensor:
+        from tools import bf16_skinny as BS
+        return BS.mix_up(d, n, self.w, hc, out)
+
+    def mul_rows(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(x, self.w).float()
+
+    def dequant(self, dtype=torch.bfloat16) -> torch.Tensor:
+        return self.w.to(dtype)
 
 
 # ------------------------------------------------------------------------------ the expert bank
@@ -511,7 +536,7 @@ def load_engine(path: str, device="cuda", mtp: bool = False, log=print, layers=N
         # 324 rows x 10,240: 41 CTAs of 8 rows for 48 SMs; a 4-CTA cluster a row tile streams K in 4 chunks
         # (2.83 against 3.06 ms a step over the 97 sites, 227 GB/s)
         W[cs + ".down_inject"] = BF16Rows(di, cluster=(16, 4))
-        W[cs + ".input_mix_weight_up.weight"] = idx.read(site + ".input_mix_weight_up.weight", device).contiguous()
+        W[cs + ".input_mix_weight_up.weight"] = BF16Up(idx.read(site + ".input_mix_weight_up.weight", device))
         W[cs + ".rank"] = dn.shape[0]
 
     def fuse(names):

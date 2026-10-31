@@ -213,13 +213,15 @@ void mxfp8_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor s, torch::Tens
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kByte && s.scalar_type() == at::kByte,
                 "mxfp8_skinny: x bf16, w uint8 (e4m3 bytes), s uint8 (E8M0)");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && s.size(1) * 32 == w.size(1), "mxfp8_skinny: K");
-    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 32, "mxfp8_skinny: 1..32 rows");
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 64, "mxfp8_skinny: 1..64 rows");
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && s.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 16 == 0,
                 "mxfp8_skinny: row-major, 16-byte aligned rows");
-    const bool two = x.size(0) > 16;
+    const int mt = (int)(x.size(0) + 15) / 16;            // 16-row tiles: a row's bits do not depend on them
 #define L(WK, NT, PF)                                 \
     if (wk == WK && nt == NT && pf == PF) {           \
-        if (two) launch<2, WK, NT, PF>(x, w, s, y);   \
+        if (mt == 4) launch<4, WK, NT, PF>(x, w, s, y);        \
+        else if (mt == 3) launch<3, WK, NT, PF>(x, w, s, y);   \
+        else if (mt == 2) launch<2, WK, NT, PF>(x, w, s, y);   \
         else launch<1, WK, NT, PF>(x, w, s, y);       \
         return;                                       \
     }

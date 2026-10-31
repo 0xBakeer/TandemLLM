@@ -254,7 +254,10 @@ def gate_mul(o: torch.Tensor, qkv: torch.Tensor, D: int) -> torch.Tensor:
 
 def mix_up(d: torch.Tensor, n: torch.Tensor, w_up, hc: int, out: torch.Tensor | None = None) -> torch.Tensor:
     """The mixer's second half: d [M, >=R] fp32 (the down projection), n [M, hc H] bf16 (the normed
-    streams), w_up [hc H, R] fp16 or Int8Rows -> x [M, H] bf16."""
+    streams), w_up [hc H, R] fp16 or Int8Rows -> x [M, H] bf16. A weight with its own `mix_up` (NVIDIA
+    FP4-Local's bf16 one) mixes itself."""
+    if hasattr(w_up, "mix_up"):
+        return w_up.mix_up(d, n, hc, out)
     q, s = (w_up.q, w_up.s) if hasattr(w_up, "q") else (w_up, None)
     H = q.shape[0] // hc
     if out is None:

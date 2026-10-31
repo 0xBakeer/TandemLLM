@@ -76,6 +76,10 @@ class FlashNextEngine(FlashNextRef):
         cos, sin = FlashNextRef.rope(self, torch.arange(max_len))
         self.rope_cos, self.rope_sin = cos, sin                          # [max_len, rotary] bf16
         self.dense_limit = (cfg.indexer_budget + cfg.indexer_compress_ratio - 1) if cfg.has_indexer else 1 << 60
+        # rows up to which every projection, expert and head kernel gives a row its lone bits (a joint pass's cap): 64
+        # on NVIDIA FP4-Local's own kernels (a bf16 head; nvidia.ROW_MAX), 32 on an EXL3 pack (fn_kernels.dense)
+        from engine.models.flashnext import nvidia
+        self.row_max = nvidia.ROW_MAX if isinstance(W.get("lm_head.weight"), torch.Tensor) else 32
         self._rb: dict = {}                                              # rows buffers by row count
         self._order1 = torch.empty(0, dtype=torch.int32, device=device)    # one row: launch order
         self.rec: dict = {}                                              # what a commit needs
@@ -205,7 +209,7 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_kernels as K
         w = self.W["lm_head.weight"]
         if isinstance(w, torch.Tensor):
-            if x.shape[0] <= 32:
+            if x.shape[0] <= self.row_max:
                 # tools/bf16_skinny with 32 warps a CTA: 258 GB/s on the 1.27 GB head (fn_gemv: 241), the sums
                 # rounded once to bf16 as before
                 from tools import bf16_skinny as BS
@@ -959,8 +963,8 @@ class FlashNextEngine(FlashNextRef):
         the head run once over all the states' rows (their weights read once); the PLE, the norms and
         mixers, the GDN recurrence and the attention run per state on its own rows and caches, as a
         lone verify runs them. The projections and the experts give a row the bits it gets alone up to
-        32 rows (the self-check's widths), so each state's tokens are its lone verify's; the caller
-        keeps a pass at or under 32 rows. Parked GDN rows are applied first (`flush`): each state's
+        `row_max` rows (the self-check's widths), so each state's tokens are its lone verify's; the caller
+        keeps a pass at or under `row_max` rows. Parked GDN rows are applied first (`flush`): each state's
         walk then starts from its own state (SPD-229: each state's walk folds in its own parked rows, as its
         lone verify does). Eager; each state commits its block (`commit`)."""
         from tools import fn_kernels as K

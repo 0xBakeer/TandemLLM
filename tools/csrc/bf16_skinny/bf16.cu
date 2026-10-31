@@ -283,16 +283,111 @@ void launch(const torch::Tensor& x, const torch::Tensor& w, torch::Tensor& y) {
         y.data_ptr<float>(), M, N, K / 64, (int)x.stride(0), (int)w.stride(0), (int)y.stride(0));
 }
 
+// The hyper-connection mixer's second half for NVIDIA FP4-Local's bf16 up weight [4 H, 320], every row count on the tensor
+// cores (fn_kernels' mix_up_kernel streams it on the CUDA cores: at bandwidth for one row, compute-bound at 32). A =
+// bf16(silu(bf16(bf16(D) / hc))) [M, 320] is staged in shared memory by every CTA; u_s = W[s H + j] . A[m] (fp32, the
+// mma's order: lane (g, t) holds 16 contiguous weights of row g in each 64-wide K chunk, the activations at the same
+// logical K), then mix_up_kernel's epilogue: p_s = bf16(bf16(sigmoid(bf16(u_s))) n_s), x = bf16((((p0 + p1) + p2) + p3) / hc).
+// grid H / 8, 128 threads: warp s = stream s's 8 rows s H + j0... A row's bits never depend on the others: row-invariant.
+#define MXU_R 320
+#define MXU_LDS (MXU_R + 4)            // a row 162 words apart: a half-warp's 8-byte A loads hit 32 distinct banks
+__device__ __forceinline__ float bfr_(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
+__device__ __forceinline__ float silu_(float v) { return v / (1.0f + ::expf(-v)); }
+
+template <int JG>
+__global__ void __launch_bounds__(128 * JG) mixup_bf16_kernel(const float* __restrict__ D, int ldd,
+        const __nv_bfloat16* __restrict__ Nn, int ldn, const __nv_bfloat16* __restrict__ W,
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, float inv_hc) {
+    extern __shared__ __align__(16) unsigned char sm_raw[];
+    __nv_bfloat16* as = reinterpret_cast<__nv_bfloat16*>(sm_raw);   // [mr][MXU_LDS]
+    const int mr = (M + 15) / 16 * 16;
+    float* ps = reinterpret_cast<float*>(sm_raw + (size_t)mr * MXU_LDS * 2);   // [JG][4][M][8]
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, s = warp & 3, jg = warp >> 2, g = lane >> 2, t = lane & 3;
+    const int j0 = (blockIdx.x * JG + jg) * 8;
+    float* pj = ps + (size_t)jg * 4 * M * 8;
+    constexpr int NQ = MXU_R / 64;
+    uint4 wv[2 * NQ];
+    const __nv_bfloat16* wr = W + (size_t)(s * H + j0 + g) * MXU_R + 16 * t;
+#pragma unroll
+    for (int c = 0; c < NQ; ++c) {                        // the weights never depend on the predecessor
+        wv[2 * c] = ldw(wr + 64 * c);
+        wv[2 * c + 1] = ldw(wr + 64 * c + 8);
+    }
+    pdl_wait();
+    pdl_trigger();
+    for (int e = threadIdx.x; e < mr * MXU_R; e += blockDim.x) {
+        const int m = e / MXU_R, k = e % MXU_R;
+        as[m * MXU_LDS + k] = m < M ? __float2bfloat16_rn(silu_(bfr_(bfr_(D[(size_t)m * ldd + k]) * inv_hc)))
+                                    : __float2bfloat16_rn(0.f);
+    }
+    __syncthreads();
+    for (int r0 = 0; r0 < M; r0 += 16) {
+        float acc[4] = {0.f, 0.f, 0.f, 0.f};
+        const uint32_t* a_lo = reinterpret_cast<const uint32_t*>(as + (size_t)(r0 + g) * MXU_LDS + 16 * t);
+        const uint32_t* a_hi = reinterpret_cast<const uint32_t*>(as + (size_t)(r0 + g + 8) * MXU_LDS + 16 * t);
+#pragma unroll
+        for (int c = 0; c < NQ; ++c) {
+            const uint32_t wd[8] = {wv[2 * c].x, wv[2 * c].y, wv[2 * c].z, wv[2 * c].w,
+                                    wv[2 * c + 1].x, wv[2 * c + 1].y, wv[2 * c + 1].z, wv[2 * c + 1].w};
+#pragma unroll
+            for (int v = 0; v < 4; ++v) {
+                const int o = 32 * c + 2 * v;             // words: the lane's 4 values at logical K 64 c + 16 t + 4 v
+                mma_bf16(acc, a_lo[o], a_hi[o], a_lo[o + 1], a_hi[o + 1], wd[2 * v], wd[2 * v + 1]);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const int m = r0 + g + (i < 2 ? 0 : 8), jj = 2 * t + (i & 1);
+            if (m < M) {
+                const float u = bfr_(1.0f / (1.0f + ::expf(-bfr_(acc[i]))));
+                pj[((size_t)s * M + m) * 8 + jj] = bfr_(u * __bfloat162float(Nn[(size_t)m * ldn + s * H + j0 + jj]));
+            }
+        }
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < JG * M * 8; e += blockDim.x) {
+        const int q = e / (M * 8), m = (e / 8) % M, jj = e % 8;
+        const float* pq = ps + (size_t)q * 4 * M * 8;
+        const float p0 = pq[(0 * M + m) * 8 + jj], p1 = pq[(1 * M + m) * 8 + jj];
+        const float p2 = pq[(2 * M + m) * 8 + jj], p3 = pq[(3 * M + m) * 8 + jj];
+        Xo[(size_t)m * ldxo + (blockIdx.x * JG + q) * 8 + jj] = __float2bfloat16_rn((((p0 + p1) + p2) + p3) * inv_hc);
+    }
+}
+
+void mixup_bf16(torch::Tensor d, torch::Tensor n, torch::Tensor w, torch::Tensor x, int64_t hc, int64_t jg) {
+    const int M = d.size(0), H = x.size(1);
+    TORCH_CHECK(hc == 4 && w.scalar_type() == at::kBFloat16 && w.is_contiguous() && w.size(0) == 4 * H && w.size(1) == MXU_R,
+                "mixup_bf16: w bf16 [4 H, 320]");
+    TORCH_CHECK(d.scalar_type() == at::kFloat && d.stride(1) == 1 && d.size(1) >= MXU_R, "mixup_bf16: d fp32 [M, >=320]");
+    TORCH_CHECK(n.scalar_type() == at::kBFloat16 && n.stride(1) == 1 && n.size(1) == 4 * H && n.size(0) == M,
+                "mixup_bf16: n bf16 [M, 4 H]");
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && x.stride(1) == 1 && x.size(0) == M && H % 8 == 0, "mixup_bf16: x");
+    TORCH_CHECK(M >= 1 && M <= 64, "mixup_bf16: 1..64 rows");
+    const int mr = (M + 15) / 16 * 16;
+    TORCH_CHECK(jg == 1 || jg == 2 || jg == 4, "mixup_bf16: jg 1, 2 or 4");
+    TORCH_CHECK(H % (8 * jg) == 0, "mixup_bf16: H % (8 jg)");
+    const size_t smem = (size_t)mr * MXU_LDS * 2 + (size_t)jg * 4 * M * 8 * 4;
+    auto k = jg == 1 ? mixup_bf16_kernel<1> : jg == 2 ? mixup_bf16_kernel<2> : mixup_bf16_kernel<4>;
+    static bool once[3] = {false, false, false};
+    const int ki = jg == 1 ? 0 : jg == 2 ? 1 : 2;
+    if (!once[ki]) { cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024); once[ki] = true; }
+    launch_pdl(k, dim3(H / (8 * jg)), dim3(128 * jg), smem, at::cuda::getCurrentCUDAStream(),
+        (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0),
+        (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, 1.0f / (float)hc);
+}
+
 void bf16_cluster(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, int64_t cs) {
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
                 "bf16_cluster: x, w bf16, y fp32");
-    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && x.size(0) >= 1 && x.size(0) <= 32, "bf16_cluster: shapes");
+    TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1) && x.size(0) >= 1 && x.size(0) <= 64, "bf16_cluster: shapes");
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && y.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0,
                 "bf16_cluster: row-major, 16-byte aligned rows");
-    const bool two = x.size(0) > 16;
+    const int mt = (int)(x.size(0) + 15) / 16;
 #define C(WK, CS)                                         \
     if (wk == WK && cs == CS) {                           \
-        if (two) launch_cluster<2, WK, CS>(x, w, y);      \
+        if (mt == 4) launch_cluster<4, WK, CS>(x, w, y);          \
+        else if (mt == 3) launch_cluster<3, WK, CS>(x, w, y);     \
+        else if (mt == 2) launch_cluster<2, WK, CS>(x, w, y);     \
         else launch_cluster<1, WK, CS>(x, w, y);          \
         return;                                           \
     }
@@ -305,13 +400,15 @@ void bf16_skinny(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t wk, 
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16 && y.scalar_type() == at::kFloat,
                 "bf16_skinny: x, w bf16, y fp32");
     TORCH_CHECK(w.size(1) % 64 == 0 && x.size(1) == w.size(1), "bf16_skinny: K % 64");
-    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 32, "bf16_skinny: 1..32 rows");
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= 64, "bf16_skinny: 1..64 rows");
     TORCH_CHECK(x.stride(1) == 1 && w.stride(1) == 1 && y.stride(1) == 1 && x.stride(0) % 8 == 0 && w.stride(0) % 8 == 0,
                 "bf16_skinny: row-major, 16-byte aligned rows");
-    const bool two = x.size(0) > 16;
+    const int mt = (int)(x.size(0) + 15) / 16;
 #define L(WK, NT, PF)                                 \
     if (wk == WK && nt == NT && pf == PF) {           \
-        if (two) launch<2, WK, NT, PF>(x, w, y);      \
+        if (mt == 4) launch<4, WK, NT, PF>(x, w, y);          \
+        else if (mt == 3) launch<3, WK, NT, PF>(x, w, y);     \
+        else if (mt == 2) launch<2, WK, NT, PF>(x, w, y);     \
         else launch<1, WK, NT, PF>(x, w, y);          \
         return;                                       \
     }

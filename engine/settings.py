@@ -401,12 +401,6 @@ KNOBS: dict[str, tuple] = {
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
     'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),
-    # load-time quantisation rules `scope:pattern=from>to` (engine/models/flashnext/quant.py): draft:lm_head=bf16>nvfp4
-    # builds the MTP drafter's head in NVFP4 (the verify reads the served head: the text is unchanged); empty = none
-    'QUANT': ('', 'engine/models/flashnext/quant.py'),
-    # the MTP head's shorter chains, a round drafting the smallest at or above 1.5 x its recent accepted drafts + 1
-    # (engine/methods/mtp_drafter.py `_pick_depth`; the deepest is --depth); empty = every round drafts --depth
-    'FN_DEPTH_LADDER': ('', 'engine/models/flashnext/mtp.py'),
     # ENG-229: the lookup (the request's text, --corpus and the server's suffix store) in the MTP round's
     # cut, one tree with the head's chain; 0 = the head alone
     'FN_LOOKUP': ('0', 'engine/models/flashnext/serving.py'),

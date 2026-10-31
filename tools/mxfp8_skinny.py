@@ -1,4 +1,4 @@
-"""The W8A16 product for MXFP8 weights (NVIDIA FP4-Local's dense layers), 1..32 rows, on the tensor cores.
+"""The W8A16 product for MXFP8 weights (NVIDIA FP4-Local's dense layers), 1..64 rows, on the tensor cores.
 
 MXFP8 = e4m3 values with one E8M0 scale (a power of two) per 32 along K. The weight is decoded in registers to the
 bf16 bits of its exact value and multiplied by bf16 activations (W8A16: the activations are never quantised), fp32
@@ -50,7 +50,7 @@ PF = 1
 
 def mm(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor, wk: int | None = None, out: torch.Tensor | None = None,
        nt: int | None = None, pf: int | None = None):
-    """x [M, K] bf16 (M <= 32) @ MXFP8 w [N, K] (uint8 e4m3 bytes) with scales s [N, K/32] (uint8 E8M0) -> [M, N] bf16.
+    """x [M, K] bf16 (M <= 64) @ MXFP8 w [N, K] (uint8 e4m3 bytes) with scales s [N, K/32] (uint8 E8M0) -> [M, N] bf16.
 
     nt = 8-row weight tiles a CTA owns (1, 2, 4): the activations of a K step are loaded once and reused across them."""
     M, K = x.shape

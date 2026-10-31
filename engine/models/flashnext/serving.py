@@ -236,9 +236,11 @@ class FlashNextServing:
     JOINT_ROWS_AT = {8: int(_S.get("FN_JOINT_ROWS8") or 0)}
 
     def joint_policy(self) -> dict:
-        """The joint pass of this family: 32 rows (the row-invariant widths of its kernels, `tree_batchable`)
-        and, by lanes, the rows a pass keeps (`JOINT_ROWS_AT`, a class's measured table)."""
-        return {"max_rows": 32, "rows_at": {e: n for e, n in self.JOINT_ROWS_AT.items() if n}}
+        """The joint pass of this family: the row-invariant widths of its kernels (`FlashNextEngine.row_max`: 32 on
+        EXL3, 64 on NVIDIA FP4-Local; `tree_batchable`) and, by lanes, the rows a pass keeps (`JOINT_ROWS_AT`, a
+        class's measured table)."""
+        rows_at = self.JOINT_ROWS_AT if self.fn.row_max == 32 else {8: int(_S.get("FN_NV_JOINT_ROWS8") or 0)}
+        return {"max_rows": self.fn.row_max, "rows_at": {e: n for e, n in rows_at.items() if n}}
 
     def price_class(self, n: int) -> int:
         """The draft prices' context class of a round at context length `n` (engine/methods/staircut.py):
@@ -637,8 +639,8 @@ class FlashNextServing:
 
     def tree_batchable(self, parents) -> bool:
         """A block a joint pass may take (`forward_tree_multi`): its rows within the widths whose
-        projections and experts give a row its lone bits (the self-check's, up to 32)."""
-        return len(parents) <= 32
+        projections and experts give a row its lone bits (the self-check's, up to `row_max`)."""
+        return len(parents) <= self.fn.row_max
 
     @staticmethod
     @torch.no_grad()
