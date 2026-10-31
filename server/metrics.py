@@ -811,10 +811,13 @@ def serve(handler) -> None:
 
 def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
                exc: BaseException | None = None) -> None:
-    """One generation ended. Called once, from wherever the server logs its one line per request."""
+    """One generation ended. Called once, from wherever the server logs its one line per request. The tokens the
+    stream already counted as they were written (`track_stream`) are not counted again."""
     requests_total.inc(finish_reason=str(finish))
     prompt_tokens_total.inc(float(n_prompt))
-    generation_tokens_total.inc(float(n_out))
+    streamed = getattr(_REQ, "streamed", 0) or 0
+    _REQ.streamed = 0
+    generation_tokens_total.inc(float(max(0, int(n_out) - streamed)))
     e2e_request_latency_seconds.observe(max(0.0, float(seconds)))
     if finish in ("stop", "length"):
         request_success_total.inc()
@@ -939,6 +942,9 @@ def track_stream(fn):
             else:
                 time_per_output_token_seconds.observe(now - prev)
             prev = now
+            # counted as written, as vLLM's counter is: a scraper reads a live rate while the request runs
+            generation_tokens_total.inc(1.0)
+            _REQ.streamed = (getattr(_REQ, "streamed", 0) or 0) + 1
             yield tok
     wrapped.__name__ = getattr(fn, "__name__", "generate_stream")
     wrapped.__doc__ = fn.__doc__
@@ -956,6 +962,7 @@ def track_complete(fn):
     def wrapped(self, *args, **kwargs):
         _REQ.arrived = time.perf_counter()
         _REQ.pending = None
+        _REQ.streamed = 0
         try:
             return fn(self, *args, **kwargs)
         finally:
