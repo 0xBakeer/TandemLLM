@@ -5,8 +5,10 @@ accounting mode changes; generation, replay and the cache state are untouched.
 """
 from pathlib import Path
 import sys
+import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from chatd.runs import Run, client_prompt_of
 from server.usage import RequestRecord
 
 
@@ -61,6 +63,51 @@ def test_cached_count_cannot_exceed_the_reported_context():
     r.prompt_tokens, r.context_prompt_tokens, r.cached_tokens = 20, 30, 100
     r.usage_context = "engine"
     assert r.usage()["prompt_tokens_details"]["cached_tokens"] == 30
+
+
+def test_engine_continuation_counts_cached_rows_in_the_occupied_context():
+    r = RequestRecord("test", "chat", False)
+    r.prompt_tokens = r.prompt_client = 7_000
+    r.context_prompt_tokens = 10_000
+    r.usage_context = "engine"
+    r.absorb_prefill({"reused": 2_000, "forwarded": 2_500, "kind": "end"})
+    assert r.cache_source == "continuation"
+    assert r.cached_tokens == 7_500
+    assert r.usage()["prompt_tokens_details"] == {
+        "cached_tokens": 7_500, "client_tokens": 7_000}
+
+
+def test_engine_response_replay_counts_every_occupied_row_as_cached():
+    r = RequestRecord("test", "chat", False)
+    r.prompt_tokens, r.context_prompt_tokens = 7_000, 10_000
+    r.usage_context = "engine"
+    r.absorb_response_cache()
+    assert r.cache_source == "response" and r.prompt_n == 0
+    assert r.cached_tokens == 10_000
+    assert r.usage()["prompt_tokens_details"] == {
+        "cached_tokens": 10_000, "client_tokens": 7_000}
+
+
+def test_chatd_learns_and_reports_from_the_client_prompt():
+    usage = {"prompt_tokens": 900,
+             "prompt_tokens_details": {"cached_tokens": 100, "client_tokens": 600}}
+    assert client_prompt_of(usage) == 600
+    assert client_prompt_of({"prompt_tokens": 900}) == 900
+
+    learned = []
+    svc = types.SimpleNamespace(
+        learn_ratio=lambda conv, prompt, chars, images: learned.append((prompt, chars, images)))
+    run = Run(svc, types.SimpleNamespace(id="c1"), user_message_id="u", message_id="m",
+              max_steps=10, started_by=None)
+    run.step, run.request_chars, run.request_images = 1, 1_200, 0
+    run.call = types.SimpleNamespace(
+        events=lambda: [("data", {"usage": dict(
+            usage, completion_tokens=12,
+            completion_tokens_details={"reasoning_tokens": 0})})])
+    assert run._consume() == "completed"
+    assert learned == [(600, 1_200, 0)]
+    assert run.step_usage[-1]["prompt_tokens"] == 600
+    assert run.stats("stop")["prompt_tokens"] == 600
 
 
 if __name__ == "__main__":

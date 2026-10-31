@@ -275,14 +275,20 @@ class RequestRecord:
             self.cache_source = str(info.get("kind") or "prefix")
             self.cache_via = info.get("via")
         if self.prompt_client is not None:
-            self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
+            if self.usage_context == "engine":
+                self.cached_tokens = max(0, self.context_tokens - self.prompt_n)
+            else:
+                self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
             self.cache_source = "continuation"
 
     def absorb_response_cache(self) -> None:
         """A replay: every prompt token came out of a cache and none was forwarded."""
         self.cache_source = "response"
-        self.cached_tokens = int(self.prompt_tokens or 0)
         self.prompt_n = 0
+        if self.usage_context == "engine":
+            self.cached_tokens = max(0, self.context_tokens - self.prompt_n)
+        else:
+            self.cached_tokens = int(self.prompt_tokens or 0)
 
     def absorb_blocks(self, bs) -> None:
         """The decode loop's `BlockStats`: forwards paid, and the first-miss histogram.
