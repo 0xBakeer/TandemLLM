@@ -15,6 +15,12 @@ the top-2 tokens and their probabilities, `views()` and `resume(n)`. Of the engi
 last block captured a verify or commit graph), `commit_ms` and `last_streams()` (the last committed
 row's streams, a section of its cache state).
 
+SPD-249: a head that drafts coupled for a seeded sampled request (`keyed_for(sampler, start)`, Flash-Next's)
+gets the request's sampler from the server (`set_keyed`, beside `set_sampling`; the target's sampling is not
+touched) and, before each launch, the round's `keyed` staging (start = len(context): the walk's own start, so draft
+depth d + 1 meets the target's keyed draw at start + d). Such a round's cut may take the head's own inputs
+(`cut_inputs`: a measured calibration, prices, draft cost, a depth-1 sibling), swapped in around the cut only.
+
 A lookup source (`ngram`, engine/drafters/ngram.py: the request's own text, the corpus and the server's
 suffix store, which the server hands to it through `add_store`) adds its best continuation to the
 round's cut (ENG-229): the head and the lookup in one tree, one verify. It is asked while the draft
@@ -145,6 +151,8 @@ class MTPTreeDrafter:
         self._ml_left = 0
         self._ml_tree = None                # the last lookup round's (tokens, parents, its own rows), until its sync
         self._ml_skip = False               # this round's lookup was skipped
+        self.keyed_sm = None                # SPD-249: the request's sampler, for a head that drafts coupled
+        self.keyed_rounds = 0               # rounds this process drafted coupled
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
@@ -211,6 +219,7 @@ class MTPTreeDrafter:
         self._anchor_streak = self._backoff_left = 0
         self._ml_streak = self._ml_left = 0
         self._ml_tree = None
+        self.keyed_sm = None
 
     def prime(self, tokens: list[int]) -> None:
         # the prompt's rows come through `sync`; the lookup indexes its tokens
@@ -219,6 +228,11 @@ class MTPTreeDrafter:
 
     def set_sampling(self, sampler) -> None:
         pass                                # the draft is the greedy tree; a sampled walk draws on it
+
+    def set_keyed(self, sampler) -> None:
+        """SPD-249: the request's sampler (None: greedy or unseeded), for a head that drafts coupled for a
+        seeded sampled request (`keyed_for`); the head decides whether it does. After `reset`."""
+        self.keyed_sm = sampler if hasattr(self.head, "keyed_for") else None
 
     def sync(self, tokens: list[int], streams: torch.Tensor, pos: int, rows=None) -> None:
         if self._turn is False:
@@ -349,6 +363,11 @@ class MTPTreeDrafter:
                 return None
         rows, nexts = self.pending
         self.pending = None
+        keyed = None
+        if self.keyed_sm is not None:
+            keyed = self.head.keyed_for(self.keyed_sm, len(context))
+        if hasattr(self.head, "keyed"):
+            self.head.keyed = keyed
         c0 = getattr(self.head, "captures", 0)
         self.head.launch(rows, nexts)
         captured = self._captured = getattr(self.head, "captures", 0) != c0
@@ -359,7 +378,10 @@ class MTPTreeDrafter:
         if self.head.depth:
             look = self._mtp_look(context)
         tok, prob = self.head.read()
-        toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
+        ci = self.head.cut_inputs(keyed is not None, self.lanes, self.cls) if hasattr(self.head, "cut_inputs") else None
+        if keyed is not None:
+            self.keyed_rounds += 1
+        toks, parents = self._cut(ci, int(context[-1]), tok, prob, look)
         # SPD-225: the rows' calibrated path probabilities as the tree's scores (a joint round's cut ranks
         # every lane's nodes by them; without them every draft scored 0 and the cut went by lane order)
         sc = getattr(self.cut, "last_scores", None)
@@ -389,6 +411,29 @@ class MTPTreeDrafter:
         self.req["rounds"] += 1
         self.req["draft_ms"] += ms
         return tree
+
+    def _cut(self, ci, anchor: int, tok: list, prob: list, look):
+        """The round's cut; with the head's own inputs `ci` (SPD-249: calibration, prices, draft ms, a depth-1
+        sibling) swapped in for this cut alone (what the cut learns after the round goes to its own tables)."""
+        c = self.cut
+        if ci is None:
+            return c.cut(anchor, tok, prob, look, self.cls)
+        saved = (c.cal, c.prices, c.draft.get(self.cls), c.sib1)
+        if ci.get("cal") is not None:
+            c.cal = ci["cal"]
+        if ci.get("prices") is not None:
+            c.prices = ci["prices"]
+        if ci.get("draft_ms") is not None:
+            c.draft[self.cls] = float(ci["draft_ms"])
+        c.sib1 = bool(ci.get("sib1"))
+        try:
+            return c.cut(anchor, tok, prob, look, self.cls)
+        finally:
+            c.cal, c.prices, c.sib1 = saved[0], saved[1], saved[3]
+            if saved[2] is None:
+                c.draft.pop(self.cls, None)
+            else:
+                c.draft[self.cls] = saved[2]
 
     def _start_turn(self, n: int) -> None:
         """The turn's first round (context n tokens): the head is put at the position of the first row

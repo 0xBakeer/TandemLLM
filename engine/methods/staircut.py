@@ -153,7 +153,7 @@ class ProbDeciles:
         self.prior_n, self.cap = prior_n, cap
         self.cal = {k: [[0.0, 0.0] for _ in range(10)] for k in kinds}
 
-    def q(self, kind: str, p: float) -> float:
+    def q(self, kind: str, p: float, depth: int | None = None) -> float:
         hits, n = self.cal[kind][min(int(p * 10), 9)]
         return (hits + self.prior_n * p) / (n + self.prior_n)
 
@@ -164,6 +164,26 @@ class ProbDeciles:
         if b[1] > self.cap:
             b[0] *= 0.5
             b[1] *= 0.5
+
+
+class DepthDeciles(ProbDeciles):
+    """SPD-249: measured acceptance by kind, depth (0: the first draft) and tenth of the reported probability,
+    as data (`table[kind][depth][bin]`, a rate; None: no measurement there); a kind, depth or bin without one is
+    `ProbDeciles`' (the probability itself). Fixed: what a cut learns goes to its own calibrator (the drafter swaps
+    this one in around a cut, engine/methods/mtp_drafter.py `_cut`)."""
+
+    def __init__(self, table: dict, **kw):
+        super().__init__(**kw)
+        self.table = {k: [list(row) for row in rows] for k, rows in (table or {}).items()}
+
+    def q(self, kind: str, p: float, depth: int | None = None) -> float:
+        rows = self.table.get(kind)
+        if rows and depth is not None:
+            row = rows[min(int(depth), len(rows) - 1)]
+            v = row[min(int(p * 10), 9)]
+            if v is not None:
+                return float(v)
+        return super().q(kind, p)
 
 
 class StairCut:
@@ -199,6 +219,9 @@ class StairCut:
         self.cls = 0
         self.last = None
         self.frozen = False
+        # SPD-249: this cut may keep the head's second token at depth 1 (a child of the anchor) where its
+        # probability is above 0, with or without `siblings` (the drafter sets it around a cut, `_cut`)
+        self.sib1 = False
 
     @property
     def draft_ms(self) -> float | None:
@@ -329,8 +352,9 @@ class StairCut:
         q = self.cal.q
         reach, spine_q, sib_q = 1.0, [], []
         for k in range(D):
-            c1 = q("spine", prob[k][0])
-            sib_q.append(reach * (1 - c1) * q("sib", prob[k][1]) if self.siblings else 0.0)
+            c1 = q("spine", prob[k][0], k)
+            sib = self.siblings or (self.sib1 and k == 0 and prob[k][1] > 0.0)
+            sib_q.append(reach * (1 - c1) * q("sib", prob[k][1], k) if sib else 0.0)
             reach *= c1
             spine_q.append(reach)
         draft = self.draft_ms or 0.0
@@ -395,7 +419,7 @@ class StairCut:
         # node: [token, parent node (-1: the anchor), q, (kind, k), depth]
         nodes, reach, up = [], 1.0, -1
         for k in range(D):
-            c1 = q("spine", prob[k][0])
+            c1 = q("spine", prob[k][0], k)
             c = 1.0 - (1.0 - c1) * (1.0 - pl) if k < j else c1
             nodes.append([tok[k][0], up, reach * c, ("spine", k) if k >= j else ("both", k), k])
             if k == j and j < len(look):

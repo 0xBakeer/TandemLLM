@@ -75,4 +75,28 @@ KNOBS: dict[str, tuple] = {
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)
     'FN_JOINT_GRAPH_AFTER': ('2', 'engine/models/flashnext/engine.py'),
+    # SPD-249: a seeded sampled request's MTP drafts are coupled: each depth proposes argmax(log q_f + G_t) with the
+    # target's own keyed noise G_t of that output position (engine/sample.py `_key`, `pick_at`), q_f the draft head's
+    # row filtered like the request; every emitted token stays the target's keyed draw. Greedy and unseeded requests
+    # keep the argmax draft. 0: every request drafts argmax(q)
+    'FN_MTP_COUPLED': ('0', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: the coupled draft's temperature, relative to the request's (0.85: the best measured at T 1.0)
+    'FN_MTP_COUPLED_TAU': ('0.85', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: the request's top-k and top-p applied to q before the coupled pick; 0: q over the head's top 64
+    'FN_MTP_COUPLED_FILTER': ('1', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: the hot vocabulary of the coupled drafts' own int8 head (ops/fn-hot-vocab.npy[:N], e.g. 65536); 0:
+    # the served draft head (FN_DRAFT_HOT). Greedy and unseeded drafts keep the served head
+    'FN_MTP_COUPLED_HOT': ('0', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: a keyed chain of one lane (the lone draft, on the round's critical path) reads the first N rows of
+    # the coupled head (N below FN_MTP_COUPLED_HOT, e.g. 32768: a view, no extra memory; the hot ids are one ranked
+    # list) and a packed chain of several lanes the whole coupled head; only drafts change. 0: one head for both
+    'FN_MTP_COUPLED_HOT_LONE': ('0', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: a coupled draft's rank-2 candidate at depth 1 is offered to the cut as a sibling row while its
+    # margin (score 1 - score 2) is at most FN_MTP_COUPLED_SIB_MARGIN; 0: no sibling
+    'FN_MTP_COUPLED_SIB': ('0', 'engine/models/flashnext/coupled.py'),
+    'FN_MTP_COUPLED_SIB_MARGIN': ('1.3', 'engine/models/flashnext/coupled.py'),
+    # SPD-249: a coupled round's cut inputs from the measured file next to the price file
+    # (ops/prices/<model>/<profile>.<device>.coupled.json): per-depth calibration of the reported draft statistic, and
+    # at one lane the re-measured class-0 prices and draft cost; 0: the cut's own inputs as for any round
+    'FN_MTP_COUPLED_CAL': ('0', 'engine/models/flashnext/coupled.py'),
 }

@@ -2383,6 +2383,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
                        and sampler is not None and sampler.on)
                 drafter.set_sampling(None if det else sampler)
+            if hasattr(drafter, "set_keyed"):
+                # SPD-249: a seeded sampled request's sampler for a head that drafts coupled (its own picks under
+                # the target's keyed noise); the target's sampling and walk are untouched
+                drafter.set_keyed(sampler if sampler is not None and sampler.coupled else None)
             if hasattr(drafter, "note_sampled"):
                 drafter.note_sampled(sampler is not None and bool(sampler.on))   # SPD-181
             if hasattr(drafter, "prime"):

@@ -2550,11 +2550,15 @@ class FlashNextEngine(FlashNextRef):
         return rb["d"]["tok"]
 
     @torch.no_grad()
-    def mtp_chain_multi(self, items: list) -> None:
+    def mtp_chain_multi(self, items: list, keyed: list | None = None) -> None:
         """SPD-235: `mtp_chain_dev` of several heads over these weights at once: [(head key, MTP state, n fed
         rows, depth, class)], each staged (`stage_mtp`, its streams in its `_mtp_bufs()["stack"]`). Every step
         runs the MTP layer once over all lanes' rows (the attention on each lane's own cache), the draft head
-        once over each lane's last row; each lane's top-2 tokens and probabilities land in its own buffers."""
+        once over each lane's last row; each lane's top-2 tokens and probabilities land in its own buffers.
+        SPD-249: `keyed` (a flag a lane, staged by `stage_mtp(keyed=...)`): those lanes' pairs are the coupled
+        pick's (engine/models/flashnext/coupled.py), over the keyed head of this many lanes (`keyed_head`: one lane
+        the lone head, more the coupled head) where it has its own; with every lane keyed only that head is read,
+        else the others keep the served head's argmax pairs bit for bit."""
         from tools import fn_kernels as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
@@ -2563,6 +2567,14 @@ class FlashNextEngine(FlashNextRef):
             self._mtp_key = key
             bs.append(self._mtp_bufs(depth))
         depth = items[0][3]
+        kk = keyed is not None and any(keyed)
+        if kk:
+            from engine.models.flashnext import coupled as CP
+            KEYS = torch.stack([b["ckeys"] for b in bs])           # [lanes, 32]
+            PAR = torch.stack([b["cpar"] for b in bs])             # [lanes, NPAR]: `on` 0 for a lane not keyed
+            kh, kids = self.keyed_head(len(items))
+            chead = kh is not self.draft_head              # the keyed lanes read a head of their own
+            all_k = all(keyed)
         cuts = np.cumsum([it[2] for it in items])
         last = torch.as_tensor(cuts - 1, dtype=torch.long, device=self.device)
         self._multi = [(self._rows_buffers(n, ("mtp", key, 0, n)), st_m, n, cls) for key, st_m, n, _, cls in items]
@@ -2578,14 +2590,26 @@ class FlashNextEngine(FlashNextRef):
                 st_m.pool[MTP].index_copy_(0, b["dpi"], own)
         x, h = x.index_select(0, last), h.index_select(0, last)
         for j in range(depth):
-            if self.draft_head is not None:
-                lg = K.gemv(x, self.draft_head)
+            if kk and all_k:
+                head, hids = kh, kids
+            else:
+                head, hids = self.draft_head, self.draft_ids
+            if head is not None:
+                lg = K.gemv(x, head)
             else:
                 lg = K.dense(x, self.W["lm_head.weight"]).float()
             vals, ids = torch.topk(lg, 2, dim=-1)
             z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
             prob = torch.exp(vals - vals[:, :1]) / z
-            tok = self.draft_ids.index_select(0, ids.view(-1)).view(ids.shape) if self.draft_head is not None else ids
+            tok = hids.index_select(0, ids.view(-1)).view(ids.shape) if head is not None else ids
+            if kk:
+                if chead and not all_k:
+                    # lanes of both kinds: the keyed lanes' pick over their head's own rows
+                    lgc = K.gemv(x, kh)
+                    zc = torch.exp(lgc - lgc.amax(-1, keepdim=True)).sum(-1, keepdim=True)
+                    CP.pick(lgc, kids, KEYS[:, j], PAR, zc, tok, prob, c.vocab_size)
+                else:
+                    CP.pick(lg, hids if head is not None else None, KEYS[:, j], PAR, z, tok, prob, c.vocab_size)
             for i, b in enumerate(bs):
                 b["prob"][j].copy_(prob[i])
                 b["tok"][j].copy_(tok[i])
@@ -2604,11 +2628,14 @@ class FlashNextEngine(FlashNextRef):
             b["tok_h"].copy_(b["tok"], non_blocking=True)
             b["prob_h"].copy_(b["prob"], non_blocking=True)
 
-    def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int) -> int:
+    def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int, keyed: tuple | None = None) -> int:
         """Host work of a greedy chain draft at st_m.length: the feed of n = len(nexts) committed rows
         (their streams copied into the static input on the device by the caller), then depth - 1
         one-row draft steps after them, each at its own position (cache slot = position), and the
-        pool rows the feed completes. Returns the context class of the draft (`qsa_class`)."""
+        pool rows the feed completes. Returns the context class of the draft (`qsa_class`).
+        SPD-249: `keyed` (engine/models/flashnext/coupled.py `keyed_for`: the noise keys a depth and the row's
+        parameters) into the head's coupled buffers; with coupled drafting on and no `keyed`, the row's `on` flag
+        0 (a packed chain that keys other lanes leaves this one's pairs alone)."""
         from tools import fn_seq_kernels as SK
         c = self.cfg
         n, L = len(nexts), st_m.length
@@ -2642,7 +2669,21 @@ class FlashNextEngine(FlashNextRef):
             b["hpi"].numpy()[:] = np.clip(blk, 0, st_m.pool[MTP].shape[0] - 1)
             b["d32"].copy_(b["h32"], non_blocking=True)
             b["dpi"].copy_(b["hpi"], non_blocking=True)
+        if keyed is not None or self._coupled_on():
+            b = self._mtp_bufs(depth)
+            if keyed is not None:
+                b["ckeys_h"].numpy()[:depth] = np.asarray(keyed[0], dtype=np.uint64).view(np.int64)
+                b["cpar_h"].numpy()[:] = keyed[1]
+            else:
+                b["cpar_h"].numpy()[4] = 0.0
+            b["ckeys"].copy_(b["ckeys_h"], non_blocking=True)
+            b["cpar"].copy_(b["cpar_h"], non_blocking=True)
         return cls
+
+    @staticmethod
+    def _coupled_on() -> bool:
+        from engine.models.flashnext import coupled as CP
+        return CP.ON
 
     def _mtp_bufs(self, depth: int) -> dict:
         """The MTP chain's static buffers: the committed rows' streams (input), and per draft step the
@@ -2664,14 +2705,23 @@ class FlashNextEngine(FlashNextRef):
             b["d32"] = torch.zeros(SK.OWN * 5, dtype=torch.int32, device=self.device)
             b["hpi"] = torch.zeros(SK.OWN, dtype=torch.int64, pin_memory=True)
             b["dpi"] = torch.zeros(SK.OWN, dtype=torch.int64, device=self.device)
+            # SPD-249: a keyed chain's noise keys a depth and its row parameters (coupled.py NPAR)
+            b["ckeys_h"] = torch.zeros(32, dtype=torch.int64, pin_memory=True)
+            b["ckeys"] = torch.zeros(32, dtype=torch.int64, device=self.device)
+            b["cpar_h"] = torch.zeros(8, dtype=torch.float32, pin_memory=True)
+            b["cpar"] = torch.zeros(8, dtype=torch.float32, device=self.device)
         assert depth <= 32
-        if self.draft_head is not None and ("hot", self.draft_ids.numel()) not in b:
-            b[("hot", self.draft_ids.numel())] = torch.zeros(1, self.draft_ids.numel(), dtype=torch.float32,
-                                                             device=self.device)
+        for hids in (self.draft_ids, self.coupled_ids, self.lone_ids):
+            if hids is not None and ("hot", hids.numel()) not in b:
+                b[("hot", hids.numel())] = torch.zeros(1, hids.numel(), dtype=torch.float32, device=self.device)
         return b
 
     draft_head = None          # Int8Rows over a hot vocabulary (`set_draft_head`), else the full head
     draft_ids = None
+    coupled_head = None        # SPD-249: the keyed drafts' own hot head (`set_coupled_head`), else the draft head
+    coupled_ids = None
+    lone_head = None           # SPD-249: a one-lane keyed chain's head (the coupled head's first rows), else
+    lone_ids = None            # the coupled head
 
     def set_draft_head(self, ids) -> None:
         """Draft over a hot vocabulary `ids` (token ids; None: the full head): the head's rows,
@@ -2681,22 +2731,79 @@ class FlashNextEngine(FlashNextRef):
         if ids is None:
             self.draft_head = self.draft_ids = None
             return
+        self.draft_head, self.draft_ids = self._hot_head(ids)
+
+    @staticmethod
+    def _hot_key(ids) -> int:
+        return hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
+
+    def _hot_head(self, ids) -> tuple:
         from engine.models.flashnext.pack import Int8Rows
         heads = self.__dict__.setdefault("_draft_heads", {})
-        key = hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
+        key = self._hot_key(ids)
         if key not in heads:
             idx = torch.as_tensor(np.asarray(ids, dtype=np.int64), device=self.device)
             w = self.W["lm_head.weight"].dequant()
             heads[key] = (Int8Rows.of(w.index_select(0, idx).half().contiguous()), idx)
             del w
             torch.cuda.empty_cache()
-        self.draft_head, self.draft_ids = heads[key]
+        return heads[key]
 
-    def mtp_chain_dev(self, st_m: FNState, n: int, depth: int, cls: int = 0) -> None:
+    def set_coupled_head(self, ids, lone: int = 0) -> None:
+        """SPD-249: the keyed (coupled) drafts' own hot head over `ids` (None, or the draft head's ids: they
+        read the draft head). Greedy and unseeded drafts keep the draft head; a keyed chain reads only this one.
+        `lone` (FN_MTP_COUPLED_HOT_LONE, below the coupled head's size): a keyed chain of one lane reads the first
+        `lone` rows of the coupled head instead (`keyed_head`), the hot ids being one ranked list
+        (ops/fn-hot-vocab.npy), so a smaller head is a prefix of a larger. One int8 scale a row: a head over a
+        prefix of the ids is the same bytes as the larger head's first rows, so it is a view of them, and the
+        served draft head, where its ids are such a prefix, becomes one too (its own matrix freed): one matrix."""
+        self.lone_head = self.lone_ids = None
+        if ids is None:
+            self.coupled_head = self.coupled_ids = None
+            return
+        h, i = self._hot_head(ids)
+        if self.draft_head is not None and h is self.draft_head:
+            self.coupled_head = self.coupled_ids = None
+            return
+        self.coupled_head, self.coupled_ids = h, i
+        n = int(i.numel())
+        nd = int(self.draft_ids.numel()) if self.draft_ids is not None else 0
+        if 0 < nd < n and torch.equal(i[:nd], self.draft_ids):
+            heads = self.__dict__.setdefault("_draft_heads", {})
+            heads.pop(self._hot_key(self.draft_ids.cpu().numpy()), None)
+            self.draft_head, self.draft_ids = self._head_rows(h, nd), i[:nd]
+            torch.cuda.empty_cache()
+        if 0 < lone < n:
+            if lone == nd and self.draft_head is not None and torch.equal(i[:lone], self.draft_ids):
+                self.lone_head, self.lone_ids = self.draft_head, self.draft_ids
+            else:
+                self.lone_head, self.lone_ids = self._head_rows(h, lone), i[:lone]
+
+    @staticmethod
+    def _head_rows(h, n: int):
+        """The first n rows of an int8 hot head (one scale a row) as a view: the same bytes a head over those
+        n ids alone holds (`quant_int8_rows` scales each row by its own max)."""
+        from engine.models.flashnext.pack import Int8Rows
+        assert h.s.dim() == 1, "a hot head has one scale a row"
+        return Int8Rows(h.q[:n], h.s[:n])
+
+    def keyed_head(self, lanes: int) -> tuple:
+        """SPD-249: (head, ids) a keyed chain of `lanes` lanes reads: one lane the lone head where set, else
+        the coupled head where set, else the draft head (None, None: the full head)."""
+        if lanes <= 1 and self.lone_head is not None:
+            return self.lone_head, self.lone_ids
+        if self.coupled_head is not None:
+            return self.coupled_head, self.coupled_ids
+        return self.draft_head, self.draft_ids
+
+    def mtp_chain_dev(self, st_m: FNState, n: int, depth: int, cls: int = 0, keyed: bool = False) -> None:
         """A greedy chain of `depth` drafts on the device (`stage_mtp` first, the n committed rows'
         streams in `_mtp_bufs()["stack"]`): the feed, then each draft's token and streams into the
         next step without the host. Per step the top-2 tokens and their probabilities under the draft
-        head land in `tok` / `prob` and their pinned copies (the second token is a sibling candidate)."""
+        head land in `tok` / `prob` and their pinned copies (the second token is a sibling candidate).
+        SPD-249 `keyed`: each step's pair is the coupled pick (engine/models/flashnext/coupled.py) over the
+        one-lane keyed head (`keyed_head(1)`: the lone head, else the coupled head, else the draft head), with the
+        keys and parameters `stage_mtp` staged."""
         from tools import fn_kernels as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
@@ -2708,17 +2815,23 @@ class FlashNextEngine(FlashNextRef):
             own = SK.qsa_pool(st_m.ik[MTP], b["d32"][:SK.OWN * 4].view(SK.OWN, 4), b["d32"][SK.OWN * 4:],
                               self.W[ip + "k_layernorm.weight"], self.rope_cos, self.rope_sin, c.rms_norm_eps)
             st_m.pool[MTP].index_copy_(0, b["dpi"], own)
+        head, hids = self.keyed_head(1) if keyed else (self.draft_head, self.draft_ids)
+        if keyed:
+            from engine.models.flashnext import coupled as CP
         for j in range(depth):
-            if self.draft_head is not None:
-                lg = b[("hot", self.draft_ids.numel())]
-                K.gemv(x[-1:], self.draft_head, out=lg)
+            if head is not None:
+                lg = b[("hot", hids.numel())]
+                K.gemv(x[-1:], head, out=lg)
             else:
                 lg = b["logits"]
                 K.dense(x[-1:], self.W["lm_head.weight"], out=lg)
             vals, ids = torch.topk(lg[0], 2)
             z = torch.exp(lg[0] - vals[0]).sum()
             b["prob"][j].copy_(torch.exp(vals - vals[0]) / z)
-            b["tok"][j].copy_(self.draft_ids.index_select(0, ids) if self.draft_head is not None else ids)
+            b["tok"][j].copy_(hids.index_select(0, ids) if head is not None else ids)
+            if keyed:
+                CP.pick(lg, hids if head is not None else None, b["ckeys"][j:j + 1], b["cpar"].view(1, -1), z,
+                        b["tok"][j:j + 1], b["prob"][j:j + 1], c.vocab_size)
             if j + 1 == depth:
                 break
             self._rows_buffers(1, ("mtp", self._mtp_key, j + 1, 1))["d"]["tok"].copy_(b["tok"][j, :1])
@@ -3000,26 +3113,31 @@ class CommitGraph:
 
 class MTPChainGraph:
     """`FlashNextEngine.mtp_chain_dev` for a feed of n rows and a chain depth, captured once for an MTP
-    cache: the whole draft (feed, depth - 1 deeper steps, every head and argmax) is one replay."""
+    cache: the whole draft (feed, depth - 1 deeper steps, every head and argmax) is one replay. SPD-249:
+    `keyed`, the coupled chain (its keys and parameters staged before each replay)."""
 
-    def __init__(self, eng: FlashNextEngine, st_m: FNState, n: int, depth: int, cls: int = 0):
-        self.eng, self.st_m, self.n, self.depth, self.cls = eng, st_m, n, depth, cls
+    def __init__(self, eng: FlashNextEngine, st_m: FNState, n: int, depth: int, cls: int = 0, keyed: bool = False):
+        self.eng, self.st_m, self.n, self.depth, self.cls, self.keyed = eng, st_m, n, depth, cls, keyed
         self.graph = None
 
     def capture(self) -> None:
         eng, st_m = self.eng, self.st_m
         # writes only cache rows past the length, and pool rows the next feed writes again
-        eng.stage_mtp(st_m, [0] * self.n, self.depth)
+        kw = {"keyed": True} if self.keyed else {}
+        if self.keyed:
+            eng.stage_mtp(st_m, [0] * self.n, self.depth, keyed=([0] * self.depth, [1.0, 20.0, 0.95, -1.0, 1.0, 0.0, 0.0, 0.0]))
+        else:
+            eng.stage_mtp(st_m, [0] * self.n, self.depth)
         saved = {k: v.clone() for k, v in st_m.pool.items()}
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
-                eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls)
+                eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls, **kw)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
         with capture_lock.LOCK, torch.cuda.graph(self.graph):
-            eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls)
+            eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls, **kw)
         torch.cuda.synchronize()
         for k, v in st_m.pool.items():
             v.copy_(saved[k])

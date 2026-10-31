@@ -943,6 +943,23 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
     if spec:
         if hot:
             fn.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
+        from engine.models.flashnext import coupled as CP
+        if CP.ON:
+            # SPD-249: seeded sampled requests draft coupled; their own hot head (FN_MTP_COUPLED_HOT), their cut
+            # inputs (the measured file next to the price file)
+            if CP.HOT:
+                # FN_MTP_COUPLED_HOT_LONE: a one-lane keyed chain reads the coupled head's first rows (a view)
+                fn.set_coupled_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:CP.HOT], lone=CP.HOT_LONE)
+            if CP.HOT_LONE and fn.lone_head is None:
+                log(f"[server] FN_MTP_COUPLED_HOT_LONE={CP.HOT_LONE} ignored: it needs FN_MTP_COUPLED_HOT above it "
+                    f"(now {CP.HOT})")
+            ci = CP.CalInputs.get(pack)
+            lone = f", one lane hot {fn.lone_ids.numel()}" if fn.lone_head is not None else ""
+            log(f"[server] Flash-Next coupled drafts for seeded sampled requests: tau {CP.TAU} x the request's, "
+                f"filter {'the request' if CP.FILTER else 'none'}, head "
+                f"{'hot ' + str(CP.HOT) if CP.HOT else 'the draft head'}{lone}, sibling "
+                f"{'margin <= ' + str(CP.SIB_MARGIN) if CP.SIB else 'off'}, cut inputs "
+                f"{'from ' + ci.file if ci is not None else 'the cut own'}")
         text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
@@ -970,6 +987,10 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
     mark("drafters")
     info = {"pack": pack, "load": timing, "self_check": check,
             "draft_head": f"hot {hot}" if spec else None, "depth": depth if drafter is not None else 0}
+    if spec and fn.coupled_head is not None:
+        info["draft_head"] += f", coupled hot {fn.coupled_ids.numel()}"
+        if fn.lone_head is not None:
+            info["draft_head"] += f" (one lane {fn.lone_ids.numel()})"
     return eng, drafter, info
 
 
