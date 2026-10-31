@@ -211,28 +211,7 @@ class MTPTreeDrafter:
             self.queue.append((hs, ht[1:] + [toks[0]]))
         self.held = (toks, h)
 
-    #: QWEN38_FN_DEPTH_LADDER: the EMA weight of a drafted round's accepted drafts, and the depth asked for over it
-    #: (a x EMA + b: prose at ~1.2 accepted drafts 3, code at ~4 drafts 7-8)
-    DEPTH_EMA, DEPTH_A, DEPTH_B = 0.25, 1.5, 1.0
-
-    def _pick_depth(self, accepted: int) -> None:
-        """A head with a depth ladder (`depths`): the next round drafts the smallest rung at or above
-        DEPTH_A x the recent accepted drafts + DEPTH_B; a round that took every draft goes a rung up at once."""
-        h = self.head
-        ladder = getattr(h, "depths", ())
-        if len(ladder) < 2:
-            return
-        e = getattr(self, "_acc_ema", None)
-        e = self._acc_ema = accepted if e is None else e + self.DEPTH_EMA * (accepted - e)
-        want = self.DEPTH_A * e + self.DEPTH_B
-        d = next((r for r in ladder if r >= want), ladder[-1])
-        if accepted >= h.cur:
-            d = max(d, next((r for r in ladder if r > h.cur), ladder[-1]))
-        h.cur = d
-
     def observe(self, tokens: list[int]) -> None:
-        if self.round is not None and self._drafted:
-            self._pick_depth(len(tokens) - 1)
         if self.ngram is not None:
             self.ngram.observe(tokens)
         self.req["tokens"] += len(tokens)

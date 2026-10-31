@@ -14,6 +14,7 @@ import time
 import torch
 
 from engine.methods import draft_meet
+from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.models.flashnext.engine import FlashNextEngine, MTPChainGraph
 from engine.models.flashnext.ref import MTP
 
@@ -129,3 +130,33 @@ class FlashNextMTPHead:
         d = getattr(self, "_d", self.depth)
         b = self.fn._mtp_bufs(d)
         return b["tok_h"][:d].tolist(), b["prob_h"][:d].tolist()
+
+
+class FlashNextMTPDrafter(MTPTreeDrafter):
+    """The shared tree drafter over a Flash-Next MTP head with a depth ladder (`FlashNextMTPHead.depths`,
+    QWEN38_FN_DEPTH_LADDER): after each drafted round the head's next chain is the smallest rung at or above
+    DEPTH_A x the recent accepted drafts (an EMA) + DEPTH_B, and a round that took every draft goes a rung up at once.
+    Without a ladder it is the shared drafter."""
+
+    #: the EMA weight of a drafted round's accepted drafts, and the depth asked for over it (a x EMA + b: prose at
+    #: ~1.2 accepted drafts 3, code at ~4 drafts 7-8)
+    DEPTH_EMA, DEPTH_A, DEPTH_B = 0.25, 1.5, 1.0
+
+    def _pick_depth(self, accepted: int) -> None:
+        h = self.head
+        ladder = getattr(h, "depths", ())
+        if len(ladder) < 2:
+            return
+        e = getattr(self, "_acc_ema", None)
+        e = self._acc_ema = accepted if e is None else e + self.DEPTH_EMA * (accepted - e)
+        want = self.DEPTH_A * e + self.DEPTH_B
+        d = next((r for r in ladder if r >= want), ladder[-1])
+        if accepted >= h.cur:
+            d = max(d, next((r for r in ladder if r > h.cur), ladder[-1]))
+        h.cur = d
+
+    def observe(self, tokens: list[int]) -> None:
+        if self.round is not None and self._drafted:
+            self._pick_depth(len(tokens) - 1)
+        super().observe(tokens)
+

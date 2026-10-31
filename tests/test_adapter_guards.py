@@ -89,11 +89,13 @@ GOLDEN_FP4 = {
     # no row changes); Flash-Next and Ornith
     # ENG-411: the kernel sources move into csrc/ files beside their modules and count in the fingerprint (the
     # compiled text unchanged); every adapter
+    # 2026-10-31 (bilikaz): NVIDIA FP4-Local served as stored (engine/models/flashnext/nvidia.py, ops.py, its own
+    # kernels in tools/ beside fn_kernels): Flash-Next's two adapters only; the shared modules keep their bytes
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "25b36ced9a41d1873adba9d63f487c0a46932fb69c93ca48856c07a663c3cdc0",
+    "qwen4_exp": "5088809eccd66b8c71911c5bbffc6aaaf69beb4aa44a2eb13be988849a543670",
     "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
     "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
-    "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
+    "qwen3_5_moe": "5db1479936fefcbb0f51f7a46b04e903ec667c64ae60dbbec1cecb1d70dd7ab8",
     "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

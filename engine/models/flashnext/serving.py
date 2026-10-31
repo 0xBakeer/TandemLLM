@@ -35,12 +35,11 @@ import torch
 
 from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
-from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
 from engine.settings import SETTINGS as _S
 from engine.models.flashnext.engine import CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
-from engine.models.flashnext.mtp import FlashNextMTPHead
+from engine.models.flashnext.mtp import FlashNextMTPDrafter, FlashNextMTPHead
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
 
@@ -308,7 +307,7 @@ class FlashNextServing:
                 ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16, min_corpus_order=8)
                 ng.corpus = drafter0.ngram.corpus
             c0 = drafter0.cut
-            d2 = MTPTreeDrafter(e2, e2.add_mtp_head(drafter0.depth),
+            d2 = FlashNextMTPDrafter(e2, e2.add_mtp_head(drafter0.depth, getattr(drafter0.head, "depths", ())),
                                 StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=c0.siblings), ng)
             d2.capture_all()
         return e2, d2
@@ -836,8 +835,8 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
             # there costs ~2.75 ms a draft, so a prose round drafting 8 paid ~16 ms for drafts the cut dropped)
             lad = _S.get("FN_DEPTH_LADDER") or ("2,3,4,6" if nv else "")
             depths = tuple(int(x) for x in lad.replace(" ", "").split(",") if x)
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth, depths), StairCut(prices(pack, log), siblings=False),
-                                     ngram)
+            drafter = FlashNextMTPDrafter(eng, eng.add_mtp_head(depth, depths), StairCut(prices(pack, log), siblings=False),
+                                          ngram)
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")

@@ -46,16 +46,6 @@ template <> struct WVec<__half> {
         for (int i = 0; i < 4; ++i) { w[2 * i] = __low2float(h[i]); w[2 * i + 1] = __high2float(h[i]); }
     }
 };
-// bf16 weights (NVIDIA FP4-Local keeps its mixers, router, GDN a/b, PLE projections and head in bf16): exact in fp32
-template <> struct WVec<__nv_bfloat16> {
-    static constexpr int VEC = 8;
-    static __device__ __forceinline__ void load(const __nv_bfloat16* p, float* w) {
-        const uint4 r = *reinterpret_cast<const uint4*>(p);
-        const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&r);
-#pragma unroll
-        for (int i = 0; i < 4; ++i) { w[2 * i] = __low2float(h[i]); w[2 * i + 1] = __high2float(h[i]); }
-    }
-};
 
 // the dot of one weight row with MC activation rows, by a group of LPR lanes; every lane ends with
 // the full sums (fixed xor tree)
@@ -1127,7 +1117,6 @@ __device__ __forceinline__ float block_sum(float v, float* sh) {
 template <typename TN> __device__ __forceinline__ float wf(const TN* w, int i);
 template <> __device__ __forceinline__ float wf(const __half* w, int i) { return __half2float(w[i]); }
 template <> __device__ __forceinline__ float wf(const __nv_bfloat16* w, int i) { return __bfloat162float(w[i]); }
-template <> __device__ __forceinline__ float wf(const float* w, int i) { return w[i]; }   // NVIDIA FP4-Local: fp32 hc_norm
 
 // the reference's grouped RMS norm with weight 1 + w over one (row, group): bf16(x r (1 + w)),
 // r = rsqrt(sum(x^2) / G + eps), x in fp32. grid (M, groups), 1024 threads, G <= 4096.
@@ -1852,12 +1841,8 @@ void fn_gemv(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> s, t
         const float* sp = (const float*)s->data_ptr();
         if (f32) gemv_dispatch<int8_t, float>(x, w, sp, y, M, N, K, st, G);
         else gemv_dispatch<int8_t, __nv_bfloat16>(x, w, sp, y, M, N, K, st, G);
-    } else if (w.dtype() == torch::kBFloat16) {
-        TORCH_CHECK(K % 8 == 0, "K % 8");
-        if (f32) gemv_dispatch<__nv_bfloat16, float>(x, w, nullptr, y, M, N, K, st);
-        else gemv_dispatch<__nv_bfloat16, __nv_bfloat16>(x, w, nullptr, y, M, N, K, st);
     } else {
-        TORCH_CHECK(w.dtype() == torch::kHalf && K % 8 == 0, "w int8, fp16 or bf16, K % 8");
+        TORCH_CHECK(w.dtype() == torch::kHalf && K % 8 == 0, "w int8 or fp16, K % 8");
         if (f32) gemv_dispatch<__half, float>(x, w, nullptr, y, M, N, K, st);
         else gemv_dispatch<__half, __nv_bfloat16>(x, w, nullptr, y, M, N, K, st);
     }
@@ -1873,11 +1858,8 @@ void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, do
     if (w.dtype() == torch::kHalf)
         launch(hc_norm_kernel<__half>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
             (const __half*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
-    else if (w.dtype() == torch::kFloat)
-        launch(hc_norm_kernel<float>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
-            (const float*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
     else {
-        TORCH_CHECK(w.dtype() == torch::kBFloat16, "norm weight fp16, bf16 or fp32");
+        TORCH_CHECK(w.dtype() == torch::kBFloat16, "norm weight fp16 or bf16");
         launch(hc_norm_kernel<__nv_bfloat16>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
             (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
     }
@@ -1899,10 +1881,6 @@ void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_
             (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
             w.has_value() ? (const __half*)w->data_ptr() : (const __half*)nullptr, (__nv_bfloat16*)hn.data_ptr(),
             (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
-    else if (w->dtype() == torch::kFloat)
-        launch(inject_norm_kernel<float>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
-            (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
-            (const float*)w->data_ptr(), (__nv_bfloat16*)hn.data_ptr(), (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
     else
         launch(inject_norm_kernel<__nv_bfloat16>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
             (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
@@ -1926,11 +1904,6 @@ void fn_combine_inject_norm(torch::Tensor h0, torch::Tensor yd, torch::Tensor id
             (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
             w.has_value() ? (const __half*)w->data_ptr() : (const __half*)nullptr, (__nv_bfloat16*)hn.data_ptr(),
             (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
-    else if (w->dtype() == torch::kFloat)
-        launch(combine_inject_norm_kernel<float>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
-            (const float*)yd.data_ptr(), (const int*)ids.data_ptr(), (const float*)wts.data_ptr(), S,
-            (const float*)d.data_ptr(), (int)d.stride(0), (int)R, (const float*)w->data_ptr(),
-            (__nv_bfloat16*)hn.data_ptr(), (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
     else
         launch(combine_inject_norm_kernel<__nv_bfloat16>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
             (const float*)yd.data_ptr(), (const int*)ids.data_ptr(), (const float*)wts.data_ptr(), S,
@@ -1987,11 +1960,6 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
             launch(mix_up_nb_kernel<int8_t, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
                 (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
                 (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
-        } else if (w.dtype() == torch::kBFloat16) {
-            TORCH_CHECK(R % 8 == 0, "bf16 up weight, R % 8");
-            launch(mix_up_nb_kernel<__nv_bfloat16, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
-                (const __nv_bfloat16*)n.data_ptr(), (int)n.stride(0), (const __nv_bfloat16*)w.data_ptr(), (const float*)nullptr,
-                (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, 0);
         } else {
             TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
             launch(mix_up_nb_kernel<__half, 8>, dim3((H + 15) / 16), dim3(128), 0, st, (const __nv_bfloat16*)a.data_ptr(),
@@ -2013,12 +1981,6 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
         launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
             (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
-    } else if (w.dtype() == torch::kBFloat16) {
-        TORCH_CHECK(R % 8 == 0, "bf16 up weight, R % 8");
-        auto k = M == 1 ? mix_up_kernel<__nv_bfloat16, 1> : mix_up_kernel<__nv_bfloat16, 8>;
-        launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
-            (int)n.stride(0), (const __nv_bfloat16*)w.data_ptr(), (const float*)nullptr,
-            (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, 0);
     } else {
         TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
         auto k = M == 1 ? mix_up_kernel<__half, 1> : mix_up_kernel<__half, 8>;
