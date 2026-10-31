@@ -311,7 +311,7 @@ The Chat tab is in beta in this release, and a Beta pill beside it says so. We k
 - A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
 - When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
 - Images only: there is no video input (VIS-97).
-- The 5.05 Flash-Next pack does not load yet.
+- The 5.05 Flash-Next pack’s full-pack load and generation are not yet verified.
 - Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
 - The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
 

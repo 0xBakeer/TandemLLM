@@ -72,10 +72,10 @@ Qwen3.8-Flash-Next runs from turboderp's EXL3 packs, one branch each of [`turbod
 | `flashnext-2.05` | `2.05bpw_h4_ng4` | 61.5 GB | 262,144 tokens |
 | `flashnext-3.05` (default) | `3.05bpw_h5_ng5` | 85.1 GB | 262,144 tokens |
 | `flashnext-4.05` | `4.05bpw_h6_ng6` | 106.1 GB | 208,896 tokens with vision on |
-| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | does not load yet |
+| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | load/generation unverified |
 | `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | does not fit |
 
-The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has each model's formats.
+The 5.05 pack's earlier blocker was its 7-bit dense projections. The dense dispatch now covers K 2..8; the MoE kernels already supported 7-bit experts. Full-pack load and generation are still unverified. [docs/quantisation.md](docs/quantisation.md) has each model's formats.
 
 LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs, one collection: [TandemLLM LFM2.5-24B-A2B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-lfm25-24b-a2b-exl3-6acf468024dd5288750dd683). The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs and the BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) are public; a download needs no token. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
 

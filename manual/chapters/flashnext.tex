@@ -41,13 +41,13 @@ turboderp publishes Flash-Next in five sizes, one branch each of \code{turboderp
 \code{flashnext-2.05} & 61.5~GB & 32.85~GiB & 24.44~GiB, warm & 262,144 \\
 \code{flashnext-3.05} & 85.1~GB & 47.87~GiB & 30.4~GiB, cold & 262,144 (recommended profile) \\
 \code{flashnext-4.05} & 106.1~GB & 62.47~GiB & 36.36~GiB, cold & 208,896 \\
-\code{flashnext-5.05} & 121.9~GB & 77.16~GiB & 36.36~GiB, cold & does not load yet \\
+\code{flashnext-5.05} & 121.9~GB & 77.16~GiB & 36.36~GiB, cold & load/generation unverified \\
 \code{flashnext-6.05} & 137.7~GB & 91.87~GiB & 36.36~GiB, cold & none: it does not fit \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-One request of 260,800 tokens through the server, on each of the three packs that load, decided those windows (Figure~\ref{fig:fn-fit}). The Setup Guide's estimate is calibrated on these three runs and predicts their lowest MemAvailable within 0.7~GiB. On the box the other programs took 4.6~GiB; the estimate's frame keeps 10~GiB for them, which is why 4.05 comes out at 208,896 tokens with the vision tower on (212,992 without) although its run at 260,800 kept MemAvailable above the floor. 5.05 would come out at 53,248 with the tower and 65,536 without, once it loads.
+One request of 260,800 tokens through the server, on each of the three packs that load, decided those windows (Figure~\ref{fig:fn-fit}). The Setup Guide's estimate is calibrated on these three runs and predicts their lowest MemAvailable within 0.7~GiB. On the box the other programs took 4.6~GiB; the estimate's frame keeps 10~GiB for them, which is why 4.05 comes out at 208,896 tokens with the vision tower on (212,992 without) although its run at 260,800 kept MemAvailable above the floor. For 5.05 the estimate is 53,248 with the tower and 65,536 without; full-pack load and generation remain unverified.
 
 \begin{figure}[htbp]
 \centering
@@ -69,7 +69,7 @@ One request of 260,800 tokens through the server, on each of the three packs tha
 
 The run also measured what a long prefill takes: 571~tok/s for the 260,800-token request on 3.05, 261,549 rows with the conductor's notes (585 on 2.05 and 581 on 4.05), and a prefill workspace of 10.47~GiB above the engine, which stops growing at about 140k tokens. Decoding at that length, with the prompt from the caches, 3.05 made 22.5~tok/s with the drafter at 2.0 tokens a block; 2.05 made 27.0 and 4.05 20.5 (\measured, one run each). A server without a drafter decoded 36.6~tok/s at that length (one request), and Section~\ref{sec:fn-plain} says what changed.
 
-Two packs do not run. 5.05 codes its routed experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8, so its load stops at the expert bank. 6.05 needs about 92~GiB for its weights, which leaves too little under the 15~GiB floor at any window. 3.05 reads its n-gram table cold. Warm, with the whole table resident, MemAvailable less the table fell to 8.4~GiB during a 146,400-token request at a 147,456-token window, under the floor.
+Full-pack load and generation of 5.05 remain unverified. Its earlier blocker was 7-bit dense projections, not routed experts: the MoE kernels already supported 7-bit experts, and dense dispatch now covers 2 through 8 bits. Its window is an estimate, not a measured run. 6.05 needs about 92~GiB for its weights, which leaves too little under the 15~GiB floor at any window. 3.05 reads its n-gram table cold. Warm, with the whole table resident, MemAvailable less the table fell to 8.4~GiB during a 146,400-token request at a 147,456-token window, under the floor.
 
 \section{Loading}
 
@@ -186,6 +186,6 @@ memory ceiling, peak, reserve slack & 66, 77, 2~GiB \\
 \item Quality against the BF16 model, per pack. The BF16 release is 360~GB and does not fit the board; the registry's quality fields are empty.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}. The rates in this chapter are single requests, mostly one run each.
 \item A sweep of StairCut's prices. The price file is provisional: class 0 holds online-learned prices, and the other classes single requests.
-\item The 5.05 pack, which needs a 7-bit expert kernel, and the 6.05 pack, which needs more than one board.
+\item Full-pack load and generation of the 5.05 pack after the 7-bit dense-dispatch fix, and the 6.05 pack, which needs more than one board.
 \item Whether parallel requests pay on Flash-Next: one run of three, and no timing of the joint pass on its own.
 \end{itemize}

@@ -1634,10 +1634,11 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
     switch (kb) {                                                                                 \
         case 2: { DENSE_W(2, OF32) break; } case 3: { DENSE_W(3, OF32) break; }                     \
         case 4: { DENSE_W(4, OF32) break; } case 5: { DENSE_W(5, OF32) break; }                     \
-        case 6: { DENSE_W(6, OF32) break; } case 8: { DENSE_W(8, OF32) break; }                     \
+        case 6: { DENSE_W(6, OF32) break; } case 7: { DENSE_W(7, OF32) break; }                     \
+        case 8: { DENSE_W(8, OF32) break; }                                                       \
         case 15: { DENSE_W(15, OF32) break; } case 25: { DENSE_W(25, OF32) break; }                 \
         case 35: { DENSE_W(35, OF32) break; }                                                     \
-        default: TORCH_CHECK(false, "fn_dense: K 2..6 and 8, 1.5, 2.5 and 3.5");                  \
+        default: TORCH_CHECK(false, "fn_dense: K 2..8, 1.5, 2.5 and 3.5");                  \
     }
 
 void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y,
@@ -1683,10 +1684,11 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
     switch (kb) {                                                                                 \
         case 2: { DENSE_ROWS_W(2, OF32) break; } case 3: { DENSE_ROWS_W(3, OF32) break; }           \
         case 4: { DENSE_ROWS_W(4, OF32) break; } case 5: { DENSE_ROWS_W(5, OF32) break; }           \
-        case 6: { DENSE_ROWS_W(6, OF32) break; } case 8: { DENSE_ROWS_W(8, OF32) break; }           \
+        case 6: { DENSE_ROWS_W(6, OF32) break; } case 7: { DENSE_ROWS_W(7, OF32) break; }           \
+        case 8: { DENSE_ROWS_W(8, OF32) break; }                                                 \
         case 15: { DENSE_ROWS_W(15, OF32) break; } case 25: { DENSE_ROWS_W(25, OF32) break; }       \
         case 35: { DENSE_ROWS_W(35, OF32) break; }                                                \
-        default: TORCH_CHECK(false, "fn_dense_rows: K 2..6 and 8, 1.5, 2.5 and 3.5");             \
+        default: TORCH_CHECK(false, "fn_dense_rows: K 2..8, 1.5, 2.5 and 3.5");             \
     }
 
 // xh: fp16 [G, M, Kin] workspace for the rotated inputs (G = suh's members)
