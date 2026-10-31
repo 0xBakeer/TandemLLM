@@ -202,7 +202,7 @@ The branch name says what is inside: `3.05bpw_h5_ng5` is 3.05 bits a weight on a
 
 The windows come from the Setup Guide's estimate ([setup.md](setup.md)), calibrated on one 260,800-token request each on 2.05, 3.05 and 4.05 (2026-10-12). It predicts the lowest MemAvailable of those three runs within 0.7 GiB. 2.05 and 3.05 hold the model's full 262,144 tokens. 4.05 ran a 260,800-token request with MemAvailable never under 17.8 GiB on a box whose other programs took 4.6 GiB; under the Setup Guide's frame of 10 GiB for the rest of the system, its window comes out at 208,896 with the vision tower on (0.31 GiB, up to 0.81 with the 512 MB image cache; VIS-97) and 212,992 without it.
 
-The 5.05 pack's earlier blocker was its 7-bit dense projections. The dense dispatch now covers K 2..8; the MoE kernels already supported 7-bit experts. Full-pack load and generation are still unverified. By the estimate (not achieved) its window would be 53,248 with the vision tower and 65,536 without. 6.05 needs about 92 GiB for its weights, which leaves too little under the 15 GiB floor at any window.
+The 5.05 pack's earlier blocker was its 7-bit dense projections. The dense dispatch now covers K 2..8; the MoE kernels already supported 7-bit experts. Full-pack load and generation are still unverified. By the estimate its window would be 53,248 with the vision tower and 65,536 without. 6.05 needs about 92 GiB for its weights, which leaves too little under the 15 GiB floor at any window.
 
 The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha256), so `ops/fetch_weights.py` hard-links it between packs instead of downloading 39 GB again ([operations.md](operations.md#one-model-at-a-time-the-27b-and-flash-next)).
 
