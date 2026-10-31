@@ -77,7 +77,7 @@ class Admission:
 
     `reserve(key, need)` admits a request whose worst case is `need` bytes when
 
-        MemAvailable - cache growth left - what the requests in flight reserved - need >= floor
+        MemAvailable - cache growth left - max(in-flight workspace, need) - KV pages >= floor
 
     and records the reservation until `release(key)`. A reservation counts in full until it is
     released, also the part that has already been allocated (and so already left MemAvailable):
@@ -127,10 +127,15 @@ class Admission:
             return sum(self.held.values())
 
     def _held(self) -> tuple[int, int]:
-        """(the workspace part, the KV part still to commit) of the requests in flight."""
+        """(the workspace part, the KV part still to commit) of the requests in flight. The
+        workspace part is the LARGEST one, not their sum: the slots prefill on one stream and take
+        the GPU turn chunk by chunk, so one chunk's activations are live at a time and the caching
+        allocator hands the same blocks to whichever slot runs next (2026-10-31: the sum held 6
+        short requests, 2.8 GiB each, as 16.5 GiB in flight and kept 2 of 8 lanes waiting while
+        MemAvailable never fell under 22 GiB)."""
         with self.lock:
             keys = list(self.held)
-            ws = sum(self.held[k] - self.kv.get(k, (0,))[0] for k in keys)
+            ws = max((self.held[k] - self.kv.get(k, (0,))[0] for k in keys), default=0)
             kv = sum(self._kv_left(k) for k in keys)
         return ws, kv
 
@@ -145,7 +150,8 @@ class Admission:
             d.update(avail=None, after=None, ok=True)
             return True, d
         avail = int(mi["MemAvailable"])
-        take = grow + held_ws + need_ws
+        # this request's workspace and the in-flight ones share one pool: the larger of the two
+        take = grow + max(held_ws, need_ws)
         room = None
         if self.room is not None:
             try:
