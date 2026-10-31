@@ -65,25 +65,25 @@ def test_cached_count_cannot_exceed_the_reported_context():
     assert r.usage()["prompt_tokens_details"]["cached_tokens"] == 30
 
 
-def test_engine_continuation_counts_cached_rows_in_the_occupied_context():
+def test_engine_usage_counts_continuation_cached_rows_in_the_occupied_context():
     r = RequestRecord("test", "chat", False)
     r.prompt_tokens = r.prompt_client = 7_000
     r.context_prompt_tokens = 10_000
     r.usage_context = "engine"
     r.absorb_prefill({"reused": 2_000, "forwarded": 2_500, "kind": "end"})
     assert r.cache_source == "continuation"
-    assert r.cached_tokens == 7_500
+    assert r.cached_tokens == 4_500                   # ledger and tandem keep client accounting
     assert r.usage()["prompt_tokens_details"] == {
         "cached_tokens": 7_500, "client_tokens": 7_000}
 
 
-def test_engine_response_replay_counts_every_occupied_row_as_cached():
+def test_engine_usage_counts_every_replayed_occupied_row_as_cached():
     r = RequestRecord("test", "chat", False)
     r.prompt_tokens, r.context_prompt_tokens = 7_000, 10_000
     r.usage_context = "engine"
     r.absorb_response_cache()
     assert r.cache_source == "response" and r.prompt_n == 0
-    assert r.cached_tokens == 10_000
+    assert r.cached_tokens == 7_000                   # ledger and tandem keep client accounting
     assert r.usage()["prompt_tokens_details"] == {
         "cached_tokens": 10_000, "client_tokens": 7_000}
 

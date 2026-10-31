@@ -275,20 +275,14 @@ class RequestRecord:
             self.cache_source = str(info.get("kind") or "prefix")
             self.cache_via = info.get("via")
         if self.prompt_client is not None:
-            if self.usage_context == "engine":
-                self.cached_tokens = max(0, self.context_tokens - self.prompt_n)
-            else:
-                self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
+            self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
             self.cache_source = "continuation"
 
     def absorb_response_cache(self) -> None:
         """A replay: every prompt token came out of a cache and none was forwarded."""
         self.cache_source = "response"
+        self.cached_tokens = int(self.prompt_tokens or 0)
         self.prompt_n = 0
-        if self.usage_context == "engine":
-            self.cached_tokens = max(0, self.context_tokens - self.prompt_n)
-        else:
-            self.cached_tokens = int(self.prompt_tokens or 0)
 
     def absorb_blocks(self, bs) -> None:
         """The decode loop's `BlockStats`: forwards paid, and the first-miss histogram.
@@ -372,7 +366,9 @@ class RequestRecord:
         details = {"cached_tokens": self.client_cached}
         if self.usage_context == "engine":
             p = self.context_tokens
-            details["cached_tokens"] = max(0, min(int(self.cached_tokens or 0), p))
+            cached = (p - int(self.prompt_n) if self.prompt_n is not None
+                      else int(self.cached_tokens or 0))
+            details["cached_tokens"] = max(0, min(cached, p))
             if p != int(self.prompt_tokens or 0):
                 details["client_tokens"] = int(self.prompt_tokens or 0)
         if self.hidden_prompt:
