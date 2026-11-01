@@ -89,11 +89,17 @@ GOLDEN_FP4 = {
     # no row changes); Flash-Next and Ornith
     # ENG-411: the kernel sources move into csrc/ files beside their modules and count in the fingerprint (the
     # compiled text unchanged); every adapter
+    # 2026-10-31 (bilikaz): NVIDIA FP4-Local served as stored (engine/models/flashnext/nvidia.py, ops.py, its own
+    # kernels in tools/ beside fn_kernels): Flash-Next's two adapters only; the shared modules keep their bytes
+    # 2026-10-31 (bilikaz): NVIDIA FP4-Local's kernels above 32 rows split columns, not K (tools/mxfp8_skinny,
+    # tools/bf16_skinny: the activations staged once a CTA; the skinny kernels' K slices in order, so their bits)
+    # 2026-11-01 (bilikaz): Flash-Next's MTP head drafts its ladder rung under a round runner too, a packed draft the
+    # lanes' rungs on average (engine/models/flashnext/mtp.py): the drafts only, the verify's text unchanged
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "25b36ced9a41d1873adba9d63f487c0a46932fb69c93ca48856c07a663c3cdc0",
+    "qwen4_exp": "7466e1784ddd5666bc45461c92e8711c9f216bbd83a7892733d458b74519d5c7",
     "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
     "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
-    "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
+    "qwen3_5_moe": "4f5b6a71934dd475a92443da471f55fb97de41a921828f9215f2af12bc3df3bd",
     "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

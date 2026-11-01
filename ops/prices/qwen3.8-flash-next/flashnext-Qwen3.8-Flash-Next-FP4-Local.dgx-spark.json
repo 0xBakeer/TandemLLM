@@ -1,0 +1,6 @@
+{
+ "0": {"chain": {"1": 39.0, "2": 44.0, "3": 48.7, "4": 52.0, "5": 56.4, "7": 63.9, "9": 70.5, "11": 77.4, "13": 84.6},
+       "plain": {"1": 37.0}, "spec": {"1": 19.0}, "prime": {"1": 0.03}},
+ "step_ms": 2.75,
+ "measured": "PROVISIONAL (2026-10-30, box1, nvidia/Qwen3.8-Flash-Next-FP4-Local as stored through engine/models/flashnext/nvidia.py, MTP chain, NVFP4 draft head over the full vocabulary). Class 0 only (about 300 prompt tokens; a longer context takes these until learned). chain: the verify block's ms plus its commit, a round past its draft, from 256-token runs of a code and a prose prompt at K = 2, 3, 4, 6, 8, 10, 12 (rows 1 and 2 estimated). plain: the decode graph's ms a token (36.98). spec: a drafted request's ms a token between the code prompt (66.6 tok/s at K = 8) and the prose one (41.2 at K = 2). step_ms: one MTP draft step with the NVFP4 head (1.43 ms of it the head). prime: estimated."
+}

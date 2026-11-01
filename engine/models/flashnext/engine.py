@@ -76,6 +76,10 @@ class FlashNextEngine(FlashNextRef):
         cos, sin = FlashNextRef.rope(self, torch.arange(max_len))
         self.rope_cos, self.rope_sin = cos, sin                          # [max_len, rotary] bf16
         self.dense_limit = (cfg.indexer_budget + cfg.indexer_compress_ratio - 1) if cfg.has_indexer else 1 << 60
+        # rows up to which every projection, expert and head kernel gives a row its lone bits (a joint pass's cap): 64
+        # on NVIDIA FP4-Local's own kernels (a bf16 head; nvidia.ROW_MAX), 32 on an EXL3 pack (fn_kernels.dense)
+        from engine.models.flashnext import nvidia
+        self.row_max = nvidia.ROW_MAX if isinstance(W.get("lm_head.weight"), torch.Tensor) else 32
         self._rb: dict = {}                                              # rows buffers by row count
         self._order1 = torch.empty(0, dtype=torch.int32, device=device)    # one row: launch order
         self.rec: dict = {}                                              # what a commit needs
@@ -180,7 +184,7 @@ class FlashNextEngine(FlashNextRef):
 
     # ------------------------------------------------------------------------- primitives
     def lin(self, x, w):
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools.exl3_linear import EXL3Block, exl3_matmul
         if isinstance(w, EXL3Block):
             lead = x.shape[:-1]
@@ -189,11 +193,42 @@ class FlashNextEngine(FlashNextRef):
             # prompt chunk: the library path of tools/exl3_linear
             y = K.dense(x2, w) if x2.shape[0] <= DENSE_MAX else exl3_matmul(x2, w)
             return y.view(*lead, w.N)
+        if hasattr(w, "mul_rows"):                 # a weight that multiplies itself (nvidia.NVWeight)
+            lead = x.shape[:-1]
+            return w.mul_rows(x.reshape(-1, x.shape[-1]).contiguous()).view(*lead, -1)
         if hasattr(w, "q") or (isinstance(w, torch.Tensor) and w.dtype == torch.float16 and w.dim() == 2):
             lead = x.shape[:-1]
             y = K.gemv(x.reshape(-1, x.shape[-1]).contiguous(), w)
             return y.to(x.dtype).view(*lead, -1)
         return super().lin(x, w)
+
+    def _head(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """The served head: fp32 logits [M, vocab] (into `out` when given). EXL3: tools/fn_kernels.dense up to
+        DENSE_MAX rows, the library path above; a bf16 head (NVIDIA FP4-Local): the GEMV with bf16 sums, as `F.linear`
+        in bf16 returns them."""
+        from engine.models.flashnext import ops as K
+        w = self.W["lm_head.weight"]
+        if isinstance(w, torch.Tensor):
+            if x.shape[0] <= self.row_max:
+                # tools/bf16_skinny with 32 warps a CTA: 258 GB/s on the 1.27 GB head (fn_gemv: 241), the sums
+                # rounded once to bf16 as before
+                from tools import bf16_skinny as BS
+                y = BS.mm(x.contiguous(), w, wk=32, nt=1).to(torch.bfloat16)
+            else:
+                y = K.gemv_bf16(x, w)
+            return y.float() if out is None else out.copy_(y)
+        if DENSE_MAX:
+            return K.dense(x, w, out=out) if out is not None else K.dense(x, w).float()
+        from tools.exl3_linear import exl3_matmul
+        return exl3_matmul(x, w, out=out) if out is not None else exl3_matmul(x, w).float()
+
+    def _ple_decode(self, tab, packed: torch.Tensor, heads: torch.Tensor) -> torch.Tensor:
+        """A table's packed rows -> fp32 [N, D] on the device: the table's own decoder when it has one (NVIDIA's NVFP4
+        rows), else the EXL3 trellis rows (`decode_rows`)."""
+        if hasattr(tab, "decode_dev"):
+            return tab.decode_dev(packed, heads)
+        pd = self._ple_dev()
+        return decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"])
 
     def rope(self, positions: torch.Tensor):
         p = positions.to(self.rope_cos.device).long()
@@ -245,7 +280,7 @@ class FlashNextEngine(FlashNextRef):
     def mixer(self, h, p, combine=True):
         """norm, down (+ inject) in one GEMV, then mix_up: the reference's mixer with each bf16
         rounding where `lin` makes it."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         n = self.rms(h, self.w(p + ".hc_norm.weight"), c.rms_norm_eps, group=c.hidden_size)
         di = K.gemv(n, self.W[p + ".down_inject"])
@@ -257,7 +292,7 @@ class FlashNextEngine(FlashNextRef):
         return x, h, inj
 
     def moe(self, x, li):
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         out = torch.empty_like(x)
         step = 2048
@@ -275,13 +310,16 @@ class FlashNextEngine(FlashNextRef):
     def moe_parts(self, x, li):
         """The router and the experts of every (row, slot) pair, without the combine (the trunk
         folds it into the next inject): (yd [M S, H] fp32, ids, wts)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
+        bank = self.banks[li]
+        if hasattr(bank, "begin"):
+            bank.begin(x)                          # work that needs only x, beside the router (nvidia.NVBank)
         logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
         ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
-        yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
+        yd = K.moe_experts(x, ids, bank, order=self._order1 if x.shape[0] == 1 else None)
         if self._moe_record is not None:
             self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), yd.clone()))
         return yd, ids, wts
@@ -302,7 +340,7 @@ class FlashNextEngine(FlashNextRef):
         every row bit for bit (the
         combine is per row and per column, so equal pairs give an equal sum). Any difference
         leaves `spec_ok` False and the log names the layer and the row."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         st = self.new_state(self.max_len)
         logits = self.prefill(torch.tensor(prompt), st)
@@ -343,7 +381,7 @@ class FlashNextEngine(FlashNextRef):
     # ------------------------------------------------------------------------- the trunk
     def _mix(self, n, p):
         """The mixer from its normed streams: (x [M, H], d [M, R + hc] fp32 = down and inject)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         di = K.gemv(n, self.W[p + ".down_inject"])
         return K.mix_up(di, n, self.W[p + ".input_mix_weight_up.weight"], self.cfg.hc_count), di
 
@@ -358,7 +396,7 @@ class FlashNextEngine(FlashNextRef):
         (not in front of a PLE layer, which changes the streams first). Returns the final mixer's
         normed streams n [M, hc H]; the streams themselves are `self.stack`. `pre`: a prompt chunk
         through the prefill kernels (ENG-225)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         mix = self._mix_pre if pre else self._mix
@@ -400,7 +438,7 @@ class FlashNextEngine(FlashNextRef):
 
     def final(self, n):
         """The final mixer (no inject) from its normed streams, and the head: fp32 logits."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         d = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
         x = K.mix_up(d, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], self.cfg.hc_count)
         return self.lin(x, self.W["lm_head.weight"]).float()
@@ -482,7 +520,7 @@ class FlashNextEngine(FlashNextRef):
     def _mix_pre(self, n, p):
         """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
         a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings."""
-        from tools import fn_prefill_kernels as PK
+        from engine.models.flashnext import ops_pre as PK
         c = self.cfg
         di = PK.mm_rows(n, self.W[p + ".down_inject"])
         R = self.W[p + ".rank"]
@@ -493,8 +531,8 @@ class FlashNextEngine(FlashNextRef):
         """The MoE of a chunk: the router (library GEMM, the router kernel), every pair's expert output
         grouped by expert (`moe_grouped`), the combine (`moe_combine`: one CTA a row's columns reads
         each pair's output once; the decode path folds it into the inject, four times a row) -> [M, H]."""
-        from tools import fn_kernels as K
-        from tools import fn_prefill_kernels as PK
+        from engine.models.flashnext import ops as K
+        from engine.models.flashnext import ops_pre as PK
         c = self.cfg
         ids, wts = K.router(PK.mm_rows(x, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
         if self.route_trace is not None:
@@ -506,8 +544,8 @@ class FlashNextEngine(FlashNextRef):
         chunk's keys, values and indexer keys into the caches at their positions), the chunk's complete
         blocks pooled into the shared pool, past 2,051 tokens each row's block scores and its top 512,
         attention over each row's visible keys (`attn_rows`), the output gate, o_proj."""
-        from tools import fn_kernels as K
-        from tools import fn_prefill_kernels as PK
+        from engine.models.flashnext import ops as K
+        from engine.models.flashnext import ops_pre as PK
         from tools import fn_seq_kernels as SK
         c, P = self.cfg, self._pre
         p = self.pre(li) + "self_attn."
@@ -540,8 +578,8 @@ class FlashNextEngine(FlashNextRef):
         """The GDN layer of a chunk: qkv|z (EXL3), a|b on the library GEMM, the conv over the chain and
         the gates in one launch (`gdn_pre`), the chunked delta rule (`delta_rule`), the gated norm,
         out_proj. The conv state keeps the chunk's last three inputs."""
-        from tools import fn_kernels as K
-        from tools import fn_prefill_kernels as PK
+        from engine.models.flashnext import ops as K
+        from engine.models.flashnext import ops_pre as PK
         from tools import fn_seq_kernels as SK
         from tools.gdn_prefill_kernels import CHUNK as GDN_CHUNK, fused_chunk_prefill, fused_prefill_refusal
         c = self.cfg
@@ -581,18 +619,18 @@ class FlashNextEngine(FlashNextRef):
         the context), read from the table's page cache as the decode step reads them and decoded on the
         device, the projections on the library GEMM, then the step's kernels (gate, norms, the dilated
         conv over the chain); the conv state keeps the last 9."""
-        from tools import fn_kernels as K
-        from tools import fn_prefill_kernels as PK
+        from engine.models.flashnext import ops as K
+        from engine.models.flashnext import ops_pre as PK
         from tools import fn_seq_kernels as SK
         c = self.cfg
         p = self.pre(li) + "ple."
         H, eps = c.hidden_size, c.rms_norm_eps
         T = h.shape[0]
-        tab, pd = self.tables[li], self._ple_dev()
+        tab = self.tables[li]
         ids = self.ple_ids(tokens, li, st).reshape(-1).numpy()
         packed = torch.from_numpy(tab.rows_of(ids)).to(self.device)
         heads = torch.from_numpy(np.searchsorted(tab.offsets_np, ids, side="right") - 1).to(self.device)
-        emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(T, -1)
+        emb = self._ple_decode(tab, packed, heads).to(self.dtype).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
         val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)
         qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
@@ -858,7 +896,7 @@ class FlashNextEngine(FlashNextRef):
         indexer selects each sparse row's blocks over that many block scores. Returns logits [M, vocab]
         fp32 (a static buffer) and leaves the greedy tokens in rows["next"] and its pinned host copy.
         `st.length` is the caller's."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         rb = self._rows_buffers(M)
         self._cur, self._write, self._cls = rb, write, cls
@@ -868,11 +906,7 @@ class FlashNextEngine(FlashNextRef):
         n = self.trunk(h, None, st, None, step=True)
         dd = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
         x = K.mix_up(dd, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
-        if DENSE_MAX:
-            K.dense(x, self.W["lm_head.weight"], out=rb["logits"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            exl3_matmul(x, self.W["lm_head.weight"], out=rb["logits"])
+        self._head(x, out=rb["logits"])
         # the greedy tokens, and their copy into pinned host memory: the host reads them after a sync
         torch.argmax(rb["logits"], dim=-1, out=rb["next"])
         rb["next_h"].copy_(rb["next"], non_blocking=True)
@@ -929,11 +963,11 @@ class FlashNextEngine(FlashNextRef):
         the head run once over all the states' rows (their weights read once); the PLE, the norms and
         mixers, the GDN recurrence and the attention run per state on its own rows and caches, as a
         lone verify runs them. The projections and the experts give a row the bits it gets alone up to
-        32 rows (the self-check's widths), so each state's tokens are its lone verify's; the caller
-        keeps a pass at or under 32 rows. Parked GDN rows are applied first (`flush`): each state's
+        `row_max` rows (the self-check's widths), so each state's tokens are its lone verify's; the caller
+        keeps a pass at or under `row_max` rows. Parked GDN rows are applied first (`flush`): each state's
         walk then starts from its own state (SPD-229: each state's walk folds in its own parked rows, as its
         lone verify does). Eager; each state commits its block (`commit`)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         S = c.num_experts_per_tok + 1
@@ -1044,11 +1078,7 @@ class FlashNextEngine(FlashNextRef):
             heads.append(K.mix_up(dd, ns[j], self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc))
             x["rec"]["stack"] = hs[j]
         Xh = torch.cat(heads)
-        if DENSE_MAX:
-            logits = K.dense(Xh, self.W["lm_head.weight"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        logits = self._head(Xh)
         out = []
         for j, x in enumerate(cx):
             rb = x["rb"]
@@ -1142,11 +1172,12 @@ class FlashNextEngine(FlashNextRef):
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
             mark("moe")
-            grp, K.MOE_GROUP = K.MOE_GROUP, K.MOE_GROUP or JOINT_MOE_GROUP
+            from tools import fn_kernels as FK      # the flag lives on the shared module (ops.py reads it there)
+            grp, FK.MOE_GROUP = FK.MOE_GROUP, FK.MOE_GROUP or JOINT_MOE_GROUP
             try:
                 yd, ids, wts = self.moe_parts(XM, li)
             finally:
-                K.MOE_GROUP = grp
+                FK.MOE_GROUP = grp
             mark("mix")
             for j, x in enumerate(cx):
                 x["rec"][("ids", li)] = ids[rows[j]]
@@ -1159,11 +1190,7 @@ class FlashNextEngine(FlashNextRef):
         Xh = K.mix_up(dd, Ns, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], hc)
         for j, x in enumerate(cx):
             x["rec"]["stack"] = Hs[rows[j]]
-        if DENSE_MAX:
-            logits = K.dense(Xh, self.W["lm_head.weight"])
-        else:
-            from tools.exl3_linear import exl3_matmul
-            logits = exl3_matmul(Xh, self.W["lm_head.weight"])
+        logits = self._head(Xh)
         out = []
         for j, x in enumerate(cx):
             rb = x["rb"]
@@ -1546,14 +1573,14 @@ class FlashNextEngine(FlashNextRef):
     def _ple_step(self, h, li, st):
         """PLE of the rows: the gathered n-gram rows decoded, key/value projections, the gate, the norm,
         the dilated conv over the row's path (`psrc`), all row-invariant."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "ple."
         H, eps = c.hidden_size, c.rms_norm_eps
-        tab, pd = self.tables[li], self._ple_dev()
+        tab = self.tables[li]
         M = h.shape[0]
-        emb = decode_rows(d["packed"], d["heads"], pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(M, -1)
+        emb = self._ple_decode(tab, d["packed"], d["heads"]).to(self.dtype).reshape(M, -1)
         key = K.hc_norm(K.gemv_bf16(emb, self.W[p + "key_proj.weight"]), self.W[p + "norm_key.weight"], H, eps)
         val = K.gemv_bf16(emb, self.W[p + "value_proj.weight"])
         qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
@@ -1573,7 +1600,7 @@ class FlashNextEngine(FlashNextRef):
         one launch (`fn_seq_kernels.gdn_rows_multi`: each state's own call, its tree's scratch slots its own), the
         gated norm once over every row (row-wise). None (the state-at-a-time path) when the trees' slots exceed
         the scratch."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
         stk = self._scratch()
@@ -1629,7 +1656,7 @@ class FlashNextEngine(FlashNextRef):
     def _gdn1(self, x, li, st):
         """The GDN layer of the rows: qkv|z and a|b, the conv over each row's window and the gates
         (`csrc`), the delta rule over the block's tree (`gctl`), the gated norm, out_proj."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         p = self.pre(li) + "linear_attn."
         qkvz = self.lin(x, self.W[p + "qkvz"])
         ab = K.gemv_bf16(x, self.W[p + "ab"])
@@ -1638,7 +1665,7 @@ class FlashNextEngine(FlashNextRef):
     def _gdn1_core(self, qkvz, ab, li, st):
         """`_gdn1` past its input projections and before out_proj: the rows of one state (a joint
         pass runs the projections over every state's rows at once, `verify_multi`)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "linear_attn."
@@ -1674,7 +1701,7 @@ class FlashNextEngine(FlashNextRef):
 
     def _attn1_core(self, qkv, iqk, li, st):
         """`_attn1` past its input projections and before o_proj: the rows of one state."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "self_attn."
@@ -1746,7 +1773,7 @@ class FlashNextEngine(FlashNextRef):
         token's embedding -> fc_embedding, rms of all hc H streams -> fc_hidden per stream, added),
         its attention layer through the trunk's row kernels on the MTP cache, the MoE (bank -1), its
         own final mixer. Returns (x [M, H], the layer's streams [M, hc H]); the head is the caller's."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         M = stack_in.shape[0]
@@ -1791,7 +1818,7 @@ class FlashNextEngine(FlashNextRef):
         rows, depth, class)], each staged (`stage_mtp`, its streams in its `_mtp_bufs()["stack"]`). Every step
         runs the MTP layer once over all lanes' rows (the attention on each lane's own cache), the draft head
         once over each lane's last row; each lane's top-2 tokens and probabilities land in its own buffers."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
         bs = []
@@ -1817,7 +1844,7 @@ class FlashNextEngine(FlashNextRef):
             if self.draft_head is not None:
                 lg = K.gemv(x, self.draft_head)
             else:
-                lg = K.dense(x, self.W["lm_head.weight"]).float()
+                lg = self._head(x)
             vals, ids = torch.topk(lg, 2, dim=-1)
             z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
             prob = torch.exp(vals - vals[:, :1]) / z
@@ -1909,21 +1936,26 @@ class FlashNextEngine(FlashNextRef):
     draft_head = None          # Int8Rows over a hot vocabulary (`set_draft_head`), else the full head
     draft_ids = None
 
-    def set_draft_head(self, ids) -> None:
+    def set_draft_head(self, ids, fmt: str = "int8") -> None:
         """Draft over a hot vocabulary `ids` (token ids; None: the full head): the head's rows,
         dequantised and stored as int8 rows with an fp32 scale (`tools.fn_kernels.gemv`), read in place
         of the full EXL3 head by the MTP drafts. Only the drafts change; the verify reads the served
-        head. A head once built is kept for the process (captured draft graphs point into it)."""
-        if ids is None:
+        head. A head once built is kept for the process (captured draft graphs point into it).
+        `fmt` (QWEN38_QUANT draft:lm_head, engine/models/flashnext/quant.py): int8 or nvfp4; with
+        nvfp4 `ids` None is every id."""
+        if ids is None and fmt == "int8":
             self.draft_head = self.draft_ids = None
             return
-        from engine.models.flashnext.pack import Int8Rows
+        from engine.models.flashnext import quant
+        if ids is None:
+            ids = np.arange(self.cfg.vocab_size, dtype=np.int64)
         heads = self.__dict__.setdefault("_draft_heads", {})
-        key = hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
+        key = (fmt, hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64))))))
         if key not in heads:
             idx = torch.as_tensor(np.asarray(ids, dtype=np.int64), device=self.device)
-            w = self.W["lm_head.weight"].dequant()
-            heads[key] = (Int8Rows.of(w.index_select(0, idx).half().contiguous()), idx)
+            w = self.W["lm_head.weight"]
+            w = w.dequant() if hasattr(w, "dequant") else w
+            heads[key] = (quant.draft_head(w, idx, fmt), idx)
             del w
             torch.cuda.empty_cache()
         self.draft_head, self.draft_ids = heads[key]
@@ -1933,7 +1965,7 @@ class FlashNextEngine(FlashNextRef):
         streams in `_mtp_bufs()["stack"]`): the feed, then each draft's token and streams into the
         next step without the host. Per step the top-2 tokens and their probabilities under the draft
         head land in `tok` / `prob` and their pinned copies (the second token is a sibling candidate)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         from tools import fn_seq_kernels as SK
         c = self.cfg
         b = self._mtp_bufs(depth)
@@ -1949,7 +1981,7 @@ class FlashNextEngine(FlashNextRef):
                 K.gemv(x[-1:], self.draft_head, out=lg)
             else:
                 lg = b["logits"]
-                K.dense(x[-1:], self.W["lm_head.weight"], out=lg)
+                self._head(x[-1:], out=lg)
             vals, ids = torch.topk(lg[0], 2)
             z = torch.exp(lg[0] - vals[0]).sum()
             b["prob"][j].copy_(torch.exp(vals - vals[0]) / z)
@@ -2019,7 +2051,7 @@ class FlashNextEngine(FlashNextRef):
         """The MTP layer over a chunk of committed rows on the prefill kernels: the reference's input
         fusion, its attention and MoE through `_attn_pre` / `_moe_pre`; the cache advances. Returns the
         layer's streams [T, hc H] (the final mixer and the head are the drafts' business)."""
-        from tools import fn_kernels as K
+        from engine.models.flashnext import ops as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         T = next_tokens.numel()

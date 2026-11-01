@@ -305,16 +305,28 @@ def test_admission_counts_the_requests_in_flight_and_the_growth():
     avail = [40 * GiB]
     adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": avail[0]},
                           growth=lambda: 5 * GiB)
-    assert adm.reserve("a", 8 * GiB)[0]
-    ok, d = adm.reserve("b", 8 * GiB)       # 40 - 5 - 8 - 8 = 19 >= 15
+    # KV pages add up across the requests in flight (the workspace does not: the next test)
+    assert adm.reserve("a", 8 * GiB, kv=8 * GiB)[0]
+    ok, d = adm.reserve("b", 8 * GiB, kv=8 * GiB)       # 40 - 5 - 8 - 8 = 19 >= 15
     assert ok, d
-    ok, d = adm.reserve("c", 8 * GiB)       # 40 - 5 - 16 - 8 = 11 < 15
+    ok, d = adm.reserve("c", 8 * GiB, kv=8 * GiB)       # 40 - 5 - 16 - 8 = 11 < 15
     assert not ok and d["after"] == 11 * GiB, d
     assert "c" not in adm.held
     adm.release("a")
-    ok, d = adm.reserve("c", 8 * GiB)       # 40 - 5 - 8 - 8 = 19
+    ok, d = adm.reserve("c", 8 * GiB, kv=8 * GiB)       # 40 - 5 - 8 - 8 = 19
     assert ok, d
-    assert slots.Admission.describe(d).endswith("(>= floor 15.0)")
+    assert slots.Admission.describe(d).split(";")[0].endswith("(>= floor 15.0)")
+
+
+def test_admission_counts_the_largest_workspace_in_flight_not_their_sum():
+    """The slots prefill on one stream, a chunk at a time: one workspace is live at once."""
+    adm = slots.Admission(3 * GiB, meminfo=lambda: {"MemAvailable": 24 * GiB},
+                          growth=lambda: 4 * GiB)
+    for i in range(8):                                   # 24 - 4 - 2.8 = 17.2 for every one
+        ok, d = adm.reserve(f"r{i}", int(2.8 * GiB))
+        assert ok, d
+    ok, d = adm.reserve("big", 18 * GiB)                 # 24 - 4 - 18 = 2 < 3
+    assert not ok and d["after"] == 2 * GiB, d
 
 
 def test_admission_without_meminfo_admits_and_says_so():
@@ -334,7 +346,7 @@ def test_admission_check_and_reserve_are_atomic():
 
     def go(k):
         barrier.wait()
-        if adm.reserve(k, 12 * GiB)[0]:
+        if adm.reserve(k, 12 * GiB, kv=12 * GiB)[0]:
             wins.append(k)
 
     ths = [threading.Thread(target=go, args=(f"r{i}",)) for i in range(8)]
