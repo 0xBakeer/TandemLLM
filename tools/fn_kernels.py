@@ -56,6 +56,7 @@ from engine import native_build as nb  # noqa: E402
 from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
+from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
 
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
 # cp.async and the 128-point Hadamard; it ends inside the anonymous namespace
@@ -130,6 +131,10 @@ class MoEBank:
         self.ks = sorted(set(kb), key=X.tile_width)
         if not set(self.ks) <= set(MOE_K):
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
+        dev = torch.device(device)
+        if dev.type == "cuda" and not _sm_supported(dev):
+            from tools import moe_ada
+            moe_ada.probe(dev)                # once a device: the verdict the dispatch reads
 
     @property
     def nbytes(self) -> int:
@@ -150,6 +155,11 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
         q, s = w, None
     if out is None:
         out = torch.empty(x.shape[0], q.shape[0], dtype=torch.float32, device=x.device)
+    if not _sm_supported(x.device):
+        wd = w.dequant() if s is not None else q.float()
+        for m in range(x.shape[0]):
+            out[m:m + 1] = x[m:m + 1].float() @ wd.t()
+        return out
     _module().fn_gemv(x, q, s, out)
     return out
 
@@ -202,9 +212,12 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """x [M <= 32, Kin] bf16 @ EXL3Block^T -> [M, N] (bf16, or fp32 for an `out_fp32` block): the input
     rotation fused, K over a cluster, programmatic dependent launch; each row its own programs, so an
     M-row call's rows are its one-row calls' bits."""
-    S, warps = dense_split(w.tile_n, w.K, w.kb)
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
+    if not _sm_supported(x.device):
+        out.copy_(X._reference_rows(x.to(torch.bfloat16), w).view(out.shape))
+        return out
+    S, warps = dense_split(w.tile_n, w.K, w.kb)
     _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps)
     return out
 
@@ -364,6 +377,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     """`moe` without its combine: every pair's down-projection output yd [M S, H] fp32 (unweighted),
     for `combine_inject_norm`."""
     M, S = ids.shape
+    if not _sm_supported(x.device):
+        # the batched Triton kernels where the load probe passed (one launch a stage, a pair's
+        # bits its own); else the torch reference's per-pair walk. A kernel error after the
+        # verdict propagates -- it is a bug, not a reason to change algorithms mid-call.
+        from tools import moe_ada
+        if x.is_cuda and moe_ada.ok(x.device):
+            return moe_ada.moe_experts(x, ids, bank)
+        from tools import fn_prefill_kernels as PK
+        return PK.moe_grouped_reference(x, ids, bank)
     if order is None:
         if M > 1:
             order = expert_order(ids)
@@ -430,6 +452,21 @@ def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: tor
     M = ids.shape[0]
     if out is None:
         out = torch.empty(M, yd.shape[1], dtype=torch.bfloat16, device=yd.device)
+    if not _sm_supported(yd.device):
+        S = ids.shape[1]
+        # the fused Ada kernel where the load probe passed and its shapes fit: one launch, the
+        # same arithmetic
+        from tools import moe_ada
+        if yd.is_cuda and moe_ada.ok(yd.device):
+            got = moe_ada.try_moe_combine(yd, ids, wts, out=out)
+            if got is not None:
+                return out
+        # the slots of a row in ascending expert id (stable), on the device: a row's slots are
+        # gathered then weighted and summed, every row's arithmetic its own
+        order = ids.argsort(dim=1, stable=True)
+        ydg = yd.view(M, S, -1).gather(1, order.unsqueeze(-1).expand(-1, -1, yd.shape[1]))
+        wg = wts.gather(1, order).float().unsqueeze(-1)
+        return out.copy_((ydg * wg).sum(1).to(torch.bfloat16))
     _module().fn_moe_combine(yd, ids.reshape(-1), wts.reshape(-1), out)
     return out
 
