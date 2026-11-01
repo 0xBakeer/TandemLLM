@@ -161,6 +161,8 @@ Behind the server everything is the 27B's code: every route, reasoning formats a
 
 Parallel requests work on Flash-Next without changing any answer, and its profiles turn them on: three slots over one engine with the KV pool (\code{QSE_PARALLEL=3}, \code{QSE_KV_POOL=on}). On fresh servers three requests arriving together took 27.18~s against 27.03~s one after the other, the same total throughput, and the first tokens came at 2.2 to 6.1~s instead of up to about 20~s for the last of three. One request alone decodes at 45.78~tok/s with three slots, 45.79 with one (\measured). At a 262,144-token window with two 65,536-token side slots, a 260,800-token prompt kept MemAvailable at 31.6~GiB or more. Table~\ref{tab:fn-parallel} lists the limits.
 
+Requests that arrive together on an idle engine prefill in one forward (\code{QWEN38_FN_JOINT_PREFILL}, on in the profiles, off in the family's defaults, SPD-249): each layer's experts run once over every prompt's rows, the rest of the layer a prompt at a time, and every prompt ends bit for bit as its own prefill leaves it. The burst gets more tokens per second in total, and its long prompts get their first token later, since every first token waits for the one forward.
+
 \begin{table}[h]
 \centering
 \begin{tabular}{ll}

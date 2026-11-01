@@ -17,7 +17,7 @@ KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EX
         "QSE_WEIGHTS_DIR", "QSE_WEIGHTS_REVISION", "QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
         "QWEN38_FN_TABLE", "QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP", "VISION", "MAX_LEN", "QWEN38_FN_LOOKUP",
         "RESIDENT_STASH_GB", "QSE_PARALLEL", "QSE_KV_POOL", "QSE_SIDE_MAX_LEN", "QWEN38_DECIDER_MODELS",
-        "QWEN38_DECIDER_DIR", "DEFAULT_MAX_TOKENS")
+        "QWEN38_DECIDER_DIR", "DEFAULT_MAX_TOKENS", "QWEN38_FN_JOINT_PREFILL")
 
 
 def _env(profile: str | None, extra: dict | None = None) -> dict:
@@ -73,6 +73,8 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QSE_PAGE_CACHE_KEEP"] == ("ngram_embedding.safetensors" if table == "warm" else ""), e
         assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "on", e
         assert e["QWEN38_FN_LOOKUP"] == "1", e
+        # SPD-249: a prefill burst's prompts in one forward (the family's code default stays off)
+        assert e["QWEN38_FN_JOINT_PREFILL"] == "1", e
         # ENG-241: lanes on the KV pool (SRV-707: 8 of them); the side window serve.env's
         assert e["QSE_PARALLEL"] == "8" and e["QSE_KV_POOL"] == "on", e
         # 0.8.2: Laya beside it, as on the 27B box; its checkpoints where serve.env says
@@ -84,7 +86,7 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
     # a 27B profile sets none of them: start.sh's 27B flags and use-profile.sh's 27B assets stay
     e = _env("exl3-4.5")
     assert all(e[k] == "<unset>" for k in ("QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
-                                           "QSE_WEIGHTS_REVISION", "QSE_PAGE_CACHE_KEEP")), e
+                                           "QSE_WEIGHTS_REVISION", "QSE_PAGE_CACHE_KEEP", "QWEN38_FN_JOINT_PREFILL")), e
     assert e["QWEN38_DECIDER_MODELS"] == base["QWEN38_DECIDER_MODELS"] == "", e
 
 
