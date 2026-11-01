@@ -17,6 +17,14 @@ ever admitted to write the missing chunks.
      the missing chunks are written, and the session after it starts from the disk, bit for bit
      a cold prefill
 
+  4  SPD-257: under expandable segments a capture runs with the allocator on plain segments (the rest of the
+     setting kept) and the setting goes back when the capture lets go, once for nested holds; `GUARD`,
+     `off_thread`, the live view's marks and the GPU health probe take the same lock without the switch; a
+     setting torch refuses turns the switch off; without expandable segments nothing is switched
+                                                  test_a_capture_runs_on_plain_segments
+     a capture counts once (`GEN`) when its outermost hold lets go, a reset outside a capture once
+                                                  test_a_capture_counts_once_when_its_outermost_hold_lets_go
+
 The GPU side is tools/capture_race_check.py (a hold step).
 
 Run: python tests/test_capture_lock.py
@@ -45,6 +53,105 @@ from test_disk_cache import CH, Pos, exact, run, tier  # noqa: E402
 
 TAG = {"client": "opencode", "head_end": 100}
 
+
+
+# ------------------------------------------------------------------ SPD-257: a capture's pool on plain segments
+
+def test_a_capture_runs_on_plain_segments():
+    """Each expandable segment reserves ~130 GiB of address space and each graph captured without a shared pool owns a
+    pool: the address space grew from 59 to 109 TiB in 20 minutes on a test server. A capture's hold switches the
+    allocator to plain segments and back; nothing else that takes the lock switches it."""
+    import threading
+    calls = []
+    keep = (dict(capture_lock.ALLOC), capture_lock._set_allocator, os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
+
+    def fresh_alloc(conf):
+        capture_lock.ALLOC.update(on=None, conf="", plain="", toggles=0, errors=0, error=None)
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf
+    try:
+        capture_lock._set_allocator = calls.append
+        fresh_alloc("max_split_size_mb:512,expandable_segments:True")
+        with capture_lock.LOCK:
+            assert calls == ["max_split_size_mb:512,expandable_segments:False"], calls
+            with capture_lock.LOCK:                    # nested: switched once
+                assert capture_lock.held()
+            assert len(calls) == 1
+        assert calls[-1] == "max_split_size_mb:512,expandable_segments:True" and len(calls) == 2, calls
+        with capture_lock.GUARD:
+            pass
+        with capture_lock.off_thread("test.plain"):
+            pass
+        t = threading.Thread(target=lambda: capture_lock.GUARD.acquire(blocking=False)
+                             and capture_lock.GUARD.release())
+        t.start()
+        t.join()
+        assert len(calls) == 2 and capture_lock.ALLOC["toggles"] == 2, calls
+        # a capture on another thread holds the lock: GUARD waits for it as before
+        got = []
+        with capture_lock.LOCK:
+            t = threading.Thread(target=lambda: got.append(capture_lock.GUARD.acquire(blocking=False)))
+            t.start()
+            t.join()
+        assert got == [False], got
+
+        def refuse(setting):
+            raise RuntimeError("expandable_segments cannot change now")
+        capture_lock._set_allocator = refuse
+        fresh_alloc("expandable_segments:True")
+        with capture_lock.LOCK:
+            pass
+        assert capture_lock.ALLOC["on"] is False and capture_lock.ALLOC["errors"] == 1, capture_lock.ALLOC
+        capture_lock._set_allocator = calls.append
+        n = len(calls)
+        fresh_alloc("max_split_size_mb:512")           # no expandable segments: nothing to switch
+        with capture_lock.LOCK:
+            pass
+        assert len(calls) == n and capture_lock.ALLOC["on"] is False
+    finally:
+        capture_lock.ALLOC.clear()
+        capture_lock.ALLOC.update(keep[0])
+        capture_lock._set_allocator = keep[1]
+        if keep[2] is None:
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        else:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = keep[2]
+    return "plain while a capture holds the lock, back after; GUARD and off_thread switch nothing"
+
+
+def test_a_capture_counts_once_when_its_outermost_hold_lets_go():
+    """SPD-257: the memory policy walks the allocator's segments again only when `GEN` moved. A capture counts once,
+    when its outermost hold of LOCK lets go (a nested hold does not count, and nothing counts while it holds);
+    GUARD and off_thread count nothing; a reset outside a capture counts (`graphs_reset`: a joint graph cache's
+    eviction, the 27B's flush, each of which calls it)."""
+    from engine.models.graph_lru import GraphLRU
+    gen = capture_lock.GEN
+    g0 = gen["captures"]
+    with capture_lock.LOCK:
+        with capture_lock.LOCK:
+            pass
+        assert gen["captures"] == g0, "counted while the capture still holds the lock"
+    assert gen["captures"] == g0 + 1, gen
+    with capture_lock.GUARD:
+        pass
+    with capture_lock.off_thread("test.gen"):
+        pass
+    assert gen["captures"] == g0 + 1, "GUARD or off_thread counted"
+    capture_lock.graphs_reset()
+    assert gen["captures"] == g0 + 2
+
+    class _G:
+        def __init__(self):
+            self.graph = types.SimpleNamespace(reset=lambda: None)
+    lru = GraphLRU(cap=1)
+    lru.take("a", _G)
+    assert gen["captures"] == g0 + 2, "a take that evicts nothing"
+    lru.take("b", _G)
+    assert gen["captures"] == g0 + 3 and lru.evicted == 1, gen
+    tree = ast.parse(open(os.path.join(ROOT, "engine/models/qwen3_5/joint_graphs.py")).read())
+    flush = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_flush")
+    assert any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "graphs_reset"
+               for c in ast.walk(flush)), "the 27B's joint graphs' flush does not count its resets"
+    return "a capture once (nested too), GUARD none, a reset and an eviction once each"
 
 
 # ------------------------------------------------------------------ SPD-249: the guard for CUDA work off the engine's thread

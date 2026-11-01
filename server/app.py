@@ -862,6 +862,22 @@ SIDE_SLOT0_WAIT_S = float(_S.get("SIDE_SLOT0_WAIT_S") or 3.0)
 SIDE_RESIDENT_GB = float(_S.get("SIDE_RESIDENT_GB") or 0.5)
 SIDE_STASH_GB = float(_S.get("SIDE_STASH_GB") or 1.0)
 
+#: SPD-257: `on`: every resident prefix (slot 0's and each side slot's) holds its end anchor's buffers
+#: from the load on, outside the memory policy (`ResidentPrefix.reserve_end`), so a turn's end is
+#: never refused for room the other caches hold; `off`: asked of the policy at every end, as before
+END_RESERVE = (_S.get("END_RESERVE") or "on").strip().lower()
+
+#: SPD-257: `promote`: a chat that ran as a guest on a side slot becomes the slot's conversation at
+#: its end and keeps its end anchor (`ResidentPrefix.promote_guest`), when its rows above the head
+#: it shared are at least the old conversation's or the old one has been idle SIDE_GUEST_IDLE_S;
+#: `off`: the guest's end is not kept and the slot's conversation stays (as before)
+SIDE_GUEST_END = (_S.get("SIDE_GUEST_END") or "promote").strip().lower()
+SIDE_GUEST_IDLE_S = float(_S.get("SIDE_GUEST_IDLE_S") or 300.0)
+
+#: SPD-257: `on`: a new conversation or a guest takes the free side slot whose conversation was
+#: served longest ago (`Pool.take_side`); `off`: the lowest free slot, as before
+SIDE_LRU = (_S.get("SIDE_LRU") or "on").strip().lower()
+
 #: SRV-629: `on`: a request with images may take a side slot (each slot is its own engine over the
 #: same weights, with its own `mm` and rotary offset; the tower runs in the slot's prefill), routed
 #: on its expanded key ids (`_mm_keys`); `off`: slot 0 only, as 0.12.0. Live 2026-10-19: two
@@ -3498,9 +3514,19 @@ def _answer(ctx, start: int, extra, think) -> str:
     return text[i + len("</think>"):] if i >= 0 else text
 
 
-def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
-              learn: bool = True) -> None:
+def _remember(*args, **kw) -> None:
+    """`_remember_turn`, its time the calling request's `remember` part of the [req] line (SPD-257,
+    `cache.req_ms_fields`)."""
+    t0 = time.perf_counter()
+    try:
+        _remember_turn(*args, **kw)
+    finally:
+        cache.req_ms_add("remember", (time.perf_counter() - t0) * 1e3)
+
+
+def _remember_turn(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
+                   mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
+                   learn: bool = True) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
     `learn` (SPD-151): False leaves the suffix store as it was (`suffix_learns`: a request that
@@ -3614,6 +3640,14 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     res = STATE.get("resident")
     if res is not None and res.end_on and committed:
         if mm is None and not delta:
+            if getattr(res, "_stash", None) is not None and _guest_promotes(res, committed, conv_id):
+                # SPD-257: a chat that ran as a guest on a side slot is the slot's conversation from here
+                n_p = int(STATE.get("last_prompt_n") or 0)
+                old_valid, old_owner = int(res.valid), res.owner
+                if res.promote_guest(eng, drafter, committed, n_p, conv_id) and STATE.get("verbose"):
+                    print(f"[parallel] guest kept as the slot's conversation: {n_p} prompt tokens, "
+                          f"{old_owner or 'the old one'} cut from {old_valid} to its shared head",
+                          flush=True)
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                list(hidden) + list(STATE.get("hidden_spans") or []))
             if why == "kept" and res.end is not None:
@@ -3643,7 +3677,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                delta=int(mm.delta) if mm is not None else int(delta), mm=True)
         if STATE.get("verbose") and why != "kept":
-            more = f", {cache.mem_words(STATE.get('mem'))}" if why == "memory" else ""
+            # SPD-257: the resident's own policy (a side slot's STATE has none: the line said "no policy")
+            more = f", {cache.mem_words(getattr(res, 'mem', None))}" if why == "memory" else ""
             print(f"[cache] end anchor not kept ({why}{more}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
         if slots_mod.current() is not None:
@@ -3761,6 +3796,34 @@ def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
               f"refused: {ref.get('why')}" + (f" at {ref['at']:,}" if ref.get("at") is not None else "")
               + ")", flush=True)
     return got
+
+
+def _guest_promotes(res, committed, conv_id) -> bool:
+    """SPD-257 (`SIDE_GUEST_END`): whether the guest that just ran on this side slot becomes the slot's
+    conversation (`ResidentPrefix.promote_guest`). A conversation's turn (a session, not the router's
+    question nor a lane job: `no_carry`) on a side slot, whose rows above the head it shares are at least
+    the old conversation's, or the old one has been idle `SIDE_GUEST_IDLE_S`. Slot 0 keeps its guests:
+    its park and pin hold another session there. Never over a conversation that comes back (ENG-371,
+    `_comes_back`): a parent waiting on its worker sits idle behind it for as long as the worker runs, and a
+    promotion would cut its rows without the NVMe write `_keep_parent` gives them before any other cut;
+    the guest's stash puts them back instead, as before."""
+    if SIDE_GUEST_END != "promote" or conv_id is None:
+        return False
+    slot = slots_mod.current()
+    if slot is None or getattr(slot, "no_carry", False):
+        return False
+    st = getattr(res, "_stash", None)
+    if st is None:
+        return False
+    owner = getattr(res, "owner", None)
+    if owner is not None and owner != conv_id and _comes_back(owner):
+        return False
+    s = int(st["start"])
+    mine = len(committed) - s
+    theirs = int(getattr(res, "valid", 0) or 0) - s
+    used = float(getattr(res, "t_used", 0.0) or 0.0)
+    idle = (time.monotonic() - used) if used else float("inf")
+    return mine > 0 and (mine >= theirs or idle >= SIDE_GUEST_IDLE_S)
 
 
 def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
@@ -4362,7 +4425,7 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
     # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
     # slot 0, and its request ended in an error)
-    with capture_lock.LOCK, torch.no_grad():
+    with capture_lock.GUARD, torch.no_grad():
         info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
     where = f"slot {slot.index}" if slot is not None else "slot 0"
@@ -5389,9 +5452,34 @@ def _compacting(plan, body: dict, client_kind: str | None = None) -> bool:
         return False
 
 
+#: SPD-257: when the log last said the reserve stays over the ceiling (`_memory_event`, at most every
+#: OVER_CEILING_LOG_S)
+_OVER_CEILING_LOGGED = [0.0]
+OVER_CEILING_LOG_S = 300.0
+
+
 def _memory_event(ev: dict) -> None:
     """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
     kind = ev.get("kind")
+    if kind == "over_ceiling":
+        # SPD-257: the ceiling stage shed a level and the reserve is still over the ceiling: what holds it
+        now = time.monotonic()
+        if now - _OVER_CEILING_LOGGED[0] >= OVER_CEILING_LOG_S:
+            _OVER_CEILING_LOGGED[0] = now
+
+            def g(k):
+                v = ev.get(k)
+                return "?" if v is None else f"{int(v) / 2**30:.2f}"
+            print(f"[memory] over the ceiling by {g('over')} GiB after shedding {','.join(ev.get('shed') or ())}: "
+                  f"graphs' pools {g('graphs_reserved')} GiB ({g('graphs_free')} free, their replays' scratch, "
+                  f"{g('exempt')} of it left out of the ceiling), default pool free {g('default_free')} GiB; "
+                  f"allocated {g('allocated')}, reserved {g('reserved')} GiB", flush=True)
+        return
+    if kind in ("peak_over", "stale_admit"):
+        # SPD-257: the peak stage's start (what it sheds for) and a prefill admitted on the stale rule
+        print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items() if k not in ("kind", "ts")),
+              flush=True)
+        return
     if kind in ("shed", "shed_chunk", "refused", "estimate_raised"):
         print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items()
                                              if k not in ("kind", "ts")), flush=True)
@@ -6456,7 +6544,7 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
               else "")
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
-          f"{slot_s}{tools_s}{blk_s}{tail}", flush=True)
+          f"{slot_s}{tools_s}{blk_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
 
 
 def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
@@ -7733,6 +7821,14 @@ class Handler(BaseHTTPRequestHandler):
             if not self._allowed("cache_read"):
                 return
             return self._json(200, cache_stats())
+        if path == "/v1/cache/memory":
+            # SPD-257: the engine's memory by owner; `?pools=1` adds the allocator's segments by pool
+            # (walks every block: on demand only)
+            if not self._allowed("cache_read"):
+                return
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            return self._json(200, memory_owners(pools=(q.get("pools") or ["0"])[-1] == "1"))
         if path == "/v1/models":
             # with the conductor on, `TandemLLM` alone: the raw engine's name is a hidden alias
             cond = STATE.get("conductor")
@@ -8159,6 +8255,7 @@ class Handler(BaseHTTPRequestHandler):
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
+        rec.req_ms = cache.req_ms_start()    # SPD-257: the [req] line's gate/done/remember/settle parts
         rec.model = str(body.get("model") or STATE.get("model", ""))
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
@@ -10467,19 +10564,191 @@ def _memory() -> dict:
         except Exception:                                          # noqa: BLE001
             pass
     try:
+        out["owners"] = _owners_cached()                         # SPD-257: what holds it, by part
+    except Exception:                                              # noqa: BLE001
+        pass
+    try:
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     out["rss_gb"] = round(int(line.split()[1]) / 2**20, 3)
-                    break
+                elif line.startswith("VmSize:"):
+                    # SPD-257: the address space; each expandable segment of the CUDA allocator reserves about
+                    # 1.125 times the device's memory of it (a soak watches this against the 48-bit limit)
+                    out["vm_size_gb"] = round(int(line.split()[1]) / 2**20, 1)
     except Exception:
         pass
+    # SPD-257: the captures' switch to plain segments (engine/capture_lock.py): on, how often, why off
+    a = capture_lock.ALLOC
+    out["capture_plain_segments"] = {"on": a.get("on"), "toggles": a.get("toggles"), "errors": a.get("errors"),
+                                     "error": a.get("error")}
     # The interpreter singletons' reference counts now (server/refwatch.py); a count
     # that falls from one look to the next is a C extension dropping references (bool_dealloc)
     out["python_refs"] = {name: sys.getrefcount(obj) for name, obj in refwatch_mod.WATCH}
     w = STATE.get("refwatch")
     if w is not None:
         out["python_refs_warnings"] = w.warnings
+    return out
+
+
+def _caches_by_owner() -> dict:
+    """SPD-257: every serving cache's bytes by owner: each slot's resident prefix by part
+    (`ResidentPrefix.owners`), the state store, the image embedding cache."""
+    out: dict = {}
+    res0 = dict.get(STATE, "resident")
+    if res0 is not None:
+        out["slot0"] = res0.owners()
+    pool = dict.get(STATE, "pool")
+    for sl in (pool.side() if pool is not None else ()):
+        r = (sl.values or {}).get("resident")
+        if r is not None:
+            out[f"slot{sl.index}"] = r.owners()
+    store = dict.get(STATE, "state_store")
+    if store is not None:
+        out["store"] = {"total": int(store.bytes), "entries": len(getattr(store, "_d", {}) or {})}
+    ic = dict.get(STATE, "image_cache")
+    nb = getattr(ic, "bytes", None) if ic is not None else None
+    if isinstance(nb, int):
+        out["image_embeds"] = {"total": nb}
+    return out
+
+
+def _caches_total(by: dict) -> int:
+    return sum(int((v or {}).get("total") or 0) for v in by.values())
+
+
+def _mem_load_mark(stages=None) -> None:
+    """SPD-257: what the engine holds once the load is done, the base the memory report by owner
+    counts from (`memory_owners`), with the allocator's pools then: the default pool's free bytes and
+    the graphs' private pools (`cache.allocator_pools`), and whether the allocator setting took
+    (PYTORCH_CUDA_ALLOC_CONF, expandable segments)."""
+    mem = dict.get(STATE, "mem")
+    try:
+        if mem is not None and mem.on:
+            mem.empty("load")
+            alloc, res = mem.memory()
+        else:
+            alloc, res = int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
+    except Exception:                                              # noqa: BLE001
+        return
+    by = _caches_by_owner()
+    try:
+        pools = _allocator_pools()
+    except Exception as exc:                                       # noqa: BLE001
+        pools = {"error": str(exc)}
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF") or ""
+    STATE["mem_load"] = {"allocated": int(alloc), "reserved": int(res), "caches": _caches_total(by),
+                         "ts": round(time.time(), 3), "alloc_conf": conf, "pools": pools,
+                         "stages": [{"stage": x.get("stage"), "allocated": x.get("allocated")}
+                                    for x in (stages or ())]}
+    d, g, mp = pools.get("default") or {}, pools.get("graphs") or {}, pools.get("mempools") or {}
+    roles = (f", roles' pools {mp.get('pools', 0)} reserved {_gib(mp.get('reserved') or 0)} GiB"
+             if mp.get("pools") else "")
+    a = capture_lock.ALLOC
+    # the captures' switch only where the setting asks for expandable segments, or a switch failed (`on` False)
+    plain = (f"; captures on plain segments ({a.get('toggles')} switches"
+             + (f", off: {a.get('error')}" if a.get("errors") else "") + ")"
+             ) if a.get("on") is True or a.get("errors") else ""
+    print(f"[memory] after the load: {_gib(alloc)} GiB allocated, {_gib(res)} GiB reserved, "
+          f"caches {_gib(_caches_total(by))} GiB (end anchors reserved); default pool free "
+          f"{_gib(d.get('free') or 0)} GiB, graphs' pools {g.get('pools', 0)} reserved "
+          f"{_gib(g.get('reserved') or 0)} GiB free {_gib(g.get('free') or 0)} GiB{roles}; allocator "
+          f"PYTORCH_CUDA_ALLOC_CONF={conf or '(unset)'}, expandable segments "
+          f"{sum(int(x.get('expandable') or 0) for x in (d, g, mp))} of "
+          f"{sum(int(x.get('segments') or 0) for x in (d, g, mp))} (graphs' {int(g.get('expandable') or 0)} of "
+          f"{int(g.get('segments') or 0)}){plain}", flush=True)
+
+
+def _allocator_pools() -> dict:
+    """SPD-257: the allocator's segments by pool (`cache.allocator_pools` over `cache.allocator_segments`,
+    every segment and block of the process, from the snapshot call that drops no reference: on demand only)."""
+    t0 = time.perf_counter()
+    out = cache.allocator_pools(cache.allocator_segments(), blocks=True)
+    out["snapshot_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
+    return out
+
+
+def memory_owners(pools: bool = False) -> dict:
+    """SPD-257: the engine's memory by owner, against what it held once loaded (`_mem_load_mark`):
+    the caches by slot and part, what the KV pool committed (outside the allocator when the device
+    maps its pages), and what is allocated above the load's base that no cache holds (`unattributed`:
+    a prefill in flight, a graph captured since, a leak). `pools`: the allocator's segments by pool
+    (`_allocator_pools`), which walks every block."""
+    mem = dict.get(STATE, "mem")
+    try:
+        alloc, res = (mem.memory() if mem is not None
+                      else (int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())))
+    except Exception as exc:                                       # noqa: BLE001
+        return {"error": str(exc)}
+    by = _caches_by_owner()
+    caches = _caches_total(by)
+    load = dict.get(STATE, "mem_load") or {}
+    base = load.get("allocated")
+    out = {"allocated": int(alloc), "reserved": int(res), "reserve": int(res) - int(alloc),
+           "load": load or None, "caches": caches, "by_owner": by}
+    if base is not None:
+        grown = int(alloc) - int(base)
+        out["above_load"] = grown
+        out["caches_since_load"] = caches - int(load.get("caches") or 0)
+        out["unattributed"] = grown - out["caches_since_load"]
+    if mem is not None and mem.on:
+        out["limits"] = {"ceiling": mem.ceiling, "peak": mem.peak, "slack": mem.slack,
+                         "room": mem.ceiling - mem.slack - int(alloc)}
+        if pools:
+            # the walk is the policy's own (`Budget.pools`): the free reserve a workspace can take
+            out["limits"]["default_free"] = mem.default_free(int(alloc), int(res))
+            out["limits"]["pools"] = mem.pools()
+    pool = kvpool.POOL
+    if pool is not None:
+        try:
+            rep = pool.report()
+            out["kv_pool"] = {"committed": int(round(float(rep.get("committed_gib") or 0) * (1 << 30))),
+                              "outside_allocator": kvpool.Driver.get() is not None}
+        except Exception:                                          # noqa: BLE001
+            pass
+    if pools:
+        try:
+            out["allocator_pools"] = _allocator_pools()
+        except Exception as exc:                                   # noqa: BLE001
+            out["allocator_pools"] = {"error": str(exc)}
+    return out
+
+
+#: SPD-257: `/health`'s summary of the memory by owner: (monotonic time, the summary), rebuilt at most every
+#: OWNERS_TTL_S. It walks every slot's buffers in the server's Python, which holds the interpreter lock the
+#: round runner needs: built on every `/health` build (and once more in `/v1/cache/stats`), it took a
+#: `/health` build from 43 to 63 ms on average on a test server.
+_OWNERS_LAST: list = [0.0, None]
+OWNERS_TTL_S = 10.0
+
+
+def _owners_cached() -> dict:
+    now = time.monotonic()
+    if _OWNERS_LAST[1] is None or now - _OWNERS_LAST[0] >= OWNERS_TTL_S:
+        _OWNERS_LAST[0], _OWNERS_LAST[1] = now, dict(_owners_gib(memory_owners()), age_s=0.0)
+        return _OWNERS_LAST[1]
+    return dict(_OWNERS_LAST[1], age_s=round(now - _OWNERS_LAST[0], 1))
+
+
+def _owners_gib(o: dict) -> dict:
+    """The compact form for /health: GiB, the caches summed by part over the slots."""
+    def g(b):
+        return round(int(b or 0) / (1 << 30), 3)
+    parts: dict = {}
+    for name, d in (o.get("by_owner") or {}).items():
+        if name.startswith("slot"):
+            for k in ("anchors", "anchors_free", "end", "prompt_end", "stash", "pin", "park"):
+                parts[k] = parts.get(k, 0) + int(d.get(k) or 0)
+        else:
+            parts[name] = parts.get(name, 0) + int(d.get("total") or 0)
+    out = {"caches_gb": g(o.get("caches")), "by_part_gb": {k: g(v) for k, v in parts.items()}}
+    for k in ("above_load", "caches_since_load", "unattributed"):
+        if k in o:
+            out[f"{k}_gb"] = g(o[k])
+    if o.get("load"):
+        out["load_allocated_gb"] = g(o["load"].get("allocated"))
+    if o.get("kv_pool"):
+        out["kv_pool_committed_gb"] = g(o["kv_pool"].get("committed"))
     return out
 
 
@@ -11640,6 +11909,7 @@ def _load(a) -> None:
     print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
         f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
         for x in led.stages()), flush=True)
+    _mem_load_mark(led.stages())
 
 
 def _kv_pool_open(a) -> None:
@@ -11687,6 +11957,9 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
     # the stale-reserve rule leaves them out of what the engine's allocator holds free
     mem.register("roles", _release_roles)
     mem.foreign_free = lambda: memlimits.role_pool_free(STATE)
+    # SPD-257: the allocator's pools (the graphs' scratch out of the ceiling, the idle empty and the stale rule; a
+    # cache's whole buffer against the peak) only under expandable segments: without them the policy as before
+    mem.pools_probe = cache.TorchPools() if capture_lock.alloc_expandable() else None
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=int(a.store_entry_gb * gib),
@@ -11705,6 +11978,8 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
         mem.register_partial("store", store.shed_to)      # SPD-249: the gate takes what it needs
     if resident is not None:
         resident.glue = glue_ids(tok)
+        if END_RESERVE == "on":
+            resident.reserve_end(eng)     # SPD-257: its end anchor's buffers, before any other cache
         if resident.end_on:
             STATE["end_align"] = endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
@@ -11909,7 +12184,10 @@ def _side_resident(a, tok):
     res.glue = glue_ids(tok)
     res.keeper = _keep_parent             # ENG-371: a parent's rows to the NVMe before they go
     if mem is not None:
-        for level, fn in (("anchors", res.shed_anchors), ("end", res.shed_end),
+        # SPD-257: a side slot's idle stash buffers (no guest's rows in them) go with slot 0's at
+        # `stash_idle`, before the anchors and the ends: they were given back only at `stash`, after them
+        for level, fn in (("stash_idle", lambda safe=False: res.shed_stash(True)),
+                          ("anchors", res.shed_anchors), ("end", res.shed_end),
                           ("stash", res.shed_stash)):
             prev = mem.shedders.get(level)
 
@@ -11973,6 +12251,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         values = {k: None for k in slots_mod.OVERLAY}
         values.update(engine=e2, drafter=d2, max_len=L)
         res_i = _side_resident(a, tok)
+        if res_i is not None and END_RESERVE == "on":
+            res_i.reserve_end(e2)         # SPD-257: counted in the slot's bytes the limits go up by
         if res_i is not None:
             values.update(resident=res_i, end_align=endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
@@ -12063,6 +12343,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
+    pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
     if PREFILL_BURST:
         pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245

@@ -128,10 +128,48 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     assert any("verify graphs: 3 captured" in x for x in lines)
     assert KEYS_27B <= written, sorted(KEYS_27B - written)
     # SRV-475: the checkpoint's sampling (generation_config.json), read for every model
+    # SPD-257: `mem_load`, what the engine holds once loaded (the memory report by owner's base)
     extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem",
-                                  "card_sampling", "sampling_flags"}
+                                  "card_sampling", "sampling_flags", "mem_load"}
     assert not extra, sorted(extra)
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
+
+
+def test_the_policy_reads_the_allocators_pools_only_under_expandable_segments():
+    """SPD-257: the memory policy reads the allocator's pools (`cache.TorchPools`) only when the engine's allocator
+    runs with expandable segments; without them (every family whose profile does not set them) `pools_probe` is
+    None, and the ceiling, the idle empty, an admission and the stale rule are the ones before."""
+    from engine import cache, capture_lock
+    keep = (dict(capture_lock.ALLOC), capture_lock._set_allocator, os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
+    serving = {"tree": False, "sampled_tree": "off", "relax": Relax(1.0, 1)}
+    out = {}
+
+    def fresh(conf):
+        capture_lock.ALLOC.update(on=None, conf="", plain="", toggles=0, errors=0, error=None)
+        if conf:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf
+        else:
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    try:
+        capture_lock._set_allocator = lambda setting: None
+        fresh("max_split_size_mb:512")
+        assert not capture_lock.alloc_expandable()
+        for conf in ("", "expandable_segments:True"):
+            fresh(conf)
+            _, st, _, _, _ = _run(Capabilities(caches=True, side_slots=True),
+                                  ["--drafter", "none", "--resident-gb", "0"], serving, registry_builder=False)
+            out[conf] = st["mem"].pools_probe
+    finally:
+        capture_lock.ALLOC.clear()
+        capture_lock.ALLOC.update(keep[0])
+        capture_lock._set_allocator = keep[1]
+        if keep[2] is None:
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        else:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = keep[2]
+    assert out[""] is None, out
+    assert isinstance(out["expandable_segments:True"], cache.TorchPools), out
+    return "no pools probe without expandable segments, one with them"
 
 
 def test_an_engine_that_cannot_be_lent_gets_the_side_lane_off():

@@ -780,6 +780,9 @@ class Pool:
         # load, `_build_side_slots`); None when all of them were
         self.requested = len(self.slots)
         self.limit_reason: str | None = None
+        # SPD-257: `take_side` among free slots of one window: the one whose resident conversation was
+        # served longest ago first (its prefix's `t_used`; never used first), not the lowest index
+        self.lru = False
 
     @property
     def n(self) -> int:
@@ -797,7 +800,7 @@ class Pool:
         turn carries into slot 0; the caller then serves it on slot 0 with the stash when slot 0
         is free, else takes the slot after all."""
         now = time.monotonic()
-        for s in sorted(self.side(), key=lambda s: s.max_len):
+        for s in sorted(self.side(), key=self._order):
             if self._carry_fresh(s, keep_carry_s, now):
                 continue
             if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
@@ -809,6 +812,15 @@ class Pool:
                     self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
                 return s
         return None
+
+    def _order(self, s: Slot):
+        """`take_side`'s order: the smallest window, then (SPD-257, `lru`) the conversation served longest
+        ago. A new chat that lands on the lowest free slot replaced, or became a guest of, whatever
+        conversation that slot held, however recent; the stable sort keeps the index order on a tie."""
+        if not self.lru:
+            return (s.max_len, 0.0)
+        res = (s.values or {}).get("resident")
+        return (s.max_len, float(getattr(res, "t_used", 0.0) or 0.0))
 
     @staticmethod
     def _carry_fresh(s: Slot, keep_carry_s: float, now: float) -> bool:

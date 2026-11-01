@@ -212,6 +212,13 @@ KNOBS: dict[str, tuple] = {
     'SIDE_HOME_WAIT_S': ('10', 'server/app.py'),
     'SIDE_RESIDENT_GB': ('0.5', 'server/app.py'),
     'SIDE_STASH_GB': ('1.0', 'server/app.py'),
+    # SPD-257: the end anchor's buffers are each resident prefix's own from the load (off: asked of the policy)
+    'END_RESERVE': ('on', 'server/app.py'),
+    # SPD-257: a side slot's guest chat becomes the slot's conversation at its end (off: its end is not kept)
+    'SIDE_GUEST_END': ('promote', 'server/app.py'),
+    'SIDE_GUEST_IDLE_S': ('300', 'server/app.py'),
+    # SPD-257: a new conversation takes the free side slot served longest ago (off: the lowest free one)
+    'SIDE_LRU': ('on', 'server/app.py'),
     # FX16: the end alignment's third pass (a block the client moved from an earlier message to
     # its last one is served where the model saw it), and the prompt length from which a turn
     # the end anchor did not serve says why in the log

@@ -234,6 +234,14 @@ for fd in /proc/$$/fd/*; do
     fd=${fd##*/}
     case "$fd" in 0|1|2|255|*[!0-9]*) ;; *) eval "exec $fd>&-" 2>/dev/null ;; esac
 done
+# SPD-257: the weight profile's allocator setting (QSE_ENGINE_ALLOC_CONF; Flash-Next's: expandable segments) for the
+# engine only: exported for its launch and unset once it runs, so the roles and chatd start without it; an
+# operator's own PYTORCH_CUDA_ALLOC_CONF wins
+ALLOC_FROM_PROFILE=0
+if [ -z "${PYTORCH_CUDA_ALLOC_CONF:-}" ] && [ -n "${QSE_ENGINE_ALLOC_CONF:-}" ]; then
+    export PYTORCH_CUDA_ALLOC_CONF="$QSE_ENGINE_ALLOC_CONF"
+    ALLOC_FROM_PROFILE=1
+fi
 setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
@@ -249,6 +257,7 @@ setsid nohup "$PY" -u server/app.py \
     --disk-cache "${QSE_DISK_CACHE:-off}" \
     >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"
+if [ "$ALLOC_FROM_PROFILE" = "1" ]; then unset PYTORCH_CUDA_ALLOC_CONF; fi
 ln -sfn "$LOG" "$LOGS/engine.log"
 echo "[start] pid $(cat "$PIDFILE"), log $LOG"
 # every 2 s (it was every 10 s: an install's job waited up to 10 s more for an engine that answered,

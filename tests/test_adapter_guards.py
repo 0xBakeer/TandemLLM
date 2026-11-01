@@ -55,8 +55,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: #105: engine/drafters/ngram.py skips a lookup corpus of another tokenizer instead of refusing it: v2 again
 #: SPD-249: the gate's store shed asks the heads before the next level when only heads are left or the chunks before
 #: them were too small to tell (engine/cache.py): v2's second value again
+#: SPD-257: each resident prefix's reserved end anchor, the policy's read of the allocator's pools and the graph
+#: captures on plain segments (engine/cache.py, engine/capture_lock.py, engine/disk_cache.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "6c81236626f8335d1212ea17d26d9ec80c7558f897d1ca8234661dbdd202f028")
+             "5a884c205833992b1cb138bec90714259a1387f5d9af3ee6d2f1e2304b5465ab")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);

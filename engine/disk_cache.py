@@ -1059,7 +1059,7 @@ class DiskTier:
                     # every CUDA call of this thread waits for a graph capture on the engine
                     # thread to end, and holds the next one off until it is done (2026-10-02 21:09:
                     # a copy inside the drafter's capture failed both; engine/capture_lock.py)
-                    with capture_lock.LOCK:
+                    with capture_lock.GUARD:
                         self._ensure_chunk_slots(job.views)
                         buf = self.buf_chunk[0]
                         with self._fence:
