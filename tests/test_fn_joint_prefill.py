@@ -54,6 +54,12 @@ class _Bank:
         self.scale = 1.0 + 0.1 * li
 
 
+def _which(run: list, objs: list) -> list:
+    """The indices in `objs` of a joint run's members, sorted: a run lists them in the order they joined, which two
+    threads started one after the other do not fix."""
+    return sorted(next(i for i, o in enumerate(objs) if o is x) for x in run)
+
+
 def _mm(x, w):
     """A library GEMM whose bits depend on the call's rows (its algorithm by M)."""
     return x.float() @ w.float().T + 1e-3 * x.shape[0]
@@ -380,7 +386,7 @@ def test_the_burst_hook_runs_an_adapters_own_joint_prefill(monkeypatch):
     for t in ts:
         t.join(10)
     assert got == {0: "logits [0, 1]", 1: "logits [1, 2]", 2: None}
-    assert len(runs) == 1 and [x[0] for x in runs[0]] == [engs[0], engs[1]]
+    assert len(runs) == 1 and _which([x[0] for x in runs[0]], engs) == [0, 1]
     assert burst.stats["joint"] == 1 and burst.stats["joint_rows"] == 4
     return "the two that join get the adapter's joint logits; the one it refuses prefills alone"
 
@@ -466,7 +472,8 @@ def test_a_members_own_failure_fails_it_alone(monkeypatch):
             t.join(10)
         assert isinstance(got[2], PoolFull) and isinstance(got[3], ValueError), got
         assert float(got[0].view(-1)[0]) == 10.0 and float(got[1].view(-1)[0]) == 20.0
-        assert runs == [[ss[0].st, ss[1].st]]          # one joint forward, without the failing members
+        # one joint forward, without the failing members
+        assert len(runs) == 1 and _which(runs[0], [s.st for s in ss]) == [0, 1], runs
         assert burst.stats["joint"] == 1 and burst.stats["joint_rows"] == 4 and not burst.is_open()
         assert ss[2].st.length == 0 and ss[3].st.length == 0 and ss[2].stats["prefill_rows"] == 0
         assert ss[0].st.length == 2 and ss[0].stats["prefill_rows"] == 2
