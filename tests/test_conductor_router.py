@@ -927,6 +927,7 @@ def test_the_servers_own_eta_reads_its_queue():
     import time as _t
     from server import preempt
     setup()
+    app.cache_peek.SOLO_RATES._q.clear()          # SRV-763: read before the peek's rate
     real_rate = app._peek_rate
     app._peek_rate = lambda: 1000.0                  # one row a ms
     lane = app.STATE["lane"] = preempt.Lane(lambda job: None, prompt_max=2048, new_max=64)
@@ -977,6 +978,7 @@ def test_a_free_side_slot_beside_a_background_prefill_is_no_immediate_start():
     cond, fakes = setup(decider=lambda t, o: "decider_unreachable", qwen=by_label("debug", 0.8))
     fakes["qwen"].local = True
     cond.router.own_eta = app._own_eta_ms
+    app.cache_peek.SOLO_RATES._q.clear()          # SRV-763: read before the peek's rate
     real_rate, real_rr = app._peek_rate, RR.RUNNER
     app._peek_rate = lambda: 600.0
     app.STATE["prefix_chunk"] = 4096
@@ -1032,6 +1034,7 @@ def test_a_burst_in_the_router_skips_the_questions_that_cannot_fit():
     cond, fakes = setup(decider=lambda t, o: "decider_unreachable", qwen=by_label("debug", 0.8))
     fakes["qwen"].local = True
     cond.router.own_eta = app._own_eta_ms
+    app.cache_peek.SOLO_RATES._q.clear()          # SRV-763: read before the peek's rate
     real_rate = app._peek_rate
     app._peek_rate = lambda: 600.0
     app.STATE["prefix_chunk"] = 4096

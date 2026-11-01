@@ -91,6 +91,10 @@ class Rates:
 
 
 RATES = Rates()
+#: SRV-763: the same over the requests whose prefill had the GPU turn alone (server/app.py `_account`),
+#: the rate the router's own questions are estimated at (`_own_rate`): a burst's shared prefills read
+#: about 5x slower, and after one they were the whole of `RATES`' window
+SOLO_RATES = Rates()
 
 
 #: the counters each tier's lookup adds to (and nothing else writes): `StateStore.find`,

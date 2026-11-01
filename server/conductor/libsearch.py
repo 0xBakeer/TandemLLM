@@ -264,6 +264,9 @@ def _ask(router, plan, cands, text, line, cfg, router_doc, roles,
         if not stages:
             return [], "locked", []
         router_doc = dict(router_doc, classifier=dict(clf, stages=stages))
+    if getattr(plan, "fail_open", False):
+        # SRV-763: the class question could not be answered in time; this one would wait as long
+        return [], "fail_open", []
     picks, how, asked = [], "none", []
     left = [e for e, _ in cands]
     for _ in range(int(cfg["max_picks"])):
@@ -336,7 +339,7 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         picks, how, asked = _ask(router, plan, hits, sh.user_text or "", line, cfg, router_doc,
                                  roles, _about(cls, {c["id"]: c for c in router_doc["classes"]}))
         info["stages"] = asked
-        if how not in ("no_answer", "locked") and not dry:
+        if how not in ("no_answer", "locked", "fail_open") and not dry:
             if len(sess.package_pick) > 32:
                 sess.package_pick.clear()
             sess.package_pick[key] = (picks, how)

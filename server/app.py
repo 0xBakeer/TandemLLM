@@ -986,6 +986,17 @@ def _side_ok(waited_s: float, holder, own: bool = False) -> bool:
 #: SPD-249: `on`: the router skips its Qwen stage when `_own_eta_ms` says the answer cannot come
 #: inside the stage's timeout; `off`: it asks and waits the timeout out, as before
 OWN_ETA = (_S.get("OWN_ETA") or "on").strip().lower()
+#: SRV-763: `solo`: that estimate's prefill rate is the requests' that prefilled alone (`_own_rate`);
+#: `all`: every request's (the peek's rate), as before
+OWN_RATE = (_S.get("OWN_RATE") or "solo").strip().lower()
+#: SRV-763: `prefill`: the other slots charge a unit a turn while they prefill or decode, or hold a
+#: request that has not reached its prefill yet (`_turn_units_ms`); `busy`: every busy slot that
+#: does not decode charges a whole chunk, as before
+OWN_UNITS = (_S.get("OWN_UNITS") or "prefill").strip().lower()
+#: SRV-763: the rate of that estimate's burst term (the requests in the router or waiting for a
+#: slot, `_burst_others`): `peek`, every request's (the peek's rate, as before), since a burst's
+#: prefills share the GPU; `solo`, `_own_rate`'s
+OWN_BURST_RATE = (_S.get("OWN_BURST_RATE") or "peek").strip().lower()
 #: SPD-249: the chat template's rows around a raw question's two messages (a margin, not a count)
 OWN_TEMPLATE_ROWS = 16
 #: SPD-249: the decode turns a question's answer takes after its prefill (a choice id: its first token
@@ -1026,7 +1037,8 @@ def _turn_units_ms(rate: float) -> list[float]:
     """SPD-249: the other GPU holders' units now, each the most it holds the shared turn before its
     next safe point: the round runner's round (one unit for all its lanes), a slot loop's block
     (one unit for the lanes in the joint barrier, one each alone), a prefill chunk at `rate` for a
-    busy slot that does not decode (a prompt's prefill, TandemLLM's own job on slot 0)."""
+    slot that prefills (the chunk it is on, SRV-763) and for TandemLLM's own job on slot 0
+    (`OWN_UNITS=busy`: for every busy slot that does not decode, as before)."""
     pool = dict.get(STATE, "pool")
     if pool is None:
         return []
@@ -1037,14 +1049,75 @@ def _turn_units_ms(rate: float) -> list[float]:
     chunk = int(STATE.get("prefix_chunk") or 0) or 4096
     units = []
     # slot 0 runs under the engine lock (its pool slot may have a lock of its own that nobody takes)
-    phases = [s.phase for s in pool.slots if (LOCK.locked() if s.index == 0 else s.busy)]
+    busy = [s for s in pool.slots if (LOCK.locked() if s.index == 0 else s.busy)]
+    phases = [s.phase for s in busy]
     if "runner" in phases:
         units.append(rnd)
     if "decode" in phases:
         units.append(rnd)
     units += [rnd for p in phases if p == "solo"]
-    units += [1e3 * chunk / rate for p in phases if p not in ("runner", "decode", "solo")]
+    if OWN_UNITS != "prefill":
+        units += [1e3 * chunk / rate for p in phases if p not in ("runner", "decode", "solo")]
+        return units
+    # SRV-763: a slot charges a prefill unit while it prefills (the chunk it is on), on slot 0
+    # while TandemLLM's own job (no request) holds it, and while its request has not reached its
+    # prefill (its prompt's rows, up to a chunk: the memory admission, the vision tower). A
+    # request's slot in its end's bookkeeping has no GPU work to wait for (idle 2026-10-31: the
+    # router's class question, ended, still held slot 0, and the package question's estimate
+    # read 3 turns x 3.8 s for it)
+    for s in busy:
+        if s.phase == "prefill":
+            left = getattr(s, "prefill_left", None)
+            left = chunk if left is None else left
+            units.append(1e3 * max(1, min(chunk, int(left))) / rate)
+        elif s.phase == "" and s.index == 0 and _own_job_holds():
+            units.append(1e3 * chunk / rate)
+        elif s.phase == "" and getattr(s, "pending_rows", None):
+            units.append(1e3 * max(1, min(chunk, int(s.pending_rows))) / rate)
     return units
+
+
+def _pending_mark(pool, side, rows: int) -> None:
+    """SRV-763: the slot a request was granted (`side`, else slot 0) holds `rows` prompt rows its
+    prefill has not started on (`_prefill_mark` and `_par_end` clear it), for the other requests'
+    `_turn_units_ms`."""
+    if pool is None:
+        return
+    slot = side if side is not None else pool.slots[0]
+    slot.pending_rows = int(rows) if int(rows or 0) > 0 else None
+
+
+def _own_job_holds() -> bool:
+    """SRV-763: slot 0 is held by TandemLLM's own work that is no request (the prepare or memory
+    job, the shadow reader, a lock no request took), whose prefill's progress nobody reports."""
+    with QUEUE:
+        who = HOLDER["who"]
+    if who is None:
+        return LOCK.locked()
+    return who.get("rank") in (RANK_SHADOW, RANK_PREP)
+
+
+def _own_rate() -> float | None:
+    """SRV-763: the prefill rate `_own_eta_ms` reads: with OWN_RATE `solo` the median of the last
+    requests whose prefill had the GPU turn alone (`cache_peek.SOLO_RATES`; live 2026-10-31 13:45 to
+    18:10: 969 tok/s alone, 178 shared, and after a burst every request of the peek's window was
+    shared), else (or without one yet) the peek's rate."""
+    if OWN_RATE == "solo":
+        r = cache_peek.SOLO_RATES.rate()
+        if r:
+            return r
+    return _peek_rate()
+
+
+def _burst_rate(rate: float) -> float:
+    """SRV-763: the prefill rate of `_own_eta_ms`'s burst term: with OWN_BURST_RATE `peek` the peek's
+    (every request's, as before: in a burst the prefills share the GPU, and an estimate too short
+    asks a question that then runs out its timeout), else (or without one) `rate`."""
+    if OWN_BURST_RATE == "peek":
+        r = _peek_rate()
+        if r:
+            return r
+    return rate
 
 
 def _own_side_free(rows: int, max_new: int, lane_job: bool, holder) -> bool:
@@ -1087,7 +1160,7 @@ def _own_eta_ms(texts, max_new: int = 24) -> float | None:
             rows += len(tok(t, add_special_tokens=False).input_ids)
         except Exception:                                          # noqa: BLE001
             rows += int(len(t or "") / 3.5) + 1
-    rate = _peek_rate()
+    rate = _own_rate()
     if not rate:
         return None
     lane = STATE.get("lane")
@@ -1097,8 +1170,9 @@ def _own_eta_ms(texts, max_new: int = 24) -> float | None:
         own_rows = sum(int(w.get("rows") or 0) for w in WAITERS if w.get("own"))
     chunk = int(STATE.get("prefix_chunk") or 0) or 4096
     turns = -(-rows // chunk) + OWN_ANSWER_TURNS
+    others = _burst_others()
     share = (qwait.turn_wait_ms(turns, _turn_units_ms(rate))
-             + 1e3 * rows * _burst_others() / rate)
+             + (1e3 * rows * others / _burst_rate(rate) if others else 0.0))
     if not LOCK.locked() or _own_side_free(rows, max_new, lane_job, _own_holder()):
         return qwait.own_eta_ms(rows, rate, free=True, turn_ms=share)
     if lane_job:
@@ -1546,6 +1620,7 @@ def _par_end(pool, side, cid) -> None:
         pool.admission.release(cid)
     if pool.burst is not None:
         pool.burst.leave(side.index if side is not None else 0)
+    (side if side is not None else pool.slots[0]).pending_rows = None     # SRV-763
     if side is None:
         pool.slots[0].phase = ""
         return
@@ -1646,10 +1721,51 @@ def _par_chunks(on_chunk):
         if on_chunk is not None:
             on_chunk(done, total)
         pool = dict.get(STATE, "pool")
+        if pool is not None:
+            slot = pool.slots[_par_index()]
+            if slot.phase == "prefill":
+                slot.prefill_left = max(0, int(total) - int(done))     # SRV-763
         if pool is not None and pool.turn is not None:
             pool.turn.pause(_par_index())
     hook.info = getattr(on_chunk, "info", None)
     return hook
+
+
+@contextlib.contextmanager
+def _prefill_mark(rows: int):
+    """SRV-763: this request's slot reads "prefill" with `rows` left (the chunk hook counts them
+    down) while its prompt prefills, for the other requests' `_turn_units_ms`; a slot whose phase is
+    set already keeps it. No-op without side slots."""
+    pool = dict.get(STATE, "pool")
+    slot = _par_slot(pool) if pool is not None else None
+    if slot is not None:
+        slot.pending_rows = None             # its prefill started (`_pending_mark`)
+    if slot is None or slot.phase != "":
+        yield
+        return
+    slot.phase, slot.prefill_left = "prefill", int(rows)
+    try:
+        yield
+    finally:
+        if slot.phase == "prefill":
+            slot.phase = ""
+        slot.prefill_left = None
+
+
+def _alone_watch(rec, pool) -> None:
+    """SRV-763: whether the request's prompt, from the engine lock (its turn taken) to its first token,
+    had the GPU turn alone: no other holder acquired the turn meanwhile (`Turn.stats`). Without side
+    slots the engine lock serializes the requests. `_account` notes the rate of a request that had it
+    (`cache_peek.SOLO_RATES`)."""
+    turn = getattr(pool, "turn", None) if pool is not None else None
+    if turn is None:
+        rec.prefill_alone = True
+        return
+    mark = turn.stats["acquires"]
+
+    def first():
+        rec.prefill_alone = turn.stats["acquires"] == mark
+    rec.on_first = first
 
 
 def _par_block(pool, tree_mode: bool) -> None:
@@ -2426,17 +2542,18 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             # #98: a key no cache holds, so nothing resumes; another session's, so the resident
             # conversation is stashed (a short prompt) or parked or spilled as for any other one
             keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
-        logits, reused, forwarded = cache.prefill(
-            eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
-            chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")) and not cold,
-            resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
-            key_ids=keys, mem=STATE.get("mem"),
-            compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
-            end_mm=end_mm, scratch=scratch, stay=stay, grid_mark=None if cold else grid_mark,
-            # FX5: the highest row this generation can write, for a guest's stash; the monitor's
-            # hidden tokens are not in `max_new`
-            reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
+        with _prefill_mark(len(ctx)):           # SRV-763: the other slots' estimates see it
+            logits, reused, forwarded = cache.prefill(
+                eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
+                chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
+                checkpoint=bool(STATE.get("prefix_cache")) and not cold,
+                resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
+                key_ids=keys, mem=STATE.get("mem"),
+                compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
+                end_mm=end_mm, scratch=scratch, stay=stay, grid_mark=None if cold else grid_mark,
+                # FX5: the highest row this generation can write, for a guest's stash; the
+                # monitor's hidden tokens are not in `max_new`
+                reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         _burst_prefilled()
@@ -6729,6 +6846,8 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     STATE["last_request_end"] = time.time()          # the prewarm's "in use" (SRV-349)
     if not rec.replay:
         cache_peek.RATES.note(int(rec.forwarded), rec.prompt_ms)    # the peek's estimate
+        if rec.prefill_alone:
+            cache_peek.SOLO_RATES.note(int(rec.forwarded), rec.prompt_ms)   # SRV-763: `_own_rate`
     try:
         metrics.on_record(rec)
     except Exception:                                              # noqa: BLE001
@@ -9114,6 +9233,8 @@ class Handler(BaseHTTPRequestHandler):
             rec.slot = 0
         if not micro:
             rec.lock_acquired()
+            _alone_watch(rec, par)
+            _pending_mark(par, side, len(par_why.get("ids") or ()))   # SRV-763: until it prefills
             STATE.pop("spill_restored", None)
             STATE.pop("side_carried", None)
             STATE.pop("park_returned", None)

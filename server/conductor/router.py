@@ -105,6 +105,19 @@ GEN_HEADS_MAX = 256
 GEN_PER_HEAD = 8
 #: `off`: every request with the same head is one session, as before (the A/B)
 SESSION_GENERATIONS = (_S.get("SESSION_GENERATIONS") or "on").strip().lower()
+#: SRV-763: `general`: a turn whose class question the box could not answer in time (every stage
+#: failed, one of them by `LOAD_ERRORS`) asks nothing more (no package or library question); a
+#: session keeps its class and its level. A profile that names an `undecided_class` (chat-app)
+#: gives a new session that class lean: at most the profile's default effort, the class's general
+#: packages and core alone, on its tool turns too; a new session whose answers all stayed below the
+#: bar takes it with its whole policy, unless the top answer's class builds (the default class, as
+#: before). Either guess holds back no later answer (`Session.guess`). A profile without one keeps
+#: its default class's whole policy and stickiness. `class`: the default class's whole policy and
+#: the package question, as before
+FAIL_OPEN = (_S.get("FAIL_OPEN") or "general").strip().lower()
+#: SRV-763: the stage errors that say the server was busy, not that a classifier is missing: the
+#: reasons, after its kind, of the stage that asks the server's own port (every stage but the decider)
+LOAD_ERRORS = frozenset({"busy", "timeout", "http_429", "http_503"})
 
 COMPOSITE = "TandemLLM"
 
@@ -233,11 +246,15 @@ class Injection:
 class Session:
     __slots__ = ("key", "cls", "conf", "source", "since", "turns", "user_hash", "last_row",
                  "notes", "history", "package_pick", "lock", "compacted", "size_tier",
-                 "prompt_first", "prompt_last", "evidence", "acts", "cwd")
+                 "prompt_first", "prompt_last", "evidence", "acts", "cwd", "guess")
 
     def __init__(self, key):
         self.key = key
         self.cls = self.conf = self.source = self.user_hash = self.last_row = None
+        # SRV-763: why the session's class is a guess (`FAIL_OPEN`): `busy`, the server could not
+        # answer in time; `below`, the profile's undecided class for answers below the bar; None
+        # once an answer or a rule decided it
+        self.guess: str | None = None
         self.compacted = False             # a compaction request came; the next class says so
         self.size_tier = None              # the largest size tier this task reached (SRV-157)
         self.prompt_first = self.prompt_last = None   # prompt tokens: first and latest turn
@@ -392,6 +409,10 @@ class Plan:
         self.fresh = False
         self.head_end: int | None = None
         self.head_ids: list[int] | None = None
+        # SRV-763 (`FAIL_OPEN`): the box could not answer this turn's class question in time, or
+        # the session runs on that fallback (`lean`): the turn asks no other question
+        self.fail_open = False
+        self.lean = False
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -833,6 +854,7 @@ class Router:
             if a is None:
                 stages.append(Answer(st["kind"], error=f"{st['kind']}_{why}").as_dict())
                 continue
+            eta = None
             if st["kind"] == "decider":
                 room = a.state_chars() if hasattr(a, "state_chars") else chars
                 ans = a.choice(signals.digest(text, min(chars, room), line),
@@ -841,7 +863,8 @@ class Router:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
                 state = signals.digest(text, chars, line)
                 prompt = _qwen_prompt(router, question, qid, about, listing)
-                busy = self._stage_busy(a, st, prompt, state[:chars])
+                eta = self._stage_eta(a, prompt, state[:chars])
+                busy = self._stage_busy(a, st, eta)
                 if busy is not None:
                     stages.append(busy)
                     continue
@@ -849,6 +872,9 @@ class Router:
             if st["kind"] == "qwen" and question is None:
                 ans = _code_guard(ans, text, options)    # SRV-189
             d = ans.as_dict()
+            if eta is not None and eta != float("inf"):
+                # SRV-763: the estimate beside the measured `ms`, for its check (the served model's stage)
+                d["eta_ms"] = round(eta, 1)
             if getattr(ans, "guard", None):
                 d["guard"] = ans.guard
             need = accept if accept is not None else float(st["accept"])
@@ -864,18 +890,22 @@ class Router:
                 break
         return accepted, stages
 
-    def _stage_busy(self, a, st: dict, prompt: str, state: str) -> dict | None:
-        """SPD-249: the Qwen stage's row when its answer cannot come inside the stage's timeout
-        (`qwen_busy`), else None and the stage is asked. Only for the server's own port, whose
-        queue `own_eta` sees: questions queued behind slot 0 ran out their 8 s timeout one after
-        the other in a burst of chats; skipping at once is the same fall-through without the
-        wait. Never asked here, so never a call (`decisions.stats`)."""
+    def _stage_eta(self, a, prompt: str, state: str) -> float | None:
+        """SPD-249: the server's estimate (ms) of when the Qwen stage's question is answered, for
+        the server's own port, whose queue `own_eta` sees; None without one."""
         if self.own_eta is None or not getattr(a, "local", False):
             return None
         try:
-            eta = self.own_eta((prompt, state), int(getattr(a, "max_tokens", 24)))
+            return self.own_eta((prompt, state), int(getattr(a, "max_tokens", 24)))
         except Exception:                                          # noqa: BLE001
             return None
+
+    @staticmethod
+    def _stage_busy(a, st: dict, eta: float | None) -> dict | None:
+        """SPD-249: the Qwen stage's row when its answer cannot come inside the stage's timeout
+        (`qwen_busy`), else None and the stage is asked: questions queued behind slot 0 ran out
+        their 8 s timeout one after the other in a burst of chats; skipping at once is the same
+        fall-through without the wait. Never asked here, so never a call (`decisions.stats`)."""
         limit = float(st.get("timeout_ms") or getattr(a, "timeout_ms", 0) or 0)
         if eta is None or limit <= 0 or eta <= limit:
             return None
@@ -1341,12 +1371,44 @@ class Router:
             below = self._below_build(stages, router, sess, classes)
             if below is not None:
                 return below
-            return (sess.cls if sess.cls in classes else default), None, "fallback", (
-                "fail_open" if stages and all(s.get("error") for s in stages) else "no_answer")
+            failed = bool(stages) and all(s.get("error") for s in stages)
+            # SRV-763: to answers below the bar a session whose class is a guess is new: the
+            # default class here, then `_conclude`'s undecided class unless the top class builds
+            keep = sess.cls in classes and (failed or not self._guessed(sess))
+            return (sess.cls if keep else default), None, "fallback", (
+                "fail_open" if failed else "no_answer")
         if sess.cls in classes and sess.cls != ans.label and \
-                ans.confidence < float(router["stickiness"]["switch"]):
+                ans.confidence < float(router["stickiness"]["switch"]) and \
+                not self._guessed(sess):
+            # SRV-763: the undecided class was no answer; the first one replaces it
             return sess.cls, sess.conf, "sticky", "below_switch"
         return ans.label, ans.confidence, ans.stage, None
+
+    @staticmethod
+    def _guessed(sess) -> bool:
+        """SRV-763: the session's class is the profile's undecided class, which no answer decided
+        (`Session.guess`): it counts as a new session's. A session without the field has no guess."""
+        return FAIL_OPEN == "general" and bool(getattr(sess, "guess", None))
+
+    @staticmethod
+    def _load_failed(stages) -> bool:
+        """SRV-763: every stage failed and one because the server was busy (`LOAD_ERRORS`)."""
+        return bool(stages) and all(s.get("error") for s in stages) and \
+            any(s.get("stage") != "decider" and s["error"] in {f"{s.get('stage')}_{e}" for e in LOAD_ERRORS}
+                for s in stages)
+
+    @staticmethod
+    def _top_builds(stages, classes) -> str | None:
+        """SRV-763: the class the last answered stage put first when that class builds (its policy
+        names `BUILD_MARK`, as for `_below_build`), else None."""
+        st = next((s for s in reversed(stages) if s.get("probs") and not s.get("error")), None)
+        if st is None:
+            return None
+        top = max(st["probs"].items(), key=lambda kv: kv[1])[0]
+        if top not in classes or \
+                BUILD_MARK not in ((classes[top].get("policy") or {}).get("packages") or []):
+            return None
+        return top
 
     @staticmethod
     def _below_build(stages, router, sess, classes):
@@ -1359,7 +1421,9 @@ class Router:
         file until the argument loop guard stopped it. The class's reading line still says what
         was built when a second build class is close (`_reading`)."""
         rule = (router["classifier"].get("below_accept") or {})
-        if rule.get("mode", "default") != "build" or sess.cls in classes:
+        # SRV-763: a session whose class is the undecided class's guess has no classified message
+        if rule.get("mode", "default") != "build" or \
+                (sess.cls in classes and not Router._guessed(sess)):
             return None
         st = next((s for s in reversed(stages) if s.get("probs") and not s.get("error")), None)
         if st is None:
@@ -1385,6 +1449,31 @@ class Router:
         row = plan.row
         row["classifier_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
         row["stages"] = stages
+        load = FAIL_OPEN == "general" and kept == "fail_open" and self._load_failed(stages)
+        took, renew = None, False
+        if load or (FAIL_OPEN == "general" and kept == "no_answer"):
+            # SRV-763: nobody decided the message's class, because the server could not answer in
+            # time (a burst of chats: 92 of 113 Chat-tab turns fell back to code_edit at xhigh with
+            # its coding packages) or every answer stayed below its bar. A busy turn asks nothing
+            # more. A new session (or one whose class is still a guess) of a profile that names an
+            # undecided class takes it, and its class is a guess; any other profile keeps its
+            # default class's whole policy and stickiness (opencode, hermes, overnight)
+            plan.fail_open = load
+            with sess.lock:
+                new = sess.cls not in classes or self._guessed(sess)
+            und = prof.get("undecided_class")
+            if new and und in classes:
+                renew = True
+                top = None if load else self._top_builds(stages, classes)
+                if top is not None:
+                    # below the bar and its top class builds (a second build class close behind,
+                    # `_below_build`'s margin): the default class and its files-care, as before
+                    row["extra"]["undecided_builds"] = {"top": top, "kept": cls}
+                else:
+                    took = "busy" if load else "below"
+                    if und != cls:
+                        row["extra"]["undecided_class"] = {"from": cls, "to": und, "why": took}
+                        cls = und
         model_cls, model_conf, model_source = cls, conf, source
         if dec["classify"] == "shadow":
             # journal the class; the policy runs as the profile's default class
@@ -1402,13 +1491,31 @@ class Router:
             follow = dec["classify"] != "off" and model_source != "structural"
             # FX6: the reading line goes in on the turn a class starts, not on every later one
             plan.class_new = model_cls != sess.cls
+            old_cls, was_guess = sess.cls, sess.guess
             if follow and model_cls != sess.cls:
                 sess.history.append({"at": time.time(), "from": sess.cls, "to": model_cls,
                                      "confidence": model_conf, "source": model_source})
             if follow:
                 sess.cls, sess.conf, sess.source = model_cls, model_conf, model_source
+                # SRV-763: a new session's undecided class is a guess until an answer decides. A
+                # later message the box was not too busy for drops the busy guess's lean: the
+                # class's whole policy and the package question (`below`)
+                if model_source == "fallback":
+                    if renew or old_cls not in classes:
+                        sess.guess = took
+                    elif was_guess and not load:
+                        sess.guess = "below"
+                elif model_source != "sticky":
+                    sess.guess = None
             if sh.user_hash is not None:
                 sess.user_hash = sh.user_hash
+            plan.lean = (FAIL_OPEN == "general" and conf is None and sess.guess == "busy"
+                         and source in ("fallback", "sticky"))
+            now_guess = sess.guess
+        if was_guess and follow and now_guess is None and model_cls != old_cls:
+            row["extra"]["guess_replaced"] = {"was": old_cls, "guess": was_guess}
+        if plan.lean:
+            plan.fail_open = True
 
         # ---- the policy
         base = classes[cls]["policy"]
@@ -1431,6 +1538,17 @@ class Router:
             # its user message, so the note a run started with stays the same across its steps
             policy.update(effort=prof["thinking"]["default"], effort_by_size=None)
             row["extra"]["model_fit_lean"] = True
+        if plan.lean:
+            # SRV-763: the busy fallback thinks at most at the profile's default level; its general
+            # packages and core alone go in (`_block`), so its note stays the same on its tool turns
+            cap = prof["thinking"].get("default")
+            if cap in EFFORT_ORDER and policy["effort"] in EFFORT_ORDER and \
+                    EFFORT_ORDER.index(policy["effort"]) > EFFORT_ORDER.index(cap):
+                policy["effort"] = cap
+            policy["effort_by_size"] = None
+            row["extra"]["fail_open"] = {"lean": True, "effort": policy["effort"]}
+        elif plan.fail_open:
+            row["extra"]["fail_open"] = {"lean": False}
         if modelfit.FIT != modelfit.DEFAULTS:
             row["extra"]["model_fit"] = modelfit.summary()
         self._size(plan, router, prof, sh, sess, policy, row)
@@ -1719,7 +1837,9 @@ class Router:
                 row["extra"]["package_core"] = [g for g in general if g in core]
         if dec["packages"] != "off" and cands:
             chosen, how = None, None
-            if len(cands) == 1:
+            if plan.lean:
+                how = "fail_open"         # SRV-763: the busy fallback's general packages alone
+            elif len(cands) == 1:
                 chosen, how = cands[0], "only_candidate"
             else:
                 pk = (cls, sh.user_hash)
@@ -1734,6 +1854,13 @@ class Router:
                     hit = (held[0], "sticky")
                 if hit is not None:
                     chosen, how = hit
+                elif plan.fail_open:
+                    # SRV-763: the class question could not be answered in time; a second question
+                    # waits as long. No package for this message, on its tool turns too
+                    how = "fail_open"
+                    if len(sess.package_pick) > 32:
+                        sess.package_pick.clear()
+                    sess.package_pick[pk] = (None, how)
                 else:
                     opts = {p: packages["packages"][p]["description"] for p in cands
                             if p in packages["packages"]}

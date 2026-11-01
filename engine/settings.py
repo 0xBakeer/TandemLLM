@@ -182,6 +182,17 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the router skips its Qwen stage at once when the server's queue says the answer
     # cannot come inside the stage's timeout (`qwen_busy`); off: it asks and waits out the timeout
     'OWN_ETA': ('on', 'server/app.py'),
+    # SRV-763: the prefill rate that estimate reads: `solo`, the requests whose prefill had the GPU
+    # turn alone (a burst's shared prefills read 5x slower); `all`, every request's, as before
+    'OWN_RATE': ('solo', 'server/app.py'),
+    # SRV-763: the other slots it charges a turn each: `prefill`, a slot while it prefills (the
+    # chunk it is on), decodes, or holds a request that has not reached its prefill (its rows, up
+    # to a chunk); `busy`, every busy slot that does not decode a whole chunk, as before (a slot in
+    # its end's bookkeeping read 3.8 s a turn on an idle box)
+    'OWN_UNITS': ('prefill', 'server/app.py'),
+    # SRV-763: the rate of its burst term (the other requests in the router or waiting for a slot):
+    # `peek`, every request's, as before (a burst's prefills share the GPU); `solo`, OWN_RATE's
+    'OWN_BURST_RATE': ('peek', 'server/app.py'),
     # SPD-249: TandemLLM's own raw questions (the router's) take an idle side slot: one short enough
     # for the side lane instead of the lane when slot 0 is busy, a longer one without waiting
     # SIDE_AFTER_OWN_S behind other own work; off: the lane and the wait, as before
@@ -190,6 +201,11 @@ KNOBS: dict[str, tuple] = {
     # system message on a conversation's first turn, so chats share that head in the prefix cache;
     # off: every note at the last message's end, as before
     'NOTES_HEAD': ('off', 'server/conductor/router.py'),
+    # SRV-763: a turn whose class question the server could not answer in time asks nothing more;
+    # in a profile that names an undecided class (chat-app) a new session nobody classified takes
+    # it (lean when the server was busy), any other keeps its default class's whole policy;
+    # `class`: the default class's whole policy and the package question, as before
+    'FAIL_OPEN': ('general', 'server/conductor/router.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

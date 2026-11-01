@@ -395,7 +395,7 @@ class Turn:
 class Slot:
     """One sequence. `values` holds a side slot's own values of the `OVERLAY` keys; slot 0 has
     none (it is `STATE`). `phase` is "decode" while its request is in the block loop (the barrier
-    waits only for those slots), else ""."""
+    waits only for those slots), "prefill" while its prompt prefills (SRV-763), else ""."""
 
     def __init__(self, index: int, max_len: int, values: dict | None = None, lock=None):
         self.index = int(index)
@@ -405,6 +405,12 @@ class Slot:
         self.owner = None
         self.served = 0
         self.phase = ""
+        # SRV-763: the rows its prefill has left while `phase` is "prefill" (server/app.py
+        # `_prefill_mark`), else None
+        self.prefill_left: int | None = None
+        # SRV-763: the prompt rows of the request granted the slot while its prefill has not
+        # started (server/app.py `_pending_mark`), else None
+        self.pending_rows: int | None = None
         self.t_start = None
         # FX10 (SRV-213): `gen` counts the grants; `carry` is the end of the last request this
         # side slot served (server/app.py `_side_keep_end`), usable while `gen` is unchanged: no
@@ -891,6 +897,7 @@ class Pool:
         slot.owner = None
         slot.served += 1
         slot.phase = ""
+        slot.pending_rows = None
         slot.t_start = None
         slot.lock.release()
 

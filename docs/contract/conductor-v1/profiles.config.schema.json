@@ -34,6 +34,10 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
     },
+    "undecided_class": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+    },
     "decisions": {
       "type": "object",
       "properties": {

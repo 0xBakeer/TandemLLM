@@ -60,7 +60,8 @@ def drift(profiles: dict, derived: dict) -> list[str]:
 # schema, so the schema before the fix (no memory key on chat-app) fails here
 # SRV-621: `tools` is general with its own decisions, tasks, tool gate, state lines, sampling,
 # prompt and transcript switches; memory is general's `none` (SRV-703)
-DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory")),
+# SRV-763: chat-app's own `undecided_class` (a new chat nobody classified is a chat)
+DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory", "undecided_class")),
            "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui",
                                  "sampling", "prompt", "transcripts", "secret_mask"))}
 
