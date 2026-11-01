@@ -32,11 +32,13 @@ statistic is the file's (`stat`: "q" the head's own probability of the pick at T
 softmax), with its own per-depth calibration for the cut (`cal`, the format of the coupled calibration file) where the file has one.
 
 File (safetensors, `FN_MTP_CORRECTOR_FILE`; auto: ops/correctors/<model>/<profile>.corrector.safetensors, the profile
-as the price files resolve it): A [hh, H] bf16, a [D, hh], T [hot, hh] bf16, C [5, hh], w2 [hh], cp [D, 2 + kc] (beta,
-kappa, rho) fp32; metadata "corrector" (JSON): kc, hh, D, tau, sampling {temperature, top_k, top_p}, stat, cal, the
-training record. `check` reads the file against the kernel before anything goes to the device; a file that is missing,
-fails it, or was trained at another tau than FN_MTP_COUPLED_TAU leaves the coupled drafts plain, with one log line, and
-`status` (the build's info, `/health` `weights.corrector`) says which and why.
+as the price files resolve it; ops/use-profile.sh fetches a profile's file to QSE_CORRECTOR_PATH from QSE_CORRECTOR_HF at
+the commit QSE_CORRECTOR_REVISION and checks it against QSE_CORRECTOR_SHA256): A [hh, H] bf16, a [D, hh], T [hot, hh]
+bf16, C [5, hh], w2 [hh], cp [D, 2 + kc] (beta, kappa, rho) fp32; metadata "corrector" (JSON): kc, hh, D, tau, sampling
+{temperature, top_k, top_p}, stat, cal, the training record. `check` reads the file against the kernel before anything
+goes to the device; a file that is missing, fails it, or was trained at another tau than FN_MTP_COUPLED_TAU leaves the
+coupled drafts plain, with one log line, and `status` (the build's info, `/health` `weights.corrector`) says which and
+why.
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ STAT_Q, STAT_MARGIN, STAT_C = 0, 1, 2
 STATS = {"q": STAT_Q, "margin": STAT_MARGIN, "c": STAT_C}
 #: the file's tensors (the module docstring's shapes)
 TENSORS = ("A", "a", "T", "C", "w2", "cp")
+#: `_corr` holds a [kc, hh] fp32 tile a row: the widest hidden layer and the largest tile `check` takes
+HH_MAX, TILE_MAX = 1024, 16384
 
 try:
     import triton
@@ -234,7 +238,7 @@ def _pow2(n: int) -> bool:
 def check(t: dict, meta: dict, hidden: int | None = None, tau: float | None = None) -> None:
     """Raise ValueError naming the first thing in a corrector file the kernel cannot take: a missing tensor, one that
     is not floating point or holds a value that is not finite, kc not a power of 2 from 2 to the pick's KP, hh not a
-    power of 2, a shape other than the metadata's (A [hh, H] with H = `hidden`, the MTP layer's output width, when
+    power of 2 up to HH_MAX, a [kc, hh] tile above TILE_MAX, a shape other than the metadata's (A [hh, H] with H = `hidden`, the MTP layer's output width, when
     given; a [D, hh], T [rows, hh], C [5, hh], w2 [hh], cp [D, 2 + kc]), an unknown statistic, a sampling or tau
     that is not a number, a calibration table `coupled.check_cal` refuses; with `tau` (FN_MTP_COUPLED_TAU), a file
     trained at another tau. `_corr` reads every one of these sizes from its launch arguments, so a file that passes
@@ -254,8 +258,10 @@ def check(t: dict, meta: dict, hidden: int | None = None, tau: float | None = No
         raise ValueError(f"metadata kc, hh, D: {e!r}") from None
     if not (2 <= kc <= KP and _pow2(kc)):
         raise ValueError(f"kc {kc}: a power of 2 from 2 to {KP}")
-    if not _pow2(hh):
-        raise ValueError(f"hh {hh}: not a power of 2")
+    if not _pow2(hh) or hh > HH_MAX:
+        raise ValueError(f"hh {hh}: a power of 2 up to {HH_MAX}")
+    if kc * hh > TILE_MAX:
+        raise ValueError(f"kc {kc} x hh {hh}: the kernel's tile holds at most {TILE_MAX} values")
     if D < 1:
         raise ValueError(f"D {D}: no depth")
     want = {"A": (hh, int(hidden) if hidden else (t["A"].shape[-1] if t["A"].dim() else 0)), "a": (D, hh),
@@ -313,9 +319,7 @@ class Corrector:
         """The file at `path` on `device`, after `check` (ValueError: what it gets wrong; nothing on the device)."""
         from safetensors import safe_open
         with safe_open(path, framework="pt", device="cpu") as f:
-            md = f.metadata() or {}
-            # the JSON is under "corrector"; a file of the first training run holds it as its only entry
-            raw = md.get("corrector") or (next(iter(md.values())) if len(md) == 1 else None)
+            raw = (f.metadata() or {}).get("corrector")
             if raw is None:
                 raise ValueError("no corrector metadata")
             meta = json.loads(raw)
@@ -375,9 +379,11 @@ class Corrector:
         return out
 
     def matches(self, sampler) -> bool:
-        """The request samples as the file was trained for (else its rows keep the plain coupled pick)."""
+        """The request samples as the file was trained for, and the coupled row is filtered like the request
+        (FN_MTP_COUPLED_FILTER), as in training; else its rows keep the plain coupled pick."""
+        from engine.models.flashnext import coupled as CP
         sm = self.sampling
-        return (abs(float(sampler.temperature) - float(sm.get("temperature", 1.0))) < 1e-6
+        return (CP.FILTER and abs(float(sampler.temperature) - float(sm.get("temperature", 1.0))) < 1e-6
                 and int(sampler.top_k) == int(sm.get("top_k", 20))
                 and abs(float(sampler.top_p) - float(sm.get("top_p", 0.95))) < 1e-6
                 and float(getattr(sampler, "min_p", 0.0) or 0.0) == 0.0)

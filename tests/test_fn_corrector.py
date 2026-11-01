@@ -3,14 +3,18 @@
 CPU:
   * knob off: no corrector, a keyed row's parameters are the plain coupled pick's bit for bit (the flag slot 0), the
     round's cut inputs the plain coupled round's; the keys (the target's keyed noise) are the same with the knob on or off;
-  * knob on: the flag is set only for requests sampled as the file was trained for (T, top-k, top-p, no min-p);
+  * knob on: the flag is set only for requests sampled as the file was trained for (T, top-k, top-p, no min-p) while
+    the coupled row is filtered like the request (FN_MTP_COUPLED_FILTER);
     a flagged round's cut reads the file's calibration, an unflagged one the coupled calibration file's;
   * knob on and no file: one log line, no corrector, every keyed row keeps the plain coupled parameters (the flag slot 0);
   * knob on and a file the kernel cannot take (truncated, a tensor of another shape than the metadata's or the model's,
-    no metadata, kc or hh not a power of 2, a calibration row that is not 10 bins) or one trained at another tau: one
+    no metadata or its JSON under another key than "corrector", kc or hh not a power of 2, hh or the [kc, hh] tile
+    wider than the kernel takes, a calibration row that is not 10 bins) or one trained at another tau: one
     "unusable" line, no corrector, the flag 0, and `status` says why; a good file passes `check` and loads;
   * the auto path is ops/correctors/<model>/<profile>.corrector.safetensors, the profile as the price files resolve it,
-    and the Flash-Next profile's comment names that path;
+    the Flash-Next profile's comment names that path, and flashnext-3.05 fetches its file there;
+  * the shipped file (where it is on the box: the auto path): its sha256 is the one flashnext-3.05 pins, it passes
+    `check` at the model's width and FN_MTP_COUPLED_TAU's default and loads with its own calibration of both keyed heads;
   * `status` (the build's info, /health weights.corrector): loaded or not and why, the file's name and sha256, its sizes
     and trained sampling, and which keyed heads its table covers (`serving.corrector_heads`); no paths;
   * an untrained corrector (w2 0, beta 1, kappa high) picks what the plain coupled pick picks over the top kc.
@@ -182,6 +186,12 @@ def test_a_file_the_kernel_cannot_take_keeps_the_plain_coupled_pick():
     _write(cases["a short calibration row"], t, dict(meta, cal={"512": {"spine": [[0.5] * 9]}}))
     cases["a value that is not finite"] = os.path.join(d, "nan.safetensors")
     _write(cases["a value that is not finite"], dict(t, w2=torch.full_like(t["w2"], float("nan"))), meta)
+    cases["the metadata under another key"] = os.path.join(d, "otherkey.safetensors")
+    _write(cases["the metadata under another key"], t, meta, key="first")
+    cases["hh 2048"] = os.path.join(d, "hh2048.safetensors")                  # a [8, 2048] tile: hh above HH_MAX
+    _write(cases["hh 2048"], t, dict(meta, hh=2048))
+    cases["a 64 x 512 tile"] = os.path.join(d, "tile.safetensors")            # kc * hh above TILE_MAX
+    _write(cases["a 64 x 512 tile"], t, dict(meta, kc=64, hh=512))
     for why, path in cases.items():
         c, st, flag, lines = _get_from(path)
         assert c is None and flag == 0.0, why
@@ -197,9 +207,6 @@ def test_a_file_the_kernel_cannot_take_keeps_the_plain_coupled_pick():
     good_c = CR.Corrector.load(good, device="cpu", hidden=64)
     assert good_c.kc == 8 and good_c.hh == 32 and good_c.T.shape[0] == 512
     assert good_c.calibration(512) is not None
-    first_run = os.path.join(d, "first-run.safetensors")      # a first-run file: its JSON is the only entry
-    _write(first_run, t, meta, key="first")
-    assert CR.Corrector.load(first_run, device="cpu", hidden=64).kc == 8
     return f"{len(cases) + 3} bad or missing files: one line, no corrector, flag 0, status why; a good one loads"
 
 
@@ -219,7 +226,25 @@ def test_the_auto_path():
     prof = open(os.path.join(ROOT, "ops", "profiles", "_flashnext.env")).read()
     assert "QWEN38_FN_MTP_CORRECTOR=1" in prof
     assert os.path.relpath(want, ROOT) in prof, "the profile's comment names another file"
+    # ops/use-profile.sh fetches flashnext-3.05's file to the auto path (tests/test_corrector_fetch.py)
+    p305 = open(os.path.join(ROOT, "ops", "profiles", "flashnext-3.05.env")).read()
+    assert "QSE_CORRECTOR_PATH=${REPO}/" + os.path.relpath(want, ROOT) + "\n" in p305
     return os.path.relpath(want, ROOT)
+
+
+def test_the_shipped_file_loads():
+    from engine.models.flashnext.serving import ROOT
+    path = CR.default_path("flashnext-3.05")
+    if not os.path.isfile(path):
+        raise _skip(f"no {os.path.relpath(path, ROOT)} on this box (ops/use-profile.sh flashnext-3.05 --fetch-only)")
+    pinned = next(ln.split("=", 1)[1].strip() for ln in open(os.path.join(ROOT, "ops", "profiles", "flashnext-3.05.env"))
+                  if ln.startswith("QSE_CORRECTOR_SHA256="))
+    assert CR._sha256(path) == pinned, "the file at the auto path is not the one flashnext-3.05 pins"
+    c = CR.Corrector.load(path, device="cpu", hidden=2560, tau=float(CR._S.get("FN_MTP_COUPLED_TAU")))
+    assert (c.kc, c.hh, c.D, int(c.T.shape[0]), int(c.A.shape[1])) == (8, 256, 4, 65536, 2560)
+    assert c.sampling == {"temperature": 1.0, "top_k": 20, "top_p": 0.95} and c.meta.get("stat", "q") == "q"
+    assert c.calibration(65536) is not None and c.calibration(32768) is not None
+    return f"sha256 {pinned[:16]}: kc 8, hh 256, 4 depths, 65,536 hot rows, both heads calibrated"
 
 
 def test_the_status_names_the_heads_the_table_covers():
@@ -261,10 +286,14 @@ def test_the_flag_follows_the_trained_sampling():
         _, p2 = CP.keyed_for(Sampler(temperature=0.7, top_k=20, top_p=0.95, seed=1000), 717, 4)
         _, p3 = CP.keyed_for(Sampler(temperature=1.0, top_k=40, top_p=0.95, seed=1000), 717, 4)
         _, p4 = CP.keyed_for(Sampler(temperature=1.0, top_k=20, top_p=0.95, min_p=0.05, seed=1000), 717, 4)
+    with _On(corr=c, TAU=0.85, FILTER=False, SIB=True, SIB_MARGIN=1.3):
+        # the coupled row unfiltered (top-k 0, top-p 1 staged): not the rows the file was trained on
+        _, p5 = CP.keyed_for(Sampler(temperature=1.0, top_k=20, top_p=0.95, seed=1000), 717, 4)
     assert k1 == [_key(1000, 717 + d) for d in range(4)]            # the keyed noise is the same with the knob on
     assert p1[CR.FLAG] == 1.0 and p1[:5] == [0.85, 20.0, 0.95, 1.3, 1.0]
     assert p2[CR.FLAG] == 0.0 and p3[CR.FLAG] == 0.0 and p4[CR.FLAG] == 0.0
-    return "flag 1 at T 1 / top-k 20 / top-p 0.95; 0 otherwise; keys unchanged"
+    assert p5[CR.FLAG] == 0.0 and p5[:5] == [0.85, 0.0, 1.0, 1.3, 1.0]
+    return "flag 1 at T 1 / top-k 20 / top-p 0.95 with the coupled filter on; 0 otherwise; keys unchanged"
 
 
 def test_a_flagged_rounds_cut_reads_the_files_calibration():

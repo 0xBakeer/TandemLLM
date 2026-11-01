@@ -113,8 +113,8 @@ GOLDEN_FP4 = {
     # expert kernels with their rows streamed and their groups from one block's scans (all off, the bits the same);
     # every adapter but qwen3_5
     # SPD-255: NemotronH's 33-row verify block on the row kernels (engine/models/nemotron_h/engine.py): nemotron_h
-    # SPD-249: comments only, the plan labels out (engine/settings.py, the round runner, Flash-Next's engine and
-    # serving, the fn_kernels sources); every adapter but qwen3_5
+    # SPD-249: comments only (engine/settings.py, the round runner, Flash-Next's engine and serving, the fn_kernels
+    # sources); every adapter but qwen3_5
     # SPD-249: an eager joint pass after one that raised starts on clean entry tables, a joint graph is kept by its
     # lanes' KV strides too, /health copies the kept keys (engine/models/flashnext/engine.py): Flash-Next and Ornith
     # SPD-249: Flash-Next's coupled MTP drafts for seeded sampled requests, their one-lane head, the cut calibration
