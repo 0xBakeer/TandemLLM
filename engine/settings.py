@@ -206,6 +206,13 @@ KNOBS: dict[str, tuple] = {
     # it (lean when the server was busy), any other keeps its default class's whole policy;
     # `class`: the default class's whole policy and the package question, as before
     'FAIL_OPEN': ('general', 'server/conductor/router.py'),
+    # SRV-765: the head's order, `memory` (the memory card and the index, then the class's note) or
+    # `class` (the class's note first, as before)
+    'NOTES_HEAD_ORDER': ('memory', 'server/conductor/router.py'),
+    # SRV-765: the session's address for the memory routes in a tail note once a session
+    # (`note`), so the index is the same text in every chat; `index`: in the index, as before;
+    # `auto`: `note` only where the index goes in the notes head (NOTES_HEAD on), else `index`
+    'MEMORY_ROUTES': ('auto', 'server/conductor/memory.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

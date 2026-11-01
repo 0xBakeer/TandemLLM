@@ -19,6 +19,11 @@ prefill once:
     rules (at most `pinned_tokens`), then one line per note this request may see (user, project,
     session), at most `index_tokens`. Notes written later in the session do not join it: that
     would move the tail; the model knows them because it wrote them.
+  - the address, with the index once a session when the request has a shell and the index goes
+    in the notes head (SRV-765, `QWEN38_MEMORY_ROUTES`, `routes_layout`): the index names the
+    routes on `<address>`, and this note gives the session's own (`.../s/<token>`), so the index
+    is the same text in every chat of the user and the notes head (`QWEN38_NOTES_HEAD`) is shared
+    in the prefix cache. Where the index sits at the tail it names the session's address itself.
   - the bodies, on a new user message (never a tool turn, never a compaction): BM25 over the
     message's digest, the top `bodies` notes above `min_score` that share at least `min_words`
     of the message's words (BM25's scale moves with the number of notes; a shared-word floor
@@ -66,6 +71,7 @@ from server.conductor import modelfit, schema, signals
 from server.conductor.transcripts import WORKDIR
 from server import memblock
 from server.conductor.libsearch import words as signals_words
+from server.knobs import SETTINGS as _S
 
 CARD = "tandem-memory"
 SKILL = "memory"
@@ -82,6 +88,25 @@ INDEX_HEAD = ("Your memory: notes the runtime keeps for this user{project}. The 
               "edit them. Provisional notes are yours, not confirmed by the user. Read one in "
               "full: GET {tandem_url}/v1/memory/<id>; search: "
               "GET {tandem_url}/v1/memory/search?q=<words>.")
+#: SRV-765: where the index's memory routes get the session's address. `note`: the index names
+#: the routes on `<address>` and is the same text for every chat of the user, so the notes head at
+#: the system message's end (`QWEN38_NOTES_HEAD`) is shared in the prefix cache; the session's own
+#: address (`.../s/<token>`, server/session_tokens.py) goes in ROUTES_NOTE, a tail note once a
+#: session beside the bodies. `index`: the address in the index itself, as before (30 chats sent
+#: 30 index texts, one after masking the token: no chat reused a head). `auto` (the default):
+#: `note` where the index goes in the notes head, `index` everywhere else (`routes_layout`), so a
+#: request without the head is served the prompt it was served before
+MEMORY_ROUTES = (_S.get("MEMORY_ROUTES") or "auto").strip().lower()
+#: the placeholder the `note` layout's index names its routes on
+ADDRESS = "<address>"
+INDEX_HEAD_ROUTES = ("Your memory: notes the runtime keeps for this user{project}. The user can "
+                     "read and edit them. Provisional notes are yours, not confirmed by the user. "
+                     "Read one in full: GET <address>/v1/memory/<id>; search: "
+                     "GET <address>/v1/memory/search?q=<words>, where <address> is this "
+                     "conversation's own, given in its \"Memory address\" note.")
+ROUTES_NOTE = ("Memory address: {tandem_url} is this conversation's own address for your memory "
+               "routes (read a note: GET {tandem_url}/v1/memory/<id>; search: "
+               "GET {tandem_url}/v1/memory/search?q=<words>). It works in this conversation only.")
 # SRV-247 (UX2, 2026-10-07): a client without a shell cannot GET the routes above; told them, the
 # model called a tool named `tool` with a GET on its own memory search, and the engine handed that
 # call to a curl client that had offered no tools (the answer ended at "Let me check my memory").
@@ -337,10 +362,12 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
     statuses = notes_mod.STATUSES if cfg["provisional"] else ("ratified",)
     # the index, once a session (the `unless` keeps it out while a live note carries it)
     shell = "shell" in getattr(plan, "tool_caps", ()) or not getattr(plan, "active", False)
+    layout = routes_layout(plan, sess, cfg)
     idx = index_text(mem.store, user, project, sess.key, cfg, statuses,
                      getattr(router.library._req, "url", None), shell=shell,
                      query=(signals.digest(sh.user_text or "", int(cfg["digest_chars"]), None)
-                            if cfg.get("index_order") == "ranked" and not sh.tool_turn else None))
+                            if cfg.get("index_order") == "ranked" and not sh.tool_turn else None),
+                     routes=layout)
     info["routes"] = shell
     if idx is not None:
         text, ids = idx
@@ -353,6 +380,16 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
                             "head": cfg.get("index_order") != "ranked"})
         info["index"] = {"notes": len(ids), "tokens": _tokens(text)}
         plan.memory["index_ids"] = ids
+        if shell and layout == "note":
+            # SRV-765: the session's address for the routes the index names, at the tail once a
+            # session (the `unless`), so the index above stays the same text for every chat
+            url = getattr(router.library._req, "url", None) or packages_mod.URL_DEFAULT
+            route = ROUTES_NOTE.replace("{tandem_url}", url)
+            plan.extras.append({"key": f"memory_routes:{_h(route)}", "text": route,
+                                "parts": [{"kind": "memory_routes", "name": "address"}],
+                                "kinds": {"memory"}, "reason": "memory address",
+                                "unless": ("memory_routes", "address")})
+            info["address"] = "note"
     # the bodies, on a new user message
     if not sh.tool_turn and (sh.user_text or "").strip() and int(cfg["bodies"]) > 0:
         live = _live_ids(sess)
@@ -451,12 +488,39 @@ def ranked_lines(store, user, project, session, query: str | None, room: int, sh
     return groups
 
 
+def routes_layout(plan, sess, cfg) -> str:
+    """SRV-765: where this request's index names the session's address for the memory routes,
+    `note` (on `<address>`, the address in ROUTES_NOTE at the tail) or `index` (in the index, the
+    text before SRV-765). `QWEN38_MEMORY_ROUTES` `note` or `index` decides; `auto` gives `note`
+    only where the index goes in the notes head: `QWEN38_NOTES_HEAD` on, the index not ranked
+    against the message (`index_order: ranked` keeps it at the tail), a request on the engine's
+    own prompt (the proxy's notes go in the messages, never in a head: `plan.caps`), and the
+    conversation's first turn without a compaction (`Plan.fresh`, where `Plan._apply` puts the
+    head). A later turn follows the session's live index, so an address note that dropped comes
+    back while that index stays; without one, the index goes at the tail as `index`. Everywhere
+    else `auto` serves the prompt as before."""
+    if MEMORY_ROUTES in ("note", "index"):
+        return MEMORY_ROUTES
+    from server.conductor import router as router_mod
+    if router_mod.NOTES_HEAD != "on" or cfg.get("index_order") == "ranked" or \
+            getattr(plan, "caps", None) is not None:
+        return "index"
+    for n in getattr(sess, "notes", None) or ():
+        if any(p.get("kind") == "memory_index" for p in n.parts or ()):
+            return "note" if ADDRESS in (n.text or "") else "index"
+    return "note" if getattr(plan, "fresh", False) and not getattr(plan, "compaction", False) \
+        else "index"
+
+
 def index_text(store, user, project, session, cfg, statuses, url, shell: bool = True,
-               query: str | None = None) -> tuple[str, list] | None:
+               query: str | None = None, routes: str | None = None) -> tuple[str, list] | None:
     """The index note: the pinned ratified rules in full, then the index lines, within their
     token caps. None when the user has no note this request may see. `shell` False (SRV-247): a
     request that cannot reach the memory's routes gets the head without them. SPD-249: with
-    `index_order: ranked` the lines are `ranked_lines` against `query`, the turn's message."""
+    `index_order: ranked` the lines are `ranked_lines` against `query`, the turn's message.
+    SRV-765: `routes` (None: `MEMORY_ROUTES`) `note` names the routes on `<address>` and leaves
+    `url` out, so the text is the same in every session; `index` (and `auto`, which `attach`
+    resolves per request with `routes_layout`) puts `url` in."""
     ranked = cfg.get("index_order") == "ranked"
     groups = (ranked_lines(store, user, project, session, query, int(cfg["index_tokens"]), shell)
               if ranked else store.index_lines(user, project, session))
@@ -464,7 +528,9 @@ def index_text(store, user, project, session, cfg, statuses, url, shell: bool = 
         return None
     pinned = [n for n in store.notes(user) if n.pinned and n.status == "ratified" and
               store.visible(n, project, session)]
-    head = INDEX_HEAD if shell else INDEX_HEAD_NO_SHELL
+    routes = MEMORY_ROUTES if routes is None else routes
+    head = (INDEX_HEAD_NO_SHELL if not shell else
+            INDEX_HEAD_ROUTES if routes == "note" else INDEX_HEAD)
     parts = [head.replace("{project}", f" and the project {project}" if project else "")
              .replace("{tandem_url}", url or packages_mod.URL_DEFAULT)]
     ids = []

@@ -90,6 +90,11 @@ def _marks(tok):
 #: it (`Plan.head_end`, engine/cache.py `Grid`); the varying notes stay at the last message's end.
 #: `off`: every note at the last message's end, as before
 NOTES_HEAD = (_S.get("NOTES_HEAD") or "off").strip().lower()
+#: SRV-765: the order of the head's notes. `memory` (the default): the memory card and the index
+#: first, then the class's note, so chats of one user share the memory part of the head whatever
+#: class each lands on (the class's note differs by class); `class`: the class's note first, as
+#: before
+NOTES_HEAD_ORDER = (_S.get("NOTES_HEAD_ORDER") or "memory").strip().lower()
 #: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
 #: `off`: the packages chosen as before, whatever the tools
@@ -413,6 +418,9 @@ class Plan:
         # the session runs on that fallback (`lean`): the turn asks no other question
         self.fail_open = False
         self.lean = False
+        # SRV-765: the session's token on its addresses (server/session_tokens.py); a head note that
+        # carries it is that session's alone, named in the row's `extra.head_session`
+        self.session_token: str | None = None
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -506,6 +514,7 @@ class Plan:
                 block = self.block
                 if block is not None and block["key"] not in keys:
                     block = self._fresh_block(block, live)
+                class_add = None
                 if block is not None and block["key"] not in keys:
                     text = cfg["injection"]["wrapper"].replace("{text}", block["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
@@ -514,13 +523,14 @@ class Plan:
                             f"note_too_long:{len(nids)}")
                     else:
                         hp = head[0] if head is not None else at
-                        adds.append((Injection(hp, hashes[hp], nids, text, block["parts"],
+                        class_add = (Injection(hp, hashes[hp], nids, text, block["parts"],
                                                block["kinds"], block["key"], sess.turns,
                                                self.row["id"], shas=block.get("shas"),
                                                anchor=(None if head is not None
                                                        else inject.message_anchor(ids, at, marks)),
                                                head=head is not None),
-                                     block["reason"]))
+                                     block["reason"])
+                        adds.append(class_add)
                 # J1: the outcome's note and the cards, after the class's block; a card goes in
                 # only while no live note carries the same card (the first turn, after a
                 # compaction), an outcome's note once
@@ -544,6 +554,14 @@ class Plan:
                                            head=on_head),
                                  x["reason"]))
                     parts |= {(p["kind"], p["name"]) for p in x["parts"]}
+                if class_add is not None and class_add[0].head:
+                    adds = self._head_order(adds, class_add)
+                if head is not None and self.session_token:
+                    bound = sorted({p.get("kind") for n, _ in adds
+                                    if n.head and self.session_token in n.text
+                                    for p in n.parts or ()})
+                    if bound:
+                        self.row["extra"]["head_session"] = bound
                 if head is not None and head[1] is not None:
                     adds = self._head_message(adds, head, hashes)
                 notes = live + [n for n, _ in adds]
@@ -577,6 +595,18 @@ class Plan:
         self.changed = True
         self.row["changed"] = 1
         return torch.tensor(out, dtype=prompt.dtype, device=prompt.device), in_think
+
+    @staticmethod
+    def _head_order(adds: list, class_add: tuple) -> list:
+        """SRV-765 (`NOTES_HEAD_ORDER`): `memory` moves the class's head note after the other head
+        notes (the memory card and the index, the same for every chat of the user), so two chats of
+        different classes still share those; `class` keeps it first. The tail notes keep their
+        order."""
+        if NOTES_HEAD_ORDER == "class":
+            return adds
+        rest = [a for a in adds if a is not class_add]
+        k = max((i + 1 for i, (n, _) in enumerate(rest) if n.head), default=0)
+        return rest[:k] + [class_add] + rest[k:]
 
     @staticmethod
     def _head_message(adds: list, head: tuple, hashes: dict) -> list:
@@ -1095,9 +1125,10 @@ class Router:
         plan.session = sess
         if not dry and self.session_tokens is not None:
             # `{tandem_url}` in this session's notes: its own address, `.../s/<token>`
+            plan.session_token = self.session_tokens.token_for(sess.key)
             self.library.at(session_tokens_mod.with_token(
                 packages_mod.request_url(headers) or packages_mod.URL_DEFAULT,
-                self.session_tokens.token_for(sess.key)))
+                plan.session_token))
         # a compaction under `prompt: client` is served as sent, as on the raw path
         plan.compaction = sh.compaction and not plan.prompt_client
         if not dry:
