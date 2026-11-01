@@ -27,7 +27,7 @@ The test matrix:
  10  against the server (fake engine): `/v1/tokenize` gives the chat prompt's ids, their text reads back as them,
      and `/v1/completions` streams an answer whose prompt_tokens is their count       test_the_tool_against_the_server
  11  SPD-249: a family's draft corrector (/health weights.corrector) goes to the raw file's /health records and
-     setup, and the row says whether it ran (`setup.corrector`); a row without one is as before
+     setup, and the row says whether it loaded (`setup.corrector_loaded`); a row without one is as before
                                                         test_the_corrector_is_recorded
 
 Run: python tests/test_parallel_card.py
@@ -175,14 +175,14 @@ def test_the_corrector_is_recorded():
         raw = _raw()
         raw["setup"]["corrector"] = dict(st, loaded=loaded, why=None if loaded else "no file")
         row = pc.build_row(raw)
-        assert row["setup"]["corrector"] is loaded
+        assert row["setup"]["corrector_loaded"] is loaded
         assert not validate(row, registry._PAR_ROW), validate(row, registry._PAR_ROW)
         assert yaml.safe_load("rows:\n" + pc.row_yaml(row))["rows"][0] == row
     raw = _raw()
     raw["setup"]["corrector"] = None
-    assert "corrector" not in pc.build_row(raw)["setup"]
-    assert any("corrector" in e for e in validate(dict(row, setup=dict(row["setup"], corrector="yes")),
-                                                   registry._PAR_ROW))
+    assert "corrector_loaded" not in pc.build_row(raw)["setup"]
+    assert any("corrector_loaded" in e for e in validate(dict(row, setup=dict(row["setup"], corrector_loaded="yes")),
+                                                          registry._PAR_ROW))
     return "/health's corrector in the raw records; the row's setup.corrector true/false; none: no key"
 
 

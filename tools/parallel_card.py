@@ -425,8 +425,9 @@ def build_row(raw: dict) -> dict:
                                  "prompt_tokens": s["prompts"]["prompt_tokens"]}},
            "rounds": raw["args"]["rounds"]}
     if s.get("corrector") is not None:
-        # SPD-249: whether the drafts' corrector ran (its file, sha256 and sizes are in the raw file's setup)
-        row["setup"]["corrector"] = bool(s["corrector"].get("loaded"))
+        # SPD-249: whether the drafts' corrector loaded; which requests it re-scored the server does not count (its
+        # file, sha256, sizes and trained sampling are in the raw file's setup)
+        row["setup"]["corrector_loaded"] = bool(s["corrector"].get("loaded"))
     if raw.get("decode"):
         # a workload whose stream gave no decode window (its text arrived in one event) is left out
         row["decode"] = {w: _r(raw["decode"]["median"][w], 1) for w in ("code", "prose")

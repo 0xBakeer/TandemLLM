@@ -1307,7 +1307,7 @@
               "setup": {
                 "additionalProperties": false,
                 "properties": {
-                  "corrector": {
+                  "corrector_loaded": {
                     "type": "boolean"
                   },
                   "env": {
