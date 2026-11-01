@@ -36,6 +36,7 @@ from engine.tree import DraftTree  # noqa: E402
 class _Cfg:
     attention_layers = (3,)
     num_key_value_heads, head_dim, indexer_head_dim, has_indexer = 2, 8, 4, True
+    indexer_compress_ratio = 4
     ple_layers = {1: 0}
     eos_token_id, hc_count, hidden_size = 3, 1, 3
 
@@ -54,6 +55,12 @@ class _FN:
         self.commits: list = []
         self._pending: dict = {}          # id(state) -> state with parked GDN rows (SPD-229: each its own)
         self.flushes = 0
+        self._joint: dict = {}            # id(state) -> its block of the last joint pass
+        self._cnt = torch.zeros(1, dtype=torch.int32)
+
+    def _pend_of(self, st):
+        """The parked rows' buffers and count (a capture's state save reads the count, SPD-261)."""
+        return {}, self._cnt
 
     def parked(self, st):
         return id(st) in self._pending

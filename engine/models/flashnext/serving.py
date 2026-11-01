@@ -40,7 +40,9 @@ from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
 from engine.settings import SETTINGS as _S
-from engine.models.flashnext.engine import CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
+from engine.models.flashnext import coupled as CP
+from engine.models.flashnext.engine import (CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph,
+                                            _state_restore, _state_saved)
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
@@ -68,6 +70,90 @@ class _DraftReadWait:
     @staticmethod
     def wait() -> None:
         torch.cuda.current_stream().synchronize()
+
+
+def _leave_capture_stream() -> None:
+    """SPD-261: after a capture that raised, the engine thread on its own stream again. `torch.cuda.graph` ends the
+    capture before it leaves the capture stream (torch 2.13), so a capture whose end raised (an invalidated one) left
+    the thread on torch's capture stream, where every later launch of the thread would queue. The verify, commit and
+    draft graphs are captured on that stream; the engine's threads run on the default stream."""
+    cap = getattr(torch.cuda.graph, "default_capture_stream", None)
+    if cap is not None and torch.cuda.current_stream() == cap:
+        torch.cuda.set_stream(torch.cuda.default_stream())
+
+
+def _after_failed_capture() -> None:
+    """SPD-261: before a call runs again eagerly after its capture raised: the thread's own stream, and every launch of
+    the capture's warm-ups landed (they were queued on a stream of their own)."""
+    _leave_capture_stream()
+    torch.cuda.synchronize()
+
+
+class _MTPHead(FlashNextMTPHead):
+    """SPD-261: Flash-Next's MTP head as `add_mtp_head` builds it: a chain capture that fails keeps no graph.
+
+    `FlashNextMTPHead.launch` and `capture_all` key a new chain graph before they capture it, so a capture that raised
+    (an allocation in the graph pool, a Triton launch the KV pool refused) left an uncaptured graph under its key and
+    every later draft of that key replayed it. Here a call that raises drops the graphs it keyed. A draft whose capture
+    failed then runs its chain eagerly: `mtp_chain_dev` from the same staging, the graph's own launches (the capture's
+    warm-ups wrote only cache rows past the length and pool blocks the feed writes again). The round completes, and
+    the next draft of that key captures it again. A draft only proposes tokens: the verify decides what is written.
+    `capture_all` and `capture_class` raise as before. A dropped graph goes to `dead` (the adapter's `dead_graphs`):
+    kept, never reset."""
+
+    def __init__(self, *a, dead: list | None = None, **kw):
+        self.dead = dead if dead is not None else []
+        super().__init__(*a, **kw)
+
+    def _drop(self, n0: int) -> list:
+        made = list(self.graphs)[n0:]
+        for k in made:
+            self.dead.append(self.graphs.pop(k))
+            self.fresh.discard(k)
+        return made
+
+    def capture_all(self) -> None:
+        n0 = len(self.graphs)
+        try:
+            super().capture_all()
+        except Exception:
+            self._drop(n0)
+            _leave_capture_stream()
+            raise
+
+    def capture_class(self, n: int, cls: int) -> None:
+        n0 = len(self.graphs)
+        try:
+            super().capture_class(n, cls)
+        except Exception:
+            self._drop(n0)
+            _leave_capture_stream()
+            raise
+
+    def launch(self, rows: torch.Tensor, nexts: list[int]) -> None:
+        n0 = len(self.graphs)
+        try:
+            super().launch(rows, nexts)
+            return
+        except Exception as exc:
+            made = self._drop(n0)
+            if not made:
+                raise
+            _after_failed_capture()
+            print(f"[fn-graphs] MTP chain capture {made[0]} failed ({type(exc).__name__}: {exc}): the draft runs "
+                  f"eagerly", flush=True)
+        fn, n = self.fn, len(nexts)
+        cls = fn.qsa_class(self.st.length + n + self.depth - 1)
+        kd = self.keyed if CP.ON else None
+        fn._mtp_key, self._keyed = self.key, kd is not None
+        fn._mtp_bufs(self.depth)["stack"][:n].copy_(rows)
+        staged = (fn.stage_mtp(self.st, nexts, self.depth, keyed=kd) if kd is not None
+                  else fn.stage_mtp(self.st, nexts, self.depth))
+        assert staged == cls
+        fn.mtp_chain_dev(self.st, n, self.depth, cls, keyed=kd is not None)
+        self._khot = self._hot_of(1)
+        self._n = n
+        self.captures += 1                  # the draft's time holds the failed capture: the drafter skips the round
 
 
 class _KV:
@@ -198,6 +284,11 @@ class FlashNextServing:
         self.dg = None                      # the decode step's graphs, made on the first decode token
         self.vgraphs: dict = {}
         self.cgraphs: dict = {}
+        self._eager_block = False           # SPD-261: the last block verified eagerly, so its commit runs eagerly too
+        # SPD-261: every verify, commit or draft graph a failed capture dropped, kept for the adapter's life and never
+        # reset or cleared: a reset gives back torch's cuBLAS workspace of the graph's capture stream
+        # (engine/capture_lock.py, SPD-223), which a kept graph captured on the same stream may read
+        self.dead_graphs: list = []
         # verify width M / commit key (M, n, moved) -> rounds that used it, from a prior of one round
         # each for chains of 2-6 rows (a class's idle captures need shapes before the first rounds)
         self.uses: dict = dict(PRIOR_USES)
@@ -215,7 +306,7 @@ class FlashNextServing:
         self.plain_captured = False         # the last plain step captured its decode graph
         self.heads: dict = {}               # draft heads by name (`draft_heads`)
         self._weights = None                # the weights' bytes by part (`memory_parts`), once
-        self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
+        self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0, "verify_eager": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
     @property
@@ -371,7 +462,8 @@ class FlashNextServing:
         return per_token, cost.section_bytes + SIDE_SLOT_CONST
 
     def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
-        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len, pages=self.st.pages)
+        self.heads["mtp"] = _MTPHead(self.fn, depth, self.max_len, pages=self.st.pages,     # SPD-261
+                                     dead=self.dead_graphs)
         # the head's graphs are captured now (`capture_all`): with the KV pool its first rows must be
         # mapped -- a Triton launch refuses a buffer whose first page is not ("cannot be accessed from
         # Triton", 2026-10-12)
@@ -622,7 +714,7 @@ class FlashNextServing:
             t0 = time.perf_counter()
             if kind == "v":
                 g = VerifyGraph(fn, st, key, cls)
-                g.capture()
+                self._capture_undone(g)
                 self.vgraphs[(key, cls)] = g
                 self._fresh.add((key, cls))
             elif kind == "c":
@@ -639,7 +731,7 @@ class FlashNextServing:
                 vg.replay()
                 fn.stage_commit(st, path)
                 g = CommitGraph(fn, st, (M, n, moved, cls))
-                g.capture()
+                self._capture_undone(g)
                 self.cgraphs[(M, n, moved, cls)] = g
                 self._fresh.add((M, n, moved, cls))
             else:
@@ -648,6 +740,31 @@ class FlashNextServing:
             torch.cuda.synchronize()
             self._capture_took(t0)
             yield
+
+    def _state_undo(self):
+        """SPD-261: before a capture, what its warm-ups may write (`_state_saved`: a verify's warm-up folds the parked
+        GDN rows into each layer it reaches, a commit's applies the commit) and the parked rows' count, saved; returns
+        the call that puts them back. `VerifyGraph` and `CommitGraph` leave the state consistent only after a capture
+        that returns."""
+        fn, st = self.fn, self.st
+        saved, cnt = _state_saved(fn, st), fn._pend_of(st)[1].clone()
+
+        def undo() -> None:
+            _state_restore(saved)
+            fn._pend_of(st)[1].copy_(cnt)
+        return undo
+
+    def _capture_undone(self, g) -> None:
+        """SPD-261: an idle capture whose failure leaves the slot's state as it was (the caller keys the graph only
+        after `g.capture()` returns); a graph whose capture failed goes to `dead_graphs`."""
+        undo = self._state_undo()
+        try:
+            g.capture()
+        except Exception:
+            self.dead_graphs.append(g)
+            _after_failed_capture()
+            undo()
+            raise
 
     @torch.no_grad()
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
@@ -734,18 +851,18 @@ class FlashNextServing:
         toks = [int(t) for t in block.view(-1).tolist()]
         M = len(toks)
         self._ensure(start + M)
-        n_graphs = len(self.vgraphs)
         t0 = time.perf_counter()
-        self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs)
-        self.captured = len(self.vgraphs) > n_graphs
+        how = self._verify(toks, [int(p) for p in parents])
+        # SPD-261: a round that captured its graph, or tried to, or verified eagerly is not a price of its width
+        self.captured = how != "graph"
         self.uses[M] = self.uses.get(M, 0) + 1
         self._width = M
         cls = getattr(self.fn, "_vcls", 0)
         if (M, cls) in self._fresh:
             # an idle capture's first replay uploads the graph: not a price either
             self._fresh.discard((M, cls))
-            self.captured = True
-        if self.captured:
+            self.captured, how = True, "capture"
+        if how == "capture":
             self._capture_took(t0)
         rb = self.fn._rb[M]
         self.picks = rb["next"][:M]
@@ -753,6 +870,64 @@ class FlashNextServing:
         self.stats["verify_blocks"] += 1
         self.stats["verify_rows"] += M
         return rb["logits"][:M]
+
+    def _verify(self, toks: list[int], parents: list[int]) -> str:
+        """SPD-261: `verify` of a block at the state's length, from its graph or eagerly. Returns "graph" (a kept graph
+        replayed), "capture" (the round captured the block's graph, or tried to) or "eager" (a block under a class
+        edge). After an eager verify the block's commit is eager too (`commit_tree`: a commit graph reads the verify
+        graph's own intermediates).
+
+        `verify` keys a block's graph by M and the class of its deepest row, and captures a missing one over a chain of
+        M rows from the length. With the indexer, a chain whose last row is in a higher class than the block's deepest
+        row fails its own warm-up's `class_check` (a shallow tree just under a class edge: rows to 4,095 are class
+        1,024, the chain's to 4,097 class 2,048). Such a block verifies eagerly, at its own class with the same
+        kernels; the class's graph comes from an idle window or a round whose chain fits. A capture that fails keeps
+        no graph and leaves the state as it was; the block then verifies eagerly (`_graphs_call`)."""
+        fn, st, M = self.fn, self.st, len(toks)
+        q, L = fn.qsa_class, int(st.length)
+        top = cls = q(L + M - 1)            # the class of the chain a capture stages
+        if top != q(L):
+            depth = [0] * M
+            for i, p in enumerate(parents):
+                depth[i] = 0 if p < 0 else depth[p] + 1
+            cls = q(L + max(depth))         # `verify`'s class
+        capture = (M, cls) not in self.vgraphs
+        if capture and cls != top:
+            print(f"[fn-graphs] {M}-row block at {L}: no graph of class {cls}, and a capture's chain would end in class "
+                  f"{top}: verified eagerly", flush=True)
+            kept = False
+            fn.verify(toks, parents, st, None)
+        else:
+            kept = self._graphs_call("verify", lambda g: fn.verify(toks, parents, st, g), self.vgraphs, capture)[1]
+        self._eager_block = not kept
+        if not kept:
+            self.stats["verify_eager"] += 1
+        return "graph" if not capture else "capture" if cls == top else "eager"
+
+    def _graphs_call(self, what: str, call, graphs: dict, capture: bool) -> tuple:
+        """SPD-261: `call(graphs)`, a `verify` or `commit` from captured graphs; (its result, True), or (the eager call's
+        result, False) after a failed capture. `verify` and `commit` key a new graph before they capture it, so a
+        capture that raised left a graph that was never captured, and the next rounds of that key replayed it
+        (`graph` None). Here the graphs a failed call keyed are dropped. With `capture` (the call's key is missing)
+        the state its warm-ups may write is saved first (`_state_undo`); a failed call then puts it back and runs
+        eagerly (`call(None)`), so the round completes and the next one captures the key again. A dropped graph goes
+        to `dead_graphs` and is never reset: a reset gives back torch's cuBLAS workspace of its capture stream
+        (engine/capture_lock.py, SPD-223), which a kept graph captured on the same stream may read."""
+        n0 = len(graphs)
+        undo = self._state_undo() if capture else None
+        try:
+            return call(graphs), True
+        except Exception as exc:
+            made = list(graphs)[n0:]
+            for k in made:
+                self.dead_graphs.append(graphs.pop(k))
+            if not made or undo is None:
+                raise
+            _after_failed_capture()
+            undo()
+            print(f"[fn-graphs] {what} capture {made[0]} failed ({type(exc).__name__}: {exc}): eager instead",
+                  flush=True)
+        return call(None), False
 
     def tree_batchable(self, parents) -> bool:
         """A block a joint pass may take (`forward_tree_multi`): its rows within the widths whose
@@ -813,10 +988,20 @@ class FlashNextServing:
     @torch.no_grad()
     def commit_tree(self, path: list[int]) -> None:
         t0 = time.perf_counter()
-        n_graphs = len(self.cgraphs)
-        stack = self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
+        fn, st, path = self.fn, self.st, [int(p) for p in path]
+        n_graphs, kept = len(self.cgraphs), True
+        if self._eager_block:
+            # SPD-261: after an eager verify (a commit graph reads the verify graph's own intermediates)
+            self._eager_block = False
+            stack = fn.commit(st, path, None)
+        else:
+            # SPD-261: `commit`'s key (`stage_commit`: the verified block's rows, the path's, moved, the class); a block
+            # of a joint pass commits eagerly whatever it is given
+            key = (self._width, len(path), any(p != j for j, p in enumerate(path)), getattr(fn, "_vcls", 0))
+            capture = key not in self.cgraphs and id(st) not in fn._joint
+            stack, kept = self._graphs_call("commit", lambda g: fn.commit(st, path, g), self.cgraphs, capture)
         self.commit_ms = (time.perf_counter() - t0) * 1e3
-        if len(self.cgraphs) > n_graphs:
+        if len(self.cgraphs) > n_graphs or not kept:
             self.captured = True
             self._capture_took(t0)
         k = (self._width, len(path), any(int(p) != j for j, p in enumerate(path)))
