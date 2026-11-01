@@ -90,10 +90,13 @@ class FlashNextMTPHead:
         self.fn._mtp_key = self.key
         fn = self.fn
         n = len(nexts)
-        d = self.depth if draft_meet.MEET is not None else self.cur
+        # SPD-235: a packed draft is staged at the deepest chain (`run_packed` drafts the lanes' average); a lone
+        # one drafts its own rung, also under a round runner whose round has no other lane to pack with
+        packed = draft_meet.MEET is not None and draft_meet.MEET(self)
+        d = self.depth if packed else self.cur
         self._d = d
         cls = fn.qsa_class(self.st.length + n + d - 1)
-        if draft_meet.MEET is not None and draft_meet.MEET(self):
+        if packed:
             # SPD-235: the round runner runs this draft with its other lanes' (`run_packed`), before the read
             fn._mtp_bufs(self.depth)["stack"][:n].copy_(rows)
             assert fn.stage_mtp(self.st, nexts, self.depth) == cls
@@ -118,8 +121,12 @@ class FlashNextMTPHead:
 
     @staticmethod
     def run_packed(heads: list) -> None:
-        """SPD-235: the staged drafts of these heads (one engine) in one packed chain."""
-        heads[0].fn.mtp_chain_multi([(h.key, h.st, h._n, h.depth, h._cls) for h in heads])
+        """SPD-235: the staged drafts of these heads (one engine) in one packed chain, as deep as the lanes' rungs
+        on average (halves up: 3 and 6 draft 5); a lane above it drafts fewer this round, one below it more."""
+        d = min(heads[0].depth, int(sum(h.cur for h in heads) / len(heads) + 0.5))
+        for h in heads:
+            h._d = d
+        heads[0].fn.mtp_chain_multi([(h.key, h.st, h._n, d, h._cls) for h in heads])
 
     def read(self) -> tuple[list, list]:
         """After `launch`: per depth the (first, second) token and their probabilities; the fed rows

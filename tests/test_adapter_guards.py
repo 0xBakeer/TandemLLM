@@ -93,8 +93,10 @@ GOLDEN_FP4 = {
     # kernels in tools/ beside fn_kernels): Flash-Next's two adapters only; the shared modules keep their bytes
     # 2026-10-31 (bilikaz): NVIDIA FP4-Local's kernels above 32 rows split columns, not K (tools/mxfp8_skinny,
     # tools/bf16_skinny: the activations staged once a CTA; the skinny kernels' K slices in order, so their bits)
+    # 2026-11-01 (bilikaz): Flash-Next's MTP head drafts its ladder rung under a round runner too, a packed draft the
+    # lanes' rungs on average (engine/models/flashnext/mtp.py): the drafts only, the verify's text unchanged
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "f777194ad719d0cc695d953748286b646a0ca4a38410bd089e98b736e1b1734f",
+    "qwen4_exp": "7466e1784ddd5666bc45461c92e8711c9f216bbd83a7892733d458b74519d5c7",
     "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
     "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
     "qwen3_5_moe": "4f5b6a71934dd475a92443da471f55fb97de41a921828f9215f2af12bc3df3bd",
