@@ -1,5 +1,7 @@
 # The Chat tab and chatd
 
+The Chat tab and chatd are in beta.
+
 The dashboard's Chat tab (`#/chat`) is a chat with history whose runs live on the server: close the
 browser in the middle of an answer, open the chat on a phone, and it shows the answer at the token
 the engine is writing now and keeps streaming. The wire contract is

@@ -48,6 +48,8 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 
 \section{The Chat tab}\label{sec:trouble-chat}
 
+The Chat tab is in beta (\ref{ch:chat}).
+
 \paragraph{The Chat tab asks before every bash command.} The chat runs in Ask mode. The pill in the composer's options row names the mode; pick Auto there, and calls that stay inside the chat's sandbox run without a prompt from the next call on. The default for new chats is at the top of the Tools settings page. A chat from before 0.8.2 has no mode of its own and runs in the default (Section~\ref{sec:chat-modes}).
 
 \paragraph{Auto still asks.} The call leaves the sandbox: \texttt{web\_fetch} to a domain this chat has not fetched yet, an MCP tool its server does not mark read-only, an imported Open WebUI tool that imports a network or process module, or \texttt{rm} aimed at \texttt{/}, \texttt{/workspace} or a home directory. A tool set to \enquote{ask} in the tool settings asks in every mode, and a deny rule refuses in every mode, YOLO included.

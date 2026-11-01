@@ -10,7 +10,7 @@ TandemLLM is a personal AI environment that runs on one machine on a home or off
 |-|-|-|
 | engine server, port 8000 | OpenAI-compatible API on the standard library's `ThreadingHTTPServer`, plus the dashboard API, the conductor, the memory routes and the setup API | `server/`, `engine/` |
 | proxy | the same API in front of other OpenAI-compatible backends and cloud APIs | `proxy/` |
-| chatd, 127.0.0.1:8016 | the Chat tab: conversations, agent runs, tools, MCP, uploads; the engine server forwards `/v1/chat-app/*` to it | `chatd/`, `server/chat_forward.py` |
+| chatd, 127.0.0.1:8016 | the Chat tab (beta): conversations, agent runs, tools, MCP, uploads; the engine server forwards `/v1/chat-app/*` to it | `chatd/`, `server/chat_forward.py` |
 | chat sandbox | one Docker or Podman container per chat, `--network none`; its only way out is chatd's egress proxy | `chatd/sandbox.py`, `chatd/egress.py` |
 | dashboard | the web UI, served by the engine server | `dashboard/` |
 
