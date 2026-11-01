@@ -4,6 +4,7 @@
     python ops/fetch_weights.py --plan [--revision R] <repo> <dir> [file ...]   # every URL and size; no download
     python ops/fetch_weights.py --verify <dir>                            # checksums of what is there
     python ops/fetch_weights.py --assets <profile> --repo <dir> [--also "ID ..."] [--dry-run] [--extra-gb G] [--margin-gb G]
+    python ops/fetch_weights.py --file <repo> <commit> <path> <sha256>   # one file, its name path's (SPD-249)
 
 Downloads into <dir>.partial with the token in ~/.cache/huggingface/token (HF_TOKEN wins; none is needed,
 every repository a profile reads is public), checks every file a checksum list names (crc32.txt: EXL3
@@ -23,6 +24,13 @@ and --margin-gb left over, per filesystem. --also (VIS-153): more assets of the 
 the models of the tools a selection turns on (the shadow reader's, the narrator's, Laya's), fetched the
 same way; one that two tools share is fetched once. Exit 3: an asset has no download (or no such id);
 4: not enough disk; 5: a download or a checksum failed.
+
+--file (SPD-249): one file of a repository at a commit, named as <path>'s last part, to <path>, checked against
+<sha256> (a profile's drafts' corrector: QSE_CORRECTOR_HF, QSE_CORRECTOR_REVISION, QSE_CORRECTOR_PATH,
+QSE_CORRECTOR_SHA256). A file already at <path> with that sha256 is kept; one with another sha256 is replaced, the old
+one kept as <path>.old. The download lands in <path>.partial and is renamed into place only after its sha256 matched,
+so <path> is never a partial or a wrong file. Exit 0: the file is there; 1: the download's sha256 is another;
+2: the hub did not give it (no network, no such repository, commit or file, or a repository someone made private).
 """
 from __future__ import annotations
 
@@ -450,6 +458,45 @@ def fetch_plain(aid: str, repo: str, to: str, e: dict, m: dict) -> int:
     return 0
 
 
+def _hub_download(repo: str, commit: str, name: str, to: str) -> str:
+    """`name` of `repo` at `commit` into the folder `to`; its path."""
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(repo_id=repo, filename=name, revision=commit, local_dir=to, token=_token())
+
+
+def fetch_file(repo: str, commit: str, path: str, sha256: str) -> int:
+    """--file: see the module doc."""
+    name, want = os.path.basename(path), sha256.lower()
+    if os.path.isfile(path):
+        got = _sha256(path)
+        if got == want:
+            print(f"[fetch] {name}: on this box (sha256 {want[:16]})", flush=True)
+            return 0
+        print(f"[fetch] {name}: on this box with sha256 {got[:16]}, not {want[:16]}; downloading {repo}'s", flush=True)
+    part = path + ".partial"
+    shutil.rmtree(part, ignore_errors=True)
+    os.makedirs(part)
+    try:
+        print(f"[fetch] {repo}@{commit[:12]} {name} -> {path}", flush=True)
+        try:
+            got_path = _hub_download(repo, commit, name, part)
+        except Exception as exc:                                  # noqa: BLE001 - the hub's errors, the network's
+            print(f"[fetch] {name}: {repo}@{commit[:12]} did not give it ({type(exc).__name__}: "
+                  f"{str(exc).splitlines()[0][:300] if str(exc) else 'no message'})", flush=True)
+            return 2
+        got = _sha256(got_path)
+        if got != want:
+            print(f"[fetch] {name}: the download's sha256 is {got}, not {want}; not taken", flush=True)
+            return 1
+        if os.path.isfile(path):
+            os.replace(path, path + ".old")
+        os.replace(got_path, path)
+    finally:
+        shutil.rmtree(part, ignore_errors=True)
+    print(f"[fetch] {path} complete (sha256 {want[:16]})", flush=True)
+    return 0
+
+
 def _write_json(path: str, data: dict) -> None:
     with open(path + ".tmp", "w") as fh:
         json.dump(data, fh, indent=1)
@@ -579,6 +626,10 @@ if __name__ == "__main__":
         o = ap.parse_args(a)
         sys.exit(assets(o.assets, o.repo, o.dry_run, o.extra_gb, o.margin_gb,
                         [x for x in o.also.replace(",", " ").split() if x]))
+    if a[:1] == ["--file"]:
+        if len(a) != 5:
+            sys.exit(__doc__)
+        sys.exit(fetch_file(a[1], a[2], os.path.expanduser(a[3]), a[4]))
     dry = a[:1] == ["--plan"]
     a = a[1:] if dry else a
     rev = None
