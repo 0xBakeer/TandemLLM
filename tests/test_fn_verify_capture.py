@@ -508,3 +508,8 @@ def test_spd261_a_dropped_graph_is_kept_and_never_reset():
         assert (5, 1024) not in s.vgraphs
     kept("idle", s, cuda, E.VerifyGraph)
     return "a dropped graph (" + ", ".join(out) + ") stayed alive in dead_graphs and was never reset"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())
