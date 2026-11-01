@@ -213,6 +213,17 @@ KNOBS: dict[str, tuple] = {
     # (`note`), so the index is the same text in every chat; `index`: in the index, as before;
     # `auto`: `note` only where the index goes in the notes head (NOTES_HEAD on), else `index`
     'MEMORY_ROUTES': ('auto', 'server/conductor/memory.py'),
+    # VIS-119: a shadow decision's question to the served model on this server's own port (the
+    # library's package question in shadow) is asked after the turn, once the server has been idle
+    # SHADOW_ASK_IDLE_S seconds (`idle`); `inline`: before the queue, as before; `off`: never
+    'SHADOW_ASK': ('idle', 'server/conductor/deferred.py'),
+    'SHADOW_ASK_IDLE_S': ('5', 'server/conductor/deferred.py'),
+    # VIS-119: on a class whose package answer holds for the session's class, `pick`: a picked
+    # package only; `answer`: an answer of none holds too, for the candidates it was asked over.
+    # The library question is asked on every new user message (`message`) or once per class
+    # (`class`)
+    'PACKAGE_HOLD': ('pick', 'server/conductor/router.py'),
+    'LIBRARY_HOLD': ('message', 'server/conductor/libsearch.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),

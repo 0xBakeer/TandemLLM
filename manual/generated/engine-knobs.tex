@@ -201,6 +201,7 @@
 \texttt{QWEN38\_\allowbreak{}LAUNCH\_\allowbreak{}FIRST} & \texttt{0} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}LEN\_\allowbreak{}MODE} & \texttt{none} & \texttt{wide} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}LEN\_\allowbreak{}SWITCH} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
+\texttt{QWEN38\_\allowbreak{}LIBRARY\_\allowbreak{}HOLD} & \texttt{message} & \texttt{server/\allowbreak{}conductor/\allowbreak{}libsearch.py} \\
 \texttt{QWEN38\_\allowbreak{}LOWER\_\allowbreak{}RIGHT\_\allowbreak{}FROM} & \texttt{64} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}MEMORY\_\allowbreak{}PROXIES} & \texttt{none} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}MEMORY\_\allowbreak{}ROUTES} & \texttt{auto} & \texttt{server/\allowbreak{}conductor/\allowbreak{}memory.py} \\
@@ -234,6 +235,7 @@
 \texttt{QWEN38\_\allowbreak{}OWN\_\allowbreak{}RATE} & \texttt{solo} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}OWN\_\allowbreak{}SIDE} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}OWN\_\allowbreak{}UNITS} & \texttt{prefill} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}PACKAGE\_\allowbreak{}HOLD} & \texttt{pick} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}POOL\_\allowbreak{}SNAPSHOT\_\allowbreak{}TTL\_\allowbreak{}S} & \texttt{5.0} & \texttt{engine/\allowbreak{}decision/\allowbreak{}device.py} \\
 \texttt{QWEN38\_\allowbreak{}PREFILL\_\allowbreak{}CAUSAL} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}PREFILL\_\allowbreak{}WINDOW} & \texttt{8192} & \texttt{engine/\allowbreak{}cache.py} \\
@@ -270,6 +272,8 @@
 \texttt{QWEN38\_\allowbreak{}SAMPLE\_\allowbreak{}TOPP\_\allowbreak{}K} & \texttt{1024} & \texttt{engine/\allowbreak{}sample.py} \\
 \texttt{QWEN38\_\allowbreak{}SCALE\_\allowbreak{}ON} & \texttt{weight} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
 \texttt{QWEN38\_\allowbreak{}SESSION\_\allowbreak{}GENERATIONS} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
+\texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}ASK} & \texttt{idle} & \texttt{server/\allowbreak{}conductor/\allowbreak{}deferred.py} \\
+\texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}ASK\_\allowbreak{}IDLE\_\allowbreak{}S} & \texttt{5} & \texttt{server/\allowbreak{}conductor/\allowbreak{}deferred.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DIR} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DISK} & \texttt{none} & \texttt{auto} \textbullet{} \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DISK\_\allowbreak{}GB} & \texttt{20} & \texttt{20} \textbullet{} \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\

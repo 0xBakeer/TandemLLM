@@ -50,6 +50,7 @@ import time
 
 from server import argloop, thinking
 from server.conductor import incontext, inject, libsearch, modelfit, outcomes, schema, signals, transcripts
+from server.conductor import deferred as deferred_mod
 from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
@@ -123,6 +124,12 @@ FAIL_OPEN = (_S.get("FAIL_OPEN") or "general").strip().lower()
 #: SRV-763: the stage errors that say the server was busy, not that a classifier is missing: the
 #: reasons, after its kind, of the stage that asks the server's own port (every stage but the decider)
 LOAD_ERRORS = frozenset({"busy", "timeout", "http_429", "http_503"})
+#: VIS-119: on a class whose package answer holds for the session's class (`package_sticky:
+#: class`), `pick` (the default, FX15): only a picked package holds and a none is asked again on
+#: the next message (it may fit a package); `answer`: a none holds as well while the follow-up's
+#: candidates are among the ones the none was asked over. A turn with no answer (busy, below the
+#: bar) holds nothing. `answer` waits for a follow-up label set that shows no lost picks
+PACKAGE_HOLD = (_S.get("PACKAGE_HOLD") or "pick").strip().lower()
 
 COMPOSITE = "TandemLLM"
 
@@ -274,6 +281,18 @@ class Session:
         self.cwd: tuple | None = None      # FX5: (path, note key) of the last working-directory note
 
 
+def _class_holds(held, cands) -> bool:
+    """FX15 + VIS-119: whether the session's held package answer for the class answers a
+    follow-up in it: a pick still among the candidates; under `PACKAGE_HOLD=answer` a none asked
+    over candidates that include every one of this turn's (a follow-up offered a package the none
+    was not asked over asks again)."""
+    if not held:
+        return False
+    if held[0] is not None:
+        return held[0] in cands
+    return PACKAGE_HOLD == "answer" and len(held) > 2 and set(cands) <= held[2]
+
+
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
     """A conversation id if the client sends one (opencode sends `x-session-id`; Open WebUI sends
     `X-OpenWebUI-Chat-Id` with ENABLE_FORWARD_USER_INFO_HEADERS, or as a connection header with the
@@ -421,6 +440,10 @@ class Plan:
         # SRV-765: the session's token on its addresses (server/session_tokens.py); a head note that
         # carries it is that session's alone, named in the row's `extra.head_session`
         self.session_token: str | None = None
+        # VIS-119: how long the class's package answer holds (`schema.package_sticky`), and the
+        # shadow questions asked after the turn (server/conductor/deferred.py), each a job
+        self.sticky = "message"
+        self.deferred: list[dict] = []
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -807,6 +830,11 @@ class Router:
         # `own_eta(texts, max_new)` -> ms from now (None: no basis, inf: not before the slot's
         # turn ends). Set by the server; None asks as before
         self.own_eta = None
+        # VIS-119: the seconds the server has been idle (nothing running, queued or in the
+        # router), None while it is busy; set by the server. The shadow questions asked after the
+        # turn wait for it (server/conductor/deferred.py)
+        self.own_idle = None
+        self.deferred = deferred_mod.Deferred(signal=lambda: self.own_idle)
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -943,6 +971,28 @@ class Router:
         d.update(eta_ms=round(eta, 1) if eta != float("inf") else None, timeout_ms=limit,
                  skipped=True)
         return d
+
+    def own_port_first(self, router: dict, roles: dict, qid: str | None = None) -> bool:
+        """VIS-119: whether the first stage a cascade would ask is the Qwen stage on this server's
+        own port (a decider asked before it answers in tens of milliseconds and stays where it
+        is; a backend the proxy relays to is not this server's queue). The stages are skipped and
+        resolved as `_cascade` skips and resolves them; building an adapter asks nothing."""
+        served = modelfit.FIT["served_classifier"]
+        for st in router["classifier"]["stages"]:
+            if not st.get("enabled", True) and (served or st["kind"] != "decider"):
+                continue
+            if st["kind"] != "decider" and not served:
+                continue                    # the served model's stage, left out by the fit
+            # the proxy's override as `_cascade` meets it: False skips the stage, None (what it
+            # answers for this server's own requests, the Chat tab's among them) leaves the
+            # configured adapter, an adapter answers instead (a backend's: not this server's queue)
+            a, _ = self._stage_adapter(st, roles, qid)
+            if a is None:
+                continue
+            if st["kind"] == "decider":
+                return False
+            return bool(getattr(a, "local", False))      # the test `_stage_eta` makes
+        return False
 
     # ---------------------------------------------------------------- sessions
     def replayed_for(self, key: str, ids: list[int], tok) -> list[int]:
@@ -1559,6 +1609,7 @@ class Router:
                   "package_sticky": ov.get("package_sticky") or base.get("package_sticky"),
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
+        plan.sticky = schema.package_sticky(router, policy)        # VIS-119: the library's too
         if modelfit.FIT["fallback"] == "lean" and conf is None and source in ("fallback", "sticky"):
             # ENG-E10: nobody decided the class (no answer at the accept bar, or a tool turn of
             # such a session): the profile's default effort, so a short chat does not think at a
@@ -1879,10 +1930,10 @@ class Router:
                 # question picked for that class; the class question decides a new kind of
                 # request (`plan.class_new`), the package question is not asked again for it
                 held = sess.package_pick.get(("class", cls))
-                if hit is None and held is not None and held[0] in cands and \
+                if hit is None and _class_holds(held, cands) and \
                         not getattr(plan, "class_new", True) and \
                         schema.package_sticky(router, policy) == "class":
-                    hit = (held[0], "sticky")
+                    hit = (held[0], "sticky" if held[0] is not None else "sticky_none")
                 if hit is not None:
                     chosen, how = hit
                 elif plan.fail_open:
@@ -1911,6 +1962,9 @@ class Router:
                     sess.package_pick[pk] = (chosen, how)
                     if chosen:
                         sess.package_pick[("class", cls)] = (chosen, how)
+                    elif ans is not None and PACKAGE_HOLD == "answer":
+                        # VIS-119: the none with the candidates it was asked over
+                        sess.package_pick[("class", cls)] = (None, how, frozenset(cands))
                     else:
                         sess.package_pick.pop(("class", cls), None)
             row["extra"]["package_choice"] = {"candidates": cands, "chosen": chosen, "how": how}

@@ -1188,6 +1188,21 @@ def _own_eta_ms(texts, max_new: int = 24) -> float | None:
     return qwait.own_eta_ms(rows, rate, free=False, holder_ms=None)
 
 
+def _own_idle_s() -> float | None:
+    """VIS-119 (the router's `own_idle`): the seconds since the last request or side-lane job
+    ended while nothing runs, waits, plans in the router or holds the engine lock; None while
+    something does. The router's shadow questions after their turn wait for it
+    (server/conductor/deferred.py)."""
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or INFLIGHT["lane"] or WAITERS or \
+                PLANNING["n"]:
+            return None
+    if LOCK.locked() or STATE.get("draining"):
+        return None
+    last = max(float(STATE.get("last_end_mono") or 0.0), float(STATE.get("lane_end_mono") or 0.0))
+    return max(0.0, time.monotonic() - last)
+
+
 def _holder_name() -> str:
     """Who holds slot 0 now, in words (the `[parallel]` line): free, a request, or TandemLLM's own
     work by its rank."""
@@ -10582,6 +10597,7 @@ class Handler(BaseHTTPRequestHandler):
                 with QUEUE:
                     INFLIGHT["lane"] -= 1
                     INFLIGHT["served"] += 1
+                STATE["lane_end_mono"] = time.monotonic()   # VIS-119: `_own_idle_s` counts it
             else:
                 # the allocator's reserve over its slack goes back to the driver, with the answer
                 # already sent and before the next request may take the engine (OPS-47)
@@ -12646,6 +12662,8 @@ def _serve(a, led) -> None:
         cond.router.session_tokens = STATE["session_tokens"]
         # SPD-249: no Qwen question whose answer cannot come in time
         cond.router.own_eta = _own_eta_ms if OWN_ETA == "on" else None
+        # VIS-119: the shadow questions after their turn wait for an idle server
+        cond.router.own_idle = _own_idle_s
         # stored documents a fix must reach (a shipped default reaches only a box without one)
         from server.conductor import migrations as cond_migrations
         cond_migrations.run(cond.store, cond.journal)
