@@ -501,10 +501,10 @@ components:
     docs: docs/speculative-decoding.md
     note: 192 MiB of token ids at most (--suffix-store-mb), in host memory.
   - id: conductor
-    label: Conductor
+    label: Chat (beta)
     group: features
-    what: Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.
-    default: true
+    what: 'On: the Chat tab with its service (chatd) and the conductor, which gives each request the right instructions and helper packages, keeps your memory notes and watches long sessions so they do not get stuck. Off (the default): the engine alone serves its API and the dashboard.'
+    default: false
     required: false
     memory_gib: 0.0
     memory_max_gib: null
@@ -515,9 +515,10 @@ components:
     knobs:
       CONDUCTOR: {"on": "on", "off": "raw"}
       QSE_CONDUCTOR_CONFIG: {"on": "${HOME}/.qwen38-spark-engine/conductor", "off": "off"}
+      QSE_MODE: {"on": "chat", "off": "engine"}
     assets: []
     docs: docs/server.md
-    note: Off, clients talk to the raw engine and the small models below have nothing to do.
+    note: Off (the default), clients talk to the raw engine and the small models below have nothing to do.
   - id: narrator
     label: Narrator
     group: roles
@@ -540,7 +541,8 @@ components:
     label: Laya decision models
     group: roles
     what: Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.
-    default: true
+    default: false
+    with_parent: true
     required: false
     memory_gib: 1.6
     memory_max_gib: null
@@ -557,7 +559,8 @@ components:
     label: Shadow reader
     group: roles
     what: A small model that reads along with each session when the box is idle, so later questions about it are answered fast.
-    default: true
+    default: false
+    with_parent: true
     required: false
     memory_gib: 1.52
     memory_max_gib: 5.52

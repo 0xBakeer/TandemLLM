@@ -1263,6 +1263,8 @@ export interface SetupComponent {
   assets: string[];
   /** the KV bytes a token while it is on, in place of parallelism.kv_bytes_per_token (Flint's e4m3 cache) */
   kv_bytes_per_token?: number | null;
+  /** OPS-260: on with what it depends on when that is switched on (Chat (beta) brings Laya) */
+  with_parent?: boolean;
 }
 
 /** A field of the methods and advanced steps. */

@@ -327,9 +327,13 @@ def test_the_install_says_what_it_did():
     text = open(os.path.join(ROOT, "install.sh")).read()
     done = text[text.index("${B}Done.${N}"):]
     assert "Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | doctor | chat" in done
-    assert re.search(r"Chat: +http://\$API_HOST:\$PORT/dashboard/#/chat +chatd starts and stops with the engine", done)
-    assert "($DIR/bin/tandem chat status)" in done and "The sandbox is optional" in done
-    assert "the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest" in done
+    # OPS-260: the Chat line in chat mode; engine mode says so and how to turn the chat on
+    chat = text[text.index('if [ "$MODE_NOW" = chat ]; then'):text.index("${B}Done.${N}")]
+    assert re.search(r"Chat: +http://\$API_HOST:\$PORT/dashboard/#/chat +chatd starts and stops with the engine", chat)
+    assert "($DIR/bin/tandem chat status)" in chat and "The sandbox is optional" in chat
+    assert "the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest" in chat
+    assert "Mode:      engine only (the default)" in chat and "--with-chat" in chat
+    assert "  $CHAT_LINE\n" in done
     setup = text[text.index("no model is loaded yet. Open the Setup Guide"):text.index('if [ "$START" != 1 ]; then\n    info "skipped (--no-start). Start it with')]
     assert "The Chat tab starts with the engine once the setup is done (%s/bin/tandem chat status)" in setup
     assert "chat_note" in setup and done.rstrip().endswith("chat_note")

@@ -206,10 +206,10 @@ memory:
   - engine/models/qwen3_5_moe/pack.py Qwen35MoePackIndex.decode_bytes (the pack's headers, 2026-10-20)
 components:
 - id: conductor
-  label: Conductor
+  label: Chat (beta)
   group: features
-  what: Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.
-  default: true
+  what: 'On: the Chat tab with its service (chatd) and the conductor, which gives each request the right instructions and helper packages, keeps your memory notes and watches long sessions so they do not get stuck. Off (the default): the engine alone serves its API and the dashboard.'
+  default: false
   required: false
   memory_gib: 0.0
   memory_max_gib: null
@@ -224,9 +224,12 @@ components:
     QSE_CONDUCTOR_CONFIG:
       'on': ${HOME}/.qwen38-spark-engine/conductor
       'off': 'off'
+    QSE_MODE:
+      'on': chat
+      'off': engine
   assets: []
   docs: docs/server.md
-  note: On by default, with the conductor's default fit until it is measured on Ornith.
+  note: On, with the conductor's default fit until it is measured on Ornith.
 - id: narrator
   label: Narrator
   group: roles
@@ -255,7 +258,8 @@ components:
   label: Laya decision models
   group: roles
   what: Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.
-  default: true
+  default: false
+  with_parent: true
   required: false
   memory_gib: 1.6
   memory_max_gib: null

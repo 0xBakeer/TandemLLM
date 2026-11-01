@@ -97,6 +97,7 @@ The 0.15.0 rows are from 2026-10-26 (Bolt 10-27), measured the 0.15.0 way. Flash
 
 ### Install and chatd
 
+- Engine only is a new install's default (OPS-260). One setting, `QSE_MODE=engine|chat` in `serve.env`: engine starts no conductor, decision models, narrator, shadow reader, roles or chatd; chat (beta) is the conductor, its small models and chatd. `install.sh --with-chat`, the Setup Guide's Chat (beta) switch or `run/local.env` turn the chat on, `--engine-only` turns it off. An upgrade keeps the box's mode: with the setting empty, a box whose conductor directory exists stays a chat box. `/health` and `/v1/models` report `mode` and what is `loaded`, and the Chat tab of an engine-only box says how to turn the chat on and sends no chat request. The raw path is unchanged.
 - The dash image copies `chatd` and `packages`, which `pyproject.toml` packages; a test fails on any package folder the Dockerfile does not copy (#87).
 - chatd: a stdio MCP server's closer ends its exec, not only the socket; the wait for a hijacked stream's first frame is bounded (60 s); an egress tunnel with no traffic either way ends after 300 s (#48).
 - chatd records an error that a stream sends next to choices and keeps the text. A run that completes with such an error gets one error part at the end of the answer with the engine's words, and the run's end stays the one `finish_run` sends (#66).

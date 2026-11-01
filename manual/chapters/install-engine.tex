@@ -159,9 +159,17 @@ The control script takes one command:
 ~/TandemLLM/bin/tandem logs       # follow the engine's log
 \end{shell}
 
+\section{Engine only, or the chat (beta)}\label{sec:mode}\index{qsemode@\texttt{QSE\_MODE}}
+
+A new install serves the engine alone: the OpenAI API under the served model's own name, the dashboard and the caches. Nothing runs beside it: no conductor (no \code{TandemLLM} model, router, user memory, packages, library or session monitor), no decision models, narrator, shadow reader or roles, and no chatd; the Chat tab says the chat is off and how to turn it on. One setting decides it, \code{QSE_MODE} in \code{serve.env}: \code{engine} or \code{chat}.
+
+The chat (beta) is the Chat tab with chatd and the conductor, with the small models the weight profile names. Turn it on with \code{install.sh --with-chat} (a re-run works too), with the Setup Guide's \emph{Chat (beta)} switch, which writes \code{QSE_MODE=chat} to \code{run/setup.env} and turns on Laya's decision models with it, or with \code{QSE_MODE=chat} in \code{run/local.env} and \code{tandem restart}. \code{--engine-only} turns it off again, and the next start stops the chatd the install started. On a box set up in the Setup Guide its switch decides: \code{run/setup.env} is read after the installer's \code{QSE_MODE}, so the two flags there only warn. The last block of \code{ops/serve.env} applies the mode after the weight profile, \code{run/setup.env} and \code{run/local.env}; \code{ops/use-profile.sh} keeps it.
+
+An upgrade keeps each box's mode. Left empty, \code{QSE_MODE} is \code{chat} on a box whose conductor directory (\code{QSE_CONDUCTOR_CONFIG}, by default \code{~/.qwen38-spark-engine/conductor}) exists, so a box that ran the conductor stays a chat box with its documents, memory and sessions; \code{QSE_CONDUCTOR_CONFIG=off} set by hand stays engine only. \code{/health} and \code{/v1/models} say \code{"mode": "engine"} or \code{"chat"} and what is \code{loaded}: the conductor and its monitor's mode, the decision models, the narrator, the loaded roles, and whether chatd answers.
+
 \section{The first request}
 
-The server speaks the OpenAI API on port 8000. With the conductor on, as in the shipped profile, it serves one model called \code{TandemLLM}, and any model name a client sends is served as \code{TandemLLM}:
+The server speaks the OpenAI API on port 8000. In engine-only mode it serves the engine under its own model name (\code{/v1/models} lists it). With the chat on, it serves one model called \code{TandemLLM}, and any model name a client sends is served as \code{TandemLLM}:
 
 \begin{shell}
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
@@ -178,14 +186,14 @@ Point other clients at the same address:
 \hd{client} & \hd{setting} \\
 \midrule
 an OpenAI SDK & \code{OPENAI_BASE_URL=http://<host>:8000/v1} and any key \\
-opencode & an OpenAI-compatible provider with that base URL and the model \code{TandemLLM}; it gets the \code{coding} profile by itself \\
-Open WebUI & an OpenAI connection to that base URL, with the connection header \code{X-OpenWebUI-Chat-Id: {{CHAT_ID}}} so each chat is its own conductor session (Section~\ref{sec:router-session}); it gets the \code{chat} profile \\
-\code{curl}, a script & as above; it gets the \code{general} profile \\
+opencode & an OpenAI-compatible provider with that base URL and the model \code{TandemLLM}; with the chat (beta) on it gets the \code{coding} profile by itself \\
+Open WebUI & an OpenAI connection to that base URL, with the connection header \code{X-OpenWebUI-Chat-Id: {{CHAT_ID}}} so each chat is its own conductor session with the chat (beta) on (Section~\ref{sec:router-session}); it gets the \code{chat} profile \\
+\code{curl}, a script & as above; with the chat (beta) on it gets the \code{general} profile \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-For the engine without the conductor, send the header \code{X-Tandem: raw}\index{X-Tandem header}. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
+An engine-only box (Section~\ref{sec:mode}) has no profiles: every client gets the raw path under the served model's own name, so opencode and Open WebUI name that model instead of \code{TandemLLM}. With the chat (beta) on, the header \code{X-Tandem: raw}\index{X-Tandem header} gives the engine without the conductor for one request. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
 
 \screenshot[trim=0 640 0 0, clip]{client-open-webui}{Open WebUI with \texttt{TandemLLM} as its model: a demo request on the test board in October 2026, served under the \texttt{chat} profile, with the reasoning folded into \enquote{Thought for 1 seconds}. Only the message pane is shown.}{fig:shot-open-webui}
 
@@ -317,7 +325,7 @@ The balanced and FP8 profiles source \code{ops/serve.env} and change two lines, 
 
 \section{Upgrading and uninstalling}\index{upgrade}\index{uninstall}
 
-To upgrade, run the installer again with the same \code{--dir}. It checks out the new release, installs the new lock and rewrites \code{serve.env} from the release's template; \code{local.env} stays. The usage ledger migrates in place at the first start: columns are added and every row is kept. A box installed with \code{--setup} and switched to a profile since then upgrades with \code{--setup --force-setup} and the profile switch after it, as Section~\ref{sec:update-setup} shows.
+To upgrade, run the installer again with the same \code{--dir}. It checks out the new release, installs the new lock and rewrites \code{serve.env} from the release's template; \code{local.env} stays, and so does the box's mode (Section~\ref{sec:mode}). The usage ledger migrates in place at the first start: columns are added and every row is kept. A box installed with \code{--setup} and switched to a profile since then upgrades with \code{--setup --force-setup} and the profile switch after it, as Section~\ref{sec:update-setup} shows.
 
 Coming from 0.3.0, a client sees these changes:
 

@@ -159,16 +159,26 @@ describe('setupReducer', () => {
 
 describe('dependencies', () => {
   const sel = defaults(M).components;
-  it('turning the conductor off turns the narrator, Laya and the shadow reader off with a reason', () => {
-    // the narrator switched on first: off by default since 0.11.3 (SRV-534)
-    const r = toggleComponent(M, { ...sel, narrator: true }, 'conductor', false);
+  it('turning the chat off turns the narrator, Laya and the shadow reader off with a reason', () => {
+    // OPS-260: the chat (beta) and its small models are off by default; switched on first
+    expect(sel).toMatchObject({ conductor: false, narrator: false, laya: false, shadow: false });
+    const r = toggleComponent(M, { ...sel, conductor: true, narrator: true, laya: true, shadow: true }, 'conductor', false);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.components).toMatchObject({ conductor: false, narrator: false, laya: false, shadow: false });
     expect(r.cascaded.map((c) => c.id).sort()).toEqual(['laya', 'narrator', 'shadow']);
-    expect(r.notice).toMatch(/need the conductor, so they are off too/);
+    expect(r.notice).toMatch(/need the chat \(beta\), so they are off too/);
     const av = availability(M, r.components);
-    expect(av.narrator).toMatchObject({ disabled: true, reason: 'Needs the conductor' });
+    expect(av.narrator).toMatchObject({ disabled: true, reason: 'Needs the chat (beta)' });
+  });
+  it('turning the chat on brings the small models it ships with (OPS-260: with_parent)', () => {
+    const r = toggleComponent(M, sel, 'conductor', true);
+    expect(r.ok && r.components).toMatchObject({ conductor: true, laya: true, shadow: true, narrator: false });
+    const f = toggleComponent(FN, defaults(FN).components, 'conductor', true);
+    expect(f.ok && f.components).toMatchObject({ conductor: true, laya: true, shadow: false, narrator: false });
+    // each can still be switched off on its own
+    const g = r.ok ? toggleComponent(M, r.components, 'laya', false) : r;
+    expect(g.ok && g.components).toMatchObject({ conductor: true, laya: false, shadow: true });
   });
   it('a dependent cannot be switched on while its dependency is off', () => {
     const off = { ...sel, disk_tier: false, nvme_spill: false };

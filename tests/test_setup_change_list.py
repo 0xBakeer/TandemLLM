@@ -63,8 +63,10 @@ QSE_DASHBOARD_LOGIN='off'
 
 
 def _qwen_sel():
+    # OPS-260: the chat as the LFM2.5 setup had it (the chat's tools are off by default)
     return estimate.check(M, {"model": M["id"], "profile": "exl3-6.0", "slots": 4,
-                              "window": 262_144, "side_window": 98_304})
+                              "window": 262_144, "side_window": 98_304,
+                              "components": {"conductor": True, "laya": True, "shadow": True}})
 
 
 def _box_after_lfm25(box):

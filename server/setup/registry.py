@@ -194,7 +194,10 @@ _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "w
                    "assets": _IDS, "docs": _STR, "note": _NOTE,
                    # the KV bytes a token while it is on (a cache kept in fewer bytes), in place of
                    # parallelism.kv_bytes_per_token; optional
-                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1}},
+                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1},
+                   # OPS-260, optional: off by default, and on with what it depends on when that is
+                   # switched on (Chat (beta) brings the decision models it ships with)
+                   "with_parent": {"type": "boolean"}},
                   required=("id", "label", "group", "what", "default", "required", "memory_gib",
                             "memory_max_gib", "elastic", "disk_gb", "depends_on", "conflicts", "knobs",
                             "assets", "docs", "note"))
@@ -504,6 +507,8 @@ def _cross(m: dict, root: str) -> list[str]:
                 errs.append(f"$.components[{i}].assets: no asset {a!r}")
         if c["required"] and not c["default"]:
             errs.append(f"$.components[{i}]: a required component is on by default")
+        if c.get("with_parent") and (c["default"] or c["required"] or len(c["depends_on"]) != 1):
+            errs.append(f"$.components[{i}].with_parent: off by default, optional, and depends on one other")
         if c["default"]:
             for d in c["depends_on"]:
                 if d in comps and not comps[d]["default"]:

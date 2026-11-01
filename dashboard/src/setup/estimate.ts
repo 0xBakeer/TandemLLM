@@ -76,6 +76,8 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
     if (typeof on !== 'boolean') throw new SelectionError(422, 'invalid_selection', `components.${cid}: true or false`);
     comps[cid] = on;
   }
+  // OPS-260: estimate.py turns a `with_parent` tool the selection does not name on with its parent; the
+  // page names every component (normaliseComponents, toggleComponent), so this copy leaves that rule out
   // a community pack that cannot run images: the server turns the Vision tool off, so does this copy
   if ('vision' in comps && packNoImage(m, pid)) comps.vision = false;
   const bad: string[] = [];
