@@ -34,8 +34,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------------------------
 
 # The engine release. v0.15.1 cuts the launches of Flash-Next's joint pass (every lane's attention,
-# PLE and GDN prep at once, streamed expert rows, CUDA graphs for a dense pass) and fixes a fresh
-# server's first raw request waiting behind a whole generation;
+# PLE and GDN prep at once, streamed expert rows, CUDA graphs for a dense pass), drafts Flash-Next's
+# seeded sampled requests under the target's keyed noise with a learned corrector on 3.05 (its file
+# comes with ops/use-profile.sh flashnext-3.05) and fixes a fresh server's first raw request waiting
+# behind a whole generation;
 # v0.15.0 runs 8 lanes by default, each with the full window, one round runner
 # with joint verify passes (CUDA graphs on the 27B), the burst prefill and the card's sampling filters;
 # v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its

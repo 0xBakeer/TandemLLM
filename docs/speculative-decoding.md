@@ -110,6 +110,12 @@ With `QWEN38_FN_LOOKUP=1` (the Flash-Next profiles set it, ENG-229) the lookup j
 
 That A/B ran on 3.05 on 2026-10-12, and every text equalled plain decode. The gain on copies is smaller than the gain in tokens a block, because a verify of 16 rows costs about 69 ms against 28 ms for 2 rows on this MoE.
 
+### Coupled drafts and the corrector
+
+A seeded sampled request drafts coupled (`QWEN38_FN_MTP_COUPLED`, on in the Flash-Next profiles, SPD-249). At each depth the MTP head proposes argmax(log q + G). Here q is the head's distribution under the request's own top-k and top-p, and G is the target's keyed noise for that output position, the same noise the target samples with. A draft lands on the target's token whenever the head and the target put the same token on top of that noise, and every emitted token is still the target's draw. Greedy and unseeded requests draft the argmax. The cut reads a calibration of the coupled drafts measured on 15 held-out prompts (`QWEN38_FN_MTP_COUPLED_CAL`, `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.coupled.json`).
+
+On the 3.05 pack a learned corrector re-ranks the head's top 8 tokens before that pick, so more drafts land on the token the target samples (`QWEN38_FN_MTP_CORRECTOR`, `engine/models/flashnext/corrector.py`). Its file is 34.9 MB on Hugging Face, in `0xBakeer/TandemLLM-Qwen3.8-Flash-Next-EXL3-3.05-corrector`. `ops/use-profile.sh flashnext-3.05` downloads it at the commit the profile pins to `ops/correctors/qwen3.8-flash-next/flashnext-3.05.corrector.safetensors` and checks its sha256. It covers requests sampled at T 1.0, top-k 20 and top-p 0.95; other requests keep the plain coupled pick. With no file, or one that fails the engine's check, the drafts stay plain coupled and the log says why in one line. `GET /health` shows the state under `weights.corrector`: `loaded`, `why`, the file's name and its sha256. In the A/B on 3.05, 4 pairs of fresh servers with fixed prompts and seeds, every token was the same with the corrector on and off.
+
 V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/<profile>.<device>.json` (Flash-Next 3.05 on the DGX Spark: `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json`), in the format of the 27B's stair tables:
 
     {"<context class>": {"<kind>": {"<rows>": ms, ...}, ...}, ..., "step_ms": 3.7, "measured": "how and when"}
