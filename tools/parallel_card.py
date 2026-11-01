@@ -43,7 +43,10 @@ own for every request):
            seed 1000 + i, so every round of a level decodes the same tokens, and a level's warm-up and
            measured rounds run back to back (no wait for an idle server between them); the levels' N
            requests are requests 0 .. N-1 of the 8. Without it, every request a nonce and a seed of its
-           own and a wait for an idle server before each round.
+           own and a wait for an idle server before each round. With `--levels-thinking template` the
+           levels' prompts are the chat template's own default (no thinking switch: a model whose template
+           thinks by default writes its reasoning), rendered with the model's tokenizer and checked id for
+           id against `/v1/tokenize`; the raw file says whether that template thinks (`setup.levels_thinks`).
   proof    /health every 0.2 s during every round: the slots in the decoding set and the requests
            running. A round whose most slots decoding at once is not N, or that saw more than N
            running (a request from elsewhere), is invalid and run again (`--retries`); a level
@@ -111,19 +114,24 @@ class Client:
     def _ids(self, body: dict) -> list:
         return [int(t) for t in _post_json(self.base + "/v1/tokenize", {**body, "ids": True})["ids"]]
 
-    def render(self, messages: list) -> str:
+    def render(self, messages: list, template: bool = False) -> str:
         """The text `/v1/completions` gets for these messages: the chat template's ids with thinking off (from
-        `/v1/tokenize`) as text, checked to tokenize to the same ids (see the module). A prompt rendered before
-        is not asked again."""
-        key = json.dumps(messages, sort_keys=True)
+        `/v1/tokenize`) as text, checked to tokenize to the same ids (see the module). `template`: the chat
+        template's own default instead (no thinking switch), rendered with the model's tokenizer, checked to
+        read on the engine as the tokenizer's ids. A prompt rendered before is not asked again."""
+        key = json.dumps([messages, template], sort_keys=True)
         if key in self._texts:
             return self._texts[key]
-        want = self._ids({"messages": messages, "chat_template_kwargs": {"enable_thinking": False}})
         if self._lead is None:
             self._lead = self._ids({"text": ""})            # what the tokenizer puts before any text (a BOS)
         lead = self._lead
-        body = want[len(lead):] if lead and want[:len(lead)] == lead else want
-        text = self.tok.decode(body, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        if template:
+            text = self.tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            want = list(lead) + [int(t) for t in self.tok(text, add_special_tokens=False)["input_ids"]]
+        else:
+            want = self._ids({"messages": messages, "chat_template_kwargs": {"enable_thinking": False}})
+            body = want[len(lead):] if lead and want[:len(lead)] == lead else want
+            text = self.tok.decode(body, skip_special_tokens=False, clean_up_tokenization_spaces=False)
         got = self._ids({"text": text})
         if got != want:
             i = next((k for k, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
@@ -357,14 +365,23 @@ def fixed_user(pj: dict, i: int) -> str:
     return pj["nonce_line"].format(nonce=FIXED_NONCE.format(i=i)) + "\n\n" + pj["workloads"]["prose"]
 
 
-def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int, fixed: bool = False) -> dict:
+def template_thinks(tok, messages: list) -> bool:
+    """Whether the chat template's own default renders these messages otherwise than with thinking off: the model's
+    template thinks by default (`--levels-thinking template`)."""
+    def r(**kw):
+        return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kw)
+    return r() != r(enable_thinking=False)
+
+
+def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int, fixed: bool = False,
+              template: bool = False) -> dict:
     if fixed:
         user = [fixed_user(pj, i) for i in range(n)]
         seeds = [FIXED_SEED + i for i in range(n)]
     else:
         user = [pj["nonce_line"].format(nonce=nonce("c", n, tag, i)) + pj["workloads"]["prose"] for i in range(n)]
         seeds = [zlib.crc32(f"{n}|{tag}|{i}".encode()) & 0x7FFFFFFF for i in range(n)]
-    prompts = [cl.render(cl.messages(pj["system"], u)) for u in user]      # before the release: no request waits
+    prompts = [cl.render(cl.messages(pj["system"], u), template) for u in user]  # before the release: none waits
     gate = threading.Barrier(n + 1)
     res: dict = {}
     errs: list = []
@@ -408,19 +425,19 @@ def run_levels(cl: Client, pj: dict, a, log) -> dict:
     out = {}
     for n in [int(x) for x in a.levels.split(",") if x]:
         lv = {"warm": [], "rounds": [], "invalid": []}
-        fixed = a.fixed_prompts
+        fixed, template = a.fixed_prompts, a.levels_thinking == "template"
         if fixed and not wait_idle(cl.base):           # fixed prompts: one wait before the level, then back to back
             log(f"C{n}: the server did not go idle in 120 s (traffic from elsewhere)")
         for w in range(a.warm_rounds):
             if not fixed:
                 wait_idle(cl.base)
-            lv["warm"].append(one_round(cl, pj, n, f"w{w}", a.max_tokens, fixed))
+            lv["warm"].append(one_round(cl, pj, n, f"w{w}", a.max_tokens, fixed, template))
         tries = 0
         while len(lv["rounds"]) < a.rounds and tries < a.rounds + a.retries:
             tries += 1
             if not fixed and not wait_idle(cl.base):
                 log(f"C{n}: the server did not go idle in 120 s (traffic from elsewhere)")
-            r = one_round(cl, pj, n, f"r{tries}", a.max_tokens, fixed)
+            r = one_round(cl, pj, n, f"r{tries}", a.max_tokens, fixed, template)
             (lv["rounds"] if r["valid"] else lv["invalid"]).append(r)
             log(f"C{n} round {tries}: wall {r.get('wall_tok_s')} tok/s, decode {r.get('decode_tok_s')}, "
                 f"TTFT {r.get('ttft_s')} s, at once {r['proof']['max_decoding_at_once']} "
@@ -449,7 +466,7 @@ def build_row(raw: dict) -> dict:
            "raw": raw["raw_path"],
            "setup": {"env": s["env"], "lanes": s["lanes"], "window": s["window"], "max_tokens": s["max_tokens"],
                      "suffix_store": s["suffix_store"], "response_cache": s["response_cache"],
-                     "thinking": False, "sampling": s["sampling"],
+                     "thinking": bool(s.get("levels_thinks")), "sampling": s["sampling"],
                      "prompts": {"set": s["prompts"]["set"], "sha256": s["prompts"]["sha256"][:16],
                                  "prompt_tokens": s["prompts"]["prompt_tokens"]}},
            "rounds": raw["args"]["rounds"]}
@@ -559,6 +576,9 @@ def main(argv=None) -> int:
     ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--note", default=None)
+    ap.add_argument("--levels-thinking", choices=("off", "template"), default="off",
+                    help="levels: off = the chat template with thinking off (the card's); template = the template's "
+                         "own default, rendered with the model's tokenizer (SPD-249)")
     ap.add_argument("--fixed-prompts", action="store_true",
                     help="levels: request i carries the nonce 0000-<i> and the seed 1000 + i in every round, and a "
                          "level's rounds run back to back (SPD-249)")
@@ -596,6 +616,7 @@ def main(argv=None) -> int:
                                   and v else v) for k, v in vars(a).items()},
                  "endpoint": ENDPOINT,
                  "levels_method": LEVELS_FIXED if a.fixed_prompts else LEVELS_FRESH,
+                 "levels_thinking": a.levels_thinking,
                  "health_start": hr,
                  "env": {k: v for k, v in env.items() if "${HOME}" not in v and not v.startswith("/")}}
     raw["raw_path"] = os.path.relpath(os.path.abspath(a.out), REPO) if os.path.abspath(a.out).startswith(str(REPO)) \
@@ -618,6 +639,9 @@ def main(argv=None) -> int:
                     "corrector": hr["corrector"],
                     "prompts": {"set": pj["version"], "sha256": pj["_sha256"], "filler_sha256": pj["_filler_sha256"],
                                 "prompt_tokens": {w: int(v) for w, v in pt.items() if v}}}
+    if a.levels_thinking == "template":
+        # whether the model's template thinks by default: its levels' text is then its reasoning
+        raw["setup"]["levels_thinks"] = template_thinks(cl.tok, cl.messages(pj["system"], fixed_user(pj, 0)))
     raw["valid"] = all(v["valid"] for v in (raw.get("levels") or {}).values())
     if a.note:
         raw["note"] = a.note

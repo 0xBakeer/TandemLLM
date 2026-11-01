@@ -33,6 +33,10 @@ The test matrix:
      level's N requests are requests 0 .. N-1, a prompt is rendered once, a level waits for an idle server once
      and runs its rounds back to back; without it every request has its own nonce and seed and every round waits
                                                         test_fixed_prompts_repeat_back_to_back
+ 13  SPD-249, `--levels-thinking template`: a prompt is the chat template's own default rendered with the model's
+     tokenizer, never the server's chat rendering, checked against the engine's ids of its text (a leading BOS
+     the engine's); ids that differ stop the run; `template_thinks` says whether that default thinks
+                                                        test_levels_thinking_template
 
 Run: python tests/test_parallel_card.py
 """
@@ -386,7 +390,7 @@ def test_fixed_prompts_repeat_back_to_back():
         def messages(self, system, user):
             return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-        def render(self, messages):
+        def render(self, messages, template=False):
             renders.append(messages[1]["content"])
             return messages[1]["content"]
 
@@ -412,20 +416,61 @@ def test_fixed_prompts_repeat_back_to_back():
     calls, waits = [], []
     try:
         pc.wait_idle = lambda base, limit_s=120.0: waits.append(base) or True
-        pc.one_round = lambda cl, pj, n, tag, mt, fixed=False: calls.append((n, tag, fixed)) or {
+        pc.one_round = lambda cl, pj, n, tag, mt, fixed=False, template=False: calls.append((n, tag, fixed)) or {
             "valid": True, "wall_tok_s": 1.0, "decode_tok_s": 1.0, "streams": [{"ttft_s": 0.1, "completion_tokens": 4}],
             "proof": {"max_decoding_at_once": n, "max_running": n, "decoding_hist": {}}}
         for fixed, want_waits in ((True, 2), (False, 8)):
             calls.clear()
             waits.clear()
             a = types.SimpleNamespace(levels="1,2", warm_rounds=1, rounds=3, retries=0, max_tokens=8,
-                                      fixed_prompts=fixed)
+                                      fixed_prompts=fixed, levels_thinking="off")
             out = pc.run_levels(Cl(), pj, a, lambda *x: None)
             assert [c[0] for c in calls] == [1] * 4 + [2] * 4 and all(c[2] is fixed for c in calls), calls
             assert len(waits) == want_waits and out["2"]["valid"], (fixed, len(waits))
     finally:
         pc.one_round, pc.wait_idle = real
     return "fixed: the same nonce and seed a request every round, one wait a level; fresh: a wait a round"
+
+
+class _TplTok(_Tok):
+    """A tokenizer with a chat template that thinks by default (`</t>` closes the thinking when it is off)."""
+
+    def __init__(self, thinks: bool = True, lossy: bool = False):
+        self.thinks, self.lossy = thinks, lossy
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kw):
+        assert not tokenize and add_generation_prompt
+        off = kw.get("enable_thinking", True) is False and self.thinks
+        return "".join(f"<{m['role']}>{m['content']}" for m in messages) + "<a>" + ("</t>" if off else "")
+
+    def __call__(self, text, add_special_tokens=True):
+        assert not add_special_tokens
+        ids = [ord(c) for c in text]
+        return {"input_ids": ids[:-1] if self.lossy else ids}
+
+
+def test_levels_thinking_template():
+    msgs = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hello"}]
+    real = pc._post_json
+    try:
+        for bos in (False, True):
+            pc._post_json, calls = _tokenize_server(bos)
+            cl = pc.Client("http://x", "TandemLLM", {}, {}, tok=_TplTok())
+            text = cl.render(msgs, template=True)
+            assert text == "<system>be brief<user>hello<a>", text
+            assert not any("messages" in c for c in calls), "the server's chat rendering is not asked"
+            assert cl.rendered == 1 and calls[-1] == {"text": text, "ids": True}, calls
+        pc._post_json, _ = _tokenize_server(False)
+        cl = pc.Client("http://x", "TandemLLM", {}, {}, tok=_TplTok(lossy=True))
+        try:
+            cl.render(msgs, template=True)
+            raise AssertionError("ids that differ must stop the run")
+        except pc.PromptMismatch:
+            pass
+    finally:
+        pc._post_json = real
+    assert pc.template_thinks(_TplTok(), msgs) and not pc.template_thinks(_TplTok(thinks=False), msgs)
+    return "the template's default rendered by the tokenizer, checked on the engine; thinks or not"
 
 
 if __name__ == "__main__":
