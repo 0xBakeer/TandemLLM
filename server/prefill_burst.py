@@ -26,14 +26,31 @@ other seven at 4 s). A member that would run the joint forward alone while anoth
 its way waits for it (the turn given back), up to `wait_s`; with none on the way it starts at once, so
 a lone request never waits.
 
+A request waiting for one of its own on this server (SRV-769: the router's class question, itself a
+request here, while its turn waits in the router) is not on its way while it does (`question`,
+`answered`): the question would otherwise hold for the very turn that waits for its answer, up to
+`wait_s` (live 2026-11-01, Flash-Next with its joint prefill on: the class question 9.4-9.7 s instead
+of 0.7 s, the router failed open). Each hold is kept with the requests it waited for (`holds`;
+`held_own` counts the holds for a member's own parent).
+
 Plain Python and CPU-testable (tests/test_prefill_burst.py); server/app.py builds one when
 `QSE_PREFILL_BURST` is wait or joint and the server runs parallel slots.
 """
 
 from __future__ import annotations
 
+import collections
 import threading
 import time
+
+
+class Way:
+    """A request on its way to a slot (`Burst.received`): `name` its request id, `parent` the request
+    whose question it is (SRV-769), `asking` its own questions in flight (`Burst.ask`)."""
+    __slots__ = ("settled", "asking", "name", "parent")
+
+    def __init__(self, name=None, parent=None):
+        self.settled, self.asking, self.name, self.parent = False, 0, name, parent
 
 
 class Burst:
@@ -48,36 +65,117 @@ class Burst:
         self.jobs: dict = {}               # join: member -> its job, until the last one takes them
         self.results: dict = {}            # join: member -> (ok, result or exception)
         self.incoming = 0                  # requests received and not yet bound to a slot (or queued)
+        self.ways: set = set()             # their `Way`s (the ones not asking count in `incoming`)
+        self.named: dict = {}              # SRV-769: request id -> its way, while on its way
+        self.ways_of: dict = {}            # member -> its way (`arrive`), for `holds`
+        self.holds = collections.deque(maxlen=8)
+        self.log = None                    # a line per hold (server/app.py prints it)
         self.stats = {"bursts": 0, "members": 0, "max_members": 0, "timeouts": 0, "wait_ms": 0.0,
-                      "joint": 0, "joint_rows": 0, "held": 0}
+                      "joint": 0, "joint_rows": 0, "held": 0, "held_own": 0, "asked": 0}
 
-    def received(self) -> list:
+    def received(self, name=None, parent=None) -> Way:
         """A request on its way to a slot; `settle` the token once it is bound (after `arrive`) or
         queued, and at its end whatever happened (idempotent)."""
         with self.cv:
             self.incoming += 1
-            return [False]
+            way = Way(name, parent)
+            self.ways.add(way)
+            if name is not None:
+                self.named[name] = way
+            return way
+
+    def name(self, way, name) -> None:
+        """The request id of `way`, once the request has one: its questions find it by it (`ask`)."""
+        if way is None:
+            return
+        with self.cv:
+            way.name = name
+            if not way.settled:
+                self.named[name] = way
 
     def settle(self, tok) -> None:
         if not tok:
             return
         with self.cv:
-            if not tok[0]:
-                tok[0] = True
+            if not tok.settled:
+                tok.settled = True
+                self.ways.discard(tok)
+                if self.named.get(tok.name) is tok:
+                    del self.named[tok.name]
+                if tok.asking == 0:
+                    self.incoming -= 1
+                self.cv.notify_all()
+
+    def ask(self, parent):
+        """SRV-769: a question of request `parent` (by its id) is on its way: `parent` waits for its
+        answer, so it is not on its way to a slot until `answered` (a member that held for it would wait
+        for itself). Returns the parent's way for `answered`, or None (the parent is bound, queued,
+        gone or unknown: nothing to do)."""
+        with self.cv:
+            way = self.named.get(parent) if parent else None
+            if way is None or way.settled:
+                return None
+            way.asking += 1
+            if way.asking == 1:
                 self.incoming -= 1
                 self.cv.notify_all()
+            self.stats["asked"] += 1
+            return way
+
+    def question(self, parent):
+        """`received` for a question of request `parent` and `ask(parent)` in one step: `incoming` never
+        dips between the two, so a member holding for the parent keeps holding, now for the question,
+        and the question joins its forward. Returns (the question's way, `ask`'s)."""
+        with self.cv:
+            way = self.received(parent=parent)
+            return way, self.ask(parent)
+
+    def answered(self, way) -> None:
+        """The question `ask` returned `way` for has ended (answered or not): its parent is on its way
+        again, unless it was bound or queued meanwhile."""
+        if way is None:
+            return
+        with self.cv:
+            if way.asking <= 0:
+                return
+            way.asking -= 1
+            if way.asking == 0 and not way.settled:
+                self.incoming += 1
+
+    def _held(self, who) -> None:
+        """A member with a job holds for the requests on their way (under the lock): which ones, and
+        whether its own parent is one of them (`held_own`, the SRV-769 wait)."""
+        mine = self.ways_of.get(who)
+        on_way = [w for w in self.ways if w.asking == 0]
+        asking = [w for w in self.ways if w.asking > 0]
+        own = mine is not None and mine.parent is not None and any(w.name == mine.parent for w in on_way)
+        self.stats["held"] += 1
+        self.stats["held_own"] += int(own)
+        rec = {"member": str(who), "request": getattr(mine, "name", None),
+               "parent": getattr(mine, "parent", None), "for": sorted(str(w.name) for w in on_way),
+               "asking": sorted(str(w.name) for w in asking), "own_parent": own}
+        self.holds.append(rec)
+        if self.log is not None:
+            try:
+                self.log(f"[burst] slot {who} ({rec['request']}) holds for {len(on_way)} on their way "
+                         f"{rec['for']}{' -- its own parent' if own else ''}"
+                         f"{'; asking, not counted ' + str(rec['asking']) if asking else ''}")
+            except Exception:                      # noqa: BLE001 - a log line never fails a prefill
+                pass
 
     def is_open(self) -> bool:
         return bool(self.pending or self.done or self.jobs)
 
-    def arrive(self, who, idle: bool) -> bool:
+    def arrive(self, who, idle: bool, way=None) -> bool:
         """Request on slot `who`, before its prefill: a member of the open burst, or of a new one when
-        `idle` (no slot decodes). False: not a member (it runs as before)."""
+        `idle` (no slot decodes). False: not a member (it runs as before). `way`: its `received` token
+        (named in `holds`)."""
         with self.cv:
             if not (self.is_open() or idle) or who in self.pending or who in self.done:
                 return False
             if not self.is_open():
                 self.size = 0
+            self.ways_of[who] = way
             self.pending.add(who)
             self.size += 1
             self.cv.notify_all()
@@ -92,6 +190,8 @@ class Burst:
         self.stats["members"] += self.size
         self.stats["max_members"] = max(self.stats["max_members"], self.size)
         self.done.clear()
+        for k in [k for k in self.ways_of if k not in self.pending]:
+            del self.ways_of[k]
         self.gen += 1
         self.cv.notify_all()
 
@@ -131,7 +231,7 @@ class Burst:
                     return False, None             # alone; the waiting members stay for the others
                 lead = False
                 if not self.pending:
-                    self.stats["held"] += 1        # one more is on its way: wait for it
+                    self._held(who)                # one more is on its way: wait for it
             else:
                 lead, batch = True, self.jobs
                 self.jobs = {}
@@ -235,4 +335,5 @@ class Burst:
         with self.cv:
             return {"open": self.is_open(), "pending": sorted(map(str, self.pending)), "incoming": self.incoming,
                     "waiting": sorted(map(str, self.done)), "wait_s": self.wait_s,
+                    "asking": sum(1 for w in self.ways if w.asking > 0), "holds": list(self.holds)[-4:],
                     **{k: (round(v, 1) if isinstance(v, float) else v) for k, v in self.stats.items()}}

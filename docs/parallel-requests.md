@@ -85,12 +85,13 @@ Requests bound to lanes while no lane decodes form a burst (`QSE_PREFILL_BURST`,
 
 Flash-Next runs its own joint prefill (`QWEN38_FN_JOINT_PREFILL`, `engine/models/flashnext/joint_prefill.py`, SPD-249), on in its profiles and off in the family's defaults. Each layer's experts run once over every member's rows; the rest of a layer runs a prompt at a time at its own rows, so every prompt ends bit for bit as its own prefill leaves it (`tools/fn_joint_check.py --joint-prefill`). It takes a prompt whose remaining rows fit one prefill chunk (`QWEN38_FN_PREFILL_CHUNK`) without images, and cuts the members into runs of at most one chunk of rows. A member's own steps before the forward (its open chain, its start, its KV pages) run on its own thread, so a failure there fails that member alone; a failure inside the forward fails every member of it. The trade: requests that arrive together get more tokens per second in total, and long prompts in a burst get their first token later, since every first token of the burst waits for the one forward.
 
-A member that would run the joint forward alone while another request is still on its way to a lane gives the turn back and waits for it, up to `QSE_PREFILL_BURST_WAIT_S`. A request with none on its way starts at once, so a lone request never waits. `/health` `parallel.prefill_burst` has the bursts, their members, the joint forwards and their rows, `incoming` and `held`.
+A member that would run the joint forward alone while another request is still on its way to a lane gives the turn back and waits for it, up to `QSE_PREFILL_BURST_WAIT_S`. A request with none on its way starts at once, so a lone request never waits. A request whose own question runs on this server (the router's class, package or library question before a chat turn, `X-Tandem-Parent`) is not on its way while the question runs, so the question never waits for the turn that waits for its answer (SRV-769). `/health` `parallel.prefill_burst` has the bursts, their members, the joint forwards and their rows, `incoming`, `asking`, `held`, `held_own` (holds for a member's own turn) and the last holds with the requests each waited for; the engine log has a `[burst]` line per hold.
 
 | knob | default | what it does |
 |-|-|-|
 | `QSE_PREFILL_BURST` | `joint` | `joint`: a burst's prompts in one forward; `wait` (or `on`): each prompt alone, the decodes after every member's prefill; `off`: no burst |
 | `QSE_PREFILL_BURST_WAIT_S` | 10 | how long a member waits for the others, then it goes on (counted as a timeout) |
+| `QSE_PREFILL_BURST_ASKING` | `out` | `out`: a request is not on its way while its own question runs; `in`: counted as on its way (before SRV-769) |
 
 Only the order of the work moves, so a burst changes no token. It changes time to first token: a member's first token comes after every member's prefill.
 

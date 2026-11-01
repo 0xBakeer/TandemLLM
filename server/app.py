@@ -5911,6 +5911,10 @@ PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().l
 PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "joint").strip().lower()
 PREFILL_BURST = "wait" if PREFILL_BURST == "on" else PREFILL_BURST if PREFILL_BURST in ("wait", "joint") else None
 PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
+#: SRV-769: "out": a request whose own question (the conductor's, `X-Tandem-Parent`) runs on this server
+#: is not on its way to a slot while it does (`Burst.ask`), so the question never holds for its own turn;
+#: "in" counts it as before (the A/B)
+PREFILL_BURST_ASKING = (os.environ.get("QSE_PREFILL_BURST_ASKING") or "out").strip().lower()
 
 
 def _par_window_yield() -> None:
@@ -8214,13 +8218,24 @@ class Handler(BaseHTTPRequestHandler):
         # SPD-245: on its way to a slot, for the prefill burst (server/prefill_burst.py `received`)
         pool = dict.get(STATE, "pool")
         burst = pool.burst if pool is not None else None
-        self._burst_tok = burst.received() if burst is not None else None
+        self._burst_tok = asked = None
+        if burst is not None:
+            # SRV-769: the conductor's question names its turn; the turn waits for the answer, so it is
+            # not on its way while the question is
+            par = (self.headers.get(ledger_mod.PARENT_HEADER)
+                   if (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA) else None)
+            par = par[:80] if isinstance(par, str) and par else None
+            if par is not None and PREFILL_BURST_ASKING != "in":
+                self._burst_tok, asked = burst.question(par)
+            else:
+                self._burst_tok = burst.received(parent=par)
         try:
             with logbuf.serving(body):
                 return self._complete_logged(body, path)
         finally:
             if burst is not None:
                 burst.settle(self._burst_tok)
+                burst.answered(asked)
             self._burst_tok = None
 
     def _loop_escape(self, body: dict, plan, rec, sampler, cid: str):
@@ -8390,6 +8405,8 @@ class Handler(BaseHTTPRequestHandler):
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.req_ms = cache.req_ms_start()    # SPD-257: the [req] line's gate/done/remember/settle parts
+        if getattr(self, "_burst_tok", None) is not None:
+            STATE["pool"].burst.name(self._burst_tok, cid)    # SRV-769: its questions find it by its id
         rec.model = str(body.get("model") or STATE.get("model", ""))
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
@@ -9234,7 +9251,8 @@ class Handler(BaseHTTPRequestHandler):
         if par is not None and not micro and par.burst is not None:
             # SPD-245: a member of the prefill burst when none of the slots decodes (or one is open)
             par.burst.arrive(side.index if side is not None else 0,
-                             idle=not any(s.phase in ("decode", "runner") for s in par.slots))
+                             idle=not any(s.phase in ("decode", "runner") for s in par.slots),
+                             way=getattr(self, "_burst_tok", None))
         if par is not None and par.burst is not None:
             par.burst.settle(getattr(self, "_burst_tok", None))       # SPD-245: bound (or a micro lane)
         if side is not None:
@@ -12484,6 +12502,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
     if PREFILL_BURST:
         pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
+        pool.burst.log = lambda line: print(line, flush=True)    # SRV-769: who holds, for whom
         if PREFILL_BURST == "joint":
             cache.FIRST_FORWARD = _joint_forward
     slots[0].lock = LOCK
