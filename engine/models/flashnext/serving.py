@@ -1103,6 +1103,20 @@ def prices(pack: str, log=print) -> PriceModel:
                            log=log)
 
 
+def draft_freeze(pm: PriceModel, log=print) -> bool:
+    """SPD-249: whether the MTP drafters keep their adaptive state at its start (FN_DRAFT_FREEZE): only over a price
+    file, whose prices a frozen cut keeps. With no price file for this pack on this device the cut has no prices but
+    the ones it learns, so it learns them as served."""
+    if _S.get("FN_DRAFT_FREEZE") != "1":
+        return False
+    if not pm.table:
+        log("[server] FN_DRAFT_FREEZE: no price file for this pack on this device: the drafters learn their prices")
+        return False
+    log("[server] Flash-Next drafter state frozen (FN_DRAFT_FREEZE): the cut keeps the price file's prices and "
+        "learns nothing")
+    return True
+
+
 def corrector_heads(fn, rows: int) -> dict:
     """SPD-249: the keyed heads' hot ids -> whether a corrector table of `rows` hot rows covers that head (its table is
     by hot index, the heads are prefixes of ops/fn-hot-vocab.npy). The keyed heads are `keyed_head`'s: the coupled
@@ -1181,10 +1195,9 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                      max_depth=16, min_corpus_order=8)
                 log(f"[server] Flash-Next lookup in the cut: corpus "
                     f"{(corpus or 'none') if ngram.corpus is not None else 'none'}")
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram,
-                                     freeze=_S.get("FN_DRAFT_FREEZE") == "1")
-            if drafter.freeze:
-                log("[server] Flash-Next drafter state frozen (FN_DRAFT_FREEZE): the cut learns nothing")
+            pm = prices(pack, log)
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(pm, siblings=False), ngram,
+                                     freeze=draft_freeze(pm, log))
             # SPD-249: the lookup's backoff on rounds other lanes share (0: off)
             drafter.mtp_look_backoff = int(_S.get("FN_LOOK_BACKOFF") or 0)
             if drafter.mtp_look_backoff and ngram is not None:

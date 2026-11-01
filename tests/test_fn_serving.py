@@ -1107,6 +1107,29 @@ def test_spd249_the_joint_pass_calls_the_busy_hook_between_its_issue_and_its_wai
     assert order == ["issue", "hook", "wait"], order
     return "issue, the hook, the wait; no hook: issue, wait"
 
+def test_spd249_draft_freeze_needs_a_price_file():
+    """SPD-249: FN_DRAFT_FREEZE freezes the MTP drafters only over a price file (the prices a frozen cut keeps); a pack
+    with none on this device keeps learning its prices and says so; with the knob off nothing is frozen."""
+    from engine.models.flashnext import serving as S
+    key, old = "QWEN38_FN_DRAFT_FREEZE", os.environ.get("QWEN38_FN_DRAFT_FREEZE")
+    priced, lines = PriceModel({"0": {"chain": {"1": 20.0}}}, 2.0), []
+    try:
+        os.environ[key] = "1"
+        assert S.draft_freeze(priced, lines.append) is True and "frozen" in lines[-1]
+        assert S.draft_freeze(PriceModel(), lines.append) is False and "no price file" in lines[-1]
+        os.environ[key] = "0"
+        n = len(lines)
+        assert S.draft_freeze(priced, lines.append) is False and len(lines) == n
+        del os.environ[key]
+        assert S.draft_freeze(priced, lines.append) is False and len(lines) == n
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+    return "frozen over a price file; learning without one; off by default"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
