@@ -29,6 +29,10 @@ The test matrix:
  11  SPD-249: a family's draft corrector (/health weights.corrector) goes to the raw file's /health records and
      setup, and the row says whether it loaded (`setup.corrector_loaded`); a row without one is as before
                                                         test_the_corrector_is_recorded
+ 12  SPD-249, `--fixed-prompts`: request i of every round carries the nonce 0000-<i> and the seed 1000 + i, a
+     level's N requests are requests 0 .. N-1, a prompt is rendered once, a level waits for an idle server once
+     and runs its rounds back to back; without it every request has its own nonce and seed and every round waits
+                                                        test_fixed_prompts_repeat_back_to_back
 
 Run: python tests/test_parallel_card.py
 """
@@ -368,6 +372,60 @@ def test_the_weights_dir_of_the_env_file():
         assert pc.envfile(fh.name) == {"QSE_WEIGHTS_DIR": "/w/x", "QSE_PARALLEL": "8"}
     finally:
         os.unlink(fh.name)
+
+
+def test_fixed_prompts_repeat_back_to_back():
+    import time
+    import types
+    pj = {"system": "S", "nonce_line": "Request nonce: {nonce}\n\n", "workloads": {"prose": "Write."}}
+    sent, renders = [], []
+
+    class Cl:
+        base = "http://127.0.0.1:9"                      # nothing listens: /health answers nothing at once
+
+        def messages(self, system, user):
+            return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+        def render(self, messages):
+            renders.append(messages[1]["content"])
+            return messages[1]["content"]
+
+        def stream(self, prompt, max_tokens, seed, t_send=None):
+            sent.append((prompt, seed))
+            t = time.monotonic()
+            return {"completion_tokens": 4, "ttft_s": 0.01, "t_send": t, "t_first": t + 0.01, "t_last": t + 0.02,
+                    "t_end": t + 0.03}
+
+    for fixed in (True, False):
+        sent.clear()
+        for tag in ("r1", "r2"):
+            pc.one_round(Cl(), pj, 4, tag, 8, fixed)
+        by_round = [sorted(sent[:4], key=lambda x: x[1]), sorted(sent[4:], key=lambda x: x[1])]
+        if fixed:
+            want = [(f"Request nonce: 0000-0{i}\n\n\n\nWrite.", 1000 + i) for i in range(4)]
+            assert by_round[0] == by_round[1] == want, by_round
+            assert pc.fixed_user(pj, 7) == "Request nonce: 0000-07\n\n\n\nWrite.", pc.fixed_user(pj, 7)
+        else:
+            assert not set(by_round[0]) & set(by_round[1]), "fresh requests repeat nothing"
+            assert len({seed for _, seed in sent}) == 8, sent
+    real = (pc.one_round, pc.wait_idle)
+    calls, waits = [], []
+    try:
+        pc.wait_idle = lambda base, limit_s=120.0: waits.append(base) or True
+        pc.one_round = lambda cl, pj, n, tag, mt, fixed=False: calls.append((n, tag, fixed)) or {
+            "valid": True, "wall_tok_s": 1.0, "decode_tok_s": 1.0, "streams": [{"ttft_s": 0.1, "completion_tokens": 4}],
+            "proof": {"max_decoding_at_once": n, "max_running": n, "decoding_hist": {}}}
+        for fixed, want_waits in ((True, 2), (False, 8)):
+            calls.clear()
+            waits.clear()
+            a = types.SimpleNamespace(levels="1,2", warm_rounds=1, rounds=3, retries=0, max_tokens=8,
+                                      fixed_prompts=fixed)
+            out = pc.run_levels(Cl(), pj, a, lambda *x: None)
+            assert [c[0] for c in calls] == [1] * 4 + [2] * 4 and all(c[2] is fixed for c in calls), calls
+            assert len(waits) == want_waits and out["2"]["valid"], (fixed, len(waits))
+    finally:
+        pc.one_round, pc.wait_idle = real
+    return "fixed: the same nonce and seed a request every round, one wait a level; fresh: a wait a round"
 
 
 if __name__ == "__main__":

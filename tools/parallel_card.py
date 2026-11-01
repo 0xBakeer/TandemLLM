@@ -39,6 +39,11 @@ own for every request):
            `--rounds` measured. Per round: wall tok/s = all completion tokens / (last end - send),
            TTFT included; decode tok/s = all completion tokens after the first of each request /
            (last token - first first token); the medians over the rounds.
+           With `--fixed-prompts` (SPD-249) request i of every round carries the nonce 0000-<i> and the
+           seed 1000 + i, so every round of a level decodes the same tokens, and a level's warm-up and
+           measured rounds run back to back (no wait for an idle server between them); the levels' N
+           requests are requests 0 .. N-1 of the 8. Without it, every request a nonce and a seed of its
+           own and a wait for an idle server before each round.
   proof    /health every 0.2 s during every round: the slots in the decoding set and the requests
            running. A round whose most slots decoding at once is not N, or that saw more than N
            running (a request from elsewhere), is invalid and run again (`--retries`); a level
@@ -68,6 +73,9 @@ TOOL = "tools/parallel_card.py"
 SCHEMA = 1
 #: SPD-249: where every request goes (the engine; the chat endpoint is in beta and not measured)
 ENDPOINT = "/v1/completions"
+#: SPD-249: the levels' fixed requests (`--fixed-prompts`): request i carries this nonce and seed in every round
+FIXED_NONCE = "0000-{i:02d}"
+FIXED_SEED = 1000
 
 
 # --- requests ---------------------------------------------------------------------------------
@@ -95,6 +103,7 @@ class Client:
         self.extra = {"cache_prompt": False}
         self.rendered = 0                       # prompts rendered and checked id for id
         self._lead: list | None = None
+        self._texts: dict = {}                  # a rendered prompt's text by its messages (fixed prompts repeat)
 
     def messages(self, system: str, user: str) -> list:
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -104,7 +113,11 @@ class Client:
 
     def render(self, messages: list) -> str:
         """The text `/v1/completions` gets for these messages: the chat template's ids with thinking off (from
-        `/v1/tokenize`) as text, checked to tokenize to the same ids (see the module)."""
+        `/v1/tokenize`) as text, checked to tokenize to the same ids (see the module). A prompt rendered before
+        is not asked again."""
+        key = json.dumps(messages, sort_keys=True)
+        if key in self._texts:
+            return self._texts[key]
         want = self._ids({"messages": messages, "chat_template_kwargs": {"enable_thinking": False}})
         if self._lead is None:
             self._lead = self._ids({"text": ""})            # what the tokenizer puts before any text (a BOS)
@@ -117,6 +130,7 @@ class Client:
             raise PromptMismatch(f"the prompt's text reads as other ids than the chat template's: {len(got)} ids "
                                  f"against {len(want)}, the first difference at {i}")
         self.rendered += 1
+        self._texts[key] = text
         return text
 
     def stream(self, prompt: str, max_tokens: int, seed: int, t_send: float | None = None) -> dict:
@@ -337,8 +351,19 @@ def run_prefill(cl: Client, pj: dict, a, log) -> dict:
     return out
 
 
-def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int) -> dict:
-    user = [pj["nonce_line"].format(nonce=nonce("c", n, tag, i)) + pj["workloads"]["prose"] for i in range(n)]
+def fixed_user(pj: dict, i: int) -> str:
+    """Request i's user turn with `--fixed-prompts`: its fixed nonce line, a blank line and the prose (the bare
+    A/Bs' fixed requests)."""
+    return pj["nonce_line"].format(nonce=FIXED_NONCE.format(i=i)) + "\n\n" + pj["workloads"]["prose"]
+
+
+def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int, fixed: bool = False) -> dict:
+    if fixed:
+        user = [fixed_user(pj, i) for i in range(n)]
+        seeds = [FIXED_SEED + i for i in range(n)]
+    else:
+        user = [pj["nonce_line"].format(nonce=nonce("c", n, tag, i)) + pj["workloads"]["prose"] for i in range(n)]
+        seeds = [zlib.crc32(f"{n}|{tag}|{i}".encode()) & 0x7FFFFFFF for i in range(n)]
     prompts = [cl.render(cl.messages(pj["system"], u)) for u in user]      # before the release: no request waits
     gate = threading.Barrier(n + 1)
     res: dict = {}
@@ -347,7 +372,7 @@ def one_round(cl: Client, pj: dict, n: int, tag: str, max_tokens: int) -> dict:
     def go(i):
         try:
             gate.wait()
-            res[i] = cl.stream(prompts[i], max_tokens, zlib.crc32(f"{n}|{tag}|{i}".encode()) & 0x7FFFFFFF)
+            res[i] = cl.stream(prompts[i], max_tokens, seeds[i])
         except BaseException as exc:                                  # noqa: BLE001
             errs.append(repr(exc))
 
@@ -383,15 +408,19 @@ def run_levels(cl: Client, pj: dict, a, log) -> dict:
     out = {}
     for n in [int(x) for x in a.levels.split(",") if x]:
         lv = {"warm": [], "rounds": [], "invalid": []}
+        fixed = a.fixed_prompts
+        if fixed and not wait_idle(cl.base):           # fixed prompts: one wait before the level, then back to back
+            log(f"C{n}: the server did not go idle in 120 s (traffic from elsewhere)")
         for w in range(a.warm_rounds):
-            wait_idle(cl.base)
-            lv["warm"].append(one_round(cl, pj, n, f"w{w}", a.max_tokens))
+            if not fixed:
+                wait_idle(cl.base)
+            lv["warm"].append(one_round(cl, pj, n, f"w{w}", a.max_tokens, fixed))
         tries = 0
         while len(lv["rounds"]) < a.rounds and tries < a.rounds + a.retries:
             tries += 1
-            if not wait_idle(cl.base):
+            if not fixed and not wait_idle(cl.base):
                 log(f"C{n}: the server did not go idle in 120 s (traffic from elsewhere)")
-            r = one_round(cl, pj, n, f"r{tries}", a.max_tokens)
+            r = one_round(cl, pj, n, f"r{tries}", a.max_tokens, fixed)
             (lv["rounds"] if r["valid"] else lv["invalid"]).append(r)
             log(f"C{n} round {tries}: wall {r.get('wall_tok_s')} tok/s, decode {r.get('decode_tok_s')}, "
                 f"TTFT {r.get('ttft_s')} s, at once {r['proof']['max_decoding_at_once']} "
@@ -493,6 +522,13 @@ def load_tokenizer(path: str):
     return AutoTokenizer.from_pretrained(path)
 
 
+#: the raw file's `levels_method` and the row's seed line, by `--fixed-prompts`
+LEVELS_FIXED = ("fixed prompts and seeds: request i carries the nonce 0000-<i> and the seed 1000 + i in every round; a "
+                "level's warm-up and measured rounds back to back")
+LEVELS_FRESH = "a nonce and a seed of its own a request; a wait for an idle server before each round"
+SEED_FIXED = "levels: 1000 + request, the same prompts every round, rounds back to back; decode: one per run"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--base", default="http://127.0.0.1:8000")
@@ -523,6 +559,9 @@ def main(argv=None) -> int:
     ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--note", default=None)
+    ap.add_argument("--fixed-prompts", action="store_true",
+                    help="levels: request i carries the nonce 0000-<i> and the seed 1000 + i in every round, and a "
+                         "level's rounds run back to back (SPD-249)")
     a = ap.parse_args(argv)
 
     log = lambda *x: print(f"[card {time.strftime('%H:%M:%S')}]", *x, flush=True)   # noqa: E731
@@ -556,6 +595,7 @@ def main(argv=None) -> int:
                  "args": {k: (os.path.basename(v) if k in ("env_file", "out", "row_out", "prompts", "tokenizer")
                                   and v else v) for k, v in vars(a).items()},
                  "endpoint": ENDPOINT,
+                 "levels_method": LEVELS_FIXED if a.fixed_prompts else LEVELS_FRESH,
                  "health_start": hr,
                  "env": {k: v for k, v in env.items() if "${HOME}" not in v and not v.startswith("/")}}
     raw["raw_path"] = os.path.relpath(os.path.abspath(a.out), REPO) if os.path.abspath(a.out).startswith(str(REPO)) \
@@ -573,7 +613,8 @@ def main(argv=None) -> int:
     pt = (raw.get("decode") or {}).get("prompt_tokens") or {}
     raw["setup"] = {"env": a.env_name, "lanes": hr["lanes"], "window": max(hr["windows"] or [hr["max_len"] or 0]),
                     "max_tokens": a.max_tokens, "suffix_store": hr["suffix_store"], "endpoint": ENDPOINT,
-                    "response_cache": hr["response_cache"], "sampling": {**sampling, "seed": "one per request"},
+                    "response_cache": hr["response_cache"],
+                    "sampling": {**sampling, "seed": SEED_FIXED if a.fixed_prompts else "one per request"},
                     "corrector": hr["corrector"],
                     "prompts": {"set": pj["version"], "sha256": pj["_sha256"], "filler_sha256": pj["_filler_sha256"],
                                 "prompt_tokens": {w: int(v) for w, v in pt.items() if v}}}
