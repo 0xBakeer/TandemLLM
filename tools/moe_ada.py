@@ -537,30 +537,46 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
 
 
 @triton.jit
+def _scan_max(a, b):
+    return tl.maximum(a, b)
+
+
+@triton.jit
+def _scan_min(a, b):
+    return tl.minimum(a, b)
+
+
+@triton.jit
 def _moe_groups_fused(FLAT, ORD, ES, LEAD, LEN, GC, P, G: tl.constexpr):
-    """The whole pair->group build in one launch: stable-sort the P pair expert ids (rank sort,
-    P <= 128 fits one program), write the sorted order and ids, then mark the group leads (a new
-    expert run or every G inside a run), compact them into LEAD/LEN, and store the count.
-    Identical output to argsort+index_select+_moe_groups_build."""
+    """The whole pair->group build in one launch: stable-sort the P pair expert ids (packed
+    key e*128+i through tl.sort, P <= 128 fits one program), write the sorted order and ids,
+    then mark the group leads (a new expert run or every G inside a run), compact them into
+    LEAD/LEN, and store the count. Expert ids must satisfy 0 <= e < 2**24 so keys stay
+    positive i32 under the 0x7FFFFFFF dead-lane sentinel (router top-k ids are in [0, n),
+    n <= 512). Identical output to argsort+index_select+_moe_groups_build."""
     r = tl.arange(0, 128)
     im = r < P
-    e = tl.load(FLAT + r, mask=im, other=0x3FFFFFFF)
-    # stable rank: elements sorting before i are (ej < ei) or (ej == ei and j < i)
-    ej = e[None, :]
-    ei = e[:, None]
-    before = (ej < ei) | ((ej == ei) & (tl.arange(0, 128)[None, :] < r[:, None]))
-    rank = tl.sum(before.to(tl.int32), axis=1)
-    tl.store(ORD + rank, r, mask=im)
-    tl.store(ES + rank, e, mask=im)
-    # sorted expert at position q = the e_i whose rank == q
-    esv = tl.sum(tl.where(rank[None, :] == r[:, None], e[None, :], 0), axis=1)
-    prev = tl.sum(tl.where(rank[None, :] == r[:, None] - 1, e[None, :], 0), axis=1)
-    prev = tl.where(r == 0, -1, prev)
-    run0 = tl.min(tl.where(esv[None, :] == esv[:, None], r[None, :], P), axis=1)
-    is_lead = im & ((r == 0) | (esv != prev) | ((r - run0) % G == 0))
+    e = tl.load(FLAT + r, mask=im, other=0)
+    # stable argsort in one sort: e*128+i keeps equal experts in input order
+    sk = tl.sort(tl.where(im, e * 128 + r, 0x7FFFFFFF))
+    ord_v = sk % 128
+    es_v = sk // 128
+    tl.store(ORD + r, ord_v, mask=im)
+    tl.store(ES + r, es_v, mask=im)
+    # group leads: a new expert run, or every G inside one (sorted order => a run
+    # starts wherever ES differs from its predecessor)
+    es_prev = tl.gather(es_v, tl.maximum(r - 1, 0), axis=0)
+    new_run = (r == 0) | (es_v != es_prev)
+    # run0[i] = last run boundary at or before i (forward max-scan)
+    run0 = tl.associative_scan(tl.where(new_run, r, 0), 0, _scan_max)
+    is_lead = im & (new_run | ((r - run0) % G == 0))
     gidx = tl.cumsum(is_lead.to(tl.int32), axis=0) - 1
     tl.store(LEAD + gidx, r, mask=is_lead)
-    nxt = tl.min(tl.where(is_lead[None, :] & (r[None, :] > r[:, None]), r[None, :], P), axis=1)
+    # nxt[i] = first lead after i: reverse min-scan over the lead positions shifted
+    # one lane left, so the last group's nxt is P for every group count (incl. 128)
+    lp = tl.where(is_lead, r, P)
+    sh = tl.where(r == 127, P, tl.gather(lp, tl.minimum(r + 1, 127), axis=0))
+    nxt = tl.associative_scan(sh, 0, _scan_min, reverse=True)
     tl.store(LEN + gidx, nxt - r, mask=is_lead)
     tl.store(GC, tl.sum(is_lead.to(tl.int32)))
 
