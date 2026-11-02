@@ -658,10 +658,10 @@ def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
     a = tl.where(a0 < 0, a0 + nbits, a0)
     off = a % 32
     w0i = a // 32
-    w1i = tl.where(w0i + 1 >= W2v, 0, w0i + 1)
 
     t8 = tl.arange(0, 8)
     wrd = tl.arange(0, W2P)
+    nxt = (wrd + 1) % W2v                                  # cyclic pair word (wrap = w0i=W2v-1 -> w[0])
     xh_off = tl.arange(0, 16)
     KC = (KT + KS - 1) // KS
     kt0 = ks * KC
@@ -671,15 +671,11 @@ def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
         base = (kt * NT + nb * 8) * W2v
         w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
                     mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
-        w0 = tl.gather(w, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
-        w1 = tl.gather(w, tl.broadcast_to(w1i[None, :], (8, 256)), axis=1)
-        sw = (off > 16)[None, :]
-        lo = tl.where(sw, w1, w0)
-        hi = tl.where(sw, w0, w1)
-        sh = tl.where(sw, 48 - off[None, :], 16 - off[None, :])
-        v = tl.inline_asm_elementwise("shf.r.wrap.b32 $0, $1, $2, $3;",
-                                      "=r,r,r,r", [lo, hi, sh],
-                                      dtype=tl.int32, is_pure=True, pack=1) & 0xFFFF
+        wn = tl.gather(w, tl.broadcast_to(nxt[None, :], (8, W2P)), axis=1)
+        w64 = (w.to(tl.uint64) & 0xFFFFFFFF) | (wn.to(tl.uint64) << 32)
+        pair = tl.gather(w64, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        s64 = ((off - 16) & 63)[None, :].to(tl.uint64)
+        v = (((pair << s64) | (pair >> ((64 - s64) & 63))) & 0xFFFF).to(tl.int32)
         s1024 = tl.inline_asm_elementwise(
             "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
             "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
@@ -721,10 +717,10 @@ def _moe_trellis_split_g_m(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
     a = tl.where(a0 < 0, a0 + nbits, a0)
     off = a % 32
     w0i = a // 32
-    w1i = tl.where(w0i + 1 >= W2v, 0, w0i + 1)
 
     t8 = tl.arange(0, 8)
     wrd = tl.arange(0, W2P)
+    nxt = (wrd + 1) % W2v                                  # cyclic pair word (wrap = w0i=W2v-1 -> w[0])
     ga = tl.arange(0, G)
     gm = ga < ln
     pair = tl.load(ORD + lead + ga, mask=gm, other=0)          # [G] pair ids
@@ -737,15 +733,11 @@ def _moe_trellis_split_g_m(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
         base = (kt * NT + nb * 8) * W2v
         w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
                     mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
-        w0 = tl.gather(w, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
-        w1 = tl.gather(w, tl.broadcast_to(w1i[None, :], (8, 256)), axis=1)
-        sw = (off > 16)[None, :]
-        lo = tl.where(sw, w1, w0)
-        hi = tl.where(sw, w0, w1)
-        sh = tl.where(sw, 48 - off[None, :], 16 - off[None, :])
-        v = tl.inline_asm_elementwise("shf.r.wrap.b32 $0, $1, $2, $3;",
-                                      "=r,r,r,r", [lo, hi, sh],
-                                      dtype=tl.int32, is_pure=True, pack=1) & 0xFFFF
+        wn = tl.gather(w, tl.broadcast_to(nxt[None, :], (8, W2P)), axis=1)
+        w64 = (w.to(tl.uint64) & 0xFFFFFFFF) | (wn.to(tl.uint64) << 32)
+        wpair = tl.gather(w64, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        s64 = ((off - 16) & 63)[None, :].to(tl.uint64)
+        v = (((wpair << s64) | (wpair >> ((64 - s64) & 63))) & 0xFFFF).to(tl.int32)
         s1024 = tl.inline_asm_elementwise(
             "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
             "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
