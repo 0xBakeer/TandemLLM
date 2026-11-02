@@ -28,6 +28,7 @@ and the step as a CUDA graph.
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -114,6 +115,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         self.rope_cos, self.rope_sin = cos.contiguous(), sin.contiguous()        # [max_len, D] bf16
         self.classes = K.classes(max_len)
         self._rb: dict = {}
+        self._cptrs: dict = {}
         self.rec: dict = {}
         self.host_ms: dict = {}
         self._wc = {li: W[self.pre(li) + "conv.conv.weight"].reshape(c.hidden_size, -1).to(torch.bfloat16).contiguous()
@@ -553,12 +555,53 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         cb["copied"].record()
         return key
 
+    def _commit_ptrs(self, st: LfmState, rbkey, bx: dict):
+        """The data_ptr() buffers the fused commit kernels dereference a layer's tensors through --
+        cached per (state, row-buffer key). Tensor object AND data_ptr are checked, so a state
+        tensor swapped under the same identity refills the same int64 buffer in place (a captured
+        commit graph reads the fresh addresses on replay); None marks the torch fallback."""
+        c = self.cfg
+        ck = (id(st), rbkey)
+        groups = (("pc", [st.conv[li] for li in c.conv_layers]),
+                  ("pb", [bx[li] for li in c.conv_layers]),
+                  ("pk", [st.k[li] for li in c.attention_layers]),
+                  ("pv", [st.v[li] for li in c.attention_layers]))
+        ts = [t for _, tl_ in groups for t in tl_]
+        dps = [t.data_ptr() for t in ts]
+        p = self._cptrs.get(ck)
+        if p is not None and p[0] == dps:
+            return p[1]
+        ok = (all(t.dtype == torch.bfloat16 and t.is_contiguous() for t in ts)
+              and len(set(dps)) == len(ts))                      # no shared storage to snapshot
+        ptrs = p[1] if p is not None else None
+        if ok and ptrs is None:
+            ptrs = {n: torch.empty(len(tl_), dtype=torch.int64, device=self.device)
+                    for n, tl_ in groups}
+        if ok:
+            if torch.cuda.is_current_stream_capturing():
+                return None          # a rebuild can't H2D mid-capture; the torch ops capture fine
+            for n, tl_ in groups:                                # refill in place: graph-safe
+                ptrs[n].copy_(torch.tensor([t.data_ptr() for t in tl_], dtype=torch.int64))
+        self._cptrs[ck] = (dps, ptrs if ok else None)
+        return self._cptrs[ck][1]
+
     def commit_dev(self, st: LfmState, key, rbkey=None) -> None:
         """The device half of `commit` (capturable): every input from `_commit_bufs(key)`, the B * x rows
         from the block's row buffers (`rbkey`, the lone verify's of M rows by default)."""
         c = self.cfg
         d = self._commit_bufs(key)["d"]
-        bx = self._rb[key[0] if rbkey is None else rbkey]["bx"]
+        rbkey = key[0] if rbkey is None else rbkey
+        bx = self._rb[rbkey]["bx"]
+        p = self._commit_ptrs(st, rbkey, bx) if self.device.type == "cuda" else None
+        if (p is not None and key[1] <= 64 and K.HAVE_TRITON
+                and not os.environ.get("TRITON_INTERPRET")
+                and all(d[n].dtype == torch.int64 and d[n].is_contiguous() for n in ("cols", "src", "dst"))):
+            K.commit_conv(p["pc"], p["pb"], d["cols"], c.conv_state_len, c.hidden_size,
+                          len(c.conv_layers))
+            if key[2]:
+                K.commit_kv(p["pk"], p["pv"], d["src"], d["dst"], st.k[c.attention_layers[0]].shape[1],
+                            key[1], c.head_dim, len(c.attention_layers), c.num_key_value_heads)
+            return
         for li in c.conv_layers:
             st.conv[li].copy_(torch.cat([st.conv[li], bx[li]], 0).index_select(0, d["cols"]))
         if key[2]:

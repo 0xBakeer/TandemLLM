@@ -363,6 +363,42 @@ if HAVE_TRITON:
             acc += tl.sum(tl.load(wb + n[:, None] * I + k[None, :]).to(tl.float32) * a[None, :], 1)
         tl.store(YD + p * H + n, acc)
 
+    # The verify-path commit's gathers as whole-tile register snapshots then whole-tile writes:
+    # every source row a program needs is read in one gather before any destination is written,
+    # so the copy is index_select's snapshot semantics by construction -- no reliance on
+    # `cols`/`src` ordering or on the compiler's aliasing order. A program owns a layer's column
+    # slice end to end.
+    @triton.jit
+    def _commit_conv(PC, PB, COLS, H, S: tl.constexpr, SP: tl.constexpr, CH: tl.constexpr):
+        l = tl.program_id(0)
+        pc = tl.load(PC + l).to(tl.pointer_type(tl.bfloat16))
+        pb = tl.load(PB + l).to(tl.pointer_type(tl.bfloat16))
+        c = tl.program_id(1) * CH + tl.arange(0, CH)
+        iota = tl.arange(0, SP)
+        m = c < H
+        src = tl.load(COLS + iota, mask=iota < S, other=0)
+        in_c = src < S
+        vals = tl.load(tl.where(in_c[:, None], pc, pb) + tl.where(in_c, src, src - S)[:, None] * H
+                       + c[None, :], mask=(iota < S)[:, None] & m[None, :])
+        tl.store(pc + iota[:, None] * H + c[None, :], vals, mask=(iota < S)[:, None] & m[None, :])
+
+    @triton.jit
+    def _commit_kv(PK, PV, SRC, DST, cap, n, D, N: tl.constexpr, DP: tl.constexpr):
+        l = tl.program_id(0)
+        pk = tl.load(PK + l).to(tl.pointer_type(tl.bfloat16))
+        pv = tl.load(PV + l).to(tl.pointer_type(tl.bfloat16))
+        r = tl.program_id(1).to(tl.int64) * cap * D
+        c = tl.arange(0, DP)
+        iota = tl.arange(0, N)
+        m = c < D
+        sm = (iota < n)[:, None] & m[None, :]
+        s = tl.load(SRC + iota, mask=iota < n, other=0)
+        kv = tl.load(pk + r + s[:, None] * D + c[None, :], mask=sm)
+        vv = tl.load(pv + r + s[:, None] * D + c[None, :], mask=sm)
+        d = tl.load(DST + iota, mask=iota < n, other=0)
+        tl.store(pk + r + d[:, None] * D + c[None, :], kv, mask=sm)
+        tl.store(pv + r + d[:, None] * D + c[None, :], vv, mask=sm)
+
 
 # ------------------------------------------------------------------------------ the wrappers
 def add_rms(h: torch.Tensor, d: torch.Tensor | None, w: torch.Tensor, eps: float, h_out: torch.Tensor | None = None,
@@ -549,6 +585,23 @@ def router(logits: torch.Tensor, bias: torch.Tensor | None, k: int, scale: float
     _router[(M,)](logits, logits.stride(0), bias if bias is not None else logits, ids, wts, float(scale), E=E, KK=k,
                   BIASED=bias is not None, num_warps=1)
     return ids, wts
+
+
+def commit_conv(conv_ptrs: torch.Tensor, bx_ptrs: torch.Tensor, cols: torch.Tensor, S: int, H: int,
+                nconv: int) -> None:
+    """Every conv layer's windowed state update in one launch: `conv[i] = cat(conv, bx)[cols[i]]`,
+    every source read before any destination written (index_select's snapshot)."""
+    CH = 256
+    _commit_conv[(nconv, (H + CH - 1) // CH)](conv_ptrs, bx_ptrs, cols, H, S=S,
+                                            SP=triton.next_power_of_2(S), CH=CH, num_warps=4)
+
+
+def commit_kv(k_ptrs: torch.Tensor, v_ptrs: torch.Tensor, src: torch.Tensor, dst: torch.Tensor,
+              cap: int, n: int, D: int, nattn: int, HK: int) -> None:
+    """Both K and V caches' rows moved to the path's positions in one launch, a program a
+    (layer, head) -- index_select + index_copy as a register snapshot then the stores."""
+    _commit_kv[(nattn, HK)](k_ptrs, v_ptrs, src, dst, cap, n, D, N=64,
+                            DP=triton.next_power_of_2(D), num_warps=4)
 
 
 def router_reference(logits, bias, k: int, scale: float):

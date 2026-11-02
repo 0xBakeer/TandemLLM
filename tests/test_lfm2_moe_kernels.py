@@ -174,6 +174,79 @@ def test_combine_add_rms():
     assert K.combine_add_rms(rnd(3, 256), yd3, ids3, rnd(3, 3, dtype=torch.float32), w, 1e-5) is None
 
 
+def test_commit():
+    if SKIP:
+        return SKIP
+    if DEV != "cuda":
+        return "skipped: the fused commit dereferences device pointer arrays"
+    S, H, M, HK, cap, D = 3, 512, 33, 2, 256, 64
+    nconv, nattn = 4, 2
+    ptrs = lambda ts: torch.tensor([t.data_ptr() for t in ts], dtype=torch.int64, device=DEV)
+    for L, path in ((100, [0]), (100, [0, 1, 2, 3]), (100, [0, 2, 4, 7]), (100, list(range(8))),
+                    (200, [0, 3]), (64, list(range(16))), (32, [0] + list(range(2, 33, 2)))):
+        n = len(path)
+        conv = [rnd(S, H) for _ in range(nconv)]
+        bx = [rnd(M, H) for _ in range(nconv)]
+        k = [rnd(HK, cap, D) for _ in range(nattn)]
+        v = [rnd(HK, cap, D) for _ in range(nattn)]
+        conv2 = [t.clone() for t in conv]
+        k2, v2 = [t.clone() for t in k], [t.clone() for t in v]
+        cols = torch.tensor((list(range(S)) + [S + r for r in path])[-S:], dtype=torch.int64, device=DEV)
+        src = torch.tensor([L + r for r in path], dtype=torch.int64, device=DEV)
+        dst = torch.tensor([L + j for j in range(n)], dtype=torch.int64, device=DEV)
+        for li in range(nconv):
+            conv[li].copy_(torch.cat([conv[li], bx[li]], 0).index_select(0, cols))
+        for li in range(nattn):
+            k[li].index_copy_(1, dst, k[li].index_select(1, src))
+            v[li].index_copy_(1, dst, v[li].index_select(1, src))
+        K.commit_conv(ptrs(conv2), ptrs(bx), cols, S, H, nconv)
+        K.commit_kv(ptrs(k2), ptrs(v2), src, dst, cap, n, D, nattn, HK)
+        torch.cuda.synchronize()
+        assert all(same(a, b) for a, b in zip(conv, conv2))
+        assert all(same(a, b) for a, b in zip(k, k2))
+        assert all(same(a, b) for a, b in zip(v, v2))
+    # a captured replay writes what an eager call wrote
+    path, n = [0, 2, 4, 7], 4
+    conv = [rnd(S, H) for _ in range(2)]
+    bx = [rnd(M, H) for _ in range(2)]
+    k = [rnd(HK, cap, D) for _ in range(2)]
+    v = [rnd(HK, cap, D) for _ in range(2)]
+    got = [t.clone() for t in conv], [t.clone() for t in k], [t.clone() for t in v]
+    cols = torch.tensor((list(range(S)) + [S + r for r in path])[-S:], dtype=torch.int64, device=DEV)
+    src = torch.tensor([100 + r for r in path], dtype=torch.int64, device=DEV)
+    dst = torch.tensor([100 + j for j in range(n)], dtype=torch.int64, device=DEV)
+    pc, pb = ptrs(got[0]), ptrs(bx)
+    pk, pv = ptrs(got[1]), ptrs(got[2])
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        K.commit_conv(pc, pb, cols, S, H, 2)
+        K.commit_kv(pk, pv, src, dst, cap, n, D, 2, HK)
+    torch.cuda.current_stream().wait_stream(s)
+    want = [t.clone() for t in conv]
+    for li in range(2):
+        want[li].copy_(torch.cat([want[li], bx[li]], 0).index_select(0, cols))
+    kw, vw = [t.clone() for t in k], [t.clone() for t in v]
+    for li in range(2):
+        kw[li].index_copy_(1, dst, kw[li].index_select(1, src))
+        vw[li].index_copy_(1, dst, vw[li].index_select(1, src))
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        K.commit_conv(pc, pb, cols, S, H, 2)
+        K.commit_kv(pk, pv, src, dst, cap, n, D, 2, HK)
+    for a, b in zip(got[0], conv):
+        a.copy_(b)                       # restore in place: the replay writes the same storage
+    for a, b in zip(got[1], k):
+        a.copy_(b)
+    for a, b in zip(got[2], v):
+        a.copy_(b)
+    g.replay()
+    torch.cuda.synchronize()
+    assert all(same(a, b) for a, b in zip(want, got[0]))
+    assert all(same(a, b) for a, b in zip(kw, got[1]))
+    assert all(same(a, b) for a, b in zip(vw, got[2]))
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
