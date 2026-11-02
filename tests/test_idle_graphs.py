@@ -71,6 +71,54 @@ def test_a_waiting_request_stops_it_and_a_recent_one_holds_it():
     return "recent: none; a waiter stops it after 2 of 5, the next look takes the rest"
 
 
+def test_spd273_idle_captures_pause_while_the_reserve_is_at_the_peak():
+    """SPD-273: each capture keeps a private pool no shed or `empty` lowers; on 2026-11-02 the idle windows took 635
+    of 1,390 captures and one window moved the reserve from 76.1 to 80.0 GiB over a 75.8 GiB peak. With the memory
+    policy on, no idle capture while the reserve plus the smallest prefill's workspace is over the peak ("peak", one
+    line until the reserve is back under it); under it, captured as before; without a policy, as before."""
+    import contextlib
+    import io
+    GiB = 1 << 30
+
+    class _Mem:
+        on, ws_floor, peak = True, int(2.75 * GiB), int(75.82 * GiB)
+
+        def __init__(self, res):
+            self.res = res
+
+        def memory(self):
+            return 60 * GiB, int(self.res * GiB)
+
+    eng = _Eng(3)
+    _with(eng)
+    mem = _Mem(74.0)
+    app.STATE["mem"] = mem
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            assert app.graphs_once() == "peak" and eng.owed == 3
+            assert app.graphs_once() == "peak" and eng.owed == 3
+        lines = [ln for ln in out.getvalue().splitlines() if ln.startswith("[graphs] idle captures paused")]
+        assert lines == ["[graphs] idle captures paused: reserve 74.0 GiB + the workspace floor 2.75 > peak 75.8"], \
+            out.getvalue()
+        assert not app.LOCK.locked()
+        mem.res = 70.0                              # 70 + 2.75 under 75.82: captured as before
+        assert app.graphs_once() == "captured" and eng.owed == 0
+        eng.owed, mem.res = 2, 74.0
+        with contextlib.redirect_stdout(out):
+            assert app.graphs_once() == "peak" and eng.owed == 2
+        assert len([ln for ln in out.getvalue().splitlines() if "idle captures paused" in ln]) == 2, \
+            "said again after the reserve was back under the peak"
+        mem.on = False                              # the policy off: the peak is no bound
+        assert app.graphs_once() == "captured" and eng.owed == 0
+    finally:
+        app.STATE.pop("mem", None)
+        app.STATE.pop("graphs_peak_said", None)
+    eng.owed = 1
+    assert app.graphs_once() == "captured" and eng.owed == 0
+    return "74.0 + 2.75 > 75.8: paused, one line; 70.0: captured; policy off or none: captured"
+
+
 def test_a_length_the_drafter_takes_plain_captures_nothing():
     eng = _Eng(4)
     seen = []

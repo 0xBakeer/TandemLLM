@@ -5147,7 +5147,9 @@ def graphs_once() -> str:
     0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
     of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`). An engine also takes
     the classes ahead of its state's length (`idle_captures(wants=...)`): a conductor-planned prompt
-    starts in a class the class of a short state never reached (SRV-713)."""
+    starts in a class the class of a short state never reached (SRV-713). SPD-273: none while the reserve
+    plus the smallest prefill's workspace is over the memory policy's peak ("peak"; a request's own class
+    still captures at its first use)."""
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
@@ -5167,6 +5169,19 @@ def graphs_once() -> str:
                if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
     if not engines:
         return "plain"
+    mem = STATE.get("mem")
+    if mem is not None and getattr(mem, "on", False):
+        _, res = mem.memory()
+        if res + int(mem.ws_floor) > int(mem.peak):
+            # SPD-273: every capture keeps a private pool no shed or `empty` lowers (about 20 MB a graph; 1,280
+            # pools in 80 minutes on 2026-11-02, 635 of the 1,390 captures from these windows); past here a capture
+            # ahead of the state takes the reserve over the peak, where the smallest prefill no longer fits under it
+            if not STATE.get("graphs_peak_said"):
+                STATE["graphs_peak_said"] = True
+                print(f"[graphs] idle captures paused: reserve {res / 2**30:.1f} GiB + the workspace floor "
+                      f"{int(mem.ws_floor) / 2**30:.2f} > peak {int(mem.peak) / 2**30:.1f}", flush=True)
+            return "peak"
+        STATE["graphs_peak_said"] = False
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         return "busy"
