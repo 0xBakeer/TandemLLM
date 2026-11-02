@@ -146,6 +146,34 @@ def test_moe_bf16():
     assert torch.equal(K.moe_bf16(x[1:2], ids[1:2], w13, w2), yd[2:4])
 
 
+def test_combine_add_rms():
+    if SKIP:
+        return SKIP
+    if DEV != "cuda":
+        return "skipped: the fused combine mirrors the device's moe_combine, a CUDA path"
+    from tools import fn_kernels as FK
+    for M in (1, 2, 8, 16):
+        for S in (2, 4):
+            N = 256
+            yd = rnd(M * S, N, dtype=torch.float32)
+            ids = torch.stack([torch.randperm(64, generator=G)[:S] for _ in range(M)]).to(torch.int32).to(DEV)
+            wts = rnd(M, S, s=0.5, dtype=torch.float32)
+            h, w = rnd(M, N), rnd(N, s=0.3) + 1
+            got = K.combine_add_rms(h, yd, ids, wts, w, 1e-5)
+            assert got is not None
+            hn, nn = K.add_rms(h, FK.moe_combine(yd, ids, wts), w, 1e-5)
+            assert torch.equal(hn, got[0]) and torch.equal(nn, got[1])
+    # outside the gate the caller falls back: M > 16, S not a power of 2, mismatched shapes
+    yd = rnd(17 * 4, 256, dtype=torch.float32)
+    ids = torch.stack([torch.randperm(64, generator=G)[:4] for _ in range(17)]).to(torch.int32).to(DEV)
+    wts = rnd(17, 4, s=0.5, dtype=torch.float32)
+    h, w = rnd(17, 256), rnd(256, s=0.3) + 1
+    assert K.combine_add_rms(h, yd, ids, wts, w, 1e-5) is None
+    yd3 = rnd(3 * 3, 256, dtype=torch.float32)
+    ids3 = torch.stack([torch.randperm(64, generator=G)[:3] for _ in range(3)]).to(torch.int32).to(DEV)
+    assert K.combine_add_rms(rnd(3, 256), yd3, ids3, rnd(3, 3, dtype=torch.float32), w, 1e-5) is None
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

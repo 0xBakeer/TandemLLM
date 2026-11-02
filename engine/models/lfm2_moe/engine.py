@@ -199,9 +199,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         y = F.linear(n, w).float()
         return y if out is None else out.copy_(y)
 
-    def moe_rows(self, n: torch.Tensor, li: int) -> torch.Tensor:
-        """The MoE of M <= 32 rows: the router, every (row, slot) pair through its expert, the combine
-        in ascending expert id."""
+    def moe_parts(self, n: torch.Tensor, li: int):
+        """The router and every (row, slot) pair through its expert -> (yd, ids, wts) for the combine."""
         from tools import fn_kernels as FK
         c = self.cfg
         g16 = self._gate16.get(li)
@@ -215,7 +214,19 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             yd = K.moe_bf16(n, ids, e.w13, e.w2)
         if self.route_trace is not None:
             self.route_trace.append((li, ids.long()))
-        return FK.moe_combine(yd, ids, wts) if self.device.type == "cuda" else K.combine_reference(yd, ids, wts)
+        return yd, ids, wts
+
+    def moe_combine_rows(self, yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
+        """The row's slots in ascending expert id (stable), weighted, summed fp32, one rounding."""
+        if self.device.type == "cuda":
+            from tools import fn_kernels as FK
+            return FK.moe_combine(yd, ids, wts)
+        return K.combine_reference(yd, ids, wts)
+
+    def moe_rows(self, n: torch.Tensor, li: int) -> torch.Tensor:
+        """The MoE of M <= 32 rows: the router, every (row, slot) pair through its expert, the combine
+        in ascending expert id."""
+        return self.moe_combine_rows(*self.moe_parts(n, li))
 
     route_trace = None
 
@@ -370,8 +381,15 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                     K.conv_rows(bcx[r], st.conv[li], self._wc[li], rb["d"]["csrc"], rb["bx"][li], y=y[r], write=write)
                 out = self.lin(y, self.W[p + "conv.out_proj.weight"])
             h, n = K.add_rms(h, out, self.W[p + "ffn_norm.weight"], eps)
+            nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
+                else self.W["embedding_norm.weight"]
             if c.is_moe(li):
-                m = self.moe_rows(n, li)
+                yd, ids, wts = self.moe_parts(n, li)
+                got = K.combine_add_rms(h, yd, ids, wts, nxt, eps)
+                if got is None:
+                    h, n = K.add_rms(h, self.moe_combine_rows(yd, ids, wts), nxt, eps)
+                else:
+                    h, n = got
             else:
                 f = p + "feed_forward."
                 gu = self._fused(n, f, "w13", ("w1", "w3"))
@@ -382,9 +400,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 m = (_x3.exl3_down_silu(gu, w2) if type(w2) is _x3.EXL3Block
                      and not _sm_supported(gu.device)
                      else self.lin(F.silu(gu[:, :I]) * gu[:, I:], w2))
-            nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
-                else self.W["embedding_norm.weight"]
-            h, n = K.add_rms(h, m, nxt, eps)
+                h, n = K.add_rms(h, m, nxt, eps)
         if one:
             rb = parts[0][1]
             rb["hidden"].copy_(n)

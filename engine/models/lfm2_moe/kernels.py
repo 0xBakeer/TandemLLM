@@ -106,6 +106,42 @@ if HAVE_TRITON:
         tl.store(N_OUT + r * N + o, (nrm.to(tl.float32) * w.to(tl.float32)).to(tl.bfloat16), mask=m)
 
     @triton.jit
+    def _combine_add_rms(YD, IDS, WTS, H_IN, H_OUT, N_OUT, W, eps, N: tl.constexpr, S: tl.constexpr,
+                         BLOCK: tl.constexpr, FMA: tl.constexpr):
+        """`moe_combine` + `_add_rms` in one launch: one program does a row's whole combine (the slots
+        in ascending expert id, then `_add_rms`'s arithmetic verbatim on the same [BLOCK] tile at the
+        same num_warps, so the sumsq keeps its reduction order). FMA picks the combine's multiply-add:
+        fn_moe_combine's fmaf, or the reference's mul.rn + add."""
+        m = tl.program_id(0)
+        o = tl.arange(0, BLOCK)
+        valid = o < N
+        sl = tl.arange(0, S)
+        e = tl.load(IDS + m * S + sl)
+        rank = tl.sum(((e[None, :] < e[:, None]) | ((e[None, :] == e[:, None]) & (sl[None, :] < sl[:, None]))).to(tl.int32), axis=1)
+        acc = tl.zeros([BLOCK], dtype=tl.float32)
+        for k in tl.static_range(S):
+            slot = tl.sum(tl.where(rank == k, sl, 0), 0)
+            w = tl.load(WTS + m * S + slot)
+            y = tl.load(YD + (m * S + slot) * N + o, mask=valid, other=0.0)
+            if FMA:
+                acc = tl.inline_asm_elementwise("fma.rn.f32 $0, $1, $2, $3;", "=r,r,r,r",
+                                                [tl.full([BLOCK], 0, tl.float32) + w, y, acc],
+                                                dtype=tl.float32, is_pure=True, pack=1)
+            else:
+                acc += tl.inline_asm_elementwise("mul.rn.f32 $0, $1, $2;", "=r,r,r",
+                                                 [tl.full([BLOCK], 0, tl.float32) + w, y],
+                                                 dtype=tl.float32, is_pure=True, pack=1)
+        d = acc.to(tl.bfloat16)                       # moe_combine's output rounding
+        h = tl.load(H_IN + m * N + o, mask=valid, other=0.0)
+        h = (h.to(tl.float32) + d.to(tl.float32)).to(tl.bfloat16)
+        tl.store(H_OUT + m * N + o, h, mask=valid)
+        hf = h.to(tl.float32)
+        var = tl.sum(hf * hf, 0) / N
+        nrm = (hf * tl.rsqrt(var + eps)).to(tl.bfloat16)
+        w = tl.load(W + o, mask=valid, other=0.0)
+        tl.store(N_OUT + m * N + o, (nrm.to(tl.float32) * w.to(tl.float32)).to(tl.bfloat16), mask=valid)
+
+    @triton.jit
     def _conv_rows(BCX, s_bcx, STATE, WC, SRC, REC, Y, H: tl.constexpr, KT: tl.constexpr, BLOCK: tl.constexpr,
                    WRITE: tl.constexpr):
         # KT taps; SRC[r, j] for j < KT - 1: where the input at distance KT - 1 - j lives (a row of the
@@ -347,6 +383,30 @@ def add_rms_reference(h, d, w, eps):
     hf = h.float()
     n = (hf * torch.rsqrt(hf.pow(2).mean(-1, keepdim=True) + eps)).to(torch.bfloat16)
     return h, (n.float() * w.float()).to(torch.bfloat16)
+
+
+def combine_add_rms(h: torch.Tensor, yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor,
+                    w: torch.Tensor, eps: float):
+    """`moe_combine(yd, ids, wts)` folded into `add_rms(h, ., w)`: one launch, (h', n') bit-equal to the
+    two-kernel sequence. None when the shapes do not fit -- the caller falls back to combine + add_rms."""
+    if not (HAVE_TRITON and h.is_cuda and yd.dtype == torch.float32 and yd.is_contiguous()
+            and h.dtype == torch.bfloat16 and h.is_contiguous()):
+        return None
+    M, S = ids.shape
+    N = h.shape[1]
+    # one program does a row's whole combine: measured -0.6..-1.0us at M <= 16, +0.7us at 32
+    # (S=8, N=2048, graph replay): the single-CTA-per-row combine serializes as the grid fills
+    if (yd.shape[0] != M * S or yd.shape[1] != N or h.shape[0] != M or M > 16
+            or S < 2 or S & (S - 1) or S > 16 or N != triton.next_power_of_2(N)
+            or ids.dtype != torch.int32 or wts.dtype != torch.float32 or wts.shape != (M, S)
+            or w.shape[0] != N or not w.is_contiguous()):
+        return None
+    from tools import fn_kernels as FK
+    hn = torch.empty_like(h)
+    nn = torch.empty_like(h)
+    _combine_add_rms[(M,)](yd, ids.contiguous(), wts.contiguous(), h, hn, nn, w, eps, N=N, S=S,
+                           BLOCK=N, FMA=FK._sm_supported(h.device), num_warps=4)
+    return hn, nn
 
 
 def conv_rows(bcx: torch.Tensor, state: torch.Tensor, wc: torch.Tensor, src: torch.Tensor, rec: torch.Tensor,
