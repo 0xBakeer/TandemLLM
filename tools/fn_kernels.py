@@ -159,9 +159,10 @@ class MoEBank:
         if not set(self.ks) <= set(MOE_K):
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
         dev = torch.device(device)
-        if dev.type == "cuda" and not _sm_supported(dev):
+        if dev.type == "cuda" and (not _sm_supported(dev) or not _inline_supported(dev)):
             from tools import moe_ada
-            moe_ada.probe(dev)                # once a device: the verdict the dispatch reads
+            moe_ada.probe(dev)                # once a device: the verdict every dispatch reads
+                                              # (the prefill path's arch set is narrower than ours)
 
     @property
     def nbytes(self) -> int:
