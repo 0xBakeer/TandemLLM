@@ -4,7 +4,7 @@ void fn_router(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor ids, to
 void fn_moe_gu(torch::Tensor x, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax);
 void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);
 void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out);
-void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng);
+void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng, int64_t E);
 void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t S, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax);
 void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);
 void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps);

@@ -848,27 +848,53 @@ __global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __re
 // compares them with the decode step's).
 #define MOE_GR 8
 
-// groups G [P][2 + MOE_GR] (expert, rows, the pairs), NG [1]: the pairs in launch order (ORDER, or 0..P-1),
-// a group the run of one expert, split every MOE_GR pairs. One thread; P is at most a few hundred.
-__global__ void moe_groups_kernel(const int* __restrict__ IDS, const int* __restrict__ ORDER, int P,
-        int* __restrict__ G, int* __restrict__ NG) {
+// groups G [P][2 + MOE_GR] (expert, rows, the pairs), NG [1]: a pair's group is its expert's, its
+// slot the index-rank among that expert's pairs in the walked order (ORDER, or 0..P-1 flat), a
+// group split every MOE_GR slots. One warp: a shared-memory histogram for the per-expert group
+// bases, then a chunked __match_any scan gives every pair its rank without atomics -- the serial
+// walk's exact output when ORDER is the stable sort (the sort is only needed when the caller wants
+// that order; the expert partition itself needs none).
+__global__ void __launch_bounds__(32) moe_groups_kernel(const int* __restrict__ IDS,
+        const int* __restrict__ ORDER, int P, int E, int* __restrict__ G, int* __restrict__ NG) {
     pdl_wait();
     pdl_trigger();
-    if (threadIdx.x != 0) return;
-    int ng = 0, cur = -1;
-    int* g = G;
-    for (int i = 0; i < P; ++i) {
-        const int p = ORDER ? ORDER[i] : i;
-        const int e = IDS[p];
-        if (ng == 0 || e != cur || g[1] == MOE_GR) {
-            g = G + (size_t)ng * (2 + MOE_GR);
-            g[0] = e; g[1] = 0;
-            ++ng; cur = e;
-        }
-        g[2 + g[1]] = p;
-        g[1] += 1;
+    extern __shared__ int gsm[];
+    int* cnt = gsm;                   // [E] pairs an expert (the histogram; order-free)
+    int* base = gsm + E;              // [E] its groups' first row in G
+    int* cur = gsm + 2 * E;           // [E] slots handed out so far
+    const int lane = threadIdx.x;
+    for (int e = lane; e < E; e += 32) cnt[e] = cur[e] = 0;
+    __syncwarp();
+    for (int i = lane; i < P; i += 32) {
+        const int e = IDS[ORDER ? ORDER[i] : i];
+        if ((unsigned)e < (unsigned)E) atomicAdd(&cnt[e], 1);
     }
-    NG[0] = ng;
+    __syncwarp();
+    if (lane == 0) {
+        int s = 0;
+        for (int e = 0; e < E; ++e) { base[e] = s; s += (cnt[e] + MOE_GR - 1) / MOE_GR; }
+        NG[0] = s;
+    }
+    __syncwarp();
+    for (int c0 = 0; c0 < P; c0 += 32) {
+        const int i = c0 + lane, p = i < P ? (ORDER ? ORDER[i] : i) : -1;
+        const int e = p >= 0 ? IDS[p] : -1;
+        const bool ok = (unsigned)e < (unsigned)E;
+        const unsigned same = __match_any_sync(0xffffffffu, e);
+        const int carry = ok ? cur[e] : 0;
+        __syncwarp();
+        if (ok && __ffs(same) - 1 == lane) cur[e] += __popc(same);
+        if (ok) {
+            const int slot = carry + __popc(same & ((1u << lane) - 1));
+            int* g = G + (size_t)(base[e] + slot / MOE_GR) * (2 + MOE_GR);
+            const int pos = slot % MOE_GR;
+            if (pos == 0) g[0] = e;
+            g[2 + pos] = p;
+            if (pos == MOE_GR - 1) g[1] = MOE_GR;
+            else if (slot == cnt[e] - 1) g[1] = pos + 1;
+        }
+        __syncwarp();
+    }
 }
 
 // RowGemm over the rows of a group: row r of XH [MOE_GR][Kin] (fp16, shared) in lane group g == r.
@@ -2225,14 +2251,16 @@ static size_t moe_group_smem(int kin, int kbmax, bool red_apart) {
     ? (g_moe_st_group == 2 ? KERN<2, 4> : (g_moe_st_group == 3 ? KERN<3, 4> : KERN<4, 4>))                  \
     : (g_moe_st_group == 2 ? KERN<2, 8> : (g_moe_st_group == 3 ? KERN<3, 8> : KERN<4, 8>)))
 
-void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng) {
+void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng, int64_t E) {
     const at::cuda::OptionalCUDAGuard guard(ids.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int P = ids.numel();
     TORCH_CHECK(ids.dtype() == torch::kInt && (order.numel() == P || order.numel() == 0), "ids/order int32");
     TORCH_CHECK(g.dtype() == torch::kInt && g.size(0) >= P && g.size(1) == 2 + MOE_GR && ng.numel() == 1, "groups");
-    launch(moe_groups_kernel, dim3(1), dim3(32), 0, st, (const int*)ids.data_ptr(),
-        order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr());
+    TORCH_CHECK(E > 0 && E <= 1024, "experts <= 1024 (the shared-memory histogram)");
+    launch(moe_groups_kernel, dim3(1), dim3(32), 3 * E * sizeof(int), st, (const int*)ids.data_ptr(),
+        order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int)E,
+        (int*)g.data_ptr(), (int*)ng.data_ptr());
 }
 
 void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t S, torch::Tensor tr, torch::Tensor kb,

@@ -134,7 +134,7 @@ class Relu2Bank:
             # SPD-125: a verify block's pairs of one expert share its tile decode (each pair's bits its lone call's)
             g = torch.empty(P, 2 + FK.MOE_GR, dtype=torch.int32, device=x.device)
             ng = torch.empty(1, dtype=torch.int32, device=x.device)
-            mod.nh_relu2_groups(flat, FK.expert_order(flat), g, ng)
+            mod.nh_relu2_groups(flat, FK.expert_order(flat), g, ng, len(self.blocks))
             mod.nh_relu2_up_group(x, g, ng, S, tr, kb, su, sv, a, kbmax)
             mod.nh_relu2_down_group(a, g, ng, tr, kb, su, sv, yd, kbmax)
             return yd

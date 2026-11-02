@@ -415,10 +415,12 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
             return moe_ada.moe_experts(x, ids, bank)
         from tools import fn_prefill_kernels as PK
         return PK.moe_grouped_reference(x, ids, bank)
+    grouped = MOE_GROUP and M >= 4
     if order is None:
-        if M > 1:
+        if M > 1 and not grouped:
             order = expert_order(ids)
         else:
+            # the grouped path partitions by expert id inside moe_groups -- no sort needed
             order = _EMPTY.get(x.device)
             if order is None:
                 order = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
@@ -426,12 +428,12 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     ygu = torch.empty(M * S, 2, bank.I, dtype=torch.bfloat16, device=x.device)
     yd = torch.empty(M * S, bank.H, dtype=torch.float32, device=x.device)
     flat = ids.reshape(-1)
-    if MOE_GROUP and M >= 4:
+    if grouped:
         # ENG-241: the pairs of one expert in groups of MOE_GR, its tiles decoded once a group (a
         # row's bits are its own: the self-check compares them with the decode step's single row)
         g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
         ng = torch.empty(1, dtype=torch.int32, device=x.device)
-        mod.fn_moe_groups(flat, order, g, ng)
+        mod.fn_moe_groups(flat, order, g, ng, bank.n)
         mod.fn_moe_gu_group(x, g, ng, S, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
         mod.fn_moe_down_group(ygu, g, ng, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
         return yd
