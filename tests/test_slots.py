@@ -375,6 +375,52 @@ def test_srv775_the_room_caps_the_growth_and_the_prefills_in_flight_an_over_peak
     return "c8 at hold 3's figures: 8 of 8 under the room (full count 9.7 < 10); over the peak alone: 20 refused, 21 in"
 
 
+def test_srv775_an_over_peak_admit_is_credited_the_allocators_free_blocks():
+    """SRV-775 (2026-11-02, the lone chat that waited 15 minutes): a prefill admitted over the peak takes the
+    allocator's free default-pool blocks before any new memory from the box, and MemAvailable already leaves those
+    out with the engine's whole reserve. The saved case: floor 10, MemAvailable 13.8, room 0, cache growth 13.6, a
+    workspace of 3.9 and 0.2 of KV pages. Charged in full it found 9.7 < 10 and waited; with 2.3 GiB of free blocks
+    it is 1.6 new and admitted at 12.0. A credit past the workspace leaves it 0 new; a reading that fails gives no
+    credit, as before; a request under the peak is never credited."""
+    ws, kv = int(3.9 * GiB), int(0.2 * GiB)
+    avail = int(13.8 * GiB)
+
+    def adm(spare):
+        return slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": avail}, growth=lambda: int(13.6 * GiB),
+                               room=lambda: 0, spare=spare)
+
+    def boom():
+        raise RuntimeError("no allocator reading")
+
+    rows = []
+    for spare, want_ok, want_new in ((lambda: int(2.3 * GiB), True, ws - int(2.3 * GiB)), (lambda: 0, False, ws),
+                                     (lambda: 10 * GiB, True, 0), (boom, False, ws), (None, False, ws)):
+        a = adm(spare)
+        ok, d = a.reserve("c", ws + kv, kv=kv, over_peak=True)
+        assert ok is want_ok and d["new_ws"] == want_new, (d, want_ok, want_new)
+        assert d["after"] == avail - want_new - kv, d
+        assert d["spare"] == ws - want_new and ("c" in a.held) is want_ok, d
+        rows.append(f"{d['after'] / GiB:.1f}")
+    ok, d = adm(lambda: int(2.3 * GiB)).reserve("c", ws + kv, kv=kv, over_peak=True)
+    text = slots.Admission.describe(d)
+    assert ("this request over the peak 1.6 new (2.3 of its 3.9 in the allocator's free blocks) = 12.0 GiB "
+            "(>= floor 10.0)") in text, text
+    _, d = adm(lambda: 0).reserve("c", ws + kv, kv=kv, over_peak=True)
+    text = slots.Admission.describe(d)
+    assert "this request over the peak 3.9 = 9.7 GiB (< floor 10.0)" in text and "free blocks" not in text, text
+    asked = []
+    a = adm(lambda: asked.append(1) or int(2.3 * GiB))
+    ok, d = a.reserve("u", ws + kv, kv=kv)                      # under the peak: the room caps it, no reading
+    assert ok and asked == [] and "spare" not in d and d["after"] == avail - kv, d
+    # no room cap (no policy): the over-peak line names the credit too
+    a = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": avail}, spare=lambda: int(2.3 * GiB))
+    ok, d = a.reserve("n", ws + kv, kv=kv, over_peak=True)
+    assert ok and d["after"] == avail - (ws - int(2.3 * GiB)) - kv, d
+    assert "this request 1.8 new (2.3 of its 3.9 in the allocator's free blocks)" in slots.Admission.describe(d), \
+        slots.Admission.describe(d)
+    return "after " + ", ".join(rows) + " GiB (spare 2.3, 0, 10, raising, none)"
+
+
 def test_srv775_describe_names_a_peak_wait():
     d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
          "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}

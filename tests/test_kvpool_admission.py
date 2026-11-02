@@ -488,6 +488,58 @@ def test_srv775_strict_keeps_a_lone_request_waiting():
     return "strict: waited, 503 after the queue timeout, nothing over the peak"
 
 
+class _SpareMem(_Mem):
+    """`_Mem` with the saved state of 2026-11-02 (allocated 64.71, reserved 79.70 over a 75.82 peak) and the
+    allocator's free default-pool bytes the policy reads (`workspace_spare`)."""
+
+    def __init__(self, *a, spare=0, **kw):
+        super().__init__(*a, **kw)
+        self.spare, self.spares = spare, 0
+
+    def memory(self):
+        return int(64.71 * GiB), int(79.70 * GiB)
+
+    def workspace_spare(self):
+        self.spares += 1
+        return self.spare
+
+
+def test_srv775_a_lone_over_peak_admit_is_credited_the_free_blocks_and_starts_at_once():
+    """SRV-775 (2026-11-02): a lone 31,053-row chat on a server whose reserve sat 3.9 GiB over the peak was gate-refused,
+    admitted over the peak, then charged its whole 3.89 GiB workspace at the box's floor: MemAvailable 13.8 - 3.89 =
+    9.9 < 10, and it waited. The workspace takes the allocator's 2.28 GiB of free default-pool blocks first, which
+    MemAvailable already leaves out: 13.8 - 1.61 = 12.2, admitted on the first reservation, no wait."""
+    import contextlib
+    import io
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    ws = int(3.89 * GiB)
+    mem = _SpareMem(peak=int(75.82 * GiB), ws=ws, refuse=lambda: True, spare=int(2.28 * GiB))
+    app.STATE.update(mem=mem, mem_load={"allocated": int(54.4 * GiB)}, queue_timeout=1.0, request_timeout=30.0)
+    try:
+        adm = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(13.8 * GiB)},
+                              growth=lambda: int(13.6 * GiB), room=app._par_room, spare=app._par_spare)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-98df742", "chat", True)
+        rec.lock_acquired()
+        out = io.StringIO()
+        t0 = time.monotonic()
+        with contextlib.redirect_stdout(out):
+            ok, h = _admit(app, pool, "98df742", 31_053, rec=rec)
+        assert ok is True and h.sent is None and time.monotonic() - t0 < 0.9, (ok, h.sent)
+        assert adm.stats["waits"] == 0 and rec.wait_mem_ms is None and "waits for memory" not in out.getvalue()
+        assert len(mem.over) == 1 and mem.spares == 1 and adm.held["98df742"] == ws, (mem.over, adm.held)
+        adm.release("98df742")
+        mem.spare = 0                             # no free blocks: the whole workspace is new, as before
+        ok, d = adm.check(ws, count=False, over_peak=True)
+        assert not ok and abs(d["after"] / GiB - 9.91) < 0.01, d
+    finally:
+        app.STATE.clear()
+    return "13.8 - (3.89 - 2.28) = 12.2 >= 10: admitted at once; without the credit 9.9 < 10"
+
+
 def test_srv775_the_workspace_is_released_when_the_prefill_has_run():
     """`_par_prefilled`: the admission keeps the request's KV part only, and the memory policy's prefills in flight
     lose its workspace (a side slot prefills with no policy, so `Budget.prefilled` never ran there)."""

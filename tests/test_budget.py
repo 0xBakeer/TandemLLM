@@ -401,6 +401,35 @@ def test_the_free_reserve_inside_a_roles_pool_does_not_count_as_the_engines():
     assert m.events[-1]["allocated"] < m.events[-1]["reserved"]
 
 
+def test_srv775_the_workspace_spare_is_the_default_pools_free_bytes_less_the_roles_pools():
+    """SRV-775: `workspace_spare`, the admission's credit for a prefill admitted over the peak: the free default-pool
+    bytes (`default_free`: the free reserve less the roles' pools by `foreign_free` and the graphs' scratch) less the
+    roles' pools' free bytes of the same reading. The saved state of 2026-11-02 in round figures: 64.7 allocated,
+    15.0 free in the reserve, 12.7 of it the graphs' scratch, 1.1 free in a role's pool: 2.3 free default-pool bytes,
+    1.2 credited. A reading that fails with none before it: no credit; without a pools probe the whole free reserve
+    less `foreign_free`, as `default_free`."""
+    fa = FakeAlloc(64.7, 15.0)
+    m = budget(fa, ceiling=64.8, peak=75.8)
+    reading = {"graphs_free": int(12.7 * GIB), "mempools_free": int(1.1 * GIB)}
+    m.pools_probe = lambda: reading
+    alloc, res = m.memory()
+    assert m.default_free(alloc, res) == int(15.0 * GIB) - int(12.7 * GIB)
+    assert m.workspace_spare() == int(15.0 * GIB) - int(12.7 * GIB) - int(1.1 * GIB), m.workspace_spare() / GIB
+    reading["mempools_free"] = int(3 * GIB)                     # more than the default pool's free bytes
+    assert m.workspace_spare() == 0
+    m.foreign_free = lambda: int(0.5 * GIB)
+    reading["mempools_free"] = 0
+    assert m.workspace_spare() == int(15.0 * GIB) - int(0.5 * GIB) - int(12.7 * GIB)
+
+    def failing():
+        raise RuntimeError("walk failed")
+    m.pools_probe = failing
+    assert m.workspace_spare() == 0, "no reading: no credit on the graphs' scratch"
+    m.pools_probe = None
+    assert m.workspace_spare() == int(15.0 * GIB) - int(0.5 * GIB)
+    return "2.3 free default-pool bytes, 1.2 credited; a failed reading 0"
+
+
 def test_the_decision_models_are_not_the_engine():
     """Laya's checkpoints live in the same allocator but are roles with claims of their own."""
     fa = FakeAlloc(78)

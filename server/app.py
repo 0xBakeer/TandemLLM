@@ -7853,7 +7853,8 @@ class Handler(BaseHTTPRequestHandler):
         slot -- is reserved while MemAvailable less the caches' growth, the workspaces of the prefills in
         flight and its own, together at most the engine's room to its peak (`_par_room`: the gate keeps
         each prefill it admits under the peak), less the KV pages still to commit and its own, stays at
-        the floor, alone too; a request admitted over the peak counts its workspace in full past the room,
+        the floor, alone too; a request admitted over the peak counts its workspace past the room, in full
+        less the allocator's free default-pool blocks, which it takes before any new memory (`_par_spare`),
         so the floor alone bounds it. The idle conversations' pages come back only for a request this
         floor holds back, never for one the gate refuses while other prefills run. A wait is in
         one-second slices with the GPU turn given up; a request that waits leaves the prefill burst
@@ -7986,7 +7987,8 @@ class Handler(BaseHTTPRequestHandler):
 
         def reserve() -> tuple[bool, dict]:
             """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
-            workspace in full past the engine's room (`Admission.check`)."""
+            workspace past the engine's room, in full less the allocator's free default-pool blocks
+            (`Admission.check`)."""
             return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")))
         d = gate()
         gate_again = d is not None
@@ -12544,12 +12546,20 @@ def _par_room() -> int | None:
     workspaces of the prefills in flight and the request's own, as before: every prefill, a side
     slot's too, passes `Budget.gate` on the live reserve, which keeps each one it admits under the
     peak. Only a prefill the gate admitted over the peak (alone, counted) has its workspace counted
-    in full past this room."""
+    past this room, in full less the free default-pool blocks it takes first (`_par_spare`)."""
     mem = dict.get(STATE, "mem")
     if mem is None or not getattr(mem, "on", False):
         return None
     _, reserved = mem.memory()
     return max(0, int(mem.peak) - int(reserved))
+
+
+def _par_spare() -> int:
+    """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box
+    (`Budget.workspace_spare`), for the admission's count of a prefill admitted over the peak (`Admission.check`);
+    0 without a policy."""
+    mem = dict.get(STATE, "mem")
+    return int(mem.workspace_spare()) if mem is not None and getattr(mem, "on", False) else 0
 
 
 def _par_growth() -> int:
@@ -12727,6 +12737,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
+                              spare=_par_spare,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]

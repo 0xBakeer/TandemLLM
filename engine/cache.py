@@ -840,6 +840,15 @@ class Budget:
         free = max(0, int(res) - int(alloc) - self._foreign())
         return max(0, free - int((p or {}).get("graphs_free") or 0))
 
+    def workspace_spare(self) -> int:
+        """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box:
+        `default_free` on the live counters, less the roles' pools' free bytes of the same reading (those blocks are
+        never the workspace's). The admission counts a prefill admitted over the peak (`admit_over_peak`) as new
+        memory past this figure only (server/slots.py `Admission.check`)."""
+        alloc, res = self.memory()
+        p = self.pools()
+        return max(0, self.default_free(alloc, res) - int((p or {}).get("mempools_free") or 0))
+
     def _ceiling_over(self) -> int:
         """SPD-257: bytes the ceiling stage sheds for: the reserve over the ceiling, less the graphs' pools' free
         bytes when `pools_probe` reads them (`_exempt`). Those are the scratch each captured graph's replays

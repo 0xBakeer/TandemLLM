@@ -65,8 +65,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: (engine/cache.py): v2's second value again
 #: SRV-775: a side slot's gate far under the peak admits without the policy's lock (engine/cache.py): v2's second
 #: value again
+#: SRV-775: the policy's free default-pool bytes a prefill admitted over the peak takes first
+#: (`Budget.workspace_spare`, engine/cache.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "8c2ef61fdcb394209f8cf10c03b5c7836764206ea20ce3c9d2755411a77bce21")
+             "a73cd3c2fd8b862bff64331aee434643fd70b20ae56b00dc5d4bbd6f8f7490b4")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);

@@ -84,13 +84,14 @@ class Admission:
     the check is conservative by up to one request's worst case, never optimistic. `growth()` is
     what the long-lived caches may still take (their budgets minus what they hold). The engine's
     room to its peak (`room`) caps the cache growth, the workspaces in flight and this request's
-    together; a prefill the memory gate admitted over the peak counts its workspace in full past
-    that cap. A prefill's workspace leaves the reservation when it has run (`prefilled`), its KV
-    part stays until the release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
+    together; a prefill the memory gate admitted over the peak counts its workspace past that cap,
+    in full less the allocator's free default-pool blocks it takes first (`spare`). A prefill's
+    workspace leaves the reservation when it has run (`prefilled`), its KV part stays until the
+    release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
     request is admitted and says so."""
 
     def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None,
-                 committed=None):
+                 spare=None, committed=None):
         self.floor = int(floor_bytes)
         self.meminfo = meminfo
         self.growth = growth or (lambda: 0)
@@ -99,10 +100,17 @@ class Admission:
         # policy's gate on the live reserve, which keeps the reserve plus that prefill's workspace
         # under the peak, so what the caches may still grow, the prefills in flight and this one take
         # together is at most this room (`check`). A prefill the gate refused and that runs alone over
-        # the peak (`over_peak`) counts its workspace in full past the room: the box's floor alone
-        # bounds it (on 2026-11-02 4,096 rows on a 133k context mapped 8.4 GiB of new reserve with
-        # 5.5 free; the full count of every prefill in flight kept 8 short prompts waiting 12 s)
+        # the peak (`over_peak`) counts its workspace past the room, in full less the free blocks it
+        # takes first (`spare`): the box's floor alone bounds it (on 2026-11-02 4,096 rows on a 133k
+        # context mapped 8.4 GiB of new reserve with 5.5 free; the full count of every prefill in
+        # flight kept 8 short prompts waiting 12 s)
         self.room = room
+        # SRV-775: () -> bytes, the free default-pool blocks a workspace takes before any new memory
+        # from the box (engine/cache.py `Budget.workspace_spare`); None: no credit. MemAvailable already
+        # leaves the engine's whole reserve out, those blocks too, so an over-peak admit counts its
+        # workspace past them only (2026-11-02: a lone 31k-row chat was charged 3.9 GiB, 2.3 of it free
+        # blocks of the reserve, found 9.7 GiB < 10 and waited 15 minutes)
+        self.spare = spare
         # SRV-307: (owner) -> bytes the KV pool has committed for that slot. A request's KV part
         # is the pages it may still commit; what its slot committed since it was admitted has
         # already left MemAvailable and is credited, so it is never counted twice
@@ -147,14 +155,22 @@ class Admission:
 
     def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
-        it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full."""
+        it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
+        the allocator's free default-pool blocks it takes before any new memory (`spare`)."""
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
+        spare = 0
+        if over_peak and self.spare is not None:
+            try:
+                spare = max(0, min(int(self.spare()), need_ws))
+            except Exception:                                      # noqa: BLE001
+                spare = 0                  # no reading: the whole workspace is new memory, as before
+        new_ws = need_ws - spare
         d = {"floor": self.floor, "grow_left": grow, "reserved": held_ws + held_kv,
              "need": int(need), "kv": int(kv), "kv_reserved": held_kv, "in_flight_ws": held_ws,
-             **({"over_peak": True} if over_peak else {})}
+             **({"over_peak": True, "spare": spare, "new_ws": new_ws} if over_peak else {})}
         if not mi or "MemAvailable" not in mi or self.floor <= 0:
             d.update(avail=None, after=None, ok=True)
             return True, d
@@ -167,10 +183,10 @@ class Admission:
                 room = None
         # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's,
         # as before: the gate bounds every prefill it admits under the peak to the room. One it admitted over
-        # the peak counts its workspace in full past the room
+        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first
         under = grow + held_ws + (0 if over_peak else need_ws)
         take = min(room, under) if room is not None else under
-        take += need_ws if over_peak else 0
+        take += new_ws if over_peak else 0
         # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
         # its room, always counted
         take += held_kv + int(kv)
@@ -191,7 +207,8 @@ class Admission:
         (2026-11-02: a lone side-slot turn of 3,714 rows on a 131k end took the engine's reserve to
         84.8 GiB over its 75.8 GiB peak and MemAvailable to 5.0 GiB, checked by nothing). Under the
         room as any request, unless the gate admitted it over the peak (`over_peak`): then its
-        workspace counts in full, and the floor is what bounds it.
+        workspace counts in full less the free default-pool blocks it takes first (`spare`), and the
+        floor is what bounds it.
 
         `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit."""
         with self._admit:
@@ -261,13 +278,18 @@ class Admission:
         room, under, over = d.get("room"), d.get("under"), bool(d.get("over_peak"))
         capped = room is not None and under is not None and room < under
         need_ws = d["need"] - (d.get("kv") or 0)
+        spare = int(d.get("spare") or 0)
+        # SRV-775: an over-peak admit's workspace is new memory past the allocator's free default-pool blocks
+        free = f" ({g(spare)} of its {g(need_ws)} in the allocator's free blocks)" if spare else ""
         # SRV-775: the room caps the growth and the workspaces under the peak; an over-peak admit's is out of it
         mid = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
                f"workspaces in flight {g(d.get('in_flight_ws') or 0)}"
                + ("" if over else f", this request's {g(need_ws)}") + ")"
-               + (f" - this request over the peak {g(need_ws)}" if over else "")
+               + (f" - this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
+                  if over else "")
                if capped else
-               f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request {g(d['need'])}")
+               f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
+               f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
         return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
                 + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})"
                 + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"

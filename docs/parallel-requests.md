@@ -198,7 +198,9 @@ reading without the policy's lock, which slot 0's gate holds (`cache.memory.fast
 a cold prompt without the gate's 2.75 GiB floor) and gives it back when the prefill has run
 (`parallel.admission.ws_in_flight_gib`). It caps the caches' growth and the workspaces of the prefills in flight at
 the engine's room to its peak, as before: the gate keeps each prefill it admits under the peak. A lone admit over
-the peak counts its workspace in full against the box floor. A request alone is checked against the floor too
+the peak counts its workspace against the box floor, in full less the allocator's free default-pool blocks it takes
+before any new memory (`Budget.workspace_spare`; MemAvailable already leaves the engine's whole reserve out, those
+blocks too). A request alone is checked against the floor too
 (`alone`, `lone_checked`).
 
 A prefill the gate still refuses after shedding waits in the memory line while another prefill runs
