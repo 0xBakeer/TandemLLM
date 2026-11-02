@@ -1670,6 +1670,7 @@ static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_n
 static int g_gemv_mc = 0;
 static int g_mixer_mma = 0;    // fn_set_mixer_mma: SPD-241, the mixers' int8 GEMV and mix_up on tensor cores (QWEN38_FN_MIXER_MMA)
 static int g_dense_st = 3;     // fn_set_dense_st: cp.async stages of the dense kernels (QWEN38_FN_DENSE_ST; bits do not depend on it)
+static int g_dense_st_rows = 3; // fn_set_dense_st_rows: the dense_rows stages (QWEN38_FN_DENSE_ST_ROWS)
 
 // the tensor-core GEMV's tickets: an int a column block, zero between launches (each launch's last CTA of a
 // column sets its ticket back), one buffer a device
@@ -1719,6 +1720,7 @@ void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
 void fn_set_gemv_mc(int64_t v) { g_gemv_mc = (int)v; }
 void fn_set_mixer_mma(int64_t on) { g_mixer_mma = on ? 1 : 0; }
 void fn_set_dense_st(int64_t v) { TORCH_CHECK(v == 3 || v == 4, "fn_dense stages 3 or 4"); g_dense_st = (int)v; }
+void fn_set_dense_st_rows(int64_t v) { TORCH_CHECK(v == 3 || v == 4, "fn_dense_rows stages 3 or 4"); g_dense_st_rows = (int)v; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -1829,9 +1831,9 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
 }
 
 #define DENSE_ROWS_W(KB, OF32)                                                                    \
-    if (warps == 4) { if (g_dense_st == 4) dense_rows_launch<KB, 4, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+    if (warps == 4) { if (g_dense_st_rows == 4) dense_rows_launch<KB, 4, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
         else dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }\
-    else { if (g_dense_st == 4) dense_rows_launch<KB, 4, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+    else { if (g_dense_st_rows == 4) dense_rows_launch<KB, 4, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
         else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }
 #define DENSE_ROWS_KB(OF32)                                                                       \
     switch (kb) {                                                                                 \

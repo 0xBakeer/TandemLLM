@@ -364,6 +364,8 @@ KNOBS: dict[str, tuple] = {
     'FN_MOE_WARPS': (None, 'tools/fn_kernels.py'),
     # cp.async stages of the dense kernels (3 or 4; the bits do not depend on it)
     'FN_DENSE_ST': (None, 'tools/fn_kernels.py'),
+    # the dense_rows kernels' own stage count (3 or 4)
+    'FN_DENSE_ST_ROWS': (None, 'tools/fn_kernels.py'),
     # DENSE_SPLIT's entries verbatim below sm_90 too (fn_tiles sweeps the emulated split)
     'FN_DENSE_SPLIT_FORCE': (None, 'tools/fn_kernels.py'),
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead

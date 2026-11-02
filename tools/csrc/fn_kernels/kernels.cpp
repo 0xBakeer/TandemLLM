@@ -25,3 +25,4 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
 void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh, torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps, c10::optional<torch::Tensor> part);
 
 void fn_set_dense_st(int64_t v);
+void fn_set_dense_st_rows(int64_t v);
