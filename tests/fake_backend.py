@@ -22,6 +22,9 @@ not ask gets no usage at all. Words in the last user message steer it:
                          when the request offers tools and its last message is not a tool result
                          (FAKE_CALLS_ALWAYS: after tool results too, for loop guards)
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
+    FAKE_WAIT <s>        send no headers for <s> seconds, as our engine while a request waits for
+                         memory; a client that closes meanwhile gets nothing and counts in
+                         `closed_early` (SRV-777)
     FAKE_SLOW            ten tokens a second
     FAKE_TPS <n>         <n> tokens a second (the parallel load: backends of different speeds)
     FAKE_STALL <s>       stop for <s> seconds after the third token
@@ -90,6 +93,8 @@ import argparse
 import hashlib
 import json
 import re
+import select
+import socket
 import sys
 import threading
 import time
@@ -539,6 +544,9 @@ def make_handler(fake: Fake):
                 usage = None
             m = re.search(r"FAKE_SLOW_TTFT ([0-9.]+)", text)
             ttft = float(m.group(1)) if m else 0.0
+            m = re.search(r"FAKE_WAIT ([0-9.]+)", text)
+            if m and not self._wait_headers(float(m.group(1))):
+                return
             if not body.get("stream"):
                 if ttft:
                     time.sleep(ttft)
@@ -579,6 +587,23 @@ def make_handler(fake: Fake):
             finally:
                 with fake.lock:
                     fake.streams -= 1
+
+        def _wait_headers(self, seconds: float) -> bool:
+            """FAKE_WAIT: no headers for `seconds`, as our engine while a request waits for memory. A client that
+            closes its socket meanwhile (it reads as end-of-file) is counted and gets nothing: False."""
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                try:
+                    ready, _, _ = select.select([self.connection], [], [], 0.05)
+                    gone = bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+                except (OSError, ValueError):
+                    gone = True
+                if gone:
+                    with fake.lock:
+                        fake.closed_early += 1
+                    self.close_connection = True
+                    return False
+            return True
 
         def _error_now(self, text: str) -> bool:
             """FAKE_FINISH_ERROR: every call of the turn; FAKE_FINISH_ERROR_ONCE: its first."""

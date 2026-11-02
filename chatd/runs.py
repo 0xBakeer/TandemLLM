@@ -65,7 +65,7 @@ import re
 import threading
 import time
 
-from chatd import stall as stall_mod, verify
+from chatd import engine as engine_mod, stall as stall_mod, verify
 from chatd.engine import EngineError
 from chatd.ids import iso, now_ms, ulid
 
@@ -214,6 +214,9 @@ class Run:
         self.remark: str | None = None         # a note for the end of the answer (a gone pin)
         # the loop
         self.cancel = threading.Event()        # a running tool ends on it
+        # SRV-777: the connection to the engine while its response has not started (`Engine.stream`): Stop
+        # shuts it, so the engine sees the close while the request still waits for memory or in its line
+        self.pending = None
         self.step_parts: list[int] = []        # this step's tool_call part indexes, in order
         self.tc_parts: dict[int, int] = {}     # this step's tool_calls[].index -> part index
         self.length_continued = False
@@ -303,9 +306,18 @@ class Run:
         call = self.call
         if call is not None:
             call.close()
+        pending = self.pending
+        if pending is not None:
+            engine_mod.shut(pending)
         child = self.child
         if child is not None and child.active:      # Stop stops both (VIS-E15)
             child.stop(mode)
+
+    def _opened(self, conn) -> None:
+        """SRV-777: `Engine.stream`'s request is sent and its response not started: Stop can shut it now."""
+        self.pending = conn
+        if self.stop_mode:                     # a Stop that came before the connection existed
+            engine_mod.shut(conn)
 
     @property
     def active(self) -> bool:
@@ -506,9 +518,12 @@ class Run:
             try:
                 self.t_sent = time.monotonic()
                 self.call_first = self.call_last = None
-                self.call = self.svc.engine.stream(body, headers)
+                self.call = self.svc.engine.stream(body, headers, opened=self._opened)
+                self.pending = None
             except EngineError as exc:
-                self.call = None
+                self.call, self.pending = None, None
+                if self.stop_mode:                   # SRV-777: Stop shut the call before its response
+                    return self._stopped()
                 if over is None and over_window(exc):
                     # the prompt grew past the window after the guard's estimate: compact (even
                     # when the guard compacted this step already) and send it once more, when the
