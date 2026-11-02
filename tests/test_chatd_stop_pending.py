@@ -10,6 +10,7 @@ Run: python tests/test_chatd_stop_pending.py
 
 from __future__ import annotations
 
+import http.client
 import os
 import socket
 import sys
@@ -112,6 +113,56 @@ def test_the_engines_silence_ends_when_the_connection_is_shut():
     assert got["t"] - t0 < 1.0, got["t"] - t0
     assert seen.get("request", b"").startswith(b"POST /v1/chat/completions") and seen.get("eof"), seen
     return f"ended {1e3 * (got['t'] - t0):.0f} ms after the shut; the server read the close"
+
+
+class _ShutMidway(http.client.HTTPConnection):
+    """A connection whose `getresponse()` meets a Stop after its state check and before it reads `self.sock`:
+    http.client looks up `response_class` first, so the shut lands right there."""
+
+    def connect(self):
+        self.sock, self.peer = socket.socketpair()
+
+    @property
+    def response_class(self):
+        engine_mod.shut(self)
+        return http.client.HTTPResponse
+
+
+class _BrokenResponse(http.client.HTTPConnection):
+    """A connection whose response class itself fails while the socket is still there: a fault, not a shut."""
+
+    def connect(self):
+        self.sock, self.peer = socket.socketpair()
+
+    @property
+    def response_class(self):
+        def broken(sock, method=None):
+            raise AttributeError("not a shut")
+        return broken
+
+
+def test_a_shut_inside_getresponse_is_the_same_retryable_error():
+    """Stop's `shut` can land inside `getresponse()` after its state check and before it reads `conn.sock`; `close()`
+    has set that to None and http.client's response reads None (AttributeError, not an OSError). `stream` answers it
+    as any shut connection: a retryable `EngineError`, so the run ends "stopped". An AttributeError with the socket
+    still there is not hidden."""
+    eng = engine_mod.Engine("http://127.0.0.1:9")
+    eng._conn = lambda timeout: _ShutMidway(eng.host, eng.port, timeout=timeout)
+    try:
+        eng.stream(b"{}", {})
+    except engine_mod.EngineError as exc:
+        assert exc.retryable and exc.status == 0, (exc.status, exc.retryable)
+        got = str(exc)
+    else:
+        raise AssertionError("a shut inside getresponse returned a call")
+    eng._conn = lambda timeout: _BrokenResponse(eng.host, eng.port, timeout=timeout)
+    try:
+        eng.stream(b"{}", {})
+    except AttributeError as exc:
+        assert str(exc) == "not a shut", exc
+    else:
+        raise AssertionError("an AttributeError with the socket still there was hidden")
+    return f"shut midway: EngineError ({got}); a fault with the socket set: AttributeError"
 
 
 if __name__ == "__main__":

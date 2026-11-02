@@ -186,7 +186,14 @@ class Engine:
                 conn.sock.settimeout(READ_TIMEOUT_S)
             if opened is not None:
                 opened(conn)
-            resp = conn.getresponse()
+            try:
+                resp = conn.getresponse()
+            except AttributeError:
+                # SRV-777: a `shut` from another thread between getresponse's state check and its read of
+                # `conn.sock` leaves it None to read from: the connection was shut, not a fault
+                if conn.sock is not None:
+                    raise
+                raise EngineError(0, "the engine did not answer (the connection was shut)", True) from None
         except (OSError, http.client.HTTPException) as exc:
             conn.close()
             raise EngineError(0, f"the engine did not answer ({type(exc).__name__})", True) from None
