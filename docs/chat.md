@@ -36,7 +36,10 @@ its Retry-After, then the chat is compacted and the smaller prompt sent; from th
 compacts at 80 % of the refused size, not only of the window. A 400 that says the request is over
 the model's context window (a tool result grew it past the guard's estimate) compacts the chat
 and sends the call once more when the compaction made it smaller; when it cut nothing, or the
-smaller call is refused too, the run fails with the engine's message.
+smaller call is refused too, the run fails with the engine's message. Stop also ends a call whose
+response has not started, such as one the engine holds while it waits for memory and sends no
+headers: chatd shuts the connection, the message ends `stopped`, and the engine books the request
+abandoned (SRV-777).
 
 One step's tool results share the room the model has left (#18): half of what is left under the
 compaction line, 2,000 tokens at least, never past the window less twice the answer's room, and
