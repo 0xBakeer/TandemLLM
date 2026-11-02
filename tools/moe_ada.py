@@ -25,15 +25,21 @@ import triton.language as tl
 
 from tools.exl3_ada import MUL1, _devkey, _k_bias, _k_inv
 
-# QWEN38_MOE_GATHER=1 routes the two split kernels through their masked-load variants: a tile's
-# window words come from one contiguous [8,W2P] masked load plus a register gather (the form
-# `_moe_trellis`/`_moe_gtrellis` already use) instead of two scattered [8,256] addressed loads.
-# ~8x less L1 traffic a k-step; measured 1.5-4x on the split kernels. The gather's register
-# layout re-associates `tl.sum`'s tree, so flag-on bits differ from flag-off bits by <=1 bf16
-# ulp on a small fraction of outputs -- a numerics-class change, kept off by default; the
-# flag's state joins every tier fingerprint, so the two paths never share a cache tier.
-# Grouped and ungrouped variants re-associate identically, so a pair's bits still do not
-# depend on its group. Latched at import: a flip takes effect on restart, like every knob.
+# The two split kernels run their masked-load variants by default wherever they are
+# bitwise-identical to the addressed-load originals: a tile's window words come from one
+# contiguous [8,W2P] masked load plus a u64 pair-gather + rotate (the form `_moe_trellis`/
+# `_moe_gtrellis` already use) instead of two scattered [8,256] addressed loads. ~8x less L1
+# traffic a k-step; measured 1.5-4x on the split kernels. Identity holds exactly when the
+# launch's bound on the packed word width is W2P=32 -- banks whose widest tile is <= 32 u32
+# words, i.e. every kb in {2,3,4,15,25,35} -- because the u64 gather's output layout keeps the
+# addressed load's element-to-lane map there (verified torch.equal on every rate, grouped and
+# ungrouped, deployed dims and tails). At W2P=64 (kb 5..8) the gather re-associates `tl.sum`'s
+# tree (~ulp drift), so those banks keep the addressed kernels and the masked form stays an
+# opt-in via QWEN38_MOE_GATHER=1 -- a numerics class, with the flag's state in every tier
+# fingerprint. The identity is a Triton-lowering property, not an algebra identity, so it is
+# proved per device: the load probe latches `_MASKED_EQ`, and an unproven device falls back to
+# the addressed kernels (still correct, just slower). Grouped and ungrouped variants decode
+# identically, so a pair's bits never depend on its group. Flag latched at import.
 from engine.settings import SETTINGS as _S
 MOE_GATHER = _S.get("MOE_GATHER") == "1"
 
@@ -367,6 +373,27 @@ def _pinv(device) -> torch.Tensor:
 
 
 _OK: dict = {}          # device -> verdict, recorded by `probe` at MoEBank load
+_MASKED_EQ: dict = {}   # device -> probe verdict: the masked split kernels == addressed, bitwise
+_FORCE_MASKED = None    # None: `_use_masked`'s rule; True/False: probe/test override
+
+
+def _bank_wmax(bank) -> int:
+    """The widest tile in the bank, in u32 words: `tile_width(kb) // 2` == the kernels' `W2v`
+    (`kb * 8` for kb < 10, `(kb // 10) * 8 + 4` for the half-integer rates). The admitted
+    default-masked set `wmax <= 32` is exactly kb in {2,3,4,15,25,35}; kb 5..8 give 40..64."""
+    return max(k * 8 if k < 10 else (k // 10) * 8 + 4 for k in bank.ks)
+
+
+def _use_masked(wmax: int, dev) -> bool:
+    """Whether `moe_experts` runs the masked-load split kernels for a bank whose widest tile is
+    `wmax` u32 words. Default where the masked form is bitwise-identical to the addressed form
+    on this device (wmax <= 32 and the probe latched `_MASKED_EQ`); the flag keeps it
+    selectable beyond that -- W2P=64 re-associates the partial sums, a numerics opt-in."""
+    if _FORCE_MASKED is not None:
+        return _FORCE_MASKED
+    if MOE_GATHER:
+        return True
+    return wmax <= 32 and _MASKED_EQ.get(_devkey(dev), False)
 
 
 def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | None = None):
@@ -378,14 +405,13 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     dev = x.device
     flat = ids.reshape(-1).to(torch.int32).contiguous()
     pinv = _pinv(dev)
-    split = _moe_trellis_split_m if MOE_GATHER else _moe_trellis_split
-    split_g = _moe_trellis_split_g_m if MOE_GATHER else _moe_trellis_split_g
+    wmax = _bank_wmax(bank)
+    masked = _use_masked(wmax, dev)
+    split = _moe_trellis_split_m if masked else _moe_trellis_split
+    split_g = _moe_trellis_split_g_m if masked else _moe_trellis_split_g
     # the masked variants bound their window load by the bank's widest rate (32 covers K <= 4
     # plus 1.5/2.5/3.5; 64 covers K 5..8 -- a bank mixing both classes takes 64)
-    w2p = {}
-    if MOE_GATHER:
-        wmax = max((k * 8 if k < 10 else (k // 10) * 8 + 4) for k in bank.ks)
-        w2p = {"W2P": 32 if wmax <= 32 else 64}
+    w2p = {"W2P": 32 if wmax <= 32 else 64} if masked else {}
 
     if not x.is_contiguous():
         x = x.contiguous()
@@ -634,11 +660,12 @@ def _moe_trellis_split_g(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
 def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
                          K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
                          K_INV, K_BIAS, W2P: tl.constexpr):
-    """`_moe_trellis_split` reading the window words through one masked [8,W2P] load + register
-    gathers (the `_moe_trellis`/`_moe_gtrellis` form; W2P is the launch's bound on W2v, 32 or
-    64 by the bank's rates) instead of two scattered [8,256] addressed loads. Same words, same
-    decode order -- `tl.gather`'s layout re-associates `tl.sum`'s tree, so bits differ from the
-    addressed form by ~ulp (numerics class: served only under MOE_GATHER)."""
+    """`_moe_trellis_split` reading the window words through one masked [8,W2P] load + a u64
+    pair-gather + rotate (the `_moe_trellis`/`_moe_gtrellis` load form; W2P is the launch's
+    bound on W2v, 32 or 64 by the bank's rates) instead of two scattered [8,256] addressed
+    loads. At W2P=32 the u64 gather keeps the addressed form's element-to-lane map, so the
+    outputs are bitwise-identical (the default on wmax<=32 banks once the probe latches it);
+    at W2P=64 the gather re-associates `tl.sum`'s tree -- ~ulp drift, MOE_GATHER opt-in only."""
     p = tl.program_id(0)
     j = tl.program_id(1)
     nb = tl.program_id(2) % NBS
@@ -690,9 +717,10 @@ def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
 def _moe_trellis_split_g_m(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
                            K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
                            K_INV, K_BIAS, G: tl.constexpr, W2P: tl.constexpr):
-    """`_moe_trellis_split_g` with `_moe_trellis_split_m`'s masked load + gathers. The two
-    variants re-associate `tl.sum` identically, so under MOE_GATHER a pair's bits still do
-    not depend on how many partners share its expert."""
+    """`_moe_trellis_split_g` with `_moe_trellis_split_m`'s masked load + u64 gather. The two
+    masked variants re-associate `tl.sum` identically (and, at W2P=32, identically to the
+    addressed kernels), so a pair's bits still do not depend on how many partners share its
+    expert."""
     gi = tl.program_id(0)
     j = tl.program_id(1)
     nb = tl.program_id(2) % NBS
@@ -800,6 +828,31 @@ def probe(device) -> None:
                                moe_experts(x4, ids4, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
                                moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2))
+        # The masked split kernels' bitwise identity vs the addressed ones is a Triton
+        # lowering property, not an algebra identity (W2P=64 re-associates `tl.sum`), so it is
+        # proved on THIS device before becoming the wmax<=32 default: force both arms through
+        # `moe_experts`'s own dispatch -- x4 (P=8) covers ungrouped `_split_m`, x8 (P=16) the
+        # grouped `_split_g_m`; one W2v instantiation serves every rate <= 32, so the {2,25}
+        # bank's verdict covers the whole admitted class.
+        global _FORCE_MASKED
+        try:
+            _FORCE_MASKED = False
+            d4, d8 = moe_experts(x4, ids4, bank).clone(), moe_experts(x8, ids8, bank).clone()
+            _FORCE_MASKED = True
+            _MASKED_EQ[dk] = bool(
+                torch.equal(d4, moe_experts(x4, ids4, bank))
+                and torch.equal(d8, moe_experts(x8, ids8, bank)))
+        finally:
+            _FORCE_MASKED = None
+        # ...and the residual default arm stays exercised: a W2v>32 bank dispatches the
+        # addressed kernels (or, flag-on, the drifting masked opt-in -- allclose can't gate
+        # that drift, it only proves the arm still serves).
+        bank_w = FK.MoEBank([
+            ((tre(8), su(128), su(128)), (tre(8), su(128), su(128)),
+             (tre(8), su(128), su(128))) for _ in range(8)], dev)
+        _OK[dk] = _OK[dk] and torch.allclose(
+            PK.moe_grouped_reference(x4, ids4, bank_w),
+            moe_experts(x4, ids4, bank_w), atol=4e-2, rtol=4e-2)
     except Exception as e:
         _OK[dk] = False
         _say(f"probe failed on {dev}: {e!r}")

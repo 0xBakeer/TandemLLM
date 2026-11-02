@@ -413,10 +413,10 @@ KNOBS: dict[str, tuple] = {
     'Q35M_SIBLINGS': ('0', 'engine/models/qwen3_5_moe/serving.py'),
     # rounds after an anchor-only cut that take the plain step (1, 2, 4 .. up to this; 0 = off)
     'Q35M_ANCHOR_BACKOFF': ('0', 'engine/models/qwen3_5_moe/serving.py'),
-    # the Ada MoE split kernels' window words through a masked [8,64] load + register gathers
-    # instead of two scattered [8,256] addressed loads (1.5-4x on the split kernels, ~ulp
-    # activation drift vs the addressed form -- a numerics class like FN_GEMV_SPLIT's order
-    # change); 0: the addressed-load kernels
+    # the Ada MoE split kernels' masked [8,W2P] load + u64 gather on banks whose widest tile
+    # exceeds 32 u32 words (kb 5..8), where the gather re-associates the fp32 partials ~ulp
+    # (a numerics class like FN_GEMV_SPLIT's order change); banks at <=32 words already run
+    # the masked kernels by default wherever the load probe proved them bitwise-identical
     'MOE_GATHER': ('0', 'tools/moe_ada.py'),
 }
 

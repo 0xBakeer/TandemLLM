@@ -133,4 +133,4 @@ Each kernel path has a `QWEN38_*` switch, and `ops/serve.env` sets the served co
 | `QWEN38_COMMIT_IN_VERIFY` | fold the commit into the next verify |
 | `QWEN38_VERIFY_GRAPH`, `QWEN38_DRAFT_GRAPH` | CUDA graphs for the verify and the drafter |
 | `QWEN38_FUSED_GDNPREFILL`, `QWEN38_NVFP4_PREFILL_V2` | the prefill paths |
-| `QWEN38_MOE_GATHER` | the Ada MoE split kernels' window words through a masked load + register gathers instead of scattered addressed loads (numerics class: ~ulp activation drift vs the default; off = the addressed-load kernels, bit-identical; a flip takes effect on restart) |
+| `QWEN38_MOE_GATHER` | opt-in for the Ada MoE split kernels' masked load + u64 gather on banks whose widest tile exceeds 32 u32 words (kb 5,6,7,8) — the numerics class where the gather re-associates the fp32 partials ~1 ulp; banks at <=32 words (kb 2,3,4,15,25,35) already run the masked kernels by default wherever the load probe proved them bitwise-identical to the addressed originals (a flip takes effect on restart) |

@@ -1,10 +1,12 @@
-"""`QWEN38_MOE_GATHER=1`'s masked-load MoE split kernels (tools/moe_ada.py). GPU only.
+"""The masked-load MoE split kernels (tools/moe_ada.py). GPU only.
 
-The flag's contract: flag-off is bitwise-identical to the addressed-load path (its kernels are
-untouched); flag-on re-associates the fp32 partials' tree at ~ulp scale (a numerics class, like
-FN_GEMV_SPLIT's order change), while grouped and ungrouped variants re-associate identically --
-so a pair's bits still do not depend on how many partners share its expert, and a row's bits
-still do not depend on M.
+Dispatch contract: the masked variants are the default wherever they are bitwise-identical
+to the addressed-load kernels -- banks whose widest tile is <= 32 u32 words (kb 2,3,4,15,25,35)
+on devices whose load probe latched `_MASKED_EQ`; wider banks (kb 5..8) keep the addressed
+kernels and `QWEN38_MOE_GATHER=1` remains the opt-in that serves the masked form there, whose
+fp32 partials re-associate at ~ulp scale (a numerics class, like FN_GEMV_SPLIT's order change).
+Grouped and ungrouped variants decode identically, so a pair's bits still do not depend on
+how many partners share its expert, and a row's bits still do not depend on M.
 
 Run: python tests/test_moe_gather.py
 """
@@ -47,9 +49,19 @@ def _run(x, ids, bank, gather):
         MA.MOE_GATHER = orig
 
 
+def _run_forced(x, ids, bank, masked):
+    orig = MA._FORCE_MASKED
+    MA._FORCE_MASKED = masked
+    try:
+        return MA.moe_experts(x, ids, bank)
+    finally:
+        MA._FORCE_MASKED = orig
+
+
 def test_flag_off_is_the_unchanged_path():
-    # flag-off launches the addressed-load kernels themselves; against the reference it keeps
-    # the probe's tolerance, and repeated runs are bit-identical.
+    # flag-off on a wmax<=32 bank serves the masked kernels -- whose bits equal the addressed
+    # path's (asserted per rate below) -- so the path's bits are unchanged either way; against
+    # the reference it keeps the probe's tolerance, and repeated runs are bit-identical.
     bank = _bank([2, 25] * 4)
     x = (torch.randn(8, 128, generator=torch.Generator().manual_seed(1)) * .5).to(DEV, torch.bfloat16)
     ids = torch.randint(0, bank.n, (8, 2), generator=torch.Generator().manual_seed(2)).to(DEV)
@@ -71,9 +83,48 @@ def test_gather_vs_reference():
                                   _run(x, ids, bank, True), atol=4e-2, rtol=4e-2), (kbs, m)
 
 
+def test_masked_default_is_bitwise():
+    # the wmax<=32 default's contract, run as the persistent regression net: forced addressed
+    # vs forced masked through `moe_experts`'s own dispatch, per rate and per arm -- P<16 goes
+    # ungrouped, 16<=P<=128 grouped.
+    for kbs in ([2] * 4, [3] * 4, [4] * 4, [15] * 4, [25] * 4, [35] * 4, [2, 25] * 2):
+        bank = _bank(kbs)
+        g = torch.Generator().manual_seed(7)
+        for m in (1, 4, 8, 16):
+            x = (torch.randn(m, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+            ids = torch.randint(0, bank.n, (m, 2), generator=g).to(DEV)
+            assert torch.equal(_run_forced(x, ids, bank, False),
+                               _run_forced(x, ids, bank, True)), (kbs, m)
+
+
+def test_wide_rates_stay_direct():
+    # wmax>32 is the known re-association: flag-off dispatch keeps the addressed kernels, the
+    # masked form is genuinely different there, and only the flag puts a wide bank on it.
+    dev = torch.device(DEV)
+    MA.probe(dev)
+    bank = _bank([8, 15] * 4)
+    g = torch.Generator().manual_seed(9)
+    x = (torch.randn(8, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+    ids = torch.randint(0, bank.n, (8, 2), generator=g).to(DEV)
+    assert not torch.equal(_run_forced(x, ids, bank, False),
+                           _run_forced(x, ids, bank, True))
+    wmax = MA._bank_wmax(bank)
+    assert wmax > 32
+    assert MA._use_masked(wmax, dev) is False
+    orig = MA.MOE_GATHER
+    try:
+        MA.MOE_GATHER = True
+        assert MA._use_masked(wmax, dev) is True
+    finally:
+        MA.MOE_GATHER = orig
+    if MA._MASKED_EQ.get(MA._devkey(dev)):
+        assert MA._use_masked(32, dev) is True      # the probed wmax<=32 default
+
+
 def test_drift_is_ulp_scale():
-    # the flag-on/flag-off delta is bounded and ~ulp class, not a wrong-value bug.
-    for kbs in ([25] * 8, [8, 15] * 4):
+    # the flag-on/flag-off delta on a wmax>32 bank is bounded and ~ulp class, not a
+    # wrong-value bug. (A wmax<=32 bank has no delta at all -- the masked default is bitwise.)
+    for kbs in ([8, 15] * 4,):
         bank = _bank(kbs)
         g = torch.Generator().manual_seed(4)
         x = (torch.randn(16, 128, generator=g) * .5).to(DEV, torch.bfloat16)
