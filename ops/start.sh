@@ -43,13 +43,24 @@ LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
 # hold's restart (HOLD_RESTART=1), not with QSE_CHATD=off. A chatd that does not start is a warning:
 # the engine is up either way. ops/stop.sh never stops it, so an engine restart, the watchdog's
 # included, never ends a chat run; `tandem stop` does.
+# Engine mode (OPS-260) stops a chatd this checkout started, so the Chat (beta) switch's off ends it.
 load_secrets() {
     SECRETS="${QSE_SECRETS:-${QSE_STATE_DIR:+$QSE_STATE_DIR/secrets.env}}"
     SECRETS="${SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
     if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 }
 start_chatd() {
-    [ "${QSE_CHATD:-on}" = "off" ] && { echo "[start] chatd: off (QSE_CHATD=off)"; return 0; }
+    if [ "${QSE_CHATD:-on}" = "off" ]; then
+        if [ "${QSE_MODE:-}" = engine ]; then
+            echo "[start] chatd: off (engine only; QSE_MODE=chat turns the chat on)"
+            # OPS-260: the switch to engine ends the chat's chatd too (this tree's only; not for a hold)
+            if [ "${HOLD_RESTART:-0}" != "1" ] && [ -f "$REPO/ops/chatd.sh" ] && \
+                    bash "$REPO/ops/chatd.sh" status >/dev/null 2>&1; then
+                bash "$REPO/ops/chatd.sh" stop --this-tree || true
+            fi
+        else echo "[start] chatd: off (QSE_CHATD=off)"; fi
+        return 0
+    fi
     [ "${HOLD_RESTART:-0}" = "1" ] && return 0
     [ -f "$REPO/ops/chatd.sh" ] || return 0
     bash "$REPO/ops/chatd.sh" status >/dev/null 2>&1 && return 0
@@ -143,6 +154,12 @@ if [ "$SETUP" = "1" ]; then
     echo "[start] setup mode did not answer /health in 120 s; tail of $LOG:"; tail -20 "$LOG"; exit 1
 fi
 status starting --reason "${START_REASON:-$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")}"
+# OPS-260: serve.env's last block applied the mode; engine starts no conductor, small model or chatd
+if [ "${QSE_MODE:-}" = engine ]; then
+    echo "[start] mode: engine (the engine alone: no conductor, decision models, narrator, roles or chatd)"
+else
+    echo "[start] mode: ${QSE_MODE:-chat} (the conductor, its small models and chatd)"
+fi
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And

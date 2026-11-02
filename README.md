@@ -258,10 +258,25 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |
 | `--no-start` | install and configure, don't start |
+| `--with-chat`, `--engine-only` | the chat (beta) too, or the engine alone (a new install's default); a re-run without either keeps the box's mode |
 | `--systemd` | also install a systemd user unit, `tandemllm.service` |
 | `--yes`, `--dry-run`, `--uninstall` | non-interactive, print the steps only, remove the install |
 
 Afterwards, `~/TandemLLM/bin/tandem start|stop|status|smoke|logs` controls the engine.
+
+### Engine only (default)
+
+A new install serves the engine alone (OPS-260): the OpenAI-compatible API under the served model's own name, the dashboard and the caches. Nothing else runs beside it: no conductor (no `TandemLLM` model, router, user memory, packages, library or session monitor), no decision models, narrator, shadow reader or roles, and no chatd. The Chat tab says the chat is off and how to turn it on. `/health` and `/v1/models` report `"mode": "engine"` and what is loaded (`loaded`: the conductor, its monitor, the decision models, the narrator, the roles and whether chatd answers). One setting decides it, `QSE_MODE` (`engine` or `chat`) in `ops/serve.env`.
+
+### Turn on the chat (beta)
+
+The chat (beta) is the Chat tab with chatd and the conductor: the router, user memory, packages, the session monitor and the small models the profile names (Laya's decision models on Flash-Next). Turn it on in one of three ways:
+
+- install with `--with-chat`, or re-run the installer with it (a box set up in the Setup Guide uses the guide's switch instead: its `run/setup.env` decides, and the installer warns);
+- turn on **Chat (beta)** in the Setup Guide (`#/setup`), which writes `QSE_MODE=chat` to `run/setup.env` and turns on Laya's decision models with it;
+- `echo QSE_MODE=chat >> ~/TandemLLM/run/local.env && ~/TandemLLM/bin/tandem restart`.
+
+An upgrade keeps a box's mode: a box whose conductor config directory exists (`~/.qwen38-spark-engine/conductor`, it ran the conductor) stays in chat mode with its profiles, memory and sessions; a box with `QSE_CONDUCTOR_CONFIG=off` stays engine only. `X-Tandem: raw` still gives a chat box's raw engine for one request ([docs/conductor.md](docs/conductor.md#modes-and-headers)).
 
 The dashboard at `http://<host>:8000/dashboard/` asks for no password. Until an admin password is set, anyone who can reach the port can read and change what it shows, the memory included, so keep the engine on a trusted network. [docs/dashboard.md](docs/dashboard.md#no-password) says what it shows.
 

@@ -98,6 +98,7 @@ from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
 from server import cache_peek, chat_forward, model_card, tokenize_api  # noqa: E402
 from server import memory_api  # noqa: E402
+from server import mode as mode_mod  # noqa: E402  (OPS-260 engine or chat, and what runs beside the engine)
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
 from server import session_tokens as session_tokens_mod  # noqa: E402
@@ -549,6 +550,7 @@ def _lane_room(job, where: str) -> bool:
 def _health_body(part) -> dict:
     """`/health`'s full body but the fields `HEALTH.answer`'s caller builds fresh (status, fault,
     uptime, in flight, engine busy); `part(name, fn)` times each report (server/health_cache.py)."""
+    roles = part("roles", _safe, roles_report)
     return {
         "status_port": _status_port(),
         "model": served_name(), "base_model": STATE.get("model"),
@@ -567,11 +569,36 @@ def _health_body(part) -> dict:
         # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
         **({"kv_pool": part("kv_pool", kv_pool_report)} if kvpool.POOL is not None else {}),
         # the small models and the memory governor (server/rolemem.py)
-        "roles": part("roles", _safe, roles_report),
+        "roles": roles,
+        # OPS-260: engine or chat, and what runs beside the engine (server/mode.py)
+        **part("mode", _mode_report, roles),
         **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
         # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
         **_par_status(part),
     }
+
+
+def _mode_report(roles: dict | None = None) -> dict:
+    """OPS-260's `mode` and `loaded` (server/mode.py), from a roles report already built when given;
+    never raises: a report that fails says so in `loaded` and /health stays up."""
+    try:
+        roles = _safe(roles_report) if roles is None else roles
+        return mode_mod.report(STATE, roles if "error" not in roles else None)
+    except Exception as exc:                                       # noqa: BLE001
+        return {"mode": "chat" if STATE.get("conductor") is not None else "engine",
+                "loaded": {"error": f"{type(exc).__name__}: {exc}"[:200]}}
+
+
+# /v1/models's copy of it, built at most once a MODES_TTL_S: clients poll the route (OPS-260)
+MODES_TTL_S = 2.0
+_modes_last: dict = {"at": None, "body": None}
+
+
+def _models_mode(clock=time.monotonic) -> dict:
+    now = clock()
+    if _modes_last["at"] is None or now - _modes_last["at"] >= MODES_TTL_S:
+        _modes_last.update(at=now, body=_mode_report())
+    return _modes_last["body"]
 
 
 def _health_sampling() -> dict:
@@ -8284,6 +8311,8 @@ class Handler(BaseHTTPRequestHandler):
                 # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
                                                                      STATE["started"])
+            # OPS-260: engine or chat and what runs beside the engine, beside `data` too
+            out.update(_models_mode())
             return self._json(200, out)
         if path == "/v1/laya" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, what the route takes (server/laya_api.py)

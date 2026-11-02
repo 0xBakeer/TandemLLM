@@ -117,6 +117,8 @@ class Box:
             fh.write("# none\n")
         os.makedirs(os.path.join(self.root, "run"))
         os.makedirs(self.home)
+        # OPS-260: the reference box ran the chat, so its conductor directory exists (an empty QSE_MODE is chat)
+        os.makedirs(os.path.join(self.home, ".qwen38-spark-engine", "conductor"))
         if assets:
             for a in M["assets"]:
                 for p in [a["path"], *a["also"]]:
@@ -181,10 +183,15 @@ class Box:
         return out
 
 
+#: the reference box's chat tools: the chat (beta) with Laya and the shadow reader (off by default since
+#: OPS-260, engine only) and the narrator (off by default since 0.11.3, SRV-534)
+CHAT = {"conductor": True, "laya": True, "shadow": True, "narrator": True}
+
+
 def _sel(**kw):
-    """The selection the tests plan: the reference box's tools, the narrator on beside them (off by
-    default since 0.11.3, SRV-534), and what `kw` sets."""
-    kw["components"] = dict({"narrator": True}, **(kw.get("components") or {}))
+    """The selection the tests plan: the reference box's tools, its chat tools on beside them (CHAT),
+    and what `kw` sets."""
+    kw["components"] = dict(CHAT, **(kw.get("components") or {}))
     return estimate.check(M, dict({"model": M["id"]}, **kw))
 
 

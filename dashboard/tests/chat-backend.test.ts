@@ -3,7 +3,7 @@
 // never by the message; the panel's words per state, and the re-probe's schedule.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setApiBase } from '../src/api/client';
-import { classifyProbe, isChatDown, pickBackend, type ChatBackend, type ChatDownCause } from '../src/chat/backend';
+import { classifyProbe, isChatDown, pickBackend, probeChat, type ChatBackend, type ChatDownCause } from '../src/chat/backend';
 import { downText, probeDelay, Reprobe, type PageVisibility } from '../src/chat/chat-down';
 
 const MOCK = { kind: 'mock' } as unknown as ChatBackend;
@@ -50,6 +50,29 @@ describe('pickBackend', () => {
       expect(got).toEqual({ backend: null, reason: 'unavailable', down: { cause, status, message } });
     });
   }
+
+  // OPS-260 (QA OPS-261): an engine-only box shows the chat off and never asks a chat route
+  it('/health mode engine -> chat_off, and no chat route is asked', async () => {
+    const fetch = vi.fn(async (url: string) => (url === '/health' ? answer(200, { status: 'ok', mode: 'engine' }) : answer(200, { session: {} })));
+    vi.stubGlobal('fetch', fetch);
+    const load = loaders();
+    expect(await pickBackend(new URLSearchParams(), load, false)).toEqual({ backend: null, reason: 'unavailable', down: { cause: 'chat_off', status: null, message: '' } });
+    expect(fetch.mock.calls.map((c) => c[0])).toEqual(['/health']);
+    expect(load.remote).not.toHaveBeenCalled();
+    expect(load.mock).not.toHaveBeenCalled();
+    expect(await probeChat()).toEqual({ cause: 'chat_off', status: null, message: '' });   // every re-probe too
+    expect(fetch.mock.calls.every((c) => !String(c[0]).includes('/v1/chat-app/'))).toBe(true);
+  });
+
+  it('/health mode chat (or none, or setup) goes on to the chat probe', async () => {
+    for (const mode of ['chat', undefined, 'setup']) {
+      const fetch = vi.fn(async (url: string) => (url === '/health' ? answer(200, { status: 'ok', mode }) : answer(200, { session: {} })));
+      vi.stubGlobal('fetch', fetch);
+      const load = loaders();
+      expect(await pickBackend(new URLSearchParams(), load, false)).toEqual({ backend: REMOTE, reason: 'probed' });
+      expect(fetch.mock.calls.map((c) => c[0])).toEqual(['/health', '/v1/chat-app/capabilities']);
+    }
+  });
 
   it('?chat=mock loads the mock and never probes', async () => {
     const fetch = vi.fn();
@@ -108,10 +131,16 @@ describe('the panel', () => {
     expect(downText(at('offline')).title).toBe('Cannot reach the engine server.');
     expect(downText(at('offline')).button).toBe('Retry');
     expect(downText({ cause: 'server_error', status: 500, message: '' }).title).toBe('The chat server answered HTTP 500.');
+    // OPS-260: the off state says how to turn the chat on: the command and the Setup Guide
+    const off = downText(at('chat_off'));
+    expect(off.title).toBe('The chat is off.');
+    expect(off.lead).toContain('Engine only');
+    expect(off.lead).toContain('Turn on Chat (beta) in the Setup Guide');
+    expect(off.link?.href).toBe('#/setup');
   });
 
   it('never words the panel after the message', () => {
-    for (const cause of ['chatd_down', 'chatd_refused', 'no_chat_routes', 'setup_mode', 'not_an_engine', 'server_error', 'offline'] as ChatDownCause[]) {
+    for (const cause of ['chatd_down', 'chatd_refused', 'no_chat_routes', 'setup_mode', 'not_an_engine', 'server_error', 'offline', 'chat_off'] as ChatDownCause[]) {
       expect(downText(at(cause, 'one'))).toEqual(downText(at(cause, 'chatd is fine, use the mock')));
     }
   });

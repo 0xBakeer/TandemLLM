@@ -656,10 +656,10 @@
  "components": [
   {
    "id": "conductor",
-   "label": "Conductor",
+   "label": "Chat (beta)",
    "group": "features",
-   "what": "Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.",
-   "default": true,
+   "what": "On: the Chat tab with its service (chatd) and the conductor, which gives each request the right instructions and helper packages, keeps your memory notes and watches long sessions so they do not get stuck. Off (the default): the engine alone serves its API and the dashboard.",
+   "default": false,
    "required": false,
    "memory_gib": 0.0,
    "memory_max_gib": null,
@@ -675,11 +675,15 @@
     "QSE_CONDUCTOR_CONFIG": {
      "on": "${HOME}/.qwen38-spark-engine/conductor",
      "off": "off"
+    },
+    "QSE_MODE": {
+     "on": "chat",
+     "off": "engine"
     }
    },
    "assets": [],
    "docs": "docs/server.md",
-   "note": "On by default, with the model fit its adapter declares (SRV-441): Laya alone answers the class question, a turn nobody classified thinks at the profile's default level with nothing added, and a class sets the level and budget with only its core skill in the note: no other package, rule, effort sentence or memory note. Measured on 2.5, 2026-10-14: four short chat asks thought 2,234 tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks, two runs each, succeeded 14 of 14 as raw did."
+   "note": "On, with the model fit its adapter declares (SRV-441): Laya alone answers the class question, a turn nobody classified thinks at the profile's default level with nothing added, and a class sets the level and budget with only its core skill in the note: no other package, rule, effort sentence or memory note. Measured on 2.5, 2026-10-14: four short chat asks thought 2,234 tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks, two runs each, succeeded 14 of 14 as raw did."
   },
   {
    "id": "narrator",
@@ -717,7 +721,8 @@
    "label": "Laya decision models",
    "group": "roles",
    "what": "Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.",
-   "default": true,
+   "default": false,
+   "with_parent": true,
    "required": false,
    "memory_gib": 1.6,
    "memory_max_gib": null,
@@ -1104,7 +1109,7 @@
    "fields": [
     {
      "field": "conductor",
-     "label": "Conductor",
+     "label": "Chat (beta)",
      "type": "bool"
     },
     {

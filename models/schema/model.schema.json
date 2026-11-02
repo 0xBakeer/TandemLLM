@@ -366,6 +366,9 @@
           "what": {
             "maxLength": 2000,
             "type": "string"
+          },
+          "with_parent": {
+            "type": "boolean"
           }
         },
         "required": [

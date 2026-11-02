@@ -287,7 +287,7 @@ def test_the_setup_message():
     assert "--host 0.0.0.0" in tail and "use-profile.sh" not in tail, tail
     # OPS-155: the Chat tab waits for the setup, and says how to see chatd
     assert "The Chat tab starts with the engine once the setup is done (" in tail and \
-        "/bin/tandem chat status)." in tail, tail
+        "/bin/tandem chat status) when Chat (beta) is on in the guide" in tail, tail   # OPS-260
 
 
 def test_a_setup_install_takes_an_exl3_profile():

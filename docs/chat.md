@@ -84,7 +84,9 @@ restarts the engine for it. A chatd that cannot start is a warning; the engine s
 ```
 
 `tandem status` has one chatd line. `QSE_CHATD=off` in `run/local.env` keeps the engine's start
-from starting chatd. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
+from starting chatd. A box in engine-only mode (`QSE_MODE=engine`, a new install's default, OPS-260)
+starts no chatd either and stops one this checkout started (`ops/chatd.sh stop --this-tree`), and its Chat tab says the chat is off and how to turn it on, without asking a
+chat route; `QSE_MODE=chat` (`install.sh --with-chat`, the Setup Guide's Chat (beta) switch) turns it on. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
 ops/chatd.sh start|stop|restart|status` in a checkout); `start` exits 1 with the log's last lines
 when chatd does not answer `/health`. It runs chatd under the first of: `CHATD_PY`, serve.env's
 `PY`, the install's venv (`~/TandemLLM/venv`), `./venv`, `$VIRTUAL_ENV`, `python3` (said so, with a

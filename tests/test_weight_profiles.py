@@ -20,8 +20,10 @@ KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EX
         "QWEN38_DECIDER_DIR", "DEFAULT_MAX_TOKENS", "QWEN38_FN_JOINT_PREFILL", "QWEN38_FN_DRAFT_FREEZE")
 
 
-def _env(profile: str | None, extra: dict | None = None) -> dict:
+def _env(profile: str | None, extra: dict | None = None, chat: bool = False) -> dict:
     with tempfile.TemporaryDirectory() as home:
+        if chat:            # OPS-260: a box that ran the chat (its conductor directory exists) resolves chat
+            os.makedirs(os.path.join(home, ".qwen38-spark-engine", "conductor"))
         # serve.env's REPO (${HOME}/<dir>: the repository's, or a deploy tree's own name)
         m = re.search(r"^REPO=\$\{HOME\}/(\S+)$", open(os.path.join(ROOT, "ops/serve.env")).read(), re.M)
         os.symlink(ROOT, os.path.join(home, m.group(1) if m else "qwen38-spark-engine"))
@@ -59,9 +61,10 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
     """OPS-97: a Flash-Next profile is a branch of turboderp's repo, its engine flags replace the 27B's
     (start.sh), it needs no 27B asset, keeps a warm table out of the page-cache drop, and leaves the
     shared values alone."""
-    base = _env(None)
+    base = _env(None, chat=True)
     for bpw, table in (("2.05", "warm"), ("3.05", "cold"), ("4.05", "cold"), ("5.05", "cold"), ("6.05", "cold")):
-        e = _env(f"flashnext-{bpw}", {"QWEN38_EXL3": "/leak", "QWEN38_DRAFT_EXL3": "/leak"})
+        # OPS-260: the profile's chat values as a chat box resolves them (engine mode turns Laya off, test_engine_only)
+        e = _env(f"flashnext-{bpw}", {"QWEN38_EXL3": "/leak", "QWEN38_DRAFT_EXL3": "/leak"}, chat=True)
         d = f"~/flashnext-packs/{bpw}"
         assert e["QSE_WEIGHTS"] == f"flashnext-{bpw}" and e["QSE_WEIGHTS_DIR"] == d, e
         assert e["QSE_WEIGHTS_HF"] == "turboderp/Qwen3.8-Flash-Next-exl3", e
