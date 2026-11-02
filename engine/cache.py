@@ -844,10 +844,14 @@ class Budget:
         """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box:
         `default_free` on the live counters, less the roles' pools' free bytes of the same reading (those blocks are
         never the workspace's). The admission counts a prefill admitted over the peak (`admit_over_peak`) as new
-        memory past this figure only (server/slots.py `Admission.check`)."""
+        memory past this figure only (server/slots.py `Admission.check`). A credit only on a live reading: without
+        a pools probe, or when the walk fails (`default_free` would then take the last walk's scratch, with the
+        roles' pools' free bytes left in), 0, the whole workspace counts as new memory."""
         alloc, res = self.memory()
         p = self.pools()
-        return max(0, self.default_free(alloc, res) - int((p or {}).get("mempools_free") or 0))
+        if p is None:
+            return 0
+        return max(0, self.default_free(alloc, res) - int(p.get("mempools_free") or 0))
 
     def _ceiling_over(self) -> int:
         """SPD-257: bytes the ceiling stage sheds for: the reserve over the ceiling, less the graphs' pools' free

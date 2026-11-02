@@ -406,8 +406,9 @@ def test_srv775_the_workspace_spare_is_the_default_pools_free_bytes_less_the_rol
     bytes (`default_free`: the free reserve less the roles' pools by `foreign_free` and the graphs' scratch) less the
     roles' pools' free bytes of the same reading. The saved state of 2026-11-02 in round figures: 64.7 allocated,
     15.0 free in the reserve, 12.7 of it the graphs' scratch, 1.1 free in a role's pool: 2.3 free default-pool bytes,
-    1.2 credited. A reading that fails with none before it: no credit; without a pools probe the whole free reserve
-    less `foreign_free`, as `default_free`."""
+    1.2 credited. A credit only on a live reading: a walk that fails, with or without a reading before it (the
+    production probe keeps its last one in `.last`, which `default_free` falls back to), and no pools probe at all
+    give none."""
     fa = FakeAlloc(64.7, 15.0)
     m = budget(fa, ceiling=64.8, peak=75.8)
     reading = {"graphs_free": int(12.7 * GIB), "mempools_free": int(1.1 * GIB)}
@@ -425,9 +426,23 @@ def test_srv775_the_workspace_spare_is_the_default_pools_free_bytes_less_the_rol
         raise RuntimeError("walk failed")
     m.pools_probe = failing
     assert m.workspace_spare() == 0, "no reading: no credit on the graphs' scratch"
+
+    class LastThenFails:
+        """`TorchPools`' shape: the last reading in `.last`, and a walk that now fails."""
+
+        def __init__(self, last):
+            self.last = last
+
+        def __call__(self):
+            raise RuntimeError("walk failed")
+    m.pools_probe = LastThenFails({"graphs_free": int(12.7 * GIB), "mempools_free": int(1.1 * GIB)})
+    stale = m.default_free(alloc, res)
+    assert stale == int(15.0 * GIB) - int(0.5 * GIB) - int(12.7 * GIB), stale / GIB
+    assert m.workspace_spare() == 0, f"a failed walk credited the last one's {stale / GIB:.2f} GiB"
     m.pools_probe = None
-    assert m.workspace_spare() == int(15.0 * GIB) - int(0.5 * GIB)
-    return "2.3 free default-pool bytes, 1.2 credited; a failed reading 0"
+    assert m.workspace_spare() == 0, "no pools probe: no reading, no credit"
+    return (f"2.3 free default-pool bytes, 1.2 credited; a failed walk 0 (the last walk's {stale / GIB:.1f} not "
+            f"credited), no probe 0")
 
 
 def test_the_decision_models_are_not_the_engine():
