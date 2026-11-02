@@ -241,13 +241,23 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
     if (_capability() or (0, 0)) < (9, 0):
         if _S.get("FN_DENSE_SPLIT_FORCE") == "1" and (N, Kin, kb) in DENSE_SPLIT:
             return got                           # tools/fn_tiles sweeps: the table entry verbatim
-        # no distributed shared memory among the CTAs: a split launches plain CTAs whose partials a
-        # second kernel reduces -- global-memory exchange, worthwhile only while the wider grid is
-        # still short of a couple of waves and a rank keeps a deep K slice (the table's splits are
-        # tuned for the nearly-free DSMEM exchange)
+        # no distributed shared memory among the CTAs: a split launches plain CTAs whose last-arriving
+        # rank reduces the partials in place (a ticket, one launch). The exchange is nearly free, so a
+        # split pays off wherever a rank still holds a real K slice -- and stops paying once the work
+        # is already spread thin: 2048+ elems of K below it (a verify-width grid is already saturated
+        # there and splitting can lose), the column grid under ~5 waves of CTAs to begin with, 32+
+        # K-tiles a rank, the rank slice whole 128 blocks, a grid not already past ~2K CTAs. On a
+        # column grid already past half a wave the deeper splits want ~1024 K elems a rank to keep
+        # paying (a wide projection's verify rows go through `dense` at M up to 32, where an over-deep
+        # split costs more than it buys); past a 4-way split the deeper split also wants a grid still
+        # short of a couple of waves or ~2048 K elems a rank
         KT, S = Kin // 16, 1
-        while S < 8 and (N // 128) * S * 2 < 128 and KT % (16 * S) == 0 and KT // (2 * S) >= 128:
-            S *= 2
+        if KT >= 128 and N // 128 <= 384:
+            while (S < 8 and KT % (16 * S) == 0 and KT // (2 * S) >= 32
+                   and (N // 128) * S * 2 <= 2048
+                   and (S < 2 or N // 128 <= 64 or KT // (2 * S) >= 64)
+                   and (S < 4 or (N // 128) * S * 2 <= 192 or KT // (2 * S) >= 128)):
+                S *= 2
         return S, got[1]
     return got
 
