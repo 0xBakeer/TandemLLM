@@ -25,6 +25,18 @@ import triton.language as tl
 
 from tools.exl3_ada import MUL1, _devkey, _k_bias, _k_inv
 
+# QWEN38_MOE_GATHER=1 routes the two split kernels through their masked-load variants: a tile's
+# window words come from one contiguous [8,W2P] masked load plus a register gather (the form
+# `_moe_trellis`/`_moe_gtrellis` already use) instead of two scattered [8,256] addressed loads.
+# ~8x less L1 traffic a k-step; measured 1.5-4x on the split kernels. The gather's register
+# layout re-associates `tl.sum`'s tree, so flag-on bits differ from flag-off bits by <=1 bf16
+# ulp on a small fraction of outputs -- a numerics-class change, kept off by default; the
+# flag's state joins every tier fingerprint, so the two paths never share a cache tier.
+# Grouped and ungrouped variants re-associate identically, so a pair's bits still do not
+# depend on its group. Latched at import: a flip takes effect on restart, like every knob.
+from engine.settings import SETTINGS as _S
+MOE_GATHER = _S.get("MOE_GATHER") == "1"
+
 RSQRT128 = tl.constexpr(0.08838834764831845)
 
 
@@ -366,6 +378,14 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     dev = x.device
     flat = ids.reshape(-1).to(torch.int32).contiguous()
     pinv = _pinv(dev)
+    split = _moe_trellis_split_m if MOE_GATHER else _moe_trellis_split
+    split_g = _moe_trellis_split_g_m if MOE_GATHER else _moe_trellis_split_g
+    # the masked variants bound their window load by the bank's widest rate (32 covers K <= 4
+    # plus 1.5/2.5/3.5; 64 covers K 5..8 -- a bank mixing both classes takes 64)
+    w2p = {}
+    if MOE_GATHER:
+        wmax = max((k * 8 if k < 10 else (k // 10) * 8 + 4) for k in bank.ks)
+        w2p = {"W2P": 32 if wmax <= 32 else 64}
 
     if not x.is_contiguous():
         x = x.contiguous()
@@ -386,15 +406,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     if ks_gu > 1:
         ygu_pp = torch.empty(P, 2 * ks_gu, I, dtype=torch.float32, device=dev)
         if grouped:
-            _moe_trellis_split_g[(P, 2, (I // 128) * ks_gu)](
+            split_g[(P, 2, (I // 128) * ks_gu)](
                 xh, order, es, lead, glen, gc, bank.tr, bank.kb, pinv, ygu_pp,
                 H, H // 16, I // 16, I // 128, ks_gu, J=2, TJ=-1,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1, **w2p)
         else:
-            _moe_trellis_split[(P, 2, (I // 128) * ks_gu)](
+            split[(P, 2, (I // 128) * ks_gu)](
                 xh, flat, bank.tr, bank.kb, pinv, ygu_pp,
                 H, H // 16, I // 16, I // 128, ks_gu, J=2, TJ=-1,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1, **w2p)
         xd = torch.empty(P, I, dtype=torch.float16, device=dev)
         _moe_combine_rotdown[(P, I // 128)](ygu_pp, flat, bank.sv, bank.su, xd, I,
                                            KS=ks_gu, num_warps=4)
@@ -415,15 +435,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     if ks_dn > 1:
         yd_pp = torch.empty(P, ks_dn, H, dtype=torch.float32, device=dev)
         if grouped:
-            _moe_trellis_split_g[(P, 1, (H // 128) * ks_dn)](
+            split_g[(P, 1, (H // 128) * ks_dn)](
                 xd, order, es, lead, glen, gc, bank.tr, bank.kb, pinv, yd_pp,
                 I, I // 16, H // 16, H // 128, ks_dn, J=1, TJ=2,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1, **w2p)
         else:
-            _moe_trellis_split[(P, 1, (H // 128) * ks_dn)](
+            split[(P, 1, (H // 128) * ks_dn)](
                 xd, flat, bank.tr, bank.kb, pinv, yd_pp,
                 I, I // 16, H // 16, H // 128, ks_dn, J=1, TJ=2,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1, **w2p)
         _moe_combine_rot[(P, H // 128)](yd_pp, flat, bank.sv, yd.view(P, H), H,
                                        KS=ks_dn, TJ=2, num_warps=4)
         del yd_pp
@@ -595,6 +615,137 @@ def _moe_trellis_split_g(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
         v = tl.inline_asm_elementwise("shf.r.wrap.b32 $0, $1, $2, $3;",
                                           "=r,r,r,r", [lo, hi, sh],
                                           dtype=tl.int32, is_pure=True, pack=1) & 0xFFFF
+        s1024 = tl.inline_asm_elementwise(
+            "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
+            "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
+        val = (s1024.to(tl.float32) * K_INV + K_BIAS).to(tl.float16).to(tl.float32)
+        xh = tl.load(XH + (pair[None, :] * J + j) * K + kt * 16 + xh_off[:, None],
+                     mask=gm[None, :], other=0.0).to(tl.float32)   # [16, G]
+        acc += tl.sum(tl.reshape(val, (8, 16, 16, 1)) * xh[None, :, None, :], axis=1)
+    cols = nb * 128 + tl.arange(0, 128)
+    for g in tl.static_range(G):
+        yp = tl.reshape(tl.sum(acc * (ga[None, None, :] == g), axis=2), (128,))
+        pg = tl.sum(tl.where(ga == g, pair, 0), 0)
+        tl.store(YPP + ((pg * J + j) * KS + ks) * (NT * 16) + cols,
+                 yp, mask=(g < ln) & (cols >= 0))
+
+
+@triton.jit
+def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
+                         K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
+                         K_INV, K_BIAS, W2P: tl.constexpr):
+    """`_moe_trellis_split` reading the window words through one masked [8,W2P] load + register
+    gathers (the `_moe_trellis`/`_moe_gtrellis` form; W2P is the launch's bound on W2v, 32 or
+    64 by the bank's rates) instead of two scattered [8,256] addressed loads. Same words, same
+    decode order -- `tl.gather`'s layout re-associates `tl.sum`'s tree, so bits differ from the
+    addressed form by ~ulp (numerics class: served only under MOE_GATHER)."""
+    p = tl.program_id(0)
+    j = tl.program_id(1)
+    nb = tl.program_id(2) % NBS
+    ks = tl.program_id(2) // NBS
+    e = tl.load(IDS + p)
+    tj = j if TJ < 0 else TJ
+    T = tl.load(TR + e * 3 + tj).to(tl.pointer_type(tl.int32))
+    kb = tl.load(KBt + e * 3 + tj)
+    W2v = tl.where(kb < 10, kb * 8, (kb // 10) * 8 + 4)
+    nbits = W2v * 32
+
+    s = tl.arange(0, 256)
+    pinv = tl.load(PINV + s)
+    pos = pinv + 1
+    end = tl.where(kb < 10, pos * kb, pos * (kb // 10) + pos // 2)
+    a0 = end - 16
+    a = tl.where(a0 < 0, a0 + nbits, a0)
+    off = a % 32
+    w0i = a // 32
+    w1i = tl.where(w0i + 1 >= W2v, 0, w0i + 1)
+
+    t8 = tl.arange(0, 8)
+    wrd = tl.arange(0, W2P)
+    xh_off = tl.arange(0, 16)
+    KC = (KT + KS - 1) // KS
+    kt0 = ks * KC
+    kt1 = tl.minimum(kt0 + KC, KT)
+    acc = tl.zeros([8, 16], dtype=tl.float32)
+    for kt in range(kt0, kt1):
+        base = (kt * NT + nb * 8) * W2v
+        w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
+                    mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
+        w0 = tl.gather(w, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        w1 = tl.gather(w, tl.broadcast_to(w1i[None, :], (8, 256)), axis=1)
+        sw = (off > 16)[None, :]
+        lo = tl.where(sw, w1, w0)
+        hi = tl.where(sw, w0, w1)
+        sh = tl.where(sw, 48 - off[None, :], 16 - off[None, :])
+        v = tl.inline_asm_elementwise("shf.r.wrap.b32 $0, $1, $2, $3;",
+                                      "=r,r,r,r", [lo, hi, sh],
+                                      dtype=tl.int32, is_pure=True, pack=1) & 0xFFFF
+        s1024 = tl.inline_asm_elementwise(
+            "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
+            "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
+        val = (s1024.to(tl.float32) * K_INV + K_BIAS).to(tl.float16).to(tl.float32)
+        xh = tl.load(XH + (p * J + j) * K + kt * 16 + xh_off).to(tl.float32)
+        acc += tl.sum(tl.reshape(val, (8, 16, 16)) * xh[None, :, None], axis=1)
+    tl.store(YPP + ((p * J + j) * KS + ks) * (NT * 16) + nb * 128 + tl.arange(0, 128),
+             tl.reshape(acc, (128,)))
+
+
+@triton.jit
+def _moe_trellis_split_g_m(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
+                           K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
+                           K_INV, K_BIAS, G: tl.constexpr, W2P: tl.constexpr):
+    """`_moe_trellis_split_g` with `_moe_trellis_split_m`'s masked load + gathers. The two
+    variants re-associate `tl.sum` identically, so under MOE_GATHER a pair's bits still do
+    not depend on how many partners share its expert."""
+    gi = tl.program_id(0)
+    j = tl.program_id(1)
+    nb = tl.program_id(2) % NBS
+    ks = tl.program_id(2) // NBS
+    ng = tl.load(GC)
+    if gi >= ng:
+        return
+    lead = tl.load(LEAD + gi)
+    ln = tl.load(LEN + gi)
+    tj = j if TJ < 0 else TJ
+    e = tl.load(ES + lead)
+    T = tl.load(TR + e * 3 + tj).to(tl.pointer_type(tl.int32))
+    kb = tl.load(KBt + e * 3 + tj)
+    W2v = tl.where(kb < 10, kb * 8, (kb // 10) * 8 + 4)
+    nbits = W2v * 32
+
+    s = tl.arange(0, 256)
+    pinv = tl.load(PINV + s)
+    pos = pinv + 1
+    end = tl.where(kb < 10, pos * kb, pos * (kb // 10) + pos // 2)
+    a0 = end - 16
+    a = tl.where(a0 < 0, a0 + nbits, a0)
+    off = a % 32
+    w0i = a // 32
+    w1i = tl.where(w0i + 1 >= W2v, 0, w0i + 1)
+
+    t8 = tl.arange(0, 8)
+    wrd = tl.arange(0, W2P)
+    ga = tl.arange(0, G)
+    gm = ga < ln
+    pair = tl.load(ORD + lead + ga, mask=gm, other=0)          # [G] pair ids
+    xh_off = tl.arange(0, 16)
+    KC = (KT + KS - 1) // KS
+    kt0 = ks * KC
+    kt1 = tl.minimum(kt0 + KC, KT)
+    acc = tl.zeros([8, 16, G], dtype=tl.float32)
+    for kt in range(kt0, kt1):
+        base = (kt * NT + nb * 8) * W2v
+        w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
+                    mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
+        w0 = tl.gather(w, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        w1 = tl.gather(w, tl.broadcast_to(w1i[None, :], (8, 256)), axis=1)
+        sw = (off > 16)[None, :]
+        lo = tl.where(sw, w1, w0)
+        hi = tl.where(sw, w0, w1)
+        sh = tl.where(sw, 48 - off[None, :], 16 - off[None, :])
+        v = tl.inline_asm_elementwise("shf.r.wrap.b32 $0, $1, $2, $3;",
+                                      "=r,r,r,r", [lo, hi, sh],
+                                      dtype=tl.int32, is_pure=True, pack=1) & 0xFFFF
         s1024 = tl.inline_asm_elementwise(
             "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
             "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
