@@ -10,7 +10,9 @@ on, in joint rounds of all the lanes.
 
 Only the order of the work moves: each prefill is the forward its request runs alone, so the logits,
 the states and every token are the ones without the burst. A member waits at most `wait_s` (then it
-goes on and the wait counts as a timeout); a member that ends before its prefill leaves (`leave`).
+goes on and the wait counts as a timeout); a member that ends before its prefill leaves (`leave`), and
+so does one that waits for memory at its admission (SRV-775): the others do not hold their first
+tokens for it, and once admitted it prefills alone.
 
 With `join` (QSE_PREFILL_BURST=joint) the members' prompts are not prefilled one after another
 but in one forward: each member hands its prompt over at its prefill (`join(who, job)`) and gives the

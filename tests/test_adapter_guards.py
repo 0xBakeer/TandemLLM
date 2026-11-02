@@ -57,8 +57,16 @@ from engine.models import REGISTRY  # noqa: E402
 #: them were too small to tell (engine/cache.py): v2's second value again
 #: SPD-257: each resident prefix's reserved end anchor, the policy's read of the allocator's pools and the graph
 #: captures on plain segments (engine/cache.py, engine/capture_lock.py, engine/disk_cache.py): v2's second value again
+#: SRV-773/SRV-775: the memory gate's charge by forwarded rows, the prefills in flight by thread and the resident
+#: prefix's resume estimate (engine/cache.py): v2's second value again
+#: SRV-775: the admission's count of a prefill in flight by its rows (`Budget.workspace_rows(line=False)`,
+#: engine/cache.py): v2's second value again
+#: SRV-775: a side slot's gate runs the peak stage only and `ws_now` is the largest prefill in flight
+#: (engine/cache.py): v2's second value again
+#: SRV-775: a side slot's gate far under the peak admits without the policy's lock (engine/cache.py): v2's second
+#: value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "5a884c205833992b1cb138bec90714259a1387f5d9af3ee6d2f1e2304b5465ab")
+             "8c2ef61fdcb394209f8cf10c03b5c7836764206ea20ce3c9d2755411a77bce21")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);

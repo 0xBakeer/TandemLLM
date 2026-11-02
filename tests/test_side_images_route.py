@@ -154,6 +154,9 @@ def test_the_admission_reserves_the_expanded_rows():
             seen.append(n)
             return n
 
+        def workspace_rows(self, n, rows=None, line=True):     # SRV-773: no model, the line (`Budget.workspace_rows`)
+            return self.workspace(n) if line else n             # SRV-775: the admission's count, not recorded
+
     class H:
         def _client_gone(self):
             return False

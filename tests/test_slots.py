@@ -316,12 +316,72 @@ def test_more_lanes_than_one_pass_holds_verify_in_more_passes():
 
 
 # ------------------------------------------------------------------ admission
-def test_admission_alone_is_always_admitted():
-    adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": 1 * GiB})
-    ok, d = adm.reserve("a", 10 * GiB)
-    assert ok and d.get("alone"), "a lone request is the single-sequence server's request"
+def test_srv775_alone_is_checked_against_the_floor():
+    """SRV-775: a request with nothing else in flight is checked as any other (earlier it went unchecked, and a lone
+    side-slot turn took MemAvailable to 5.0 GiB); `alone` stays a count, `lone_checked` says the check ran."""
+    avail = [16 * GiB]
+    adm = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": avail[0]})
+    ok, d = adm.reserve("a", 5 * GiB)                  # 16 - 5 = 11 >= 10
+    assert ok and d.get("alone") and d["after"] == 11 * GiB, d
+    assert adm.stats["alone"] == 1 and adm.stats["lone_checked"] == 1
     adm.release("a")
     assert adm.reserved() == 0
+    avail[0] = 3 * GiB
+    ok, d = adm.reserve("b", 5 * GiB)                  # 3 - 5 < 10, alone or not
+    assert not ok and d.get("alone") and "b" not in adm.held, d
+    assert adm.stats["lone_checked"] == 2 and slots.Admission.describe(d).startswith("alone: MemAvailable 3.0")
+    return "alone: 16 - 5 = 11 >= 10 admitted, 3 - 5 refused"
+
+
+def test_srv775_the_room_caps_the_growth_and_the_prefills_in_flight_an_over_peak_admit_counts_in_full():
+    """SRV-775: the engine's room to its peak caps the caches' growth, the workspaces in flight and this request's, as
+    before: the memory gate, on every slot, keeps each prefill it admits under the peak. Hold 3's c8 round
+    (2026-11-02: MemAvailable 46.9 GiB, cache growth 13.4, eight cold prompts of 2.75 GiB of workspace and 0.22 of KV
+    pages): counted in full past the room, the eighth found 46.9 - 13.4 - 20.8 - 3.0 = 9.7 GiB < 10 and waited 12 s;
+    under the room (13.5) all eight start. A lone request the gate admitted over the peak (`over_peak`) counts its
+    workspace in full past the room: at room 0, g2's 9.91 GiB and 0.5 of KV pages are refused at MemAvailable 20
+    (20 - 9.91 - 0.5 < 10) and admitted at 21. A workspace leaves the reservation when its prefill has run, its KV
+    part kept until the release."""
+    ws, kv = int(2.75 * GiB), int(0.22 * GiB)
+    adm = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(46.9 * GiB)},
+                          growth=lambda: int(13.4 * GiB), room=lambda: int(13.5 * GiB))
+    for i in range(8):
+        ok, d = adm.reserve(f"c{i}", ws + kv, kv=kv)
+        assert ok, (i, slots.Admission.describe(d))
+    # the eighth: 13.4 + 7 x 2.75 + 2.75 = 35.4 under the room, capped at 13.5; the KV pages past it
+    assert d["room"] == int(13.5 * GiB) and d["under"] == int(13.4 * GiB) + 8 * ws, d
+    assert d["after"] == int(46.9 * GiB) - int(13.5 * GiB) - 8 * kv and d["in_flight_ws"] == 7 * ws, d
+    text = slots.Admission.describe(d)
+    assert text.startswith("MemAvailable 46.9 GiB - the engine's room to its peak 13.5 (under the room: cache "
+                           "growth 13.4, workspaces in flight ") and "this request's" in text, text
+    full = int(46.9 * GiB) - int(13.4 * GiB) - 8 * (ws + kv)      # every workspace in full: the 12 s wait
+    assert full < adm.floor and abs(full / GiB - 9.74) < 0.01, full / GiB
+    assert adm.ws_in_flight() == 8 * ws
+    adm.prefilled("c0")
+    assert adm.held["c0"] == kv and adm.ws_in_flight() == 7 * ws, adm.held
+    g2, g2kv = int(9.91 * GiB), GiB // 2
+    for avail, want in ((20.0, False), (21.0, True)):
+        def lone():
+            return slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(avail * GiB)},
+                                   growth=lambda: int(6.6 * GiB), room=lambda: 0)
+        ok, d = lone().reserve("g2", g2 + g2kv, kv=g2kv, over_peak=True)
+        assert ok is want and d.get("alone") and d["over_peak"], (avail, d)
+        assert d["after"] == int(avail * GiB) - g2 - g2kv, d
+        assert "this request over the peak 9.9" in slots.Admission.describe(d), slots.Admission.describe(d)
+        ok, d = lone().reserve("g2", g2 + g2kv, kv=g2kv)                   # under the peak: the room caps it
+        assert ok and d["after"] == int(avail * GiB) - g2kv, d
+    rep = adm.report()
+    assert rep["ws_in_flight_gib"] == round(7 * ws / GiB, 3) and rep["lone_checked"] == 1, rep
+    return "c8 at hold 3's figures: 8 of 8 under the room (full count 9.7 < 10); over the peak alone: 20 refused, 21 in"
+
+
+def test_srv775_describe_names_a_peak_wait():
+    d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
+         "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}
+    text = slots.Admission.describe(d)
+    assert text == ("the engine's peak: reserved 74.0 + this request's workspace 2.8 > peak 75.8 (1.0 GiB over "
+                    "after shedding)"), text
+    return text
 
 
 def test_admission_counts_the_requests_in_flight_and_the_growth():

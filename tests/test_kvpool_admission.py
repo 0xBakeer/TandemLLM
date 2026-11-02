@@ -69,7 +69,8 @@ def test_kv_is_not_capped_by_the_engine_room():
     adm = _adm(60, room=lambda: 1 * GiB)
     adm.reserve("x", GiB, owner=None)              # alone, workspace only
     ok, d = adm.check(2 * GiB + 30 * GiB, kv=30 * GiB)
-    # workspace parts capped at the 1 GiB room; the 30 GiB of pages counted in full
+    # workspace parts capped at the 1 GiB room (SRV-775: as before, the gate keeps each prefill under the
+    # peak); the 30 GiB of pages counted in full
     assert d["after"] == 60 * GiB - 1 * GiB - 30 * GiB and ok
 
 
@@ -143,6 +144,9 @@ class _H:
     def _send_bytes(self, code, raw, extra_headers=()):
         self.sent = (code, json.loads(raw), dict(extra_headers))
 
+    def _busy(self, code, message, retry=5):
+        self.sent = (code, {"error": {"message": message}}, {"Retry-After": str(retry)})
+
 
 def test_a_non_streamed_wait_ends_in_a_readable_503():
     import types
@@ -152,8 +156,8 @@ def test_a_non_streamed_wait_ends_in_a_readable_503():
     app.STATE.clear()
     app.STATE["queue_timeout"] = 1.5
     app.STATE["request_timeout"] = 3600.0
-    adm = _adm(16)
-    adm.reserve("big", 2 * GiB)
+    adm = _adm(18)                                 # SRV-775: a lone request is checked too: 18 - 2 >= 15
+    assert adm.reserve("big", 2 * GiB)[0]
     pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
     rec = usage.RequestRecord("chatcmpl-y", "chat", False)
     said = []
@@ -181,10 +185,10 @@ def test_a_streamed_wait_outlasts_the_queue_timeout():
     app.STATE.clear()
     app.STATE["queue_timeout"] = 0.5
     app.STATE["request_timeout"] = 30.0
-    box = {"avail": 16 * GiB}
+    box = {"avail": 18 * GiB}                     # SRV-775: a lone request is checked too: 18 - 2 >= 15
     adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": box["avail"]},
                           growth=lambda: 0)
-    adm.reserve("big", 2 * GiB)
+    assert adm.reserve("big", 2 * GiB)[0]
     pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
     rec = usage.RequestRecord("chatcmpl-z", "chat", True)
     rec.lock_acquired()
@@ -294,6 +298,519 @@ def test_spd271_every_kv_reclaim_resets_the_heads():
             else:
                 app.STATE[k] = v
     return "idle side slot, slot 0's idle conversation, a lane's give-back: the head reset each time"
+
+
+class _Mem:
+    """The memory policy's surface `_par_admit` uses (engine/cache.py `Budget`), recording what it is asked: a
+    workspace of `ws` whatever the rows, a gate that refuses while `refuse()` says so."""
+    on = True
+
+    def __init__(self, peak, ws, refuse=None, res=None):
+        self.peak, self.ws, self.refuse, self.res = peak, ws, refuse, res
+        self.gates, self.refusals, self.over = [], [], []
+
+    def workspace_rows(self, n, rows=None, line=True):
+        return self.ws
+
+    def gate(self, n, count=True, rows=None, others=0, ceiling=True):
+        self.gates.append({"n": n, "rows": rows, "others": others, "count": count, "ceiling": ceiling,
+                           "held": getattr(self.res, "end_hold", None)})
+        if self.refuse is not None and self.refuse():
+            from engine import cache
+            exc = cache.MemoryRefused(self.peak + GiB, self.peak, n, rows=rows)
+            exc.detail = {"allocated": self.peak - GiB, "reserved": self.peak}
+            raise exc
+        return {}
+
+    def refused(self, exc):
+        self.refusals.append(exc)
+
+    def admit_over_peak(self, n, rows, ws, slot, **info):
+        self.over.append((n, rows, ws, slot, info))
+
+    def prefill_done(self):
+        pass
+
+
+def _admit(app, pool, cid, n, rec=None, stream=True):
+    import torch
+    h = _H()
+    return app.Handler._par_admit(h, pool, cid, torch.zeros(n, dtype=torch.long), rec=rec, stream=stream), h
+
+
+def test_srv773_no_reclaim_for_a_request_the_gate_refuses():
+    """A prefill no reserve could ever take (the engine's load plus its workspace over the peak) gets its 503 at once:
+    no gate, no shed, and no idle conversation reclaimed for it (live 2026-11-02: 7 of 23 reclaims served retries that
+    slot 0's gate then refused)."""
+    import types
+    app = _app()
+    from engine import kvpool
+    from server import usage
+    calls = []
+    kp = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+    kp.add_reclaimer("idle_side", lambda want, o: calls.append(("idle_side", want)) or GiB)
+    kp.add_reclaimer("idle_slot0", lambda want, o: calls.append(("idle_slot0", want)) or GiB)
+    old = kvpool.POOL
+    app.STATE.clear()
+    mem = _Mem(peak=10 * GiB, ws=11 * GiB)
+    app.STATE.update(mem=mem, mem_load={"allocated": 0}, queue_timeout=1.0, request_timeout=30.0)
+    kvpool.POOL = kp
+    try:
+        adm = _adm(16)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-r3", "chat", True)
+        ok, h = _admit(app, pool, "r3", 262_144, rec=rec)
+        assert ok is False and rec.stop_detail == "memory", (ok, rec.stop_detail)
+        code, body, hdr = h.sent
+        assert code == 503 and hdr.get("Retry-After") == "30", (code, hdr)
+        assert "a 262144-token prefill needs 11.0 GiB" in body["error"]["message"], body
+        assert calls == [] and mem.gates == [] and len(mem.refusals) == 1 and not adm.held, (calls, mem.gates)
+    finally:
+        kvpool.POOL = old
+        app.STATE.clear()
+    return "262,144 cold rows, 11 GiB over a 10 GiB peak: 503 at once, no gate, no reclaim"
+
+
+class _Res:
+    """A slot's resident prefix as the admission reads it: g8's conversation with its end kept at 62,865."""
+
+    def __init__(self):
+        self.end, self.end_hold, self.asked = {"at": 62_865}, False, []
+
+    def resume_estimate(self, keys, n, mm_ok=False):
+        self.asked.append((len(keys), n, mm_ok))
+        return 62_865, "end"
+
+    def common(self, keys):
+        return min(len(keys), 62_865)
+
+    def end_offer(self, c, max_len, mm_ok=False):
+        return 62_865 if c >= 62_865 and max_len >= 62_865 else 0
+
+
+def test_srv773_a_resumed_turn_is_admitted_with_the_end_held():
+    """g8's shape: a 62,886-token follow-up whose slot keeps its end at 62,865 is charged its 21 rows, gated with
+    that end held (the gate's levels never give it back for this request), and admitted."""
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    res = _Res()
+    mem = _Mem(peak=int(75.8 * GiB), ws=int(0.8 * GiB), res=res)
+    app.STATE.update(mem=mem, resident=res, mem_load={"allocated": int(57.8 * GiB)}, queue_timeout=1.0,
+                     request_timeout=30.0)
+    try:
+        adm = _adm(100)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-g8", "chat", True)
+        ok, h = _admit(app, pool, "g8", 62_886, rec=rec)
+        assert ok is True and h.sent is None
+        assert res.asked and set(res.asked) == {(62_886, 62_886, False)}, res.asked   # priced at every pass
+        assert mem.gates == [{"n": 62_886, "rows": 21, "others": 0, "count": False, "ceiling": True,
+                              "held": True}], mem.gates
+        assert rec.ws_rows == 21 and rec.ws_kind == "end" and abs(rec.ws_gib - 0.8) < 1e-6, vars(rec)
+        assert adm.held["g8"] == int(0.8 * GiB) and mem.over == []
+    finally:
+        app.STATE.clear()
+    return "rows 21 at the gate with the end held; 0.80 GiB reserved"
+
+
+def test_srv775_a_lone_refusal_is_admitted_over_the_peak_and_counted():
+    """A prefill the gate refuses runs over the peak when no other prefill is in flight, counted once with its slot;
+    with another one in flight it waits, the gate run again when it is first in line, and is admitted once that
+    prefill has run and the gate admits it."""
+    import threading
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    refuse = {"on": True}
+    mem = _Mem(peak=75 * GiB, ws=int(9.9 * GiB), refuse=lambda: refuse["on"])
+    app.STATE.update(mem=mem, mem_load={"allocated": 58 * GiB}, queue_timeout=1.0, request_timeout=30.0)
+    try:
+        adm = _adm(100)
+        asked = []
+        reserve = adm.reserve
+        adm.reserve = lambda key, need, **kw: asked.append((key, kw.get("over_peak"))) or reserve(key, need, **kw)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+        slots.bind(slots.Slot(3, 262_144))
+        try:
+            ok, h = _admit(app, pool, "g2", 135_083, rec=usage.RequestRecord("chatcmpl-g2", "chat", True))
+        finally:
+            slots.bind(None)
+        assert ok is True and h.sent is None and adm.stats["peak_waits"] == 0
+        assert mem.over == [(135_083, 135_083, int(9.9 * GiB), 3, {"cid": "g2", "resume": None})], mem.over
+        assert [g["ceiling"] for g in mem.gates] == [False], "a side slot's gate: the peak stage only"
+        assert asked == [("g2", True)], "the over-peak admit's workspace counts in full at the floor"
+        adm.release("g2")
+        assert adm.reserve("other", 4 * GiB)[0]       # another prefill in flight
+        rec = usage.RequestRecord("chatcmpl-w", "chat", True)
+        rec.lock_acquired()
+
+        def other_done():
+            time.sleep(1.5)
+            refuse["on"] = False
+            adm.prefilled("other")
+        threading.Thread(target=other_done, daemon=True).start()
+        t0 = time.monotonic()
+        ok, h = _admit(app, pool, "w", 135_083, rec=rec)
+        assert ok is True and h.sent is None and time.monotonic() - t0 >= 1.4, time.monotonic() - t0
+        assert len(mem.over) == 1 and adm.stats["peak_waits"] == 1 and rec.wait_mem_ms >= 1000, adm.stats
+        assert len(mem.gates) >= 3 and all(g["count"] is False for g in mem.gates), mem.gates
+        assert mem.gates[-1]["ceiling"] is True and asked[-1] == ("w", False), (mem.gates[-1], asked)
+    finally:
+        app.STATE.clear()
+    return "alone: over the peak, counted on slot 3; beside a prefill: waited, then admitted"
+
+
+def test_srv775_strict_keeps_a_lone_request_waiting():
+    """QSE_PEAK_STRICT: a lone request the gate refuses waits too; a non-streamed one gets its 503 after the queue
+    timeout, and nothing ran over the peak."""
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    mem = _Mem(peak=75 * GiB, ws=int(9.9 * GiB), refuse=lambda: True)
+    app.STATE.update(mem=mem, mem_load={"allocated": 58 * GiB}, queue_timeout=1.0, request_timeout=30.0)
+    was = app.PEAK_STRICT
+    app.PEAK_STRICT = True
+    try:
+        adm = _adm(100)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-s", "chat", False)
+        ok, h = _admit(app, pool, "s", 135_083, rec=rec, stream=False)
+        assert ok is False and h.sent[0] == 503 and h.sent[1]["error"]["code"] == "memory_wait_timeout", h.sent
+        assert mem.over == [] and adm.stats["peak_waits"] == 1 and rec.stop_detail == "memory_wait_timeout"
+        assert mem.gates and all(g["others"] == 0 and g["count"] is False for g in mem.gates), mem.gates
+    finally:
+        app.PEAK_STRICT = was
+        app.STATE.clear()
+    return "strict: waited, 503 after the queue timeout, nothing over the peak"
+
+
+def test_srv775_the_workspace_is_released_when_the_prefill_has_run():
+    """`_par_prefilled`: the admission keeps the request's KV part only, and the memory policy's prefills in flight
+    lose its workspace (a side slot prefills with no policy, so `Budget.prefilled` never ran there)."""
+    app = _app()
+    from engine import cache
+    app.STATE.clear()
+    m = cache.Budget(70 * GiB, 77 * GiB, 2 * GiB, probe=lambda: (60 * GiB, 60 * GiB), empty=lambda: None,
+                     peak_probe=lambda reset=False: 0, ws_rows=lambda n, r: GiB)
+    adm = _adm(100)
+    app.STATE.update(mem=m, pool=slots.Pool([slots.Slot(0, 262_144)], admission=adm))
+    try:
+        m.gate(62_886, rows=21)
+        assert adm.reserve("c1", GiB + 3 * GiB, kv=3 * GiB)[0]
+        assert m.ws_now == GiB and adm.ws_in_flight() == GiB
+        app._par_prefilled("c1")
+        assert adm.held["c1"] == 3 * GiB and adm.ws_in_flight() == 0 and m.ws_now == 0, adm.held
+    finally:
+        app.STATE.clear()
+    return "held 4 -> 3 GiB (its KV part), ws_now 1 -> 0"
+
+
+class _LineMem(_Mem):
+    """`_Mem` whose gate charge is the line's floor (2.75 GiB) and whose count by rows alone is 0.83 GiB."""
+
+    def workspace_rows(self, n, rows=None, line=True):
+        return int(2.75 * GiB) if line else int(0.83 * GiB)
+
+
+def test_srv775_eight_short_cold_prompts_are_admitted_together():
+    """The box's floor counts a prefill in flight by its rows: eight cold prompts of 205 tokens (bare_bench c8) are
+    admitted at once with MemAvailable 44.5 GiB, cache growth 13.4 and the floor at 10 (8 x 0.83 GiB in flight).
+    Counted at the gate's 2.75 GiB each, the eighth found 44.5 - 13.4 - 7 x 2.75 - 2.75 = 9.1 GiB and waited: on
+    2026-11-02 it waited 12 s a round, and the round's first tokens came after 10.5-13.7 s (before SRV-775: 2.0-2.3 s).
+    With the engine's room to its peak (13.5 GiB at that reserve) the growth and the workspaces in flight are
+    capped at it, as before SRV-775: a family without a rows model (2.75 GiB each, by rows too) starts all eight."""
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    mem = _LineMem(peak=200 * GiB, ws=0)
+    app.STATE.update(mem=mem, mem_load={"allocated": 0}, queue_timeout=0.5, request_timeout=30.0)
+    try:
+        for cls_, want in ((_LineMem, 8), (_Mem, 7)):
+            app.STATE["mem"] = cls_(peak=200 * GiB, ws=int(2.75 * GiB))
+            adm = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(44.5 * GiB)},
+                                  growth=lambda: int(13.4 * GiB))
+            pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 7)
+            got = []
+            for i in range(8):
+                ok, h = _admit(app, pool, f"c{i}", 205, rec=usage.RequestRecord(f"cmpl-{i}", "chat", False),
+                               stream=False)
+                got.append(ok)
+            assert sum(got) == want, (cls_.__name__, got, adm.stats)
+            assert adm.stats["waits"] == 8 - want, adm.stats
+        assert adm.held and all(v == int(2.75 * GiB) for v in adm.held.values())
+        app.STATE["mem"] = _Mem(peak=200 * GiB, ws=int(2.75 * GiB))     # no rows model: 2.75 by rows too
+        adm = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(44.5 * GiB)},
+                              growth=lambda: int(13.4 * GiB), room=lambda: int(13.5 * GiB))
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 7)
+        got = [_admit(app, pool, f"r{i}", 205, rec=usage.RequestRecord(f"cmpl-r{i}", "chat", False),
+                      stream=False)[0] for i in range(8)]
+        ok, d = adm.check(int(2.75 * GiB), count=False)
+        assert all(got) and adm.stats["waits"] == 0 and d["after"] == int(31.0 * GiB), (got, adm.stats, d)
+        assert "under the room" in slots.Admission.describe(d), slots.Admission.describe(d)
+    finally:
+        app.STATE.clear()
+    return ("by rows: 8 of 8 admitted at once; by the gate's line: the eighth waits (and gets its 503 here); "
+            "under the room: 8 of 8 at 2.75 GiB each")
+
+
+class _Clock:
+    """server/app.py's `time` for one `_par_admit` call: `sleep` moves the clock by its seconds and runs the steps of
+    `at` (second -> callable) the clock has reached; everything else is the real module."""
+
+    def __init__(self, at=None):
+        self.t0 = self.t = 1000.0
+        self.at = dict(at or {})
+
+    def monotonic(self):
+        return self.t
+
+    perf_counter = monotonic
+
+    def sleep(self, s):
+        self.t += s
+        for k in sorted(k for k in self.at if k <= self.t - self.t0):
+            self.at.pop(k)()
+
+    def __getattr__(self, k):
+        return getattr(time, k)
+
+
+def test_srv775_a_peak_wait_runs_the_gate_again_only_when_a_prefill_has_run_or_every_5_s():
+    """A request the gate refuses beside another prefill waits for it. A gate pass sheds, collects and empties the
+    allocator while the other lanes decode; it ran every second of the wait. Now it runs again once the prefills in
+    flight dropped, the resume point moved, or `PEAK_REGATE_S` (5 s) passed. On a clock the test moves: gated at
+    0 s, not at 1-4 s, again at 5 s (still refused), and at 7 s, the second the other prefill ran; admitted then."""
+    import types
+    app = _app()
+    clock = _Clock()
+
+    class _Timed(_Mem):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
+            self.at.append(round(clock.t - clock.t0, 1))
+            return super().gate(n, count=count, rows=rows, others=others, ceiling=ceiling)
+
+    refuse = {"on": True}
+    mem = _Timed(peak=75 * GiB, ws=int(2 * GiB), refuse=lambda: refuse["on"])
+    mem.at = []
+    app.STATE.clear()
+    app.STATE.update(mem=mem, mem_load={"allocated": 58 * GiB}, queue_timeout=1.0, request_timeout=30.0)
+    adm = _adm(100)
+    assert adm.reserve("other", 4 * GiB)[0]          # another prefill in flight
+
+    def other_ran():
+        refuse["on"] = False
+        adm.prefilled("other")
+    clock.at[7] = other_ran
+    old = app.time
+    app.time = clock
+    try:
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+        ok, h = _admit(app, pool, "pw", 62_886)
+    finally:
+        app.time = old
+        app.STATE.clear()
+    assert ok is True and h.sent is None, h.sent
+    assert mem.at == [0.0, 5.0, 7.0], mem.at
+    assert adm.stats["peak_waits"] == 1 and mem.over == [] and adm.held["pw"] == 2 * GiB, (adm.stats, mem.over)
+    return f"gated at {mem.at} s of the wait"
+
+
+def test_srv775_a_member_that_waits_for_memory_leaves_the_prefill_burst():
+    """A member of the prefill burst that waits for memory at its admission leaves the burst: the others close it
+    without it, where they held their first tokens for it up to the burst's wait (2026-11-02: one member's 12 s wait
+    kept the seven others' first tokens at 10.5-13.7 s). Admitted later, it is no member (it prefills alone), and
+    `_par_end`'s leave is a no-op."""
+    import threading
+    import types
+    app = _app()
+    from server.prefill_burst import Burst
+    app.STATE.clear()
+    app.STATE.update(queue_timeout=10.0, request_timeout=30.0)
+    burst = Burst(wait_s=10)
+    for who in (1, 2, 3):
+        assert burst.arrive(who, idle=(who == 1))
+    box = {"avail": 18 * GiB}                          # 18 - 2 - 1.15 < 15: member 3 waits at the box's floor
+    adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": box["avail"]}, growth=lambda: 0)
+    assert adm.reserve("big", 2 * GiB)[0]
+    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 2, burst=burst)
+    got = {}
+
+    def member3():
+        slots.bind(slots.Slot(3, 262_144))
+        try:
+            got["ok"] = _admit(app, pool, "m3", 576)[0]
+        finally:
+            slots.bind(None)
+    th = threading.Thread(target=member3, daemon=True)
+    try:
+        th.start()
+        t_end = time.monotonic() + 5
+        while (burst.member(3) or "m3" not in adm.waiting) and time.monotonic() < t_end:
+            time.sleep(0.02)
+        assert not burst.member(3) and "m3" in adm.waiting, (burst.pending, adm.waiting)
+        waited = {}
+        t1 = threading.Thread(target=lambda: waited.update(
+            one=burst.prefilled(1, release=lambda: None, acquire=lambda: None)), daemon=True)
+        t0 = time.monotonic()
+        t1.start()
+        time.sleep(0.1)
+        assert burst.prefilled(2) is False                  # the last member left: it closes the burst
+        t1.join(5)
+        assert waited.get("one") is True and time.monotonic() - t0 < 2.0, (waited, time.monotonic() - t0)
+        assert burst.stats["bursts"] == 1 and burst.stats["max_members"] == 3 and not burst.is_open()
+        box["avail"] = 100 * GiB
+        th.join(5)
+        assert got.get("ok") is True and not burst.member(3), got
+        before = dict(burst.stats)
+        burst.leave(3)                                      # `_par_end`'s
+        assert burst.stats == before and not burst.is_open()
+    finally:
+        box["avail"] = 100 * GiB
+        th.join(5)
+        app.STATE.clear()
+    return "member 3 waited for memory and left; 1 and 2 closed the burst without it; admitted, it is no member"
+
+
+class _Branch:
+    """A branch's resident prefix as the admission reads it: it resumes at the anchor `points[0]` (no end, no prompt
+    end); a shed of the anchors (`shed`) gives that one back, and it resumes at the next."""
+
+    def __init__(self, points):
+        self.points, self.end, self.end_hold = list(points), None, False
+
+    def resume_estimate(self, keys, n, mm_ok=False):
+        return self.points[0], "resident"
+
+    def shed(self):
+        if len(self.points) > 1:
+            self.points.pop(0)
+
+
+class _RowsMem(_Mem):
+    """`_Mem` with a workspace of 1 MiB a forwarded row, and `on_gate(i)` run inside the i-th pass, before its
+    verdict (where the real gate sheds)."""
+
+    def __init__(self, peak, refuse=None, res=None, on_gate=None):
+        super().__init__(peak, 0, refuse=refuse, res=res)
+        self.on_gate = on_gate
+
+    def workspace_rows(self, n, rows=None, line=True):
+        return (n if rows is None else rows) << 20
+
+    def gate(self, n, count=True, rows=None, others=0, ceiling=True):
+        if self.on_gate is not None:
+            self.on_gate(len(self.gates))
+        return super().gate(n, count=count, rows=rows, others=others, ceiling=ceiling)
+
+
+def test_srv773_a_pass_that_sheds_the_anchor_a_branch_resumes_at_runs_again_on_the_new_rows():
+    """The gate's anchors level keeps the newest anchors and the head lines: a branch resumes at one in the middle,
+    and the pass that admitted its 4,886 rows gave that anchor back. Priced again after the pass, the prefill
+    forwards 58,790 rows from the head line at 4,096: the gate runs again on those, and the reservation and the
+    `[req]` fields carry them, not the 4,886."""
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    res = _Branch([58_000, 4_096])
+    mem = _RowsMem(peak=200 * GiB, res=res, on_gate=lambda i: res.shed() if i == 0 else None)
+    app.STATE.update(mem=mem, resident=res, mem_load={"allocated": 0}, queue_timeout=1.0, request_timeout=30.0)
+    try:
+        adm = _adm(1000)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-br", "chat", True)
+        ok, h = _admit(app, pool, "br", 62_886, rec=rec)
+        assert ok is True and h.sent is None
+        assert [g["rows"] for g in mem.gates] == [4_886, 58_790], mem.gates
+        assert rec.ws_rows == 58_790 and rec.ws_kind == "resident" and adm.held["br"] == 58_790 << 20, vars(rec)
+        assert mem.over == []
+    finally:
+        app.STATE.clear()
+    return "gate rows 4,886 then 58,790; reserved 58,790 MiB"
+
+
+def test_srv773_a_shed_during_the_wait_is_charged_and_an_over_peak_admit_counted_once():
+    """Alone and refused, the refused pass's shed counts in the over-peak admit's charge (32,886 rows, not 4,886).
+    While it waits at the box's floor another slot's gate sheds the anchor it resumes at: the gate runs again on the
+    58,790 rows before the reservation, refused again alone, and the admit is not counted a second time."""
+    import threading
+    import types
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    res = _Branch([58_000, 30_000, 4_096])
+    mem = _RowsMem(peak=200 * GiB, refuse=lambda: True, res=res, on_gate=lambda i: res.shed() if i == 0 else None)
+    app.STATE.update(mem=mem, resident=res, mem_load={"allocated": 0}, queue_timeout=1.0, request_timeout=30.0)
+    box = {"avail": 40 * GiB}                    # 40 - 32.1 under the 15 GiB floor: it waits
+    adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": box["avail"]}, growth=lambda: 0)
+    try:
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+        rec = usage.RequestRecord("chatcmpl-wt", "chat", True)
+        rec.lock_acquired()
+
+        def other_slot():
+            time.sleep(1.2)
+            res.shed()
+            box["avail"] = 1000 * GiB
+        threading.Thread(target=other_slot, daemon=True).start()
+        ok, h = _admit(app, pool, "wt", 62_886, rec=rec)
+        assert ok is True and h.sent is None and rec.wait_mem_ms >= 1000, rec.wait_mem_ms
+        assert [g["rows"] for g in mem.gates] == [4_886, 58_790], mem.gates
+        assert [(o[1], o[2]) for o in mem.over] == [(32_886, 32_886 << 20)], mem.over
+        assert mem.ws_now == 58_790 << 20 and adm.held["wt"] == 58_790 << 20 and rec.ws_rows == 58_790
+    finally:
+        app.STATE.clear()
+    return "over the peak once at 32,886 rows; re-gated and reserved at 58,790 after the wait's shed"
+
+
+def test_srv773_the_served_prompts_end_is_held_after_the_routers_notes():
+    """A conductor turn on a parallel server: the slot's rows are the served prompt, with the router's note in turn 1.
+    `_par_admit` gates on the client's tokens, which part from the rows at that note, so its gate holds no end; the
+    handler holds the end on the served prompt once the notes and images are in (`_hold_served_end`), and the
+    prefill resumes at it."""
+    import types
+    import torch
+    app = _app()
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    from test_cache import tokens
+    from test_end_anchor import _state, turn
+    from server import usage
+    res = _state()
+    note = tokens(9, seed=93)
+    client1 = tokens(60, seed=94)
+    served1 = client1[:30] + note + client1[30:]
+    out, _, _ = turn(served1, 6, "chat-n")
+    new = tokens(7, seed=95)
+    client2, served2 = client1 + out + new, served1 + out + new
+    assert res.end is not None and not app._end_held(res, client2, len(client2), False)
+    mem = _Mem(peak=200 * GiB, ws=GiB, res=res)
+    app.STATE.update(mem=mem, mem_load={"allocated": 0}, queue_timeout=1.0, request_timeout=30.0)
+    try:
+        adm = _adm(100)
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+        rec = usage.RequestRecord("chatcmpl-n", "chat", True)
+        ok, h = _admit(app, pool, "n", len(client2), rec=rec)
+        assert ok is True and [g["held"] for g in mem.gates] == [False] and not res.end_hold, mem.gates
+        app._hold_served_end(res, torch.tensor(served2), None, None, len(served2))
+        assert res.end_hold and res.shed_end(False) == 0 and res.end is not None
+        e = int(res.end["at"])
+        app.STATE["mem"] = None
+        _, pre, _ = turn(served2, 4, "chat-n")
+        assert pre["kind"] == "end" and pre["reused"] == e, pre
+        assert not res.end_hold, "the prefill's begin lets it go"
+    finally:
+        app.STATE.clear()
+    src = open(os.path.join(ROOT, "server", "app.py")).read()
+    tail = src[src.index("prompt, in_think = plan.apply_prompt(prompt, STATE[\"tok\"], in_think)"):]
+    at = tail.index("_hold_served_end(res_, prompt, mm, comp, n_prompt)")
+    assert tail.index("prompt, mm = _mm_prompt(prompt, images, rec)") < at, "after the notes and the images"
+    assert tail[:at].rstrip().endswith("if par is not None:"), "on a parallel server"
+    return "gate on the client's tokens: no hold; on the served prompt: held until the prefill"
 
 
 def test_the_release_route_answers_trusted_local_and_the_admin_only():

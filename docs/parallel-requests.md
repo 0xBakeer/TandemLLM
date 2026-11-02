@@ -21,7 +21,9 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 |-|-|-|
 | `--parallel N` | 1 (serve.env: 8) | sequence slots; N - 1 side slots beside the engine |
 | `--side-max-len` | 0 | a side slot's window; 0 is `--max-len`, every lane the same window (SRV-707). A shorter one is kept for old setups; a request whose prompt plus `max_tokens` does not fit it waits for slot 0 |
-| `--parallel-floor-gb` | 15 | a request in flight beside others waits while its own prefill workspace, the others' and what the caches may still grow into (together at most the engine's room to `--mem-peak-gib`) would push MemAvailable under this; a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
+| `--parallel-floor-gb` | 15 | a request waits while what the caches may still grow into (at most the engine's room to `--mem-peak-gib`), the workspaces of the prefills in flight, its own and the KV pages still to commit would push MemAvailable under this, a request alone too (0.15.1, SRV-775); a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
+| `QSE_PEAK_STRICT` | 0 | `1`: a lone request the memory gate refuses waits too instead of running over the peak, and the gate counts the workspaces of the prefills in flight on the reserve (SRV-775; in no profile) |
+| `QSE_REQ_PEAK` | 0 | `1`: the `[req]` line adds `peak_gib=`, the allocator's peak over a request that ran alone less what was allocated at its prefill's start (a measurement, SRV-773) |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
 | `--parallel-cut` | the family's | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first; `auto` (SPD-155): `joint` from `QSE_PARALLEL_AUTO_N` (3) decoding slots, `share` below. Unset, the model family's `joint_policy` decides (the 27B: `auto`), else `share` |
@@ -183,6 +185,32 @@ recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
   these committed pages, outside the allocator, never as a paged tensor's size (that is its reserved
   address range, `kv_reserved_va`, 26.6 GiB a 262,144-row slot and no memory), and adds `outside`
   (the CUDA context, the host side, other programs) so that the bar sums to MemTotal - MemAvailable.
+
+One memory policy for every prefill (0.15.1, 2026-11-02, SRV-773, SRV-775). Before a request reserves its bytes,
+the engine's memory gate runs on its slot, slot 0 and every side slot alike, on the reserve as it is, and charges
+the workspace of the rows the prefill forwards from where the prompt resumes in place (the end anchor, the last
+prompt's end, the anchors). On Flash-Next a resumed turn of 21 rows took 0.10 GiB at every context from 8k to 146k
+tokens; the old charge, the whole context's (2.75 to 10.39 GiB), refused such a turn on slot 0 while the side slots
+ran with no gate at all. A side slot's gate runs the peak stage only; the ceiling stage, which walks the allocator's
+pools, stays slot 0's. A side slot's gate whose reserve plus workspace stays 0.5 GiB under the peak admits on one
+reading without the policy's lock, which slot 0's gate holds (`cache.memory.fast_gates`; never under
+`QSE_PEAK_STRICT`). The admission then counts every prefill's workspace by its rows while it runs (on Flash-Next
+a cold prompt without the gate's 2.75 GiB floor) and gives it back when the prefill has run
+(`parallel.admission.ws_in_flight_gib`). It caps the caches' growth and the workspaces of the prefills in flight at
+the engine's room to its peak, as before: the gate keeps each prefill it admits under the peak. A lone admit over
+the peak counts its workspace in full against the box floor. A request alone is checked against the floor too
+(`alone`, `lone_checked`).
+
+A prefill the gate still refuses after shedding waits in the memory line while another prefill runs
+(`peak_waits`; its line names the peak), and runs alone over the peak when none does, counted in `/health`
+`memory.over_peak_admits`, with `over_peak_slot` and the reserve over the peak now in `over_peak_gib`: a
+long-lived server's reserve holds graph scratch no shed lowers, so a lone request would wait for good.
+`QSE_PEAK_STRICT=1` makes a lone request wait too. A prefill no reserve could ever take (the engine's load plus
+its workspace over the peak) gets its 503 at once, and no idle conversation is reclaimed for a request the gate
+refuses while another prefill runs. The rows a prefill forwards are priced again before every gate pass and before
+its reservation, and a continuation keeps its end anchor through the gate's passes (2026-11-02). A request that
+waits for memory leaves the prefill burst, so the others prefill without it, and one that waits for a prefill in
+flight runs the gate again only when a prefill has run, its resume point moved or 5 s passed.
 
 ## Which request goes where
 

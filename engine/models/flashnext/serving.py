@@ -41,8 +41,8 @@ from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
 from engine.settings import SETTINGS as _S
 from engine.models.flashnext import coupled as CP
-from engine.models.flashnext.engine import (CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph,
-                                            _state_restore, _state_saved)
+from engine.models.flashnext.engine import (CAPTURE_ROWS, PREFILL_CHUNK, CommitGraph, DecodeGraph, FlashNextEngine,
+                                            VerifyGraph, _state_restore, _state_saved)
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
@@ -264,6 +264,20 @@ class FlashNextCacheState(SectionState):
         return out
 
 
+#: The prefill workspace (the memory policy's `workspace`, engine/cache.py `Budget`): the line of 2026-10-12, a floor,
+#: the bytes a token, the cap where it stops growing (`cost`)
+WS_LINE_FLOOR, WS_LINE_ROW, WS_CAP = int(2.75 * (1 << 30)), 76_309, int(10.75 * (1 << 30))
+#: SRV-773: the workspace by forwarded rows and context class (`_workspace_rows`), measured 2026-11-02 (`cost`): one
+#: chunk of FN_PREFILL_CHUNK rows takes `A + B x T + D x T x class` for its T rows, every forwarded row its streams
+WS_CHUNK_A = int(0.25 * (1 << 30))     # fit 0.180 GiB
+WS_ROW_B = 176_000                     # a row: the chunk's activations, q/k/v, MoE buffers, slabs (fit 170,274)
+WS_ROW_CLASS_D = 32                    # a row and a class block: the indexer's scores, [T, class] fp32 (fit 29.9)
+WS_STACK_ROW = 20_480                  # a row's streams: `prompt_stack`, hc_count 4 x hidden 2,560 bf16 (the config)
+WS_FLOOR_1, WS_ADD_1 = int(0.75 * (1 << 30)), int(0.5 * (1 << 30))    # a resumed chunk or less: its floor, its margin
+WS_ADD_N = 1 << 30                     # more than a chunk: the margin (the streams' cat copy)
+WS_MARGIN = 1.15
+
+
 class FlashNextServing:
     """`FlashNextEngine` with one state and its graphs, in the server's engine interface."""
 
@@ -379,12 +393,46 @@ class FlashNextServing:
         # (tools/fn_memory_check.py; the 4,096-row chunk's activations), 10.46 GiB above the engine at a
         # 147,149-token prefill and 10.47 GiB at 261,549 (SPD-99): it grows to about 140k tokens and then
         # stops -- a floor of 2.75 GiB, the line through the 147,149-token point (76,309 bytes a token),
-        # capped at 10.75 GiB (the memory policy raises the cap if a prefill ever needs more)
+        # capped at 10.75 GiB (the memory policy raises the cap if a prefill ever needs more).
+        # SRV-773, measured 2026-11-02 on 3.05 (the Spark, tree 5e4bb7c6 with the request-peak build, raw requests
+        # alone, 35 rows from 8k to 146k): the line is the whole context's, while a prefill runs in chunks of
+        # FN_PREFILL_CHUNK rows (4,096) and nothing but the prompt's streams grows with its rows past one chunk. A
+        # resumed turn of 21 rows took 0.10 GiB at every context (the line: 2.75 to 10.39 GiB). The chunk's
+        # `a + b x T + d x T x class` fitted on 26 continuation rows: a 0.180 GiB, b 170,274 B, d 29.9 B (max |resid|
+        # 0.68 GiB, rms 0.23); `WS_*` round them up, the streams' 20,480 B a row are the config's. Charged against
+        # the measured peak (the prefill's and the request end's), 28 of 28 continuations are covered (+0.38 GiB
+        # the least) and 7 of 7 cold or seeded prefills against their workspace and streams. A cold forward under
+        # 4,151 rows and the streams' life past the first draft round were not measured (`_workspace_rows`)
         return CostModel(section_bytes=sum(sec.values()), view_bytes_per_token=per_tok,
-                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=76309,
-                         workspace_cap=int(10.75 * (1 << 30)),
+                         workspace_floor=WS_LINE_FLOOR, workspace_per_token=WS_LINE_ROW, workspace_cap=WS_CAP,
+                         workspace_rows=self._workspace_rows,
                          parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
                                 "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
+
+    def _workspace_rows(self, n_ctx: int, rows: int, line: bool = True) -> int:
+        """SRV-773 (`CostModel.workspace_rows`): the workspace of forwarding `rows` rows onto `n_ctx` served rows, at
+        the class of the last served row. A resumed prefill of one chunk or less: its chunk and its rows' streams
+        with a margin, at least 0.75 GiB. More than a chunk (a re-read), and every cold prompt whatever its rows: a
+        whole chunk and every row's streams with a margin, never under the line (a cold forward under 4,151 rows is
+        not measured: the line's 2.75 GiB floor stays its charge). Both at most the cap.
+
+        SRV-775: `line` False, the admission's count of a prefill in flight: by its rows alone, a cold prompt too,
+        without the line's floor (2026-11-02: lone cold prompts of 205-215 rows peaked at 0.20-0.67 GiB, charged 2.75;
+        eight such prompts counted 22 GiB against the box's floor and the eighth waited 12 s)."""
+        n = int(n_ctx)
+        r = max(1, min(int(rows), n))
+        cls = int(self.fn.qsa_class(n - 1))
+
+        def chunk(t: int) -> int:
+            t = min(int(t), PREFILL_CHUNK)
+            return WS_CHUNK_A + WS_ROW_B * t + WS_ROW_CLASS_D * t * cls
+        if r <= PREFILL_CHUNK and (r < n or not line):
+            ws = max(WS_FLOOR_1, int(WS_MARGIN * (chunk(r) + WS_STACK_ROW * r)) + WS_ADD_1)
+        else:
+            ws = int(WS_MARGIN * (chunk(PREFILL_CHUNK) + WS_STACK_ROW * r)) + WS_ADD_N
+            if line:
+                ws = max(min(max(WS_LINE_FLOOR, WS_LINE_ROW * n), WS_CAP), ws)
+        return min(ws, WS_CAP)
 
     def manifest(self) -> Manifest:
         return manifest()

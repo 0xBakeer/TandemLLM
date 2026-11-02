@@ -966,6 +966,50 @@ def test_spd249_a_shed_needing_the_whole_store_empties_it():
     return "the whole store, as before"
 
 
+def test_srv773_resume_estimate_matches_the_prefills_choice():
+    """SRV-773: the memory gate charges the rows a prefill forwards from where it resumes in place, estimated before
+    any lock or restore (`ResidentPrefix.resume_estimate`): the end anchor over the last prompt's end over the anchors,
+    with `_prefill`'s own calls (`end_offer`, `pend_offer`, `best` at `n - 1`), 0 with nothing shared; an end after
+    images only when asked (`mm_ok`, which leaves the prompt's end out as `end_mm` does). Each estimate is checked
+    against the prefill that follows it, and changes nothing of the prefix."""
+    was = cache.PROMPT_END
+    cache.PROMPT_END = True
+    try:
+        eng = fresh()
+        res = cache.ResidentPrefix(1 << 30, 16, end=True)
+
+        def state():
+            return (list(res.tokens), res.valid, sorted(res.anchors), dict(res.end or {}), dict(res.pend or {}),
+                    dict(res.stats), res.end_hold)
+
+        def check(ids):
+            before = state()
+            est = res.resume_estimate(ids, len(ids))
+            assert state() == before, "the estimate changes nothing"
+            info: dict = {}
+            cache.prefill(eng, None, ids, DEV, chunk=16, resident=res, info=info)
+            assert est == (info["start"], info["kind"]), (est, info["start"], info["kind"])
+            return est
+        a = tokens(100, seed=21)
+        assert check(a) == (0, None)                                   # cold: anchors 16..96, the end of the prompt
+        assert sorted(res.anchors) == list(range(16, 97, 16)) and res.pend["at"] == 100, (res.anchors, res.pend)
+        assert check(a + tokens(20, seed=22)) == (100, "pend")         # the prompt's end beats the anchor at 96
+        b = list(res.tokens)
+        assert check(b[:70] + [b[70] % 95 + 1] + tokens(29, seed=23)) == (64, "resident")   # parts at 70
+        d = [b[0] % 95 + 1] + tokens(39, seed=24)
+        assert check(d) == (0, None)                                   # nothing shared
+        assert res.keep_end(eng, None, d, len(d)) == "kept" and res.end["at"] == 40
+        nxt = d + tokens(9, seed=25)
+        res.end["mm"] = True                                           # an end kept after images
+        assert res.resume_estimate(nxt, len(nxt)) == (40, "pend"), "no end for a text prompt"
+        assert res.resume_estimate(nxt, len(nxt), mm_ok=True) == (40, "end")
+        res.end["mm"] = False
+        assert check(nxt) == (40, "end")                               # the end over the prompt's end
+    finally:
+        cache.PROMPT_END = was
+    return "pend 100, anchor 64, 0, end 40: each the prefill's own start and kind"
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

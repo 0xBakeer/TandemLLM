@@ -66,6 +66,7 @@ repository, and nothing it holds reaches a log line.
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import os
 import struct
@@ -379,9 +380,12 @@ class MemoryRefused(RuntimeError):
     given back. The server answers it with a 503 and a Retry-After instead of running into the
     driver's out-of-memory wedge."""
 
-    def __init__(self, need: int, peak: int, n: int):
+    def __init__(self, need: int, peak: int, n: int, rows: int | None = None):
         self.need, self.peak, self.n = int(need), int(peak), int(n)
-        super().__init__(f"a {n}-token prefill needs {need / GIB:.1f} GiB with every cache "
+        self.rows = None if rows is None else int(rows)    # SRV-773: the rows it forwards (None: not said)
+        what = (f"a {self.rows}-row continuation on a {n}-token context" if self.rows is not None and self.rows < n
+                else f"a {n}-token prefill")
+        super().__init__(f"{what} needs {need / GIB:.1f} GiB with every cache "
                          f"given back; the engine's peak is {peak / GIB:.1f} GiB")
 
 
@@ -582,7 +586,7 @@ class Budget:
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
                  ws_floor: int = WORKSPACE_FLOOR, ws_per_token: int = WORKSPACE_PER_TOKEN,
-                 ws_cap: int | None = None, on_event=None):
+                 ws_cap: int | None = None, ws_rows=None, on_event=None):
         self.ceiling = int(ceiling_bytes)
         self.peak = int(peak_bytes)
         self.slack = int(slack_bytes)
@@ -600,17 +604,33 @@ class Budget:
         self.ws_floor = int(ws_floor)
         self.ws_per_token = int(ws_per_token)
         self.ws_cap = int(ws_cap) if ws_cap is not None else None
+        # SRV-773: (n, rows) -> the workspace of forwarding `rows` rows onto `n` served rows (the adapter's
+        # `CostModel.workspace_rows`); None: the line, whatever the rows. SRV-775: a model that takes `line` also
+        # gives the count by the rows alone (`workspace_rows(line=False)`)
+        self._ws_rows = ws_rows
+        try:
+            self._ws_rows_line = ws_rows is not None and "line" in inspect.signature(ws_rows).parameters
+        except (TypeError, ValueError):
+            self._ws_rows_line = False
+        self._mark_rows: int | None = None  # the rows the prefill since `mark` forwards; None: not said
         self.on_event = on_event
         self.shedders: dict = {}
         # SPD-249: levels that can give back part of themselves, `fn(safe, need) -> {"freed", ...}`
         self.partial: dict = {}
-        self.ws_now = 0                    # the running prefill's workspace, until it is done
+        # SRV-775: thread -> the workspace of its prefill, from its gate until it has run (`ws_now`: the largest)
+        self._ws_live: dict = {}
+        self._ws_lock = threading.Lock()
         self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
                       "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
                       "shed": {lv: 0 for lv in self.LEVELS},
                       "shed_bytes": {lv: 0 for lv in self.LEVELS},
                       "observed": None, "last_gate": None, "prefill_peak": 0,
-                      "last_prefill_peak": None, "stale_admits": 0, "over_ceiling": 0, "last_done_ms": 0.0}
+                      "last_prefill_peak": None, "stale_admits": 0, "over_ceiling": 0, "last_done_ms": 0.0,
+                      "over_peak_admits": 0, "last_over_peak": None, "fast_gates": 0}
+        # SRV-775: the gate counters a side slot's gate far under the peak (`_fast_gate`) moves without `lock`
+        self._stats_lock = threading.Lock()
+        # SRV-775: the server's strict peak (QSE_PEAK_STRICT): every gate takes `lock`, a side slot's too
+        self.strict = False
         self.refused_in_a_row = 0
         # () -> bytes: free memory in the roles' own pools, which counts in `reserved` but which
         # the engine's allocator cannot use (the stale-reserve rule leaves it out)
@@ -662,6 +682,51 @@ class Budget:
         w = max(self.ws_floor, self.ws_per_token * int(n))
         # a model whose workspace stops growing (its adapter's `workspace_cap`; the 27B's: none)
         return min(w, self.ws_cap) if self.ws_cap is not None else w
+
+    def workspace_rows(self, n: int, rows: int | None = None, line: bool = True) -> int:
+        """SRV-773: the workspace of a prefill that forwards `rows` of its `n` served rows (None: all of them, a cold
+        prompt): the adapter's model (`CostModel.workspace_rows`) where it has one, under the same cap, and never
+        under the line for a cold prompt (what `prefilled` learned); else the line, whatever the rows. A resumed
+        turn of 21 rows took 0.10 GiB at every context from 8k to 146k (Flash-Next, 2026-11-02), where the line
+        charged it 2.75-10.39.
+
+        SRV-775: `line` False, the admission's count of a prefill in flight (server/app.py `_par_admit`): by the rows
+        alone where the model can say it, a cold prompt without the line's floor; the gate keeps the floor."""
+        n = int(n)
+        rows = n if rows is None else max(1, min(int(rows), n))
+        if self._ws_rows is None:
+            return self.workspace(n)
+        if not line and self._ws_rows_line:
+            w = int(self._ws_rows(n, rows, line=False))
+        else:
+            w = int(self._ws_rows(n, rows))
+            if rows == n:
+                w = max(w, self.workspace(n))
+        return min(w, self.ws_cap) if self.ws_cap is not None else w
+
+    @property
+    def ws_now(self) -> int:
+        """SRV-775: the largest workspace of the prefills admitted and not yet run, every slot's (`_ws_live`): what a
+        cache's allocation must leave room for under the peak (`admit`), as its one figure was before; the admission's
+        `ws_in_flight_gib` is their sum. Summed, eight short cold prompts at the gate's 2.75 GiB floor (22 GiB) made
+        `admit` refuse the stash and shed the state store during a burst (2026-11-02)."""
+        with self._ws_lock:
+            return max(self._ws_live.values(), default=0)
+
+    @ws_now.setter
+    def ws_now(self, v: int) -> None:
+        """This thread's prefill's workspace (0: none)."""
+        tid = threading.get_ident()
+        with self._ws_lock:
+            if int(v):
+                self._ws_live[tid] = int(v)
+            else:
+                self._ws_live.pop(tid, None)
+
+    def ws_own(self) -> int:
+        """SRV-775: this thread's prefill's workspace in `ws_now` (0: none)."""
+        with self._ws_lock:
+            return int(self._ws_live.get(threading.get_ident(), 0))
 
     def _event(self, kind: str, **kw) -> dict:
         ev = dict(kind=kind, ts=round(time.time(), 3), **kw)
@@ -831,59 +896,84 @@ class Budget:
         return freed
 
     # --- the request's start ---------------------------------------------------------------
-    def gate(self, n: int, count: bool = True) -> dict:
+    #: SRV-775: a side slot's gate whose reserve plus workspace stays this far under the peak admits without `lock`
+    FAST_MARGIN = 512 << 20
+
+    def gate(self, n: int, count: bool = True, rows: int | None = None, others: int = 0,
+             ceiling: bool = True) -> dict:
         """Before a prefill of an `n`-token prompt: back under the ceiling, room for the
-        workspace under the peak, or `MemoryRefused`. Called with the engine lock held and
-        before the response has started, so a refusal is still an HTTP status. SPD-257: its time is
-        the calling request's `gate` part, and the last `done` before it the request's `done` part
-        (`req_ms_fields`)."""
+        workspace under the peak, or `MemoryRefused`. Called before the response has started, so a
+        refusal is still an HTTP status; every slot's request thread calls it (slot 0's with the
+        engine lock held), one at a time through the policy's own lock. SPD-257: its time is the
+        calling request's `gate` part, and the last `done` before it the request's `done` part
+        (`req_ms_fields`).
+
+        SRV-773: `rows`, the rows the prefill forwards (it resumes at `n - rows`): the workspace is theirs
+        (`workspace_rows`); None: all `n`. SRV-775: `others`, bytes of the other prefills in flight the peak test adds
+        to the reserve (0 unless the server's strict peak, QSE_PEAK_STRICT). Every slot's prefill passes it, a side
+        slot's too, on the reserve as it is. `ceiling` False (a side slot's): the peak stage only, as side slots before
+        had no gate at all; the ceiling stage and its allocator walks stay slot 0's (2026-11-02: every side gate ran
+        it, 57 ms median, and a c8 round's first tokens came 0.5 s later). A side slot's gate with no others and no
+        strict peak whose reserve plus workspace stays `FAST_MARGIN` under the peak admits on one reading without the
+        lock (`_fast_gate`): at a c8 round's start the eight gates queued on it behind slot 0's (2026-11-02, hold 4:
+        side gates 49.3 ms median, 88.5 max, with the reserve under the ceiling)."""
         d = getattr(_REQ, "ms", None)
         if d is not None and "done" not in d:
             d["done"] = float(self.stats.get("last_done_ms") or 0.0)
         t0 = time.perf_counter()
         try:
-            return self._gate(n, count)
+            return self._gate(n, count, rows, others, ceiling)
         finally:
             req_ms_add("gate", (time.perf_counter() - t0) * 1e3)
 
-    def _gate(self, n: int, count: bool = True) -> dict:
+    def _gate(self, n: int, count: bool = True, rows: int | None = None, others: int = 0,
+              ceiling: bool = True) -> dict:
         if not self.on:
             return {}
+        if not ceiling and not others and not self.strict:
+            g = self._fast_gate(n, rows)
+            if g is not None:
+                return g
         with self.lock:
-            self.stats["gates"] += 1
+            with self._stats_lock:
+                self.stats["gates"] += 1
             shed: list = []
             alloc, res = self.memory()
-            if res > self.ceiling and res > alloc and self._ceiling_over() > 0:
-                self.empty("ceiling")
-                alloc, res = self.memory()
-            for lv in self.LEVELS:
-                if self._ceiling_over() <= 0:
-                    break
-                if lv in self.partial:
-                    if self._shed_to(lv, "ceiling", self._ceiling_over):
-                        shed.append(lv)
-                        alloc, res = self.memory()
-                    continue
-                if self.shed(lv, "ceiling"):
-                    shed.append(lv)
+            if ceiling:
+                if res > self.ceiling and res > alloc and self._ceiling_over() > 0:
                     self.empty("ceiling")
                     alloc, res = self.memory()
-            if shed and res > self.ceiling:
-                self._over_ceiling(alloc, res, shed)
-            ws = self.workspace(n)
-            if res + ws > self.peak and res > alloc:
+                for lv in self.LEVELS:
+                    if self._ceiling_over() <= 0:
+                        break
+                    if lv in self.partial:
+                        if self._shed_to(lv, "ceiling", self._ceiling_over):
+                            shed.append(lv)
+                            alloc, res = self.memory()
+                        continue
+                    if self.shed(lv, "ceiling"):
+                        shed.append(lv)
+                        self.empty("ceiling")
+                        alloc, res = self.memory()
+                if shed and res > self.ceiling:
+                    self._over_ceiling(alloc, res, shed)
+            ws = self.workspace_rows(n, rows)
+            # SRV-775: the other prefills in flight, counted on the reserve under the strict peak only
+            need = ws + max(0, int(others))
+            said = {**({"rows": int(rows)} if rows is not None else {}), **({"others": int(others)} if others else {})}
+            if res + need > self.peak and res > alloc:
                 self.empty("peak")
                 alloc, res = self.memory()
             # SPD-257: shed while over the peak and the stale rule does not hold either (`_peak_over`)
-            over = self._peak_over(ws)
+            over = self._peak_over(need)
             if over > 0:
                 self._event("peak_over", n=int(n), ws=ws, allocated=alloc, reserved=res,
-                            default_free=self.default_free(alloc, res), over=over)
+                            default_free=self.default_free(alloc, res), over=over, **said)
             for lv in self.LEVELS:
-                if self._peak_over(ws) <= 0:
+                if self._peak_over(need) <= 0:
                     break
                 if lv in self.partial:
-                    if self._shed_to(lv, "peak", lambda: self._peak_over(ws)):
+                    if self._shed_to(lv, "peak", lambda: self._peak_over(need)):
                         shed.append(lv)
                         alloc, res = self.memory()
                     continue
@@ -891,7 +981,7 @@ class Budget:
                     shed.append(lv)
                     self.empty("peak")
                     alloc, res = self.memory()
-            if self._peak_over(ws) > 0:
+            if self._peak_over(need) > 0:
                 # the last try before a refusal: what only a collection frees (a frame or a
                 # traceback that still holds tensors), then the allocator's free blocks back.
                 # Not while the stale rule holds: those free blocks are the workspace's room
@@ -899,25 +989,44 @@ class Budget:
                 self.empty("refuse")
                 alloc, res = self.memory()
             g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res,
-                 "shed": shed, "ts": round(time.time(), 3)}
+                 "shed": shed, "ts": round(time.time(), 3), **said}
             self.stats["last_gate"] = g
-            if (res + ws > self.peak and alloc + ws <= self.peak
-                    and ws <= self.default_free(alloc, res)):
+            if (res + need > self.peak and alloc + need <= self.peak
+                    and need <= self.default_free(alloc, res)):
                 # a stale reserve: the workspace fits in what the allocator already holds free,
                 # so the prefill takes no new memory from the box. Never refuse it
                 # (a 12-token prompt refused for 25 minutes on a reserve nothing could give back)
                 self.stats["stale_admits"] += 1
-                self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws)
+                self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws, **said)
                 g["stale"] = True
-            elif res + ws > self.peak:
-                exc = MemoryRefused(res + ws, self.peak, n)
+            elif res + need > self.peak:
+                exc = MemoryRefused(res + need, self.peak, n, rows=rows)
                 exc.detail = dict(allocated=alloc, reserved=res)
                 if count:
                     self._count_refused(exc)
+                self.ws_now = 0                # SRV-775: a refused prefill holds no workspace, a pass before it none
                 raise exc
             self.refused_in_a_row = 0
-            self.ws_now = ws
+            self.ws_now = ws                   # SRV-775: this thread's, until its prefill has run
             return g
+
+    def _fast_gate(self, n: int, rows: int | None) -> dict | None:
+        """SRV-775: a side slot's gate on one reading of the reserve, without `lock`. Its reserve plus workspace
+        `FAST_MARGIN` or more under the peak is admitted at once: the locked peak stage takes the same decision there
+        (nothing over the peak: no empty, no shed, no refusal). Else None, and the gate takes the lock as before."""
+        alloc, res = self.memory()
+        ws = self.workspace_rows(n, rows)
+        if res + ws > self.peak - self.FAST_MARGIN:
+            return None
+        g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res, "shed": [],
+             "ts": round(time.time(), 3), **({"rows": int(rows)} if rows is not None else {}), "fast": True}
+        with self._stats_lock:
+            self.stats["gates"] += 1
+            self.stats["fast_gates"] += 1
+        self.stats["last_gate"] = g
+        self.refused_in_a_row = 0
+        self.ws_now = ws                       # this thread's, until its prefill has run
+        return g
 
     def _over_ceiling(self, alloc: int, res: int, shed: list) -> None:
         """SPD-257: the ceiling stage shed a level and the reserve is still over the ceiling: what holds it (the
@@ -941,6 +1050,27 @@ class Budget:
         self.refused_in_a_row += 1
         self._event("refused", n=exc.n, need=exc.need, peak=exc.peak,
                     in_a_row=self.refused_in_a_row, **getattr(exc, "detail", {}))
+
+    def admit_over_peak(self, n: int, rows: int, ws: int, slot, **info) -> None:
+        """SRV-775: a prefill the gate refused runs all the same: alone, with no other prefill in flight to wait
+        for (server/app.py `_par_admit`, which checks the box's floor next). Counted, the last one kept for
+        /health, an `over_peak_admit` event (`info`: the request's id, where it resumes) with the reserve and the
+        bytes it goes over the peak by, and its workspace in `ws_now` as any admitted prefill's. A long-lived
+        server's reserve sits at the peak with graphs' scratch and fragments no shed lowers (SPD-273): such a
+        request would wait for good."""
+        _, res = self.memory()
+        by = max(0, int(res) + int(ws) - self.peak)
+        self.stats["over_peak_admits"] += 1
+        self.stats["last_over_peak"] = {"slot": slot, "ws": int(ws), "rows": int(rows), "n": int(n), "by": by,
+                                        "ts": round(time.time(), 3)}
+        self._event("over_peak_admit", n=int(n), rows=int(rows), ws=int(ws), slot=slot, reserved=int(res),
+                    peak=self.peak, by=by, **info)
+        self.ws_now = ws
+
+    def over_peak(self) -> int:
+        """SRV-775: bytes the engine's reserve is over its declared peak now (0 under it), for /health."""
+        _, res = self.memory()
+        return max(0, int(res) - int(self.peak))
 
     def admit(self, level: str, nbytes: int) -> bool:
         """May a cache allocate `nbytes` more? Under `ceiling - slack` allocated and, while a
@@ -973,8 +1103,10 @@ class Budget:
         self._event("admit_refused", level=level, nbytes=int(nbytes))
         return False
 
-    def mark(self) -> None:
-        """A prefill's forwards start here: the allocator's peak counts from now."""
+    def mark(self, rows: int | None = None) -> None:
+        """A prefill's forwards start here: the allocator's peak counts from now. SRV-773: `rows`, the rows it
+        forwards (None: not said); a continuation teaches the line nothing (`prefilled`)."""
+        self._mark_rows = None if rows is None else int(rows)
         try:
             self.lifetime_peak = max(self.lifetime_peak, self._peak())
             self._peak(reset=True)
@@ -996,8 +1128,11 @@ class Budget:
         the anchors and the store snapshot a prefill takes on its way are still allocated at its
         end, and counting them as workspace taught the estimate 113 kB a token from a 48k prompt
         (27.6 GiB at 262k) in the 2026-10-01 gate. Only a long prefill (64k tokens and more)
-        teaches the slope, where the context's part dominates the fixed one."""
-        self.ws_now = 0
+        teaches the slope, where the context's part dominates the fixed one. SRV-773: and only a cold one (`mark`
+        without rows, or with all `n`): a resumed turn's few rows say nothing of a whole prompt's workspace."""
+        self.ws_now = 0                    # this thread's (SRV-775)
+        cold = self._mark_rows is None or self._mark_rows == int(n)
+        self._mark_rows = None
         workspace = None
         if self._mark is not None:
             try:
@@ -1010,7 +1145,7 @@ class Budget:
             except Exception:                                      # noqa: BLE001
                 workspace = None
         self._mark = None
-        if workspace is None or n < 65_536:
+        if workspace is None or n < 65_536 or not cold:
             return
         self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
                                   "estimate": self.workspace(n)}
@@ -1024,6 +1159,11 @@ class Budget:
                         per_token=per, was=self.ws_per_token)
             self.ws_per_token = per
 
+    def prefill_done(self) -> None:
+        """SRV-775: this thread's prefill has run (or will not): its workspace leaves `ws_now`. A side slot's prefill
+        runs without the policy (`prefill(..., mem=None)`), so `prefilled` never runs there; the server calls this."""
+        self.ws_now = 0
+
     def done(self) -> int:
         """After a request: the reserve over its slack goes back to the driver. SPD-257: the graphs' scratch
         is no such reserve (`_scratch`): with it counted, a reserve the graphs held over the slack emptied
@@ -1036,7 +1176,7 @@ class Budget:
             self.stats["last_done_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
 
     def _done(self) -> int:
-        self.ws_now = 0
+        self.ws_now = 0                    # SRV-775: this thread's only: a side slot's prefill in flight keeps its own
         if not self.on:
             return 0
         with self.lock:
@@ -1057,6 +1197,7 @@ class Budget:
                 "default_free": (self._less_graphs(alloc, res, last) if self.pools_probe is None or last
                                  else None),
                 "ws_floor": self.ws_floor, "ws_per_token": self.ws_per_token,
+                "ws_now": self.ws_now,             # SRV-775: the largest prefill admitted and not yet run
                 "events": list(self.events)[-20:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
 
@@ -1929,6 +2070,22 @@ class ResidentPrefix:
             return 0
         e = self.end["at"] if self.end is not None else 0
         return e if (e and c >= e and e <= max_len and e > self.best(c, max_len)) else 0
+
+    def resume_estimate(self, keys, n: int, mm_ok: bool = False) -> tuple[int, str | None]:
+        """SRV-773: where a prompt of `keys` (`n` served rows) resumes in place, before its prefill: the end
+        anchor over the prompt's end over the anchors, with the calls and thresholds `_prefill` makes; (0, None)
+        for none. Host work only, nothing changes (no settle, no restore, no unpark). A store entry, the NVMe,
+        the park or the pin can only resume it later: the memory gate then charges more rows than the prefill
+        forwards, never fewer."""
+        c = self.common(keys)
+        b = self.best(c, n - 1)
+        be = self.end_offer(c, n - 1, mm_ok=mm_ok)
+        bpe = self.pend_offer(c, n - 1) if not mm_ok else 0
+        if be:
+            return be, "end"
+        if bpe:
+            return bpe, "pend"
+        return (b, "resident") if b else (0, None)
 
     def resume_end(self, eng, drafter, saved: int = 0) -> None:
         """Bring the engine to the end anchor's line: the state its generation ended in, the rows
@@ -3417,7 +3574,7 @@ def _prefill(eng, drafter, ids, device, *, store, chunk, conv_id, checkpoint, re
     job = (_disk(disk, "plan", keys, hashes, start, n, dlim, kind_disk, conv_id, disk_tag)
            if disk is not None and not scratch and (dlim == lim or dlim > start) else None)
     if mem is not None:
-        mem.mark()
+        mem.mark(rows=n - start)           # SRV-773: a continuation teaches the workspace line nothing
     lines = res is not None or job is not None or (store is not None and checkpoint and chunk > 0)
     win = PREFILL_WINDOW if lines else PREFILL_WINDOW_FREE
     try:

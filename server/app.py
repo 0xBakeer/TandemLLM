@@ -689,6 +689,20 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
 #: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
 KV_RECOMPUTE_MAX = 16
+#: SRV-775: a request the memory gate refuses waits for the prefills in flight; alone, it runs over the
+#: engine's declared peak and is counted (`_par_admit`). 1: a lone one waits too, and the gate counts the
+#: workspaces of the prefills in flight on the reserve, as the admission holds them: by their rows (in no profile)
+PEAK_STRICT = os.environ.get("QSE_PEAK_STRICT") == "1"
+#: SRV-773: memory gate passes for one admission while each moves the resume point down (`_par_admit`); the
+#: last charges every row
+GATE_PASSES = 3
+#: SRV-775: a request waiting for the prefills in flight runs the memory gate again once one of them has run, its
+#: resume point moved, or this many seconds passed (`_par_admit`; a pass sheds, collects and empties the allocator
+#: while the other lanes decode, and it ran every second)
+PEAK_REGATE_S = 5.0
+#: SRV-773: the `[req]` line's `peak_gib=`: the allocator's peak over the request less what was allocated at
+#: its prefill's start, read for a request that ran alone (the peak is reset then); a measurement knob
+REQ_PEAK = os.environ.get("QSE_REQ_PEAK") == "1"
 
 #: The least output a side slot's window must leave a request (its prompt and the margins
 #: taken): below it the request waits for slot 0, at or above it the request runs there with its
@@ -1488,13 +1502,20 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                      or bool(res.end is not None and res.end.get("mm")))
             # ENG-371: a worker beside its own parent: the parent stays on slot 0
             mine = stay and parent is not None and getattr(res, "owner", None) == parent
+            # SRV-773: a homeless long prompt takes a free side slot before the slot whose conversation resumes
+            # at a kept end (2026-11-02: an 85k turn sent a 62.9k conversation to the NVMe and was refused on
+            # the one closed slot)
+            kept_end = getattr(res, "end", None) is not None and valid >= 2 * chunk
+            long_end = kept_end and len(ids) > int(getattr(res, "guest_max", 0) or 0)
             stale = (_slot0_stale() if other and valid >= 2 * chunk and bound and not mine
                      else None)
             if stale is not None:
                 why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
-            elif other and valid >= 2 * chunk and (bound or mine):
+            elif other and valid >= 2 * chunk and (bound or mine or long_end):
                 why["prefer_side"] = valid
-                if len(ids) <= SIDE_NEW_SHORT and not stay:
+                if long_end and not (bound or mine):
+                    why["prefer_side_end"] = valid     # no wait for a busy side slot (`prefer_side_wait`)
+                elif len(ids) <= SIDE_NEW_SHORT and not stay:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
                     # takes slot 0 and sends the long conversation to the NVMe
                     why["prefer_side_wait"] = True
@@ -1544,8 +1565,8 @@ def _par_nums(why: dict) -> str:
     nums = " ".join(f"{k}={why[k]}" for k in ("view", "view_common", "valid", "res_common",
                                               "conv", "need", "guest", "park", "slot0_wait_s",
                                               "home", "home_share", "home_wait", "hop_from",
-                                              "prefer_side", "slot0_stale", "new_wait", "spill",
-                                              "spill_head", "slot0_wait")
+                                              "prefer_side", "prefer_side_end", "slot0_stale", "new_wait",
+                                              "spill", "spill_head", "slot0_wait")
                     if k in why)
     if "n_images" in why:
         nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
@@ -1633,10 +1654,14 @@ def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
 
 
 def _par_end(pool, side, cid) -> None:
-    """A request's end on its slot: its bytes out of the admission, its slot out of the barrier,
-    the turn and the side slot given back."""
+    """A request's end on its slot: its bytes out of the admission and its workspace out of the memory
+    policy's prefills in flight (SRV-775: a request that passed the gate and never prefilled too), its slot
+    out of the barrier, the turn and the side slot given back."""
     if pool.admission is not None:
         pool.admission.release(cid)
+    mem = dict.get(STATE, "mem")
+    if getattr(mem, "prefill_done", None) is not None:
+        mem.prefill_done()
     if pool.burst is not None:
         pool.burst.leave(side.index if side is not None else 0)
     (side if side is not None else pool.slots[0]).pending_rows = None     # SRV-763
@@ -1655,6 +1680,19 @@ def _par_end(pool, side, cid) -> None:
 # ------------------------------------------------------------------ parallel requests
 # `--parallel N` (server/slots.py). Every helper below runs only when `STATE["pool"]` exists; a
 # server without side slots never calls one.
+def _par_prefilled(cid) -> None:
+    """SRV-775: the request's prefill has run: its workspace leaves the admission's reservation (its KV
+    part stays until `_par_end`) and the memory policy's prefills in flight. A side slot prefills without
+    the policy (`cache.prefill(..., mem=None)`), so `Budget.prefilled` never runs there; this does, on
+    every slot (and with no side slots only the policy's part)."""
+    pool = dict.get(STATE, "pool")
+    if cid is not None and pool is not None and pool.admission is not None:
+        pool.admission.prefilled(cid)
+    mem = dict.get(STATE, "mem")
+    if getattr(mem, "prefill_done", None) is not None:
+        mem.prefill_done()
+
+
 def _burst_prefilled() -> None:
     """SPD-245: a member of the prefill burst has prefilled: the GPU turn back, until every member has."""
     pool = dict.get(STATE, "pool")
@@ -1748,6 +1786,33 @@ def _par_chunks(on_chunk):
             pool.turn.pause(_par_index())
     hook.info = getattr(on_chunk, "info", None)
     return hook
+
+
+#: SRV-773 (`REQ_PEAK`): thread -> (allocated at its prefill's start, whether it ran alone)
+_REQ_PEAK_AT: dict = {}
+
+
+def _req_peak_start() -> None:
+    """SRV-773 (`REQ_PEAK`): at a prefill's start, what is allocated; the allocator's peak is reset when the
+    request runs alone (no other request running, no other slot busy), so the peak is its own."""
+    pool = dict.get(STATE, "pool")
+    busy = sum(1 for s in pool.slots if s.busy) if pool is not None else 0
+    alone = int(INFLIGHT.get("running", 0)) <= 1 and busy <= 1
+    if alone:
+        torch.cuda.reset_peak_memory_stats()
+    _REQ_PEAK_AT[threading.get_ident()] = (int(torch.cuda.memory_allocated()), alone)
+
+
+def _req_peak_field() -> str:
+    """SRV-773 (`REQ_PEAK`): the `[req]` line's `peak_gib=`: the allocator's peak since this request's prefill
+    started less what was allocated then, decode included; `-` for a request that did not run alone."""
+    a0, alone = _REQ_PEAK_AT.pop(threading.get_ident(), (None, False))
+    if a0 is None or not alone:
+        return " peak_gib=-"
+    try:
+        return f" peak_gib={(torch.cuda.max_memory_allocated() - a0) / 2**30:.2f}"
+    except Exception:                                              # noqa: BLE001
+        return " peak_gib=-"
 
 
 @contextlib.contextmanager
@@ -2486,6 +2551,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
 
     `grid_mark` (SPD-249): the row where the prompt's stable head ends (the conductor's notes at the
     head, `Plan.head_end`): the prefill's grid is cut there (engine/cache.py `Grid`).
+
+    SRV-775: once the prompt is prefilled its workspace leaves the admission and the memory policy
+    (`_par_prefilled`, by the record `on_prefill` carries: `Handler._prefill_watch`), and the record gets the
+    rows it forwarded for its `[req]` line (`rec.fwd`).
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -2561,6 +2630,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             # #98: a key no cache holds, so nothing resumes; another session's, so the resident
             # conversation is stashed (a short prompt) or parked or spilled as for any other one
             keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
+        if REQ_PEAK:
+            _req_peak_start()                   # SRV-773: the `[req]` line's `peak_gib=`
         with _prefill_mark(len(ctx)):           # SRV-763: the other slots' estimates see it
             logits, reused, forwarded = cache.prefill(
                 eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
@@ -2573,6 +2644,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # FX5: the highest row this generation can write, for a guest's stash; the
                 # monitor's hidden tokens are not in `max_new`
                 reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
+        rec_ = getattr(on_prefill, "rec", None)  # the request's record; None for the engine's own turns
+        _par_prefilled(getattr(rec_, "request_id", None))     # SRV-775: its workspace is free again
+        if rec_ is not None:
+            rec_.fwd = int(forwarded)           # SRV-773: the `[req]` line's `fwd=`, beside the gate's rows
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         _burst_prefilled()
@@ -3139,7 +3214,7 @@ def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | N
     stage's prompt expands them exactly as the turn's does (`_mm_prompt`): the same rows, the same
     rotary coordinates, the same `key_ids` the caches compare, and the tower's output from the
     embedding cache when the turn asks for it again."""
-    with torch.no_grad():
+    with torch.no_grad(), _turn_ws_kept():
         logits, reused, forwarded = _context_prefill(ids, at, conv_id, on_chunk, images)
         row = logits[0, -1].float()
         picked = row[torch.tensor(letters, device=row.device)].tolist()
@@ -3154,11 +3229,25 @@ def context_rows(ids: list[int], conv_id: str | None = None, on_chunk=None,
     tapped layers and the post-norm row, fp32 on the host -- with their names and the counts.
     Under the engine lock."""
     eng, drafter = STATE["engine"], STATE["drafter"]
-    with torch.no_grad():
+    with torch.no_grad(), _turn_ws_kept():
         _, reused, forwarded = _context_prefill(ids, len(ids), conv_id, on_chunk, images)
         names, _, rows = probe_mod.rows_of(eng, drafter)
         vec = torch.stack([r[-1] for r in rows]).float().cpu() if rows else None
     return vec, names, {"reused": int(reused), "forwarded": int(forwarded)}
+
+
+@contextlib.contextmanager
+def _turn_ws_kept():
+    """SRV-775: a stage's own gate and prefill on the turn's thread (the in-context stage, the probe rows) leave the
+    turn's workspace, charged at its admission (`_par_admit`), in the memory policy's prefills in flight: the
+    turn's own prefill is still to run. Their `Budget.prefilled` would take it out with the stage's."""
+    mem = STATE.get("mem")
+    own = mem.ws_own() if getattr(mem, "ws_own", None) is not None else 0
+    try:
+        yield
+    finally:
+        if own:
+            mem.ws_now = own
 
 
 def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
@@ -4627,7 +4716,26 @@ def _end_held(res, keys: list[int], n: int, mm_ok: bool) -> bool:
             and res.end_offer(res.common(keys), n - 1, mm_ok=mm_ok) > 0)
 
 
-def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
+def _served_keys(prompt, mm, comp) -> tuple[list[int], bool]:
+    """The served prompt's keys for the end anchor's test (`_end_held`), with the router's notes and the
+    images in: the images' key ids, else the prompt's; and whether an end after images may be offered (SRV-669:
+    a compaction served as the continuation resumes at the end anchor, `end_mm`, after images too)."""
+    keys = list(mm.key_ids) if mm is not None else prompt.tolist()
+    return keys, (mm is not None and MM_END == "on") or comp is not None
+
+
+def _hold_served_end(res, prompt, mm, comp, n: int) -> None:
+    """SRV-773: a parallel server's gate (`_par_admit`) runs on the client's tokens, before the router's notes, the
+    images' rows and a compaction's continuation are in the prompt: a conductor turn's tokens part from the slot's
+    rows at the first replayed note, so that gate held no end. Held here on the served prompt, as the gate at this
+    point held it before (ENG-371, SRV-669, SRV-546), until the prefill's `begin`; the charge is the admission's."""
+    if res is not None:
+        keys, mm_ok = _served_keys(prompt, mm, comp)
+        res.end_hold = _end_held(res, keys, n, mm_ok)
+
+
+def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool, rows: int | None = None,
+                      others: int = 0, count: bool = True, ceiling: bool = True) -> None:
     """The memory gate (`Budget.gate`) with the end anchor this request resumes at held
     (`ResidentPrefix.end_hold`), so the levels after it go first: live 2026-10-18 01:58 the gate
     gave back the end a worker's call had just been carried into slot 0 with, and the call read
@@ -4638,22 +4746,34 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
     later, rather than a 503 at every retry; only a refusal of the last pass counts. The hold is
     set or cleared at every gate, and the handler clears it in its `finally` (a request that
     passes the gate and prefills nothing: A1's give-up, a prepared summary, a response-cache hit,
-    a client that left), so a hold never outlives its request."""
+    a client that left), so a hold never outlives its request.
+
+    SRV-773: `rows`, the rows the prefill forwards (its workspace's), and `others`, the strict peak's
+    prefills in flight (`Budget.gate`). `count` False: a refusal is not counted here either, its caller
+    decides the outcome (the parallel admission waits or runs it over the peak, `_par_admit`). A
+    continuation (`rows` under `n`) keeps its end through a refusal: it is charged the rows after that
+    end, and a pass without it would admit a re-read of the conversation on that charge (g8's 21 rows,
+    0.80 GiB, then about 57,100 rows forwarded from the prompt's end). It runs once more only for a
+    waited-for park, with the end still held; the hold stays through the caller's wait. SRV-775:
+    `ceiling` False (a side slot's request): the gate's peak stage only (`Budget.gate`)."""
     hold = _end_held(res, keys, n, mm_ok)
     if res is not None:
         res.end_hold = hold                  # never a hold another request left behind
+    keep = hold and rows is not None and int(rows) < int(n)
     _PARK_LET_GO.kept = False
     try:
-        mem.gate(n, count=False)             # a refusal counts once, at the outcome
+        mem.gate(n, count=False, rows=rows, others=others,      # a refusal counts once, at the outcome
+                 ceiling=ceiling)
     except cache.MemoryRefused as exc:
-        if not hold and not _PARK_LET_GO.kept:
-            mem.refused(exc)
+        if (not hold or keep) and not _PARK_LET_GO.kept:
+            if count:
+                mem.refused(exc)
             raise
-        if hold:
+        if hold and not keep:
             res.end_hold = False
         _PARK_LET_GO.on = True               # and a waited-for park may go unwritten
         try:
-            mem.gate(n)
+            mem.gate(n, count=count, rows=rows, others=others, ceiling=ceiling)
         finally:
             _PARK_LET_GO.on = False
 
@@ -5637,6 +5757,15 @@ def _memory_event(ev: dict) -> None:
     if kind in ("peak_over", "stale_admit"):
         # SPD-257: the peak stage's start (what it sheds for) and a prefill admitted on the stale rule
         print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items() if k not in ("kind", "ts")),
+              flush=True)
+        return
+    if kind == "over_peak_admit":
+        # SRV-775: a lone prefill the gate refused runs over the declared peak (`_par_admit`), counted
+        def g(k):
+            v = ev.get(k)
+            return "?" if v is None else f"{int(v) / 2**30:.2f}"
+        print(f"[memory] over_peak_admit {ev.get('cid')} slot={ev.get('slot')} ws={g('ws')} rows={ev.get('rows')} "
+              f"ctx={ev.get('n')} kind={ev.get('resume')} reserved={g('reserved')} peak={g('peak')} by={g('by')} GiB",
               flush=True)
         return
     if kind in ("shed", "shed_chunk", "refused", "estimate_raised"):
@@ -6705,9 +6834,16 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     # SRV-197: the sequence slot it ran on, with `--parallel N`
     slot_s = (f" slot={rec.slot}" if rec is not None and getattr(rec, "slot", None) is not None
               else "")
+    # SRV-773: the rows its prefill forwarded beside the rows and the workspace the memory gate charged it
+    ws_s = ""
+    if rec is not None and getattr(rec, "ws_rows", None) is not None:
+        fwd = getattr(rec, "fwd", None)
+        ws_s = f" fwd={'-' if fwd is None else fwd} ws_rows={rec.ws_rows} ws_gib={rec.ws_gib:.2f}"
+    if REQ_PEAK:
+        ws_s += _req_peak_field()
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
-          f"{slot_s}{tools_s}{blk_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
+          f"{slot_s}{tools_s}{blk_s}{ws_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
 
 
 def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
@@ -7671,14 +7807,32 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
-                   stream: bool = False, rows: int | None = None, respond: bool = True) -> bool:
-        """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
-        worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
-        shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
-        slot -- is reserved while it runs; with other requests in flight it waits, in one-second
-        slices with the GPU turn given up, while MemAvailable less the engine's growth
-        (`_par_growth`), the other requests' reservations and its own would fall under the floor.
-        False: refused, the response is sent.
+                   stream: bool = False, rows: int | None = None, respond: bool = True,
+                   cold: bool = False) -> bool:
+        """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
+        (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
+        resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
+        gives the rows its prefill forwards and their workspace (`Budget.workspace_rows`). A prefill
+        no reserve could ever take (the engine's load plus that workspace over its declared peak) gets
+        its 503 at once. Then the memory gate on the live reserve sheds the caches for it, with the end
+        anchor it resumes at held (`_gate_holding_end`; a side slot's gate runs the peak stage only, the
+        ceiling stage stays slot 0's); when the gate still refuses it, the request waits for the other
+        prefills in flight, or alone runs over the peak and is counted (`Budget.admit_over_peak`: no shed
+        lowers a long-lived server's reserve for it, SPD-273; `PEAK_STRICT`: it waits too). The rows are
+        priced again before every gate pass, over-peak admit and reservation (a shed moves the resume
+        point down), and the gate runs again on rows that grew since it admitted them. Then its own worst
+        case -- the workspace by its rows (a cold prompt without the line's floor the gate keeps) and,
+        with the shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
+        slot -- is reserved while MemAvailable less the caches' growth, the workspaces of the prefills in
+        flight and its own, together at most the engine's room to its peak (`_par_room`: the gate keeps
+        each prefill it admits under the peak), less the KV pages still to commit and its own, stays at
+        the floor, alone too; a request admitted over the peak counts its workspace in full past the room,
+        so the floor alone bounds it. The idle conversations' pages come back only for a request this
+        floor holds back, never for one the gate refuses while other prefills run. A wait is in
+        one-second slices with the GPU turn given up; a request that waits leaves the prefill burst
+        (it prefills alone once admitted, and the burst's others go on without it), and one waiting for
+        a prefill runs the gate again only when the prefills in flight dropped, its resume point moved
+        or `PEAK_REGATE_S` passed. False: refused, the response is sent.
 
         SRV-250 (FX7, 2026-10-07): every request was counted as 2.1 GiB (the workspace's 1.15 GiB
         floor plus a whole state-store entry, 1 GiB, whatever its length) against 6.4 to 8.4 GiB of
@@ -7708,8 +7862,87 @@ class Handler(BaseHTTPRequestHandler):
             return True
         n = max(int(prompt.numel()), int(rows or 0))
         mem = dict.get(STATE, "mem")
-        ws = mem.workspace(n) if mem is not None else max(
-            cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
+        gated = mem is not None and getattr(mem, "on", False)
+        if gated and slots_mod.current() is None:
+            memlimits.refresh(STATE)          # slot 0: a new residency document's limits, before its gate
+        # SRV-773: the rows the prefill forwards, from where it resumes in place on this slot. With images
+        # the keys are the prompt's ids (one placeholder an image), which part from the rows at the first
+        # image: more rows charged, never fewer
+        res_ = STATE.get("resident")
+        keys = prompt.tolist()
+        mm_ok = rows is not None and MM_END == "on"
+        est: dict = {}
+
+        def price(full: bool = False) -> int:
+            """SRV-773: the rows the prefill forwards from where it resumes in place now, their workspace and
+            `rec`'s `ws_*`; `full`: all `n`. Priced again before every gate pass, over-peak admit and reservation:
+            a shed in between (this request's gate taking a branch's anchor, another slot's gate during a wait)
+            moves the resume point down, and the charge priced before it is the smaller one."""
+            start, kind = ((0, None) if full or res_ is None or cold
+                           else res_.resume_estimate(keys, n, mm_ok))
+            fwd = max(1, n - int(start))
+            ws = mem.workspace_rows(n, fwd) if mem is not None else max(
+                cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
+            # SRV-775: the box's floor counts it by its rows alone, a cold prompt without the line's floor the gate
+            # keeps (2026-11-02: 8 short cold prompts counted 8 x 2.75 GiB and the eighth waited 12 s; before, all 8 ran)
+            ws_r1 = mem.workspace_rows(n, fwd, line=False) if mem is not None else ws
+            est.update(fwd=fwd, ws=ws, ws_r1=ws_r1, kind=kind)
+            if rec is not None:
+                rec.ws_gib, rec.ws_rows, rec.ws_kind = ws / (1 << 30), fwd, kind
+            return fwd
+
+        price()
+        if gated:
+            # SRV-773: a prefill no reserve could ever take (the engine's load plus its workspace over the
+            # peak) is refused at once: nothing is shed or reclaimed for it
+            load = int((dict.get(STATE, "mem_load") or {}).get("allocated") or 0)
+            if load + est["ws"] > int(mem.peak):
+                exc = cache.MemoryRefused(load + est["ws"], mem.peak, n, rows=est["fwd"])
+                exc.detail = {"load": load}
+                mem.refused(exc)
+                if rec is not None:
+                    rec.stop_detail = "memory"
+                print(f"[memory] {cid} refused: {exc}", flush=True)
+                if respond:
+                    self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                return False
+
+        def gate() -> dict | None:
+            """SRV-775: the memory gate on the live reserve. None: the prefill may run (alone it runs over
+            the peak, counted once); else the line of its wait for the prefills in flight. SRV-773: priced
+            before every pass, and again after a pass that admitted it: one that shed the anchor a branch
+            resumes at moved the resume point down, and the gate runs again on the rows the prefill now
+            forwards (the last of `GATE_PASSES` on every row)."""
+            if not gated:
+                return None
+            full = False
+            for left in range(GATE_PASSES, 0, -1):
+                fwd = price(full)
+                try:
+                    _gate_holding_end(mem, res_, keys, n, mm_ok, rows=fwd,
+                                      others=adm.ws_in_flight() if PEAK_STRICT else 0, count=False,
+                                      ceiling=slots_mod.current() is None)
+                except cache.MemoryRefused as exc:
+                    if not full:
+                        price()                 # what the refused pass shed moves its charge too
+                    if adm.ws_in_flight() > 0 or PEAK_STRICT:
+                        det = getattr(exc, "detail", None) or {}
+                        return {"peak_wait": True, "need": exc.need, "peak": exc.peak, "ws": est["ws"],
+                                "reserved": det.get("reserved"), "over": exc.need - exc.peak}
+                    est["gated"] = est["fwd"]
+                    if est.get("over_peak"):
+                        mem.ws_now = est["ws"]      # admitted over the peak before: its charge, counted once
+                    else:
+                        est["over_peak"] = True
+                        mem.admit_over_peak(n, est["fwd"], est["ws"], _par_index(), cid=cid,
+                                            resume=est["kind"])
+                    return None
+                if full or left == 1 or price() <= fwd:
+                    est["gated"] = est["fwd"]
+                    return None
+                full = left == 2
+            return None
+
         kv, owner = 0, None
         if kvpool.POOL is not None:
             eng = STATE.get("engine")
@@ -7720,16 +7953,32 @@ class Handler(BaseHTTPRequestHandler):
                 grow = int(max_new)
                 if KV_RECOMPUTE and KV_ADMIT_ROWS > 0:
                     grow = min(grow, KV_ADMIT_ROWS)
-                rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
-                kv = pages.need_bytes(rows)
+                kv_rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
+                kv = pages.need_bytes(kv_rows)
                 owner = pages.owner
-        need = ws + kv
-        ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
-        if not ok and _kv_reclaim_idle(d, owner):
-            # SRV-307: the pages idle conversations keep come back before anyone waits
-            ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
-        if ok:
-            return True
+
+        def reserve() -> tuple[bool, dict]:
+            """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
+            workspace in full past the engine's room (`Admission.check`)."""
+            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")))
+        d = gate()
+        gate_again = d is not None
+        if gate_again:
+            adm.stats["peak_waits"] += 1
+        else:
+            ok, d = reserve()
+            if not ok and _kv_reclaim_idle(d, owner):
+                # SRV-307: the pages idle conversations keep come back before anyone waits
+                ok, d = reserve()
+            if ok:
+                return True
+        i = _par_index()
+        burst = getattr(pool, "burst", None)
+        if burst is not None:
+            # SRV-775: a member of the prefill burst that waits for memory leaves it: the others prefill without
+            # it, not after up to the burst's wait (2026-11-02: one member's 12 s wait held the seven others'
+            # first tokens to 10.5-13.7 s); admitted, it prefills alone. `_par_end`'s leave is then a no-op
+            burst.leave(i)
         print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
         adm.stats["waits"] += 1
         self._mem_wait = True
@@ -7737,7 +7986,10 @@ class Handler(BaseHTTPRequestHandler):
             rec.wait_reason = "memory"
             rec.waiting_memory = True
         t0 = time.perf_counter()
-        i = _par_index()
+        st0 = getattr(mem, "stats", None)
+        e0 = (int(st0.get("empties") or 0), float(st0.get("empty_ms") or 0.0)) if isinstance(st0, dict) else None
+        # SRV-775: the prefills in flight and the time at the gate's last refusal (`PEAK_REGATE_S`)
+        seen, t_gate = adm.ws_in_flight(), time.monotonic()
         limit = (float(STATE.get("request_timeout") or 3600.0) if stream
                  else float(STATE.get("queue_timeout", 120.0)))
         until = time.monotonic() + limit
@@ -7749,7 +8001,9 @@ class Handler(BaseHTTPRequestHandler):
                 place = adm.wait(cid)
                 if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
                     said = time.monotonic()
-                    short = max(0.0, (d.get("floor", 0) - (d.get("after") or 0)) / slots_mod.GiB)
+                    gap = ((d.get("over") or 0) if d.get("peak_wait")       # SRV-775: over the peak
+                           else d.get("floor", 0) - (d.get("after") or 0))
+                    short = max(0.0, gap / slots_mod.GiB)
                     try:
                         try:
                             say(short, place)
@@ -7768,17 +8022,34 @@ class Handler(BaseHTTPRequestHandler):
                 # the first in line only: arrival order among the requests that wait for memory
                 if place > 1:
                     continue
-                ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                if price() > est.get("gated", n):
+                    gate_again = True           # SRV-773: a shed during the wait moved the resume point down
+                elif (gate_again and adm.ws_in_flight() >= seen
+                      and time.monotonic() - t_gate < PEAK_REGATE_S):
+                    continue                    # SRV-775: no prefill has run since the refusal: nothing to re-gate
+                if gate_again:
+                    # SRV-775: the memory gate first, again: it waits while another prefill runs
+                    got = gate()
+                    if got is not None:
+                        d = got
+                        seen, t_gate = adm.ws_in_flight(), time.monotonic()
+                        continue
+                    gate_again = False
+                ok, d = reserve()
                 if not ok and _kv_reclaim_idle(d, owner):
-                    ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                    ok, d = reserve()
                 if ok:
                     waited = time.perf_counter() - t0
                     if rec is not None:
                         rec.wait_mem_ms = round(waited * 1e3, 1)
                         if rec.t_lock is not None:
                             rec.t_lock += waited            # the wait is the queue's, not prefill
+                    st = getattr(mem, "stats", None)
+                    emp = (f"; empties +{int(st.get('empties') or 0) - e0[0]} "
+                           f"({float(st.get('empty_ms') or 0.0) - e0[1]:.1f} ms)"
+                           if e0 is not None and isinstance(st, dict) else "")
                     print(f"[parallel] {cid} admitted after {waited:.1f} s: "
-                          f"{slots_mod.Admission.describe(d)}", flush=True)
+                          f"{slots_mod.Admission.describe(d)}{emp}", flush=True)
                     return True
         finally:
             adm.unwait(cid)
@@ -7882,6 +8153,7 @@ class Handler(BaseHTTPRequestHandler):
                 watch.say(done, total, now)     # S1: the prefill's progress line, when it is due
         watch.info = {}                  # the prefill fills it: start, chunk, t0, kind
         watch.say = None
+        watch.rec = rec                  # SRV-775: whose workspace leaves the admission once prefilled
         return watch
 
     # -------------------------------------------------------------- routes
@@ -9314,7 +9586,7 @@ class Handler(BaseHTTPRequestHandler):
                     "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
-                    rows=_mm_rows(int(prompt.numel()), images) if images else None):
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -9655,25 +9927,35 @@ class Handler(BaseHTTPRequestHandler):
             # has started. A compaction drops its session's store entries and parked rows first;
             # then the engine is brought under its ceiling and the prefill's workspace under its
             # declared peak, the caches given back cheapest first -- or the request gets a 503.
+            # SRV-773: a parallel server's gate ran in `_par_admit`, on every slot; this one is a
+            # single-sequence server's, charged the rows the prompt forwards from where it resumes
             compacting = bool(chat and _compacting(plan, body, rec.client_kind))
             mem = STATE.get("mem")
-            if mem is not None and not micro:
-                memlimits.refresh(STATE)
+            if dict.get(STATE, "mem") is not None and not micro:
+                if mem is not None:
+                    memlimits.refresh(STATE)
                 if compacting and conv_id:
                     for name in ("state_store", "resident"):
                         obj = STATE.get(name)
                         if obj is not None:
                             obj.drop_session(conv_id)
-                try:
+                if par is not None:
+                    _hold_served_end(res_, prompt, mm, comp, n_prompt)   # SRV-773: the served prompt's end
+                elif mem is not None:
                     # SRV-669: a compaction served as the continuation resumes at the end
                     # anchor (`end_mm`), after images too: its end is held as well
-                    _gate_holding_end(mem, res_, list(mm.key_ids) if mm is not None
-                                      else prompt.tolist(), n_prompt,
-                                      (mm is not None and MM_END == "on") or comp is not None)
-                except cache.MemoryRefused as exc:
-                    rec.stop_detail = "memory"
-                    print(f"[memory] {cid} refused: {exc}", flush=True)
-                    return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                    keys_, mm_ok_ = _served_keys(prompt, mm, comp)
+                    start_, kind_ = (res_.resume_estimate(keys_, n_prompt, mm_ok_)
+                                     if res_ is not None and not cold else (0, None))
+                    rows_ = max(1, n_prompt - int(start_))
+                    rec.ws_gib, rec.ws_rows, rec.ws_kind = (mem.workspace_rows(n_prompt, rows_) / (1 << 30),
+                                                            rows_, kind_)
+                    try:
+                        _gate_holding_end(mem, res_, keys_, n_prompt, mm_ok_, rows=rows_)
+                    except cache.MemoryRefused as exc:
+                        rec.stop_detail = "memory"
+                        print(f"[memory] {cid} refused: {exc}", flush=True)
+                        return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
             # the reasoning-loop arms compute only for a request the monitor watches
             arms = sup.arms if sup is not None and STATE.get("think_stall", True) else None
             if sup is not None:
@@ -10743,6 +11025,10 @@ def _memory() -> dict:
             out.update(ceiling_gb=round(mem.ceiling / 2**30, 3), peak_gb=round(mem.peak / 2**30, 3),
                        engine_reserved_gb=round(res / 2**30, 3),
                        engine_allocated_gb=round(alloc / 2**30, 3))
+            # SRV-775: the reserve over the declared peak now, and the lone prefills run over it
+            last = mem.stats.get("last_over_peak") or {}
+            out.update(over_peak_gib=round(mem.over_peak() / 2**30, 3), over_peak_slot=last.get("slot"),
+                       over_peak_admits=mem.stats.get("over_peak_admits", 0))
         except Exception:                                          # noqa: BLE001
             pass
     try:
@@ -12135,7 +12421,9 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                                       exclude=lambda: memlimits.role_exclude(STATE),
                                       ws_floor=cost.workspace_floor or cache.WORKSPACE_FLOOR,
                                       ws_per_token=cost.workspace_per_token or cache.WORKSPACE_PER_TOKEN,
-                                      ws_cap=cost.workspace_cap, on_event=_memory_event)
+                                      ws_cap=cost.workspace_cap, on_event=_memory_event,
+                                      # SRV-773: a model's workspace by the rows a prefill forwards, else the line
+                                      ws_rows=getattr(cost, "workspace_rows", None))
     # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
     # the stale-reserve rule leaves them out of what the engine's allocator holds free
@@ -12144,6 +12432,7 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
     # SPD-257: the allocator's pools (the graphs' scratch out of the ceiling, the idle empty and the stale rule; a
     # cache's whole buffer against the peak) only under expandable segments: without them the policy as before
     mem.pools_probe = cache.TorchPools() if capture_lock.alloc_expandable() else None
+    mem.strict = PEAK_STRICT               # SRV-775: the strict peak's gates all take the policy's lock
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=int(a.store_entry_gb * gib),
@@ -12220,10 +12509,13 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
 
 def _par_room() -> int | None:
     """SRV-250: the engine's room to `--mem-peak-gib` under its memory policy (the reservation
-    now against the peak), None without a policy. Every cache asks `Budget.admit` before it grows
-    and every prefill passes `Budget.gate`, so the caches, the requests in flight and a new one
-    take at most this together; the caches' budgets alone counted 6.4 to 8.4 GiB the policy would
-    never have let them grow."""
+    now against the peak), None without a policy: what caps the caches' growth in the admission,
+    since every cache asks `Budget.admit` before it grows (the caches' budgets alone counted 6.4 to
+    8.4 GiB the policy would never have let them grow). SRV-775: it caps the caches' growth, the
+    workspaces of the prefills in flight and the request's own, as before: every prefill, a side
+    slot's too, passes `Budget.gate` on the live reserve, which keeps each one it admits under the
+    peak. Only a prefill the gate admitted over the peak (alone, counted) has its workspace counted
+    in full past this room."""
     mem = dict.get(STATE, "mem")
     if mem is None or not getattr(mem, "on", False):
         return None

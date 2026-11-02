@@ -451,6 +451,322 @@ def test_while_a_prefill_waits_its_workspace_counts():
     assert m.admit("pin", 4 * GIB)
 
 
+# ------------------------------------------------------------------ SRV-773, SRV-775: the rows a prefill forwards
+
+def test_srv773_a_continuation_is_charged_its_rows_not_its_context():
+    """g8's shape (2026-11-02): 21 new rows on a 62,886-token context were charged the whole context's workspace and
+    refused ten times. With the adapter's model (`ws_rows`) the gate charges the rows the prefill forwards; a cold
+    prompt (no rows said) is charged as before, and a refused continuation says what it was."""
+    fa = FakeAlloc(16)
+    m = budget(fa, ceiling=18, peak=20, slack=1, ws_rows=lambda n, r: 1 * GIB if r < n else 5 * GIB)
+    g = m.gate(62_886, rows=21)
+    assert g["workspace"] == GIB and g["rows"] == 21 and m.ws_now == GIB, g
+    try:
+        m.gate(62_886)
+        raise AssertionError("the whole context's workspace is over the peak")
+    except MemoryRefused as exc:
+        assert exc.rows is None and exc.need == 21 * GIB and "a 62886-token prefill" in str(exc), exc
+    assert m.ws_now == 0, "a refused gate leaves no workspace in flight"
+    m.peak = int(16.5 * GIB)
+    try:
+        m.gate(62_886, rows=21)
+        raise AssertionError("16 + 1 is over a 16.5 GiB peak")
+    except MemoryRefused as exc:
+        assert exc.rows == 21 and "a 21-row continuation on a 62886-token context needs 17.0 GiB" in str(exc), exc
+    plain = budget(FakeAlloc(16), ceiling=18, peak=20, slack=1)
+    assert plain.workspace_rows(62_886, 21) == plain.workspace(62_886), "no model: the line, whatever the rows"
+    return "21 rows: 1 GiB admitted; the context: 21 GiB refused; at 16.5 the message names the 21 rows"
+
+
+#: SRV-773, measured 2026-11-02 on Flash-Next 3.05 (one DGX Spark, raw requests alone): a resumed
+#: prefill's (served rows n, forwarded rows, the larger of its prefill's peak and its request end's peak, GiB)
+FN_RESUMED = [(58_020, 20, 0.10), (8_319, 20, 0.41), (8_575, 256, 0.22), (9_598, 1_023, 0.60), (13_693, 4_095, 1.59),
+              (26_019, 20, 0.10), (26_275, 256, 0.22), (27_299, 1_024, 0.69), (31_395, 4_096, 1.62),
+              (58_020, 20, 0.10), (58_276, 256, 0.25), (59_300, 1_024, 0.98), (63_395, 4_095, 2.02),
+              (100_019, 20, 0.10), (100_274, 255, 0.40), (101_298, 1_024, 1.55), (105_394, 4_096, 4.48),
+              (125_020, 20, 0.10), (125_276, 256, 0.40), (126_300, 1_024, 1.55), (130_396, 4_096, 5.10),
+              (133_019, 20, 0.10), (133_275, 256, 0.70), (134_298, 1_023, 2.68), (138_393, 4_095, 8.36),
+              (142_489, 4_096, 8.27), (146_202, 3_713, 8.63), (146_222, 20, 0.11)]
+#: and the cold or seeded ones: (n, rows, slot, the allocated delta or the request end's when larger, the policy's
+#: workspace plus the rows' streams, GiB); slot 0's delta holds its anchors, admitted apart (`Budget.admit`)
+FN_COLD = [(58_000, 58_000, 0, 6.71, 4.85), (8_299, 4_151, 1, 2.66, 2.28), (25_999, 17_630, 2, 3.05, 2.71),
+           (58_000, 49_641, 3, 5.13, 4.80), (99_999, 91_611, 4, 8.16, 7.81), (125_000, 116_637, 5, 8.63, 8.27),
+           (132_999, 124_630, 6, 8.78, 8.60)]
+
+
+def test_srv773_the_flashnext_model_covers_the_measured_rows():
+    """Flash-Next's workspace by forwarded rows (`FlashNextServing._workspace_rows`, the adapter's
+    `CostModel.workspace_rows`) on every measured row: never under what the row took, 21 rows at g8's 62,886-token
+    context under 1 GiB (the line charged 4.47), g2's 3,714 rows at 135,083 at most the cap, and a cold prompt never
+    under the line, whatever its length."""
+    import types
+    from engine.models.flashnext import serving as FS
+    from test_fn_serving import _qsa_class
+    stub = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=_qsa_class))
+
+    def charge(n, rows):
+        return FS.FlashNextServing._workspace_rows(stub, n, rows) / GIB
+    worst = min(charge(n, r) - took for n, r, took in FN_RESUMED)
+    assert worst >= 0.38, [(n, r, took, round(charge(n, r), 2)) for n, r, took in FN_RESUMED]
+    for n, r, slot, delta, ws_stack in FN_COLD:
+        assert charge(n, r) >= ws_stack + 0.45, (n, r, charge(n, r))
+        assert slot == 0 or charge(n, r) >= delta, (n, r, charge(n, r), delta)
+    assert charge(62_886, 21) <= 1.0 and charge(135_083, 3_714) <= 10.75
+    line = budget(FakeAlloc(50), peak=90, ws_floor=FS.WS_LINE_FLOOR, ws_per_token=FS.WS_LINE_ROW, ws_cap=FS.WS_CAP)
+    for n in (2_000, 30_000, 85_549, 262_144):
+        assert charge(n, n) >= line.workspace(n) / GIB, (n, charge(n, n), line.workspace(n) / GIB)
+    # the served cost carries it: the policy charges a continuation its rows, a cold prompt at least its line
+    model = lambda n, r: FS.FlashNextServing._workspace_rows(stub, n, r)     # noqa: E731
+    m = budget(FakeAlloc(50), peak=90, ws_floor=FS.WS_LINE_FLOOR, ws_per_token=FS.WS_LINE_ROW, ws_cap=FS.WS_CAP,
+               ws_rows=model)
+    assert m.workspace_rows(62_886, 21) == model(62_886, 21) and m.workspace_rows(2_000) == m.workspace(2_000)
+    return (f"28 resumed rows covered (least +{worst:.2f} GiB), 7 cold; g8 {charge(62_886, 21):.2f} GiB, "
+            f"g2 {charge(135_083, 3_714):.2f}, 262k cold {charge(262_144, 262_144):.2f}")
+
+
+def test_srv775_the_admission_counts_a_cold_prompt_by_its_rows():
+    """The admission's count of a prefill in flight (`workspace_rows(line=False)`): by the rows alone, a cold prompt
+    without the line's 2.75 GiB floor, which the gate keeps. Lone cold prompts of 205-215 rows peaked at 0.20-0.67 GiB
+    on 2026-11-02 (`[req] peak_gib`); counted at 2.75 each, eight of them kept the eighth waiting 12 s for the box's
+    floor. A model without the keyword, and a family without a model, count as the gate charges."""
+    import types
+    from engine.models.flashnext import serving as FS
+    from test_fn_serving import _qsa_class
+    stub = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=_qsa_class))
+    model = lambda n, r, line=True: FS.FlashNextServing._workspace_rows(stub, n, r, line=line)     # noqa: E731
+    kw = dict(ws_floor=FS.WS_LINE_FLOOR, ws_per_token=FS.WS_LINE_ROW, ws_cap=FS.WS_CAP)
+    m = budget(FakeAlloc(50), peak=90, ws_rows=model, **kw)
+    for n, took in ((205, 0.67), (215, 0.33), (1_640, None), (4_096, None)):
+        bare = m.workspace_rows(n, n, line=False) / GIB
+        assert m.workspace_rows(n, n) == FS.WS_LINE_FLOOR, "the gate: the line's floor"
+        assert bare < FS.WS_LINE_FLOOR / GIB and (took is None or bare >= took + 0.1), (n, bare)
+    assert m.workspace_rows(5_767, 5_767, line=False) < m.workspace_rows(5_767, 5_767)
+    for n, r in ((62_886, 21), (135_083, 3_714), (102_614, 102_614)):
+        assert m.workspace_rows(n, r, line=False) <= m.workspace_rows(n, r), (n, r)
+    assert m.workspace_rows(62_886, 21, line=False) == m.workspace_rows(62_886, 21), "a continuation: no line"
+    two = budget(FakeAlloc(50), peak=90, ws_rows=lambda n, r: GIB, **kw)
+    assert two.workspace_rows(205, 205, line=False) == two.workspace_rows(205, 205) == FS.WS_LINE_FLOOR
+    plain = budget(FakeAlloc(50), peak=90, **kw)
+    assert plain.workspace_rows(205, 205, line=False) == plain.workspace(205)
+    return (f"205 rows cold: gate {m.workspace_rows(205, 205) / GIB:.2f} GiB, admission "
+            f"{m.workspace_rows(205, 205, line=False) / GIB:.2f}; 1,640: {m.workspace_rows(1_640, 1_640, line=False) / GIB:.2f}")
+
+
+def test_srv775_the_strict_gate_counts_the_prefills_in_flight():
+    """QSE_PEAK_STRICT's gate adds the other prefills in flight to the reserve; the plain gate does not. `ws_now` is
+    the largest admitted prefill's workspace, kept by thread: one prefill's end leaves the others' (it once held one
+    figure, which slot 0's request end zeroed under a side slot's prefill). The largest, not the sum: summed, eight
+    cold prompts at the gate's 2.75 GiB floor made `admit` refuse the stash during a burst (2026-11-02)."""
+    import threading
+    fa = FakeAlloc(62)
+    m = budget(fa, ceiling=66, peak=70, ws_rows=lambda n, r: GIB)
+    assert m.gate(10_000, rows=100)["workspace"] == GIB                 # 62 + 1 <= 70
+    try:
+        m.gate(10_000, rows=100, others=8 * GIB)                        # 62 + 1 + 8 > 70
+        raise AssertionError("the strict gate counts the others")
+    except MemoryRefused as exc:
+        assert exc.need == 71 * GIB, exc
+    m.prefill_done()
+    steps = {k: (threading.Event(), threading.Event()) for k in ("a", "b")}
+    ws = {"a": 1 * GIB, "b": 2 * GIB}
+    two = budget(FakeAlloc(50), ceiling=66, peak=70, ws_rows=lambda n, r: ws["a"] if r == 10 else ws["b"])
+
+    def run(k):
+        two.gate(1_000, rows=10 if k == "a" else 20)
+        steps[k][0].set()
+        steps[k][1].wait(10)
+        two.prefill_done()
+    ths = {k: threading.Thread(target=run, args=(k,)) for k in steps}
+    for k in ("a", "b"):
+        ths[k].start()
+        assert steps[k][0].wait(10)
+    try:
+        assert two.ws_now == 2 * GIB and two.report()["ws_now"] == 2 * GIB, two.ws_now     # the largest of 1 and 2
+        two.done()                                   # another thread's request end: its own entry only
+        assert two.ws_now == 2 * GIB
+        steps["b"][1].set()
+        ths["b"].join(10)
+        assert two.ws_now == 1 * GIB, "b's prefill has run: a's workspace stays"
+    finally:
+        for k in steps:
+            steps[k][1].set()
+        for th in ths.values():
+            th.join(10)
+    assert two.ws_now == 0
+    return "strict: 62 + 1 + 8 > 70 refused; two threads 1 and 2 GiB: 2 (the largest), b done: 1 left"
+
+
+def test_srv775_a_side_slots_gate_runs_the_peak_stage_only():
+    """A side slot's gate (`ceiling=False`) skips the ceiling stage: over the ceiling and under the peak it sheds
+    nothing and empties nothing (no allocator walk either), where slot 0's gate gives the reserve back and sheds the
+    store as before. Over the peak both shed for the workspace (2026-11-02: every side gate ran the ceiling stage,
+    57 ms median against 0 before, and a c8 round's first tokens came 0.5 s later)."""
+    walks = []
+    for ceiling in (False, True):
+        fa = FakeAlloc(69.5, 3)                      # reserved 72.5: over the 70 ceiling, under the 77 peak
+        m = budget(fa)
+        m.pools_probe = lambda: walks.append(ceiling) or {"graphs_free": 0}
+        order = []
+        m.register("store", shedder(fa, order, "store", 2))
+        g = m.gate(1_000, ceiling=ceiling)
+        if not ceiling:
+            assert order == [] and fa.empties == 0 and g["shed"] == [] and m.stats["empties"] == 0, (order, g)
+            assert walks == [], "no pool walk under the peak"
+        else:
+            assert fa.empties == 1 and fa.res <= 70 * GIB and walks, (fa.empties, walks)
+        m.prefill_done()
+    fa = FakeAlloc(76)                               # 76 allocated, no free reserve: + 1.15 over the 77 peak
+    m = budget(fa)
+    order = []
+    m.register("store", shedder(fa, order, "store", 2))
+    g = m.gate(1_000, ceiling=False)
+    assert g["shed"] == ["store"] and order == ["store"], (g, order)
+    return "side: 72.5 reserved, nothing shed, no empty, no walk; slot 0: the reserve given back; over the peak: store"
+
+
+def _gate_in_thread(m: Budget, n: int, **kw) -> dict:
+    """`m.gate(n, **kw)` on a thread of its own, which stays alive (its `ws_now` entry with it) until `out["go"]` is
+    set: `out["done"]` is set once the gate has returned (`out["g"]`, `out["own"]`) or raised (`out["exc"]`)."""
+    import threading
+    out = {"done": threading.Event(), "go": threading.Event()}
+
+    def run():
+        try:
+            out["g"] = m.gate(n, **kw)
+            out["own"] = m.ws_own()
+        except Exception as exc:                                   # noqa: BLE001
+            out["exc"] = exc
+        out["done"].set()
+        out["go"].wait(10)
+        m.prefill_done()
+    out["th"] = threading.Thread(target=run, daemon=True)
+    out["th"].start()
+    return out
+
+
+def test_srv775_a_side_gate_far_under_the_peak_admits_without_the_lock():
+    """2026-11-02, hold 4: at a c8 round's start the eight side gates queued on the policy's lock behind slot 0's gate
+    (side gate_ms 49.3 ms median, 88.5 max, the reserve under the ceiling all along). A side slot's gate whose reserve
+    plus workspace stays `FAST_MARGIN` (0.5 GiB) under the peak now admits on one reading without the lock: it
+    returns while another thread holds the lock, keeps its workspace in `ws_now` and counts `fast_gates`, with the
+    decision the locked path takes there (no shed, no empty)."""
+    fa = FakeAlloc(60, 2)                            # reserved 62 + 1 GiB of workspace: 14 under the 77 peak
+    m = budget(fa, ws_rows=lambda n, r: GIB)
+    reads = []
+    probe = m._probe
+    m._probe = lambda: reads.append(1) or probe()
+    m.lock.acquire()                                 # slot 0's gate, or a request's `done`, holds it
+    try:
+        out = _gate_in_thread(m, 10_000, rows=100, ceiling=False)
+        assert out["done"].wait(5), "the side gate waited for the lock"
+        assert "exc" not in out, out
+        g = out["g"]
+        assert g["fast"] is True and g["workspace"] == GIB and g["shed"] == [] and g["rows"] == 100, g
+        assert g["reserved"] == 62 * GIB and g["allocated"] == 60 * GIB, g
+        assert len(reads) == 1, f"one reading of the reserve, not {len(reads)}"
+        assert out["own"] == GIB and m.ws_now == GIB and m.report()["ws_now"] == GIB, (out["own"], m.ws_now)
+        assert m.stats["gates"] == 1 and m.stats["fast_gates"] == 1 and m.stats["last_gate"] is g, m.stats
+        assert fa.empties == 0 and m.stats["empties"] == 0 and m.refused_in_a_row == 0
+    finally:
+        m.lock.release()
+        out["go"].set()
+        out["th"].join(10)
+    assert m.ws_now == 0, "its prefill has run: the workspace leaves `ws_now`"
+    ref = budget(FakeAlloc(60, 2), ws_rows=lambda n, r: GIB)
+    ref.strict = True                                # the locked path on the same reserve
+    want = ref.gate(10_000, rows=100, ceiling=False)
+    ref.prefill_done()
+    same = ("n", "workspace", "allocated", "reserved", "shed", "rows")
+    assert {k: g[k] for k in same} == {k: want[k] for k in same} and "fast" not in want, (g, want)
+    assert ref.stats["fast_gates"] == 0 and ref.stats["gates"] == 1
+    return "62 reserved + 1 GiB: admitted with the lock held elsewhere, 1 reading, ws_now 1 GiB, fast_gates 1"
+
+
+def test_srv775_a_side_gate_near_or_over_the_peak_takes_the_lock_and_decides_as_before():
+    """Within `FAST_MARGIN` of the peak, or over it, a side slot's gate takes the lock as before: it waits while
+    another thread holds it, then admits under the peak (76.2 + 0.5 <= 77), sheds the store over it, or refuses
+    with nothing left to shed. None of them is a fast gate."""
+    margin = Budget.FAST_MARGIN / GIB
+    assert margin == 0.5
+    fa = FakeAlloc(75.5, 0.7)                        # reserved 76.2 + 0.5 GiB = 76.7: under the peak, in the margin
+    m = budget(fa, ws_rows=lambda n, r: GIB // 2)
+    m.lock.acquire()
+    try:
+        out = _gate_in_thread(m, 10_000, rows=100, ceiling=False)
+        assert not out["done"].wait(0.3), "within the margin the side gate takes the lock"
+    finally:
+        m.lock.release()
+    try:
+        assert out["done"].wait(5) and "exc" not in out, out
+        g = out["g"]
+        assert "fast" not in g and g["shed"] == [] and g["workspace"] == GIB // 2, g
+        assert out["own"] == GIB // 2 and m.stats["fast_gates"] == 0 and m.stats["gates"] == 1, m.stats
+    finally:
+        out["go"].set()
+        out["th"].join(10)
+    fa = FakeAlloc(76)                               # 76 + 1.15 over the 77 peak: the store goes, as before
+    m = budget(fa)
+    order = []
+    m.register("store", shedder(fa, order, "store", 2))
+    g = m.gate(1_000, ceiling=False)
+    assert g["shed"] == ["store"] and order == ["store"] and "fast" not in g, (g, order)
+    assert m.stats["fast_gates"] == 0
+    m.prefill_done()
+    m = budget(FakeAlloc(76))                        # nothing to shed: refused, as before
+    try:
+        m.gate(1_000, ceiling=False)
+        raise AssertionError("over the peak with nothing to shed")
+    except MemoryRefused as exc:
+        assert exc.peak == 77 * GIB, exc
+    assert m.stats["fast_gates"] == 0 and m.stats["refused"] == 1 and m.ws_now == 0
+    return f"76.7 of 77 (margin {margin} GiB): waited for the lock, admitted; over the peak: store shed, then refused"
+
+
+def test_srv775_slot0_and_the_strict_peak_keep_the_lock():
+    """Slot 0's gate (`ceiling=True`), a gate that counts other prefills (`others`) and every gate under the strict
+    peak (`Budget.strict`, QSE_PEAK_STRICT) take the lock as before, however far under the peak."""
+    cases = (({"ceiling": True}, False), ({"ceiling": False, "others": GIB}, False), ({"ceiling": False}, True))
+    for kw, strict in cases:
+        m = budget(FakeAlloc(40), ws_rows=lambda n, r: GIB)
+        m.strict = strict
+        m.lock.acquire()
+        try:
+            out = _gate_in_thread(m, 10_000, rows=100, **kw)
+            assert not out["done"].wait(0.3), (kw, strict)
+        finally:
+            m.lock.release()
+        try:
+            assert out["done"].wait(5) and "exc" not in out, out
+            assert "fast" not in out["g"] and m.stats["fast_gates"] == 0 and m.stats["gates"] == 1, (kw, m.stats)
+            assert out["own"] == GIB, (kw, out["own"])
+        finally:
+            out["go"].set()
+            out["th"].join(10)
+    return "slot 0, others > 0 and strict: each waited for the lock, fast_gates 0"
+
+
+def test_srv773_a_continuation_teaches_the_line_nothing():
+    """`prefilled` learns the line from a cold prefill of 64k rows or more; a continuation's few rows (or a re-read
+    from a resume point) say nothing of a whole prompt's workspace, and `mark(rows=...)` keeps them out."""
+    def flashnext_like():
+        fa = FakeAlloc(50)
+        return fa, budget(fa, peak=90, ws_floor=int(2.75 * GIB), ws_per_token=76309, ws_cap=int(10.75 * GIB))
+    fa, m = flashnext_like()
+    m.mark(rows=21)
+    fa.take(9 * GIB)
+    fa.give(9 * GIB)
+    m.prefilled(100_000)
+    assert m.ws_per_token == 76309 and m.ws_cap == int(10.75 * GIB) and m.stats["observed"] is None
+    for rows in (None, 100_000):
+        fa, m = flashnext_like()
+        m.mark(rows=rows)
+        fa.take(9 * GIB)
+        fa.give(9 * GIB)
+        m.prefilled(100_000)
+        assert m.ws_per_token == int(9 * GIB / 100_000) and m.stats["observed"]["workspace"] == 9 * GIB, rows
+    return "mark(rows=21): nothing learned; mark() and mark(rows=n): the line raised to 96,636 B a token"
+
+
 # ------------------------------------------------------------------ 5: the reserve at idle
 
 def test_the_reserve_over_its_slack_goes_back_after_the_request():
