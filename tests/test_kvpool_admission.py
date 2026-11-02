@@ -540,6 +540,65 @@ def test_srv775_a_lone_over_peak_admit_is_credited_the_free_blocks_and_starts_at
     return "13.8 - (3.89 - 2.28) = 12.2 >= 10: admitted at once; without the credit 9.9 < 10"
 
 
+def test_srv777_a_client_that_leaves_during_the_memory_wait_is_booked_abandoned():
+    """SRV-777: a client that closed its socket while its request waited for memory (chatd's Stop, before any header)
+    ended with no `[req]` line, uncounted, its live row "error: internal error after 0 tokens". It is booked as the
+    queue books one that left: `INFLIGHT["abandoned"]` + 1, finish `abandoned` with its detail, the `[req]` line,
+    and no waiter left in the admission. A lane resuming inside its own answer (`respond=False`) is the stream's to
+    book: nothing is counted here."""
+    import contextlib
+    import io
+    import types
+    import torch
+    app = _app()
+    from server import activity, usage
+    app.STATE.clear()
+    app.STATE["queue_timeout"] = 30.0
+    app.STATE["request_timeout"] = 3600.0
+
+    class _Leaves(_H):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        def _client_gone(self):
+            self.polls += 1
+            return self.polls >= 2                 # gone at the second poll, one second into the wait
+
+    for respond in (True, False):
+        adm = _adm(18)                             # 18 - 2 (in flight) - its workspace < 15: it waits
+        assert adm.reserve("big", 2 * GiB)[0]
+        pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+        rec = usage.RequestRecord("chatcmpl-left", "chat", True)
+        rec.lock_acquired()
+        h = _Leaves()
+        before = app.INFLIGHT["abandoned"]
+        out = io.StringIO()
+        t0 = time.monotonic()
+        try:
+            with contextlib.redirect_stdout(out):
+                app.Handler._par_admit(h, pool, "w1", torch.zeros(576, dtype=torch.long), rec=rec, stream=True,
+                                       respond=respond)
+            raise AssertionError("ClientGone expected")
+        except app.ClientGone:
+            pass
+        assert 0.9 < time.monotonic() - t0 < 3.0 and h.polls == 2 and h.sent is None, (time.monotonic() - t0, h.polls)
+        assert adm.report()["waiting_memory"] == 0 and rec.waiting_memory is False and "w1" not in adm.held
+        lines = [ln for ln in out.getvalue().splitlines() if ln.startswith("[req] w1 left while waiting")]
+        if not respond:
+            assert app.INFLIGHT["abandoned"] == before and rec.finish_reason is None and not lines, out.getvalue()
+            continue
+        assert app.INFLIGHT["abandoned"] == before + 1 and len(lines) == 1, out.getvalue()
+        assert lines[0].startswith("[req] w1 left while waiting for memory (") and lines[0].endswith(" ms)"), lines
+        assert rec.finish_reason == "abandoned" and rec.stop_detail == "left_while_waiting_memory", vars(rec)
+        assert rec.client_gone_at is not None and rec.wait_mem_ms >= 900, rec.wait_mem_ms
+        stop = activity.stop_of(rec, time.perf_counter())
+        assert stop["reason"] == "abandoned" and stop["detail"] == "left_while_waiting_memory", stop
+        assert stop["sentence"].startswith("abandoned by the client after ") and \
+            stop["sentence"].endswith(" waiting for memory, 0 tokens sent"), stop["sentence"]
+    return "left at the second poll: abandoned +1, one [req] line, no waiter; a resuming lane: not booked here"
+
+
 def test_srv775_the_workspace_is_released_when_the_prefill_has_run():
     """`_par_prefilled`: the admission keeps the request's KV part only, and the memory policy's prefills in flight
     lose its workspace (a side slot prefills with no policy, so `Budget.prefilled` never ran there)."""

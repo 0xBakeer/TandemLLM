@@ -8041,6 +8041,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             while time.monotonic() < until:
                 if self._client_gone():
+                    if respond:
+                        # SRV-777: no response has started, so nothing else books this end: abandoned, as the
+                        # queue books a client that left it (a lane resuming in its answer is the stream's to book)
+                        waited = time.perf_counter() - t0
+                        with QUEUE:
+                            INFLIGHT["abandoned"] += 1
+                        if rec is not None:
+                            if rec.client_gone_at is None:
+                                rec.client_gone_at = time.perf_counter()
+                            rec.finish_reason = "abandoned"
+                            rec.stop_detail = "left_while_waiting_memory"
+                            rec.wait_mem_ms = round(waited * 1e3, 1)
+                        print(f"[req] {cid} left while waiting for memory ({waited * 1e3:.0f} ms)", flush=True)
                     raise ClientGone("client left while waiting for memory")
                 place = adm.wait(cid)
                 if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
