@@ -371,6 +371,8 @@ def moe(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, bank: MoEBank, or
     else:
         yd = b["yd"]
     flat = ids.reshape(-1)
+    # MOE_GROUP is scoped to `moe_experts`: this entry's caller-supplied bufs/order plumbing
+    # differs, and every hot row/verify path goes through `moe_experts` anyway.
     mod.fn_moe_gu(x, flat, order, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
     mod.fn_moe_down(ygu, flat, order, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
     if out is None:
@@ -406,7 +408,7 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     ygu = torch.empty(M * S, 2, bank.I, dtype=torch.bfloat16, device=x.device)
     yd = torch.empty(M * S, bank.H, dtype=torch.float32, device=x.device)
     flat = ids.reshape(-1)
-    if MOE_GROUP and M > 1:
+    if MOE_GROUP and M >= 4:
         # ENG-241: the pairs of one expert in groups of MOE_GR, its tiles decoded once a group (a
         # row's bits are its own: the self-check compares them with the decode step's single row)
         g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
@@ -421,8 +423,9 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
 
 
 #: ENG-241: a block's pairs of one expert share a CTA, up to MOE_GR of them (False: a CTA a pair,
-#: the A/B of tools/fn_moe_group_check.py)
-MOE_GROUP = False
+#: the A/B of tools/fn_moe_group_check.py). On the lfm2.5 verify path at M>=4 the dedup wins
+#: (M=16: -4.5ms of 23.8ms); at M=2 the groups-of-1 prep is a net loss -- hence the M>=4 gate.
+MOE_GROUP = True
 MOE_GR = 8
 #: the experts' bits the MoE kernels decode (the half-integer rates as ten times the rate)
 MOE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)

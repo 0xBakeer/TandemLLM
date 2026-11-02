@@ -190,6 +190,71 @@ def test_split_kernels_parity():
     assert torch.equal(yu, yg)
 
 
+def _fk_run(x, ids, bank, group):
+    orig = FK.MOE_GROUP
+    FK.MOE_GROUP = group
+    try:
+        return FK.moe_experts(x, ids, bank)
+    finally:
+        FK.MOE_GROUP = orig
+
+
+def test_moe_group_bitwise():
+    # ENG-241: at M>=4 `moe_experts` walks same-expert pairs through <=8-row CTAs whose tile
+    # decode amortizes across the group. Every pair's yd equals the ungrouped path's bitwise,
+    # whatever the routing -- including the real pack's shared-expert column (last slot = E).
+    if not FK._sm_supported(torch.device(DEV)):
+        return "skipped: the group kernels are a CUDA path"
+    for kbs in ([25] * 8, [2, 25] * 4, [4] * 4):
+        bank = _bank(kbs)
+        g = torch.Generator().manual_seed(11)
+        for m in (4, 8, 16, 32):
+            x = (torch.randn(m, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+            ids = torch.randint(0, bank.n, (m, 2), generator=g).to(DEV, torch.int32)
+            ids[:, -1] = bank.n - 1          # the shared-expert slot, as the router appends it
+            assert torch.equal(_fk_run(x, ids, bank, True),
+                               _fk_run(x, ids, bank, False)), (kbs, m)
+
+
+def test_moe_group_companion_permutation():
+    # a row's bits cannot depend on which rows share its CTA: hold row 0 fixed, permute its
+    # companions, its pairs' yd must not change.
+    if not FK._sm_supported(torch.device(DEV)):
+        return "skipped: the group kernels are a CUDA path"
+    bank = _bank([25] * 8)
+    g = torch.Generator().manual_seed(13)
+    m, S = 16, 3
+    x = (torch.randn(m, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+    ids = torch.randint(0, bank.n, (m, S), generator=g).to(DEV, torch.int32)
+    base = _fk_run(x, ids, bank, True)
+    for _ in range(8):
+        p = torch.cat([torch.arange(1), 1 + torch.randperm(m - 1, generator=g)]).to(DEV)
+        got = _fk_run(x[p], ids[p], bank, True)
+        # pair p sits at flat index p*S+s in both calls
+        want = base.reshape(m, S, -1)[p].reshape(m * S, -1)
+        assert torch.equal(got, want)
+        assert torch.equal(got[:S], base[:S])     # row 0 unmoved: identical bits
+
+
+def test_moe_group_boundary_runs():
+    # runs of one expert around the MOE_GR=8 split: exactly 8, 9 (8+1), 16 (8+8), 17 (8+8+1);
+    # plus every pair on one expert (the all-same adversarial case). All bitwise vs ungrouped.
+    if not FK._sm_supported(torch.device(DEV)):
+        return "skipped: the group kernels are a CUDA path"
+    bank = _bank([25] * 8)
+    g = torch.Generator().manual_seed(17)
+    for run in (8, 9, 16, 17):
+        m = (run + 3) // 4
+        x = (torch.randn(m, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+        ids = torch.randint(0, bank.n, (m, 4), generator=g).to(DEV, torch.int32)
+        ids.reshape(-1)[:run] = 3                # pairs 0..run-1 all route to expert 3
+        assert torch.equal(_fk_run(x, ids, bank, True),
+                           _fk_run(x, ids, bank, False)), run
+    x = (torch.randn(8, 128, generator=g) * .5).to(DEV, torch.bfloat16)
+    ids = torch.full((8, 4), 5, dtype=torch.int32, device=DEV)   # 32 pairs, one expert
+    assert torch.equal(_fk_run(x, ids, bank, True), _fk_run(x, ids, bank, False))
+
+
 if __name__ == "__main__":
     assert torch.cuda.is_available(), "cuda required"
     fails = 0
