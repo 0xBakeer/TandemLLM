@@ -109,7 +109,7 @@ def _module():
                                   "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
-                                  "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
+                                  "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm", "fn_set_dense_st"],
                        extra_cuda_cflags=["-O3", "-lineinfo", _gencode()],
                        verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1" and (_capability() or (0, 0)) >= (9, 0)))
@@ -118,6 +118,7 @@ def _module():
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
         _ada = (_capability() or (0, 0)) == (8, 9)
+        _MOD.fn_set_dense_st(int(_S.get("FN_DENSE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS") or ("8" if _ada else "4")))
     return _MOD
@@ -238,7 +239,16 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
             S *= 2
         got = (S, 4)
     if (_capability() or (0, 0)) < (9, 0):
-        return 1, got[1]                 # distributed shared memory is sm_90+: one rank covers K
+        if _S.get("FN_DENSE_SPLIT_FORCE") == "1" and (N, Kin, kb) in DENSE_SPLIT:
+            return got                           # tools/fn_tiles sweeps: the table entry verbatim
+        # no distributed shared memory among the CTAs: a split launches plain CTAs whose partials a
+        # second kernel reduces -- global-memory exchange, worthwhile only while the wider grid is
+        # still short of a couple of waves and a rank keeps a deep K slice (the table's splits are
+        # tuned for the nearly-free DSMEM exchange)
+        KT, S = Kin // 16, 1
+        while S < 8 and (N // 128) * S * 2 < 128 and KT % (16 * S) == 0 and KT // (2 * S) >= 128:
+            S *= 2
+        return S, got[1]
     return got
 
 
@@ -251,7 +261,11 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     if not _sm_supported(x.device):
         return X._reference_rows(x.to(torch.bfloat16), w, out=out)
     S, warps = dense_split(w.tile_n, w.K, w.kb)
-    _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps)
+    part = None
+    if S > 1 and (_capability() or (0, 0)) < (9, 0):
+        part = torch.empty((w.N // 128) * x.shape[0] * S * warps * 128,
+                           dtype=torch.float32, device=x.device)
+    _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps, part)
     return out
 
 
@@ -263,7 +277,11 @@ def dense_rows(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Ten
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     xh = torch.empty(w.suh.shape[0], x.shape[0], w.K, dtype=torch.float16, device=x.device)
-    _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps)
+    part = None
+    if S > 1 and (_capability() or (0, 0)) < (9, 0):
+        part = torch.empty((w.N // 128) * ((x.shape[0] + 15) // 16) * S * warps * 16 * 128,
+                           dtype=torch.float32, device=x.device)
+    _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps, part)
     return out
 
 

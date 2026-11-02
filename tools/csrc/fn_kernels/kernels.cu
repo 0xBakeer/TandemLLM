@@ -1256,7 +1256,8 @@ __global__ void __launch_bounds__(256) gated_norm_kernel(const __nv_bfloat16* __
 template <int KB, int ST, int WARPS, bool OF32>
 __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, int ldx,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SUH, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S, uint32_t* smem) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S, uint32_t* smem,
+        float* __restrict__ PART) {
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int rank = blockIdx.x % S, t2 = blockIdx.x / S;
     const int row = t2 % M, cb = t2 / M;
@@ -1304,6 +1305,13 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
         }
         cluster.sync();
         if (rank != 0) return;
+#else
+        // no distributed shared memory: every rank dumps its warp partials for dense_red_kernel,
+        // which adds them in the same rank-major, warp order the rank-0 warp of a cluster would
+        float* p = PART + ((size_t)t2 * S + rank) * WARPS * 128;
+        *reinterpret_cast<float4*>(p + warp * 128 + 4 * lane) =
+            *reinterpret_cast<const float4*>(red + warp * 128 + 4 * lane);
+        return;
 #endif
     } else if (warp == 0) {
         red_rot<WARPS>(red, lane, v0, v1, v2, v3);
@@ -1327,9 +1335,40 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
 template <int KB, int ST, int WARPS, bool OF32>
 __global__ void __launch_bounds__(256) dense_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SUH, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S,
+        float* __restrict__ PART) {
     extern __shared__ uint32_t smem[];
-    dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem);
+    dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem, PART);
+}
+
+// the S > 1 split without a cluster (sm_80/89): a warp a (row, 128-column block) reads the ranks'
+// warp partials from global, adds them in the same rank-major, warp order the sm_90 cluster's rank-0
+// warp uses, and applies the output rotation and svh. The bits are the cluster launch's.
+template <int WARPS, bool OF32>
+__global__ void __launch_bounds__(32) dense_red_kernel(const float* __restrict__ PART,
+        const __half* __restrict__ SVH, void* __restrict__ Yv, int ldy, int M, int N, int S) {
+    const int lane = threadIdx.x, t2 = blockIdx.x;
+    const int row = t2 % M, cb = t2 / M;
+    const float* p = PART + (size_t)t2 * S * WARPS * 128;
+    const int c = 4 * lane;
+    float v0 = p[c], v1 = p[c + 1], v2 = p[c + 2], v3 = p[c + 3];
+    for (int i = 1; i < S * WARPS; ++i) {
+        const float* r = p + (size_t)i * 128;
+        v0 += r[c]; v1 += r[c + 1]; v2 += r[c + 2]; v3 += r[c + 3];
+    }
+    wht128(v0, v1, v2, v3, lane);
+    const int n = cb * 128 + 4 * lane;
+    const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+    v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+    v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+    if constexpr (OF32) {
+        *reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + (size_t)row * ldy + n) = make_float4(v0, v1, v2, v3);
+    } else {
+        __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+        uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+        *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)row * ldy + n) = o;
+    }
 }
 
 // SPD-125: the same projection for M > 1 rows with each trellis tile decoded once for 16 rows. First
@@ -1368,7 +1407,8 @@ __global__ void __launch_bounds__(128) dense_rot_kernel(const __nv_bfloat16* __r
 template <int KB, int ST, int WARPS, bool OF32>
 __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restrict__ XH,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S,
+        float* __restrict__ PART) {
     extern __shared__ uint32_t smem[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
@@ -1442,6 +1482,18 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
     cg::cluster_group cluster = cg::this_cluster();
     if (S > 1) cluster.sync();
 #endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+    if (S > 1) {
+        // dump this rank's [WARPS][R][128] partials for dense_rows_red_kernel (row stride 16)
+        float* p = PART + ((size_t)t2 * S + rank) * WARPS * 16 * 128;
+        for (int i4 = threadIdx.x; i4 < WARPS * R * 32; i4 += WARPS * 32) {
+            const int i = i4 * 4, w = i / (R * 128), rm = i % (R * 128), r = rm / 128, c = rm % 128;
+            *reinterpret_cast<float4*>(p + (w * 16 + r) * 128 + c) =
+                *reinterpret_cast<const float4*>(red + (w * R + r) * 128 + c);
+        }
+        return;
+    }
+#endif
     {
         const int c = 4 * lane, n = cb * 128 + 4 * lane;
         const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
@@ -1481,6 +1533,41 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     if (S > 1) cluster.sync();                         // every rank keeps its RED until the others have read it
 #endif
+}
+
+// the rows split's reduce without a cluster: a warp a (column block, group, row) adds the ranks'
+// warp partials rank-major then warp order -- the order the cluster's warps make the same sums in --
+// then the output rotation, svh and store of dense_rows_kernel's epilogue.
+template <int WARPS, bool OF32>
+__global__ void __launch_bounds__(32) dense_rows_red_kernel(const float* __restrict__ PART,
+        const __half* __restrict__ SVH, void* __restrict__ Yv, int ldy, int M, int N, int S) {
+    const int lane = threadIdx.x;
+    const int MG = (M + 15) / 16;
+    const int t2 = blockIdx.x / 16, r = blockIdx.x % 16;
+    const int grp = t2 % MG, cb = t2 / MG;
+    const int r0 = grp * 16, R = min(16, M - r0);
+    if (r >= R) return;
+    const float* p = PART + (size_t)t2 * S * WARPS * 16 * 128;
+    const int c = 4 * lane;
+    float v0 = p[r * 128 + c], v1 = p[r * 128 + c + 1], v2 = p[r * 128 + c + 2], v3 = p[r * 128 + c + 3];
+    for (int i = 1; i < S * WARPS; ++i) {
+        const float* q = p + (size_t)i * 16 * 128 + r * 128;
+        v0 += q[c]; v1 += q[c + 1]; v2 += q[c + 2]; v3 += q[c + 3];
+    }
+    wht128(v0, v1, v2, v3, lane);
+    const int n = cb * 128 + 4 * lane;
+    const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+    v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+    v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+    const size_t m = (size_t)(r0 + r);
+    if constexpr (OF32) {
+        *reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + m * ldy + n) = make_float4(v0, v1, v2, v3);
+    } else {
+        __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+        uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+        *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + m * ldy + n) = o;
+    }
 }
 
 // ------------------------------------------------------------------------- attention, a row's inputs
@@ -1570,6 +1657,7 @@ static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_n
 // 3 CTAs. A row's sums are the same chunks in the same order whatever the rows a pass (its bits)
 static int g_gemv_mc = 0;
 static int g_mixer_mma = 0;    // fn_set_mixer_mma: SPD-241, the mixers' int8 GEMV and mix_up on tensor cores (QWEN38_FN_MIXER_MMA)
+static int g_dense_st = 3;     // fn_set_dense_st: cp.async stages of the dense kernels (QWEN38_FN_DENSE_ST; bits do not depend on it)
 
 // the tensor-core GEMV's tickets: an int a column block, zero between launches (each launch's last CTA of a
 // column sets its ticket back), one buffer a device
@@ -1607,6 +1695,7 @@ void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
 void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
 void fn_set_gemv_mc(int64_t v) { g_gemv_mc = (int)v; }
 void fn_set_mixer_mma(int64_t on) { g_mixer_mma = on ? 1 : 0; }
+void fn_set_dense_st(int64_t v) { TORCH_CHECK(v == 3 || v == 4, "fn_dense stages 3 or 4"); g_dense_st = (int)v; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -1625,7 +1714,7 @@ static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t sm
 template <int KB, int ST, int WARPS, bool OF32>
 static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const torch::Tensor& suh,
                          const torch::Tensor& svh, torch::Tensor& y, int M, int Kin, int N, int b1, int b2,
-                         int S, cudaStream_t st) {
+                         int S, cudaStream_t st, float* part) {
     constexpr int TW = tile_u32(KB);
     const int per_r = Kin / 16 / S;
     const size_t smem = (size_t)(per_r * 8 + WARPS * 128) * 4 + (size_t)WARPS * ST * 8 * TW * 4;
@@ -1636,15 +1725,27 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
         cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
         attr = true;
     }
+    if (part) {
+        // a global-memory cluster: S plain CTAs a column block write their partials, then the reduce
+        launch(kern, dim3((N / 128) * M * S), dim3(32 * WARPS), smem, st,
+            (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const uint32_t*)t.data_ptr(),
+            (int)(t.stride(0) / t.stride(1)), (const __half*)suh.data_ptr(), (const __half*)svh.data_ptr(),
+            (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, part);
+        launch(dense_red_kernel<WARPS, OF32>, dim3((N / 128) * M), dim3(32), 0, st,
+            (const float*)part, (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, N, S);
+        return;
+    }
     launch_cluster(kern, dim3((N / 128) * M * S), dim3(32 * WARPS), smem, S, st,
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const uint32_t*)t.data_ptr(),
         (int)(t.stride(0) / t.stride(1)), (const __half*)suh.data_ptr(), (const __half*)svh.data_ptr(),
-        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S);
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, (float*)nullptr);
 }
 
 #define DENSE_W(KB, OF32)                                                                         \
-    if (warps == 4) dense_launch<KB, 3, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st);    \
-    else dense_launch<KB, 3, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st);
+    if (warps == 4) { if (g_dense_st == 4) dense_launch<KB, 4, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part);\
+        else dense_launch<KB, 3, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part); }    \
+    else { if (g_dense_st == 4) dense_launch<KB, 4, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part);\
+        else dense_launch<KB, 3, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part); }
 #define DENSE_KB(OF32)                                                                            \
     switch (kb) {                                                                                 \
         case 2: { DENSE_W(2, OF32) break; } case 3: { DENSE_W(3, OF32) break; }                     \
@@ -1656,7 +1757,7 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
     }
 
 void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y,
-              int64_t b1, int64_t b2, int64_t S, int64_t warps) {
+              int64_t b1, int64_t b2, int64_t S, int64_t warps, c10::optional<torch::Tensor> part_) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
@@ -1671,12 +1772,20 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
     TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
     TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
+    float* part = (part_.has_value() && part_->defined()) ? (float*)part_->data_ptr() : nullptr;
+    const int cc = at::cuda::getCurrentDeviceProperties()->major * 10
+                 + at::cuda::getCurrentDeviceProperties()->minor;
+    TORCH_CHECK(S == 1 || (cc >= 90) == (part == nullptr),
+                "fn_dense: S > 1 launches as a cluster on sm_90+ and through a partials buffer below it");
+    TORCH_CHECK(part == nullptr || (part_->dtype() == torch::kFloat &&
+                  part_->numel() >= (int64_t)(N / 128) * M * S * warps * 128), "part fp32 scratch");
     if (y.dtype() == torch::kFloat) { DENSE_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_KB(false) }
 }
 
 template <int KB, int ST, int WARPS, bool OF32>
 static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, const torch::Tensor& svh,
-                              torch::Tensor& y, int M, int Kin, int N, int b1, int b2, int S, cudaStream_t st) {
+                              torch::Tensor& y, int M, int Kin, int N, int b1, int b2, int S, cudaStream_t st,
+                              float* part) {
     constexpr int SW = 8 * tile_u32(KB);
     const size_t smem = std::max((size_t)WARPS * ST * SW * 4, (size_t)WARPS * std::min(16, M) * 128 * 4);
     auto kern = dense_rows_kernel<KB, ST, WARPS, OF32>;
@@ -1686,14 +1795,24 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
         cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
         attr = true;
     }
+    if (part) {
+        launch(kern, dim3((N / 128) * ((M + 15) / 16) * S), dim3(32 * WARPS), smem, st,
+            (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (int)(t.stride(0) / t.stride(1)),
+            (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, part);
+        launch(dense_rows_red_kernel<WARPS, OF32>, dim3((N / 128) * ((M + 15) / 16) * 16), dim3(32), 0, st,
+            (const float*)part, (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, N, S);
+        return;
+    }
     launch_cluster(kern, dim3((N / 128) * ((M + 15) / 16) * S), dim3(32 * WARPS), smem, S, st,
         (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (int)(t.stride(0) / t.stride(1)),
-        (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S);
+        (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, (float*)nullptr);
 }
 
 #define DENSE_ROWS_W(KB, OF32)                                                                    \
-    if (warps == 4) dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);   \
-    else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);
+    if (warps == 4) { if (g_dense_st == 4) dense_rows_launch<KB, 4, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part);\
+        else dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part); }   \
+    else { if (g_dense_st == 4) dense_rows_launch<KB, 4, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part);\
+        else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part); }
 #define DENSE_ROWS_KB(OF32)                                                                       \
     switch (kb) {                                                                                 \
         case 2: { DENSE_ROWS_W(2, OF32) break; } case 3: { DENSE_ROWS_W(3, OF32) break; }           \
@@ -1706,7 +1825,8 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
 
 // xh: fp16 [G, M, Kin] workspace for the rotated inputs (G = suh's members)
 void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh,
-                   torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps) {
+                   torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps,
+                   c10::optional<torch::Tensor> part_) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
@@ -1722,6 +1842,14 @@ void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::T
     TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.numel() >= (int64_t)G * M * Kin, "xh fp16 [G, M, Kin]");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
     TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
+    float* part = (part_.has_value() && part_->defined()) ? (float*)part_->data_ptr() : nullptr;
+    const int cc = at::cuda::getCurrentDeviceProperties()->major * 10
+                 + at::cuda::getCurrentDeviceProperties()->minor;
+    TORCH_CHECK(S == 1 || (cc >= 90) == (part == nullptr),
+                "fn_dense_rows: S > 1 launches as a cluster on sm_90+ and through a partials buffer below it");
+    TORCH_CHECK(part == nullptr || (part_->dtype() == torch::kFloat &&
+                  part_->numel() >= (int64_t)(N / 128) * ((M + 15) / 16) * S * warps * 16 * 128),
+                "part fp32 scratch");
     launch(dense_rot_kernel, dim3((Kin + 511) / 512, M, G), dim3(128), 0, st, (const __nv_bfloat16*)x.data_ptr(),
         (int)x.stride(0), (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
     if (y.dtype() == torch::kFloat) { DENSE_ROWS_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_ROWS_KB(false) }

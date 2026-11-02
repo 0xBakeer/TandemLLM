@@ -20,5 +20,7 @@ void fn_set_moe_warps(int64_t w);
 void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc, torch::Tensor vc, c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps, c10::optional<torch::Tensor> qln, c10::optional<torch::Tensor> iq);
 void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D);
 void fn_combine_inject_norm(torch::Tensor h0, torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);
-void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps);
-void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh, torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps);
+void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps, c10::optional<torch::Tensor> part);
+void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh, torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps, c10::optional<torch::Tensor> part);
+
+void fn_set_dense_st(int64_t v);
