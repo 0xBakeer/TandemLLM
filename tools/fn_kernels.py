@@ -262,14 +262,29 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
     return got
 
 
+#: `dense` routes M in [DENSE_ROWS_MIN_M, 32] bf16-contiguous calls to `dense_rows` (the row-group
+#: kernel; same bits a row, amortized tile decode). Set to 33+ to keep the per-row kernel always.
+DENSE_ROWS_MIN_M = 4
+
+
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """x [M <= 32, Kin] bf16 @ EXL3Block^T -> [M, N] (bf16, or fp32 for an `out_fp32` block): the input
-    rotation fused, K over a cluster, programmatic dependent launch; each row its own programs, so an
-    M-row call's rows are its one-row calls' bits."""
+    rotation fused, K over a cluster, programmatic dependent launch; an M-row call's rows are its
+    one-row calls' bits. M in [DENSE_ROWS_MIN_M, 32] is served by `dense_rows` (identical row bits;
+    the tile decode amortizes over the group)."""
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     if not _sm_supported(x.device):
         return X._reference_rows(x.to(torch.bfloat16), w, out=out)
+    M = x.shape[0]
+    if (DENSE_ROWS_MIN_M <= M <= 32 and x.is_contiguous() and x.dtype == torch.bfloat16
+            and not (M <= 4 and (w.tile_n < 2048 or (w.tile_n == 3072 and w.K == 2048)))):
+        # the row-group kernel decodes each trellis tile once for up to 16 rows -- the same
+        # bits row for row (tests/gpu/test_fn_kernels_gpu.py). At M>=4 the amortized decode
+        # beats the per-row-program kernel on every measured pack shape but 3072x2048 at M=4
+        # (-9%, excluded above, as are unmeasured <2048-col blocks at M<=4); at M=2 it is
+        # mixed, so the gate is the MoE grouping's M>=4 too.
+        return dense_rows(x, w, out=out)
     S, warps = dense_split(w.tile_n, w.K, w.kb)
     part = None
     if S > 1 and (_capability() or (0, 0)) < (9, 0):
@@ -282,7 +297,8 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
 def dense_rows(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """`dense` for a verify block (SPD-125): each trellis tile decoded once for up to 16 rows (rows
     of the m16n8k16 tile), the inputs rotated once a row first. Every output byte is the one-row
-    `dense` call's on that row (same split, same K slices, warp and rank order); an opt-in for M > 1."""
+    `dense` call's on that row (same split, same K slices, warp and rank order). `dense` routes its
+    own M in [DENSE_ROWS_MIN_M, 32] calls here."""
     S, warps = dense_split(w.tile_n, w.K, w.kb)
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
