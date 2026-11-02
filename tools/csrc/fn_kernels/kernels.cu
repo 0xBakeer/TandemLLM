@@ -2164,6 +2164,13 @@ static int g_moe_warps = 8;
 void fn_set_moe_st(int64_t st) { TORCH_CHECK(st >= 2 && st <= 4, "MoE stages 2..4"); g_moe_st = (int)st; }
 void fn_set_moe_warps(int64_t w) { TORCH_CHECK(w == 4 || w == 8, "MoE warps 4 or 8"); g_moe_warps = (int)w; }
 
+// stages in the GROUPED kernels only (fn_set_moe_st_group; QWEN38_FN_MOE_ST_GROUP): the group CTAs
+// carry far more shared memory a stage than the pair CTAs, so fewer stages resident wins on Ada
+// (measured ST2 > ST4 for groups while pairs want 4). Warps stay shared with the pair path: the
+// warp count sets the partial-sum order, which must match the decode path's bits.
+static int g_moe_st_group = 2;
+void fn_set_moe_st_group(int64_t st) { TORCH_CHECK(st >= 2 && st <= 4, "MoE group stages 2..4"); g_moe_st_group = (int)st; }
+
 // the input row (fp16), the eight warps' partial rows, and 8 warps x stages x 8 tiles of the bank's
 // widest trellis tile (tile_u32(kbmax) words)
 static size_t moe_smem(int kin, int kbmax) {
@@ -2211,8 +2218,12 @@ void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torc
 // them (gate|up lays them over the rows), then the stages
 static size_t moe_group_smem(int kin, int kbmax, bool red_apart) {
     const size_t rows = (size_t)MOE_GR * kin * 2, red = (size_t)g_moe_warps * MOE_GR * 128 * 4;
-    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st * 8 * tile_u32(kbmax) * 4;
+    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st_group * 8 * tile_u32(kbmax) * 4;
 }
+
+#define MOE_PICK_GROUP(KERN) (g_moe_warps == 4                                                            \
+    ? (g_moe_st_group == 2 ? KERN<2, 4> : (g_moe_st_group == 3 ? KERN<3, 4> : KERN<4, 4>))                  \
+    : (g_moe_st_group == 2 ? KERN<2, 8> : (g_moe_st_group == 3 ? KERN<3, 8> : KERN<4, 8>)))
 
 void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng) {
     const at::cuda::OptionalCUDAGuard guard(ids.device());
@@ -2232,7 +2243,7 @@ void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, H]");
     TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.is_contiguous() && y.size(1) == 2, "y bf16 [P, 2, I]");
     const size_t smem = moe_group_smem(H, (int)kbmax, false);
-    auto kern = MOE_PICK(moe_gu_group_kernel);
+    auto kern = MOE_PICK_GROUP(moe_gu_group_kernel);
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
     TORCH_CHECK(smem <= 96 * 1024, "grouped gate|up shared memory");
     launch(kern, dim3(2 * (I / 128), P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)x.data_ptr(),
@@ -2247,7 +2258,7 @@ void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, tor
     const int P = ygu.size(0), I = ygu.size(2), H = yd.size(1);
     TORCH_CHECK(yd.dtype() == torch::kFloat && yd.is_contiguous() && yd.size(0) == P, "yd fp32 [P, H]");
     const size_t smem = moe_group_smem(I, (int)kbmax, true);
-    auto kern = MOE_PICK(moe_down_group_kernel);
+    auto kern = MOE_PICK_GROUP(moe_down_group_kernel);
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
     TORCH_CHECK(smem <= 96 * 1024, "grouped down shared memory");
     launch(kern, dim3(H / 128, P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)ygu.data_ptr(),

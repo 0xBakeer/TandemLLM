@@ -358,6 +358,8 @@ KNOBS: dict[str, tuple] = {
     'FN_PDL': ('1', 'tools/fn_kernels.py'),
     # cp.async stages of a warp in the MoE kernels (2..4; the bits do not depend on it)
     'FN_MOE_ST': (None, 'tools/fn_kernels.py'),
+    # the grouped MoE kernels' own stage count (2..4; group CTAs hold far more smem a stage)
+    'FN_MOE_ST_GROUP': (None, 'tools/fn_kernels.py'),
     # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
     'FN_MOE_WARPS': (None, 'tools/fn_kernels.py'),
     # cp.async stages of the dense kernels (3 or 4; the bits do not depend on it)

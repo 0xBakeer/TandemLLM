@@ -108,7 +108,7 @@ def _module():
                        functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                   "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_st_group", "fn_set_moe_warps", "fn_attn_prep",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm", "fn_set_dense_st"],
                        extra_cuda_cflags=["-O3", "-lineinfo", _gencode()],
                        verbose=False)
@@ -120,6 +120,7 @@ def _module():
         _ada = (_capability() or (0, 0)) == (8, 9)
         _MOD.fn_set_dense_st(int(_S.get("FN_DENSE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST") or ("4" if _ada else "3")))
+        _MOD.fn_set_moe_st_group(int(_S.get("FN_MOE_ST_GROUP") or ("2" if _ada else _S.get("FN_MOE_ST") or "3")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS") or ("8" if _ada else "4")))
     return _MOD
 
