@@ -215,8 +215,7 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     if not _sm_supported(x.device):
-        out.copy_(X._reference_rows(x.to(torch.bfloat16), w).view(out.shape))
-        return out
+        return X._reference_rows(x.to(torch.bfloat16), w, out=out)
     S, warps = dense_split(w.tile_n, w.K, w.kb)
     _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps)
     return out

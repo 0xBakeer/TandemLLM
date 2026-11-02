@@ -33,16 +33,18 @@ def _fwht(v):
 
 
 @triton.jit
-def _exl3_rot_in_kernel(X, SUH, XH, X_STRIDE, K):
-    """XH[m, b] = fp16(H(fp32(X[m, b]) * fp32(SUH[b])) / sqrt(128)) for 128-block b: `rot_in`'s
-    arithmetic, one program a (row, block), so a row's bits do not depend on M."""
+def _exl3_rot_in_kernel(X, SUH, XH, X_STRIDE, K, KB: tl.constexpr):
+    """XH[g, m, b] = fp16(H(fp32(X[m, b]) * fp32(SUH[g, b])) / sqrt(128)) for 128-block b of
+    segment g: `rot_in`'s arithmetic, one program a (row, g * block), so a row's bits do not
+    depend on M. G = 1 is `rot_in`; G > 1 is `rot_in_g`'s one launch for every segment."""
     m = tl.program_id(0)
     b = tl.program_id(1)
-    off = b * 128 + tl.arange(0, 128)
+    g = b // KB
+    off = (b - g * KB) * 128 + tl.arange(0, 128)
     x = tl.load(X + m * X_STRIDE + off).to(tl.float32)
-    suh = tl.load(SUH + off).to(tl.float32)
+    suh = tl.load(SUH + g * K + off).to(tl.float32)
     xh = (_fwht(x * suh) * RSQRT128).to(tl.float16)
-    tl.store(XH + m * K + off, xh)
+    tl.store(XH + (g * tl.num_programs(0) + m) * K + off, xh)
 
 
 @triton.jit
@@ -63,19 +65,20 @@ def _exl3_rot_in_silu_kernel(YGU, SUH, XH, Y_STRIDE, I):
 
 
 @triton.jit
-def _exl3_rot_out_kernel(YP, SVH, Y, N_STRIDE, BF16: tl.constexpr):
+def _exl3_rot_out_kernel(YP, SVH, Y, S_YP, S_Y, BF16: tl.constexpr):
     """Y[m, b] = H(YP[m, b]) / sqrt(128) * fp32(SVH[b]): `rot_out`'s arithmetic to bf16 (or fp32
-    for the vocabulary head), one program a (row, 128-block)."""
+    for the vocabulary head), one program a (row, 128-block). S_YP / S_Y: the row strides --
+    equal when Y is fresh, apart when Y is a caller's wider row's slice."""
     m = tl.program_id(0)
     b = tl.program_id(1)
     off = b * 128 + tl.arange(0, 128)
-    yp = tl.load(YP + m * N_STRIDE + off)
+    yp = tl.load(YP + m * S_YP + off)
     svh = tl.load(SVH + off).to(tl.float32)
     y = _fwht(yp) * RSQRT128 * svh
     if BF16:
-        tl.store(Y + m * N_STRIDE + off, y.to(tl.bfloat16))
+        tl.store(Y + m * S_Y + off, y.to(tl.bfloat16))
     else:
-        tl.store(Y + m * N_STRIDE + off, y)
+        tl.store(Y + m * S_Y + off, y)
 
 
 @triton.jit
@@ -293,11 +296,12 @@ def _exl3_gemv_combine_kernel(P_OUT, OUT, NB16, KS: tl.constexpr):
 
 
 @triton.jit
-def _exl3_gemv_combine_rot_kernel(P_OUT, SVH, OUT, NB16,
+def _exl3_gemv_combine_rot_kernel(P_OUT, SVH, OUT, NB16, SO,
                                   KS: tl.constexpr, BF16: tl.constexpr):
     """`_exl3_gemv_combine_kernel` + `rot_out`: OUT[m, n] = H(sum_ks P_OUT[m, ks, n]) / sqrt(128)
     * SVH[n], bf16 or fp32. The 256-column program covers two 128-blocks; the addition sequence
-    is the combine's, the rotation's arithmetic is unchanged, so the bits are identical."""
+    is the combine's, the rotation's arithmetic is unchanged, so the bits are identical. SO: the
+    output row stride -- NB16 for a fresh tensor, wider when OUT is a caller's row's slice."""
     m = tl.program_id(0)
     nb = tl.program_id(1)
     off = nb * 256 + tl.arange(0, 256)
@@ -314,9 +318,9 @@ def _exl3_gemv_combine_rot_kernel(P_OUT, SVH, OUT, NB16,
     y1 = _fwht(b) * RSQRT128 * sb
     y = tl.reshape(tl.trans(tl.join(y0, y1), 1, 0), (256,))
     if BF16:
-        tl.store(OUT + m * NB16 + off, y.to(tl.bfloat16), mask=valid)
+        tl.store(OUT + m * SO + off, y.to(tl.bfloat16), mask=valid)
     else:
-        tl.store(OUT + m * NB16 + off, y, mask=valid)
+        tl.store(OUT + m * SO + off, y, mask=valid)
 
 
 _END_S: dict = {}
@@ -445,10 +449,11 @@ def _exl3_gemv_split_direct_g_kernel(XH, T, P_OUT, END_S,
 
 
 def gemv_rot(xh: torch.Tensor, t: torch.Tensor, svh: torch.Tensor,
-             out_fp32: bool) -> torch.Tensor:
+             out_fp32: bool, out: torch.Tensor | None = None) -> torch.Tensor:
     """`gemv` + `rot_out` in the combine launch when K is split (the `out` fp32 round-trip
     disappears); falls back to gemv + rot_out for the single-program path. Bit-identical to
-    `rot_out(gemv(xh, t), svh, out_fp32)`."""
+    `rot_out(gemv(xh, t), svh, out_fp32)`. `out`: a caller's [M, n] to write (a wide row's
+    slice, say a fused member's), placed by its stride."""
     from tools.exl3_linear import kb_of
     KT, NTs, W = t.shape
     M, K = xh.shape
@@ -459,8 +464,9 @@ def gemv_rot(xh: torch.Tensor, t: torch.Tensor, svh: torch.Tensor,
     n = NTs * 16
     nb8 = (NTs + 7) // 8
     ks = min(max(KT // 16, (8 * 304) // max(nb8, 1)), 32)
-    out = torch.empty(M, n, dtype=torch.float32 if out_fp32 else torch.bfloat16,
-                      device=xh.device)
+    if out is None:
+        out = torch.empty(M, n, dtype=torch.float32 if out_fp32 else torch.bfloat16,
+                          device=xh.device)
     if ks > 1:
         part = torch.empty(M, ks, n, dtype=torch.float32, device=xh.device)
         if M > 1:
@@ -488,10 +494,10 @@ def gemv_rot(xh: torch.Tensor, t: torch.Tensor, svh: torch.Tensor,
                                                 K_INV=_k_inv(), K_BIAS=_k_bias(),
                                                 num_warps=1, num_stages=4)
         _exl3_gemv_combine_rot_kernel[(M, (n + 255) // 256)](
-            part, svh, out, n, KS=ks, BF16=not out_fp32, num_warps=4)
+            part, svh, out, n, out.stride(0), KS=ks, BF16=not out_fp32, num_warps=4)
     else:
         yp = gemv(xh, t)
-        return rot_out(yp, svh, out_fp32)
+        return rot_out(yp, svh, out_fp32, out=out)
     return out
 
 
@@ -613,10 +619,23 @@ def rot_in(x: torch.Tensor, suh: torch.Tensor) -> torch.Tensor:
         x = x.contiguous()
     M, K = x.shape
     xh = torch.empty(M, K, dtype=torch.float16, device=x.device)
-    _exl3_rot_in_kernel[(M, K // 128)](x, suh, xh, x.stride(0), K, num_warps=1)
+    _exl3_rot_in_kernel[(M, K // 128)](x, suh, xh, x.stride(0), K, KB=K // 128, num_warps=1)
     return xh
 
 
+def rot_in_g(x: torch.Tensor, suh: torch.Tensor) -> torch.Tensor:
+    """rot_in for every segment's suh in one launch: xh [G, M, K] fp16, `rot_in(x, suh[g])` in
+    xh[g] -- the same programs at a wider grid, so the bits are the per-segment calls'."""
+    if x.stride(1) != 1:
+        x = x.contiguous()
+    M, K = x.shape
+    suh = suh.view(-1, K)
+    if suh.stride(0) != K or suh.stride(1) != 1:
+        suh = suh.contiguous()
+    G = suh.shape[0]
+    xh = torch.empty(G, M, K, dtype=torch.float16, device=x.device)
+    _exl3_rot_in_kernel[(M, G * (K // 128))](x, suh, xh, x.stride(0), K, KB=K // 128, num_warps=1)
+    return xh
 
 
 def rot_in_silu(ygu: torch.Tensor, suh: torch.Tensor) -> torch.Tensor:
@@ -631,14 +650,19 @@ def rot_in_silu(ygu: torch.Tensor, suh: torch.Tensor) -> torch.Tensor:
     return xh
 
 
-def rot_out(yp: torch.Tensor, svh: torch.Tensor, out_fp32: bool) -> torch.Tensor:
-    """y = H(yp) / sqrt(128) * fp32(svh), bf16 or fp32 out, one launch for every row."""
+def rot_out(yp: torch.Tensor, svh: torch.Tensor, out_fp32: bool,
+            out: torch.Tensor | None = None) -> torch.Tensor:
+    """y = H(yp) / sqrt(128) * fp32(svh), bf16 or fp32 out, one launch for every row. `out`: a
+    caller's [M, N] (possibly a wider row's slice) to write instead of a fresh tensor -- the
+    same values, placed by stride."""
     M, N = yp.shape
     if yp.stride(1) != 1 or yp.stride(0) != N:
         yp = yp.contiguous()
-    y = torch.empty(M, N, dtype=torch.float32 if out_fp32 else torch.bfloat16, device=yp.device)
-    _exl3_rot_out_kernel[(M, N // 128)](yp, svh, y, N, BF16=not out_fp32, num_warps=1)
-    return y
+    if out is None:
+        out = torch.empty(M, N, dtype=torch.float32 if out_fp32 else torch.bfloat16, device=yp.device)
+    _exl3_rot_out_kernel[(M, N // 128)](yp, svh, out, yp.stride(0), out.stride(0),
+                                        BF16=not out_fp32, num_warps=1)
+    return out
 
 
 # ---------------------------------------------------------------------- load-time probes
