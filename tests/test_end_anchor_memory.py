@@ -622,7 +622,7 @@ def test_spd257_a_cache_near_the_peak_counts_its_whole_buffer():
 
 
 def _band(pools: bool, store: float = 3.0):
-    """A review's reading (2026-11-01): 61 GiB allocated, 70.3 reserved (the graphs' scratch), a 4.5 GiB
+    """A reading of 2026-11-01: 61 GiB allocated, 70.3 reserved (the graphs' scratch), a 4.5 GiB
     workspace running, a `store` GiB state store. A 1 GiB buffer is under the ceiling less the slack and under the
     peak on the reserve (74.8 of 75.36), over it with its whole bytes on top (75.8)."""
     sa = SegAlloc(expandable=True)
