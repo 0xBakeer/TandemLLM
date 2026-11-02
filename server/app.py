@@ -623,6 +623,10 @@ def _par_health(part=_untimed) -> dict:
     r = dict.get(STATE, "disk_side")
     out["side_disk"] = part("par_side_disk", r.report) if r is not None else None
     eng = dict.get(STATE, "engine")
+    st0 = getattr(eng, "stats", None)
+    if out.get("slots") and isinstance(st0, dict):
+        # SPD-271: slot 0's engine is the server's own (its slot keeps no values)
+        out["slots"][0]["capture_failed"] = st0.get("idle_capture_failed")
     jg = getattr(getattr(eng, "fn", None), "__dict__", {}).get("joint_graphs")
     out["joint_graphs"] = part("par_joint_graphs", jg.report) if hasattr(jg, "report") else None
     rep = getattr(eng, "joint_graphs_report", None)
@@ -4975,6 +4979,18 @@ def prepare_once() -> str:
 
 #: the engine's idle graph captures wait this long after the last request ended (s)
 GRAPHS_IDLE_S = 1.0
+#: SPD-271: the served family's "an idle capture failed and was recorded" error (its serving module's
+#: `IdleCaptureFailed`, set at load by `_idle_capture_failed`); () for a family without one
+IDLE_CAPTURE_FAILED: "type | tuple" = ()
+
+
+def _idle_capture_failed(eng) -> "type | tuple":
+    """SPD-271: the `IdleCaptureFailed` of the module that defines the engine's class or one it builds on, else ()."""
+    for c in type(eng).__mro__:
+        got = getattr(sys.modules.get(c.__module__), "IdleCaptureFailed", None)
+        if isinstance(got, type) and issubclass(got, BaseException):
+            return got
+    return ()
 
 
 def graphs_once() -> str:
@@ -4988,9 +5004,10 @@ def graphs_once() -> str:
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
-    engines = [(STATE.get("engine"), STATE.get("drafter"))] + (
-        [(s.values.get("engine"), s.values.get("drafter")) for s in pool.side()] if pool is not None else [])
-    engines = [(e, d) for e, d in engines if getattr(e, "idle_captures", None) is not None]
+    engines = [(0, STATE.get("engine"), STATE.get("drafter"))] + (
+        [(s.index, s.values.get("engine"), s.values.get("drafter")) for s in pool.side()]
+        if pool is not None else [])
+    engines = [(i, e, d) for i, e, d in engines if getattr(e, "idle_captures", None) is not None]
     if not engines:
         return "off"
     with QUEUE:
@@ -4999,7 +5016,7 @@ def graphs_once() -> str:
     if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
         return "recent"
     # a length where the drafter takes the plain step anyway (260,800 tokens) captures nothing
-    engines = [(e, d) for e, d in engines
+    engines = [(i, e, d) for i, e, d in engines
                if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
     if not engines:
         return "plain"
@@ -5008,17 +5025,27 @@ def graphs_once() -> str:
         return "busy"
     t0, n, why = time.perf_counter(), 0, "nothing"
     try:
-        for e, d in engines:
-            # SRV-713: and the classes ahead of the state's length where drafting can pay there
-            steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
-            if steps is None:
-                continue
-            why = "captured"
-            for _ in steps:
-                n += 1
-                if _waiting():
-                    why = "stopped"
-                    return why
+        for idx, e, d in engines:
+            try:
+                # SRV-713: and the classes ahead of the state's length where drafting can pay there
+                steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
+                if steps is None:
+                    continue
+                why = "captured"
+                for _ in steps:
+                    n += 1
+                    if _waiting():
+                        why = "stopped"
+                        return why
+            except Exception as exc:                               # noqa: BLE001
+                # SPD-271: one engine's failed capture leaves the others their idle window; the engine records
+                # the class and skips it until its state changes, so this line is printed once per failure
+                if not isinstance(exc, IDLE_CAPTURE_FAILED):
+                    logbuf.print_exc()
+                print(f"[graphs] slot {idx}: idle capture failed ({exc}); not retried until the slot's state "
+                      f"changes", flush=True)
+                if why == "nothing":
+                    why = "failed"
         return why
     except Exception:                                              # noqa: BLE001
         logbuf.print_exc()
@@ -11994,6 +12021,8 @@ def _load(a) -> None:
         raise SystemExit(f"[server] the {arch.name} family names no builder (engine/models: Arch.serve)")
     m = build(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
+    global IDLE_CAPTURE_FAILED
+    IDLE_CAPTURE_FAILED = _idle_capture_failed(eng)         # SPD-271: `graphs_once` prints it once, no traceback
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
     gen_cfg = os.path.join(m["path"], "generation_config.json")
     cfg_eos = None

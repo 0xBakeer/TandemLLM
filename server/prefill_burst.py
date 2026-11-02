@@ -29,8 +29,8 @@ a lone request never waits.
 A request waiting for one of its own on this server (SRV-769: the router's class question, itself a
 request here, while its turn waits in the router) is not on its way while it does (`question`,
 `answered`): the question would otherwise hold for the very turn that waits for its answer, up to
-`wait_s` (live 2026-11-01, Flash-Next with its joint prefill on: the class question 9.4-9.7 s instead
-of 0.7 s, the router failed open). Each hold is kept with the requests it waited for (`holds`;
+`wait_s` (live 2026-11-01, the served model with its joint prefill on: the class question 9.4-9.7 s
+instead of 0.7 s, the router failed open). Each hold is kept with the requests it waited for (`holds`;
 `held_own` counts the holds for a member's own parent).
 
 Plain Python and CPU-testable (tests/test_prefill_burst.py); server/app.py builds one when

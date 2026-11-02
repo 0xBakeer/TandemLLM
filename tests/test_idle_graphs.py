@@ -83,6 +83,38 @@ def test_a_length_the_drafter_takes_plain_captures_nothing():
     return "260,800 (plain turns there): nothing captured; 32,000: captured"
 
 
+def test_spd271_one_engines_failure_leaves_the_others_their_window():
+    """SPD-271: slot 1's capture raised (observed: a ClassError in the MTP chain's warm-up) and ended the loop over the
+    engines, so slots 2-7 got no idle captures, and the next look 2 s later did the same. Now the failing engine
+    gets one line and the next engine still captures what it owes; the engine lock is released."""
+    import contextlib
+    import io
+    import types
+
+    class _Failing(_Eng):
+        def _steps(self):
+            raise RuntimeError("mtp_chain_dev: class 16384 below 32768, the class of position 85010")
+            yield                                   # noqa: unreachable (a generator, as idle_captures returns)
+
+    e1, e2 = _Failing(2), _Eng(3)
+    _with(_Eng(0))
+
+    def slot(i, e):
+        return types.SimpleNamespace(index=i, values={"engine": e, "drafter": None})
+    app.STATE["pool"] = types.SimpleNamespace(side=lambda: [slot(1, e1), slot(2, e2)])
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app.graphs_once()
+    finally:
+        app.STATE.pop("pool", None)
+    lines = [ln for ln in out.getvalue().splitlines() if ln.startswith("[graphs] slot 1: idle capture failed")]
+    assert got == "captured" and e2.owed == 0 and e2.locked == [True] * 3, (got, out.getvalue())
+    assert len(lines) == 1 and "class 16384 below 32768" in lines[0], out.getvalue()
+    assert not app.LOCK.locked()
+    return "slot 1 failed (one line), slot 2's 3 graphs captured, the lock released"
+
+
 def test_an_engine_without_idle_captures_is_left_alone():
     _with(object())
     assert app.graphs_once() == "off"

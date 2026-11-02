@@ -430,7 +430,9 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
 
     fn.stage_rows = lambda toks, parents, st: staged.append(("rows", list(parents)))
     fn.stage_commit = lambda st, path: staged.append(("commit", list(path)))
-    head = types.SimpleNamespace(depth=1, graphs={(1, 0): 1, (2, 0): 1})
+    head = types.SimpleNamespace(depth=1, graphs={(1, 0): 1, (2, 0): 1},
+                                 st=types.SimpleNamespace(length=0, pool_n={}))     # SPD-271: its length
+    head.reset = lambda: setattr(head.st, "length", 0)                              # SPD-271: with the trunk's
     head.capture_class = lambda n, cls: head.graphs.__setitem__((n, cls), 1)
     s = FlashNextServing(fn, 64)
     s.heads["mtp"] = head
@@ -724,7 +726,8 @@ def _ahead_serving(max_len: int = 32_768):
         def capture(self):
             made.append(("c",) + self.key)
 
-    head = types.SimpleNamespace(depth=3, graphs={})
+    head = types.SimpleNamespace(depth=3, graphs={}, st=types.SimpleNamespace(length=0, pool_n={}))
+    head.reset = lambda: (setattr(head.st, "length", 0), setattr(head.st, "pool_n", {}))
     head.capture_class = lambda n, cls: (made.append(("m", n, cls)), head.graphs.__setitem__((n, cls), 1))
     s = FlashNextServing(fn, max_len)
     s.heads["mtp"] = head
@@ -797,6 +800,93 @@ def test_an_idle_window_takes_no_class_below_the_states_own():
     _drain(s, stubs, s.idle_captures())
     assert ("v", 9, 0) in made and 0 not in s._owed, (made, s._owed)
     return "no class-0 capture on a 2,268-token state; the owed width taken once a state is short again"
+
+
+def _observed_head(length: int = 85_010):
+    """SPD-271: an MTP head at `length` rows (the observed state a KV reclaim left on slot 1)."""
+    head = types.SimpleNamespace(st=types.SimpleNamespace(length=length, pool_n={1: 1}), depth=3, graphs={})
+    head.reset = lambda: (setattr(head.st, "length", 0), setattr(head.st, "pool_n", {}))
+    return head
+
+
+def test_spd271_a_kv_reset_resets_the_heads_with_the_trunk():
+    """SPD-271: a KV reclaim (`eng.kv.length = 0`, server/app.py `_kv_reclaim_side`) restarted the trunk only; the MTP
+    head kept its 85,010 rows (class 32768) and every idle look planned a class below it (ClassError, 2026-11-02).
+    A restart resets every head and forgets the failed captures: through `kv.length = 0` and through `reset()`
+    (a guest's cold prefill)."""
+    for how in ("kv.length = 0", "reset()"):
+        s = FlashNextServing(_FN(), 64)
+        head = _observed_head()
+        s.heads["mtp"] = head
+        s._capture_failed = {16384: (0, (85_010,))}
+        s.st.length = 5
+        if how == "reset()":
+            s.reset()
+        else:
+            s.kv.length = 0
+        assert s.st.length == 0 and head.st.length == 0 and head.st.pool_n == {}, (how, head.st)
+        assert s._capture_failed == {}, (how, s._capture_failed)
+    return "the head's length and pooled keys with the trunk's, the failed captures forgotten; both ways"
+
+
+def test_spd271_an_idle_window_plans_no_class_below_a_heads_position():
+    """SPD-271: the trunk at 0 and the head at 85,010 (the observed state): the classes ahead of the trunk (1,024 and
+    2,048) are below the head's (32,768 at 85,010 + 2 x depth), whose chain the class check refuses, so nothing is
+    planned; once the head is reset with the trunk the classes ahead of an empty state are taken as before."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0
+    made.clear()
+    head = s.heads["mtp"]
+    head.st.length = 85_010
+    floor = _qsa_class(85_010 + 2 * head.depth)
+    assert floor == 32_768 and s.idle_captures() is None, floor
+    assert not [m for m in made if m[-1] < floor], made
+    head.reset()
+    n = _drain(s, stubs, s.idle_captures())
+    assert n > 0 and {m[-1] for m in made} == {1024, 2048} and s.st.length == 0, made
+    return "nothing below class 32,768 under a head at 85,010; after its reset 1,024 and 2,048 ahead"
+
+
+def test_spd271_a_failed_idle_capture_is_recorded_once_and_retried_after_the_state_changes():
+    """SPD-271: an idle capture that raises (here a verify graph of class 1,024, the observed failure was the head's chain)
+    is recorded for its class at the engine's state, counted once and raised as `IdleCaptureFailed`; the class's owed
+    entry stays. The next looks skip that class while the state is the same (the class after it is taken) and plan
+    it again once the state changed, when its owed entry goes with the capture."""
+    from engine.models.flashnext import engine as E
+    s, made, (S, VG, CG) = _ahead_serving()
+    _drain(s, (S, VG, CG), s.idle_captures(ahead=False))                     # the warm-up: class 0
+    made.clear()
+    bad = {"on": True}
+
+    class BadVG(VG):
+        def capture(self):
+            if bad["on"] and self.key[1] == 1024:
+                raise E.ClassError("verify: class 1024 below 32768, the class of position 85010")
+            super().capture()
+    stubs = (S, BadVG, CG)
+    after, S._after_failed_capture = S._after_failed_capture, lambda: None   # no CUDA stream on the host
+    try:
+        assert s.capture_cost(2100) > 0 and s._owed.get(1024) == 2100, s._owed
+        try:
+            _drain(s, stubs, s.idle_captures())
+            raise AssertionError("the failed capture was not raised")
+        except S.IdleCaptureFailed as exc:
+            assert exc.cls == 1024 and isinstance(exc.exc, E.ClassError) and "class 1024" in str(exc), exc
+        assert s._capture_failed == {1024: s._state_key()} and s.stats["idle_capture_failed"] == 1, s._capture_failed
+        assert s._owed.get(1024) == 2100, s._owed
+        made.clear()
+        n = _drain(s, stubs, s.idle_captures())                              # same state: 1,024 skipped
+        assert n > 0 and {m[-1] for m in made} == {2048} and s.stats["idle_capture_failed"] == 1, made
+        assert s._owed.get(1024) == 2100, s._owed
+        bad["on"] = False
+        s.st.length = 300                                                    # the state changed
+        made.clear()
+        n = _drain(s, stubs, s.idle_captures())
+        assert n > 0 and 1024 in {m[-1] for m in made} and 1024 not in s._owed, (made, s._owed)
+        assert s.idle_captures() is None and s.stats["idle_capture_failed"] == 1
+    finally:
+        S._after_failed_capture = after
+    return "recorded once, skipped at the same state (2,048 taken), planned and captured after the state changed"
 
 
 def test_a_launch_below_its_rows_class_is_refused_on_the_host():

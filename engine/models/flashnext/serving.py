@@ -89,6 +89,15 @@ def _after_failed_capture() -> None:
     torch.cuda.synchronize()
 
 
+class IdleCaptureFailed(RuntimeError):
+    """SPD-271: an idle capture of class `cls` raised `exc`; the engine recorded the class at its state
+    (`FlashNextServing._capture_failed`) and the idle looks skip it until that state changes."""
+
+    def __init__(self, cls: int, exc: BaseException):
+        self.cls, self.exc = int(cls), exc
+        super().__init__(f"class {cls}: {type(exc).__name__}: {exc}")
+
+
 class _MTPHead(FlashNextMTPHead):
     """SPD-261: Flash-Next's MTP head as `add_mtp_head` builds it: a chain capture that fails keeps no graph.
 
@@ -294,7 +303,8 @@ class FlashNextServing:
         self.uses: dict = dict(PRIOR_USES)
         self._fresh: set = set()            # graphs captured while idle and not replayed yet
         self._owed: dict = {}               # class -> a length a turn found it at without its graphs
-        self.last_owed = None               # the last `capture_cost`'s class and missing graphs (the turn's line)
+        self._capture_failed: dict = {}     # SPD-271: class -> the state (`_state_key`) its idle capture failed at
+        self.last_owed = None              # the last `capture_cost`'s class and missing graphs (the turn's line)
         self.capture_ms = None              # one verify or commit graph's capture, ms (EMA 0.2)
         self._width = 0                     # the last verify block's rows (its commit's key)
         self.picks = None
@@ -306,7 +316,8 @@ class FlashNextServing:
         self.plain_captured = False         # the last plain step captured its decode graph
         self.heads: dict = {}               # draft heads by name (`draft_heads`)
         self._weights = None                # the weights' bytes by part (`memory_parts`), once
-        self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0, "verify_eager": 0}
+        self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0, "verify_eager": 0,
+                      "idle_capture_failed": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
     @property
@@ -571,6 +582,11 @@ class FlashNextServing:
         self.picks = None
         self.fn.drop_parked(self.st)
         self.st.reset_inplace()
+        # SPD-271: a head's length goes with the trunk's: a KV reclaim left a head at 85,010 over a trunk at 0 and
+        # every idle look planned a class below the head's (ClassError, 2026-11-02)
+        for h in self.heads.values():
+            h.reset()
+        self._capture_failed.clear()
 
     # --- a context class's graphs, captured while the server is idle -----------------------------
     #: the shapes a class captures ahead: the verify widths and commit shapes that make up this share
@@ -680,8 +696,12 @@ class FlashNextServing:
         `ahead`) still takes class 0's."""
         todo, seen = [], set()
         # SPD-249: never a class below the state's own (its rows' positions from the length on): an owed turn
-        # that started under it and grew past it keeps its entry for a shorter state (`class_check`)
-        floor = self.fn.qsa_class(int(self.st.length) + CAPTURE_ROWS)
+        # that started under it and grew past it keeps its entry for a shorter state (`class_check`).
+        # SPD-271: nor below a head's (a chain's last row is the head's length + its feed + depth - 1, the feed
+        # at most depth + 1 rows)
+        floor = max([self.fn.qsa_class(int(self.st.length) + CAPTURE_ROWS)]
+                    + [self.fn.qsa_class(int(h.st.length) + 2 * h.depth) for h in self.heads.values()])
+        key = self._state_key()
         for i, n in enumerate(self._capture_lengths(ahead)):
             cls = self.fn.qsa_class(n)
             if cls in seen:
@@ -689,6 +709,8 @@ class FlashNextServing:
             seen.add(cls)
             if cls < floor:
                 continue
+            if self._capture_failed.get(cls) == key:
+                continue                    # SPD-271: failed at this state; retried once the state changes
             if i and wants is not None and not wants(n):
                 continue
             miss = self._missing(cls)
@@ -700,9 +722,20 @@ class FlashNextServing:
                 self._owed.pop(cls, None)
         return self._capture_classes(todo) if todo else None
 
+    def _state_key(self) -> tuple:
+        """SPD-271: the state an idle capture is planned on: the trunk's length and each head's."""
+        return (int(self.st.length), tuple(int(h.st.length) for h in self.heads.values()))
+
     def _capture_classes(self, todo: list):
+        key = self._state_key()
         for cls, miss in todo:
-            yield from self._capture_steps(cls, miss)
+            try:
+                yield from self._capture_steps(cls, miss)
+            except Exception as exc:
+                # SPD-271: recorded per class at this state; the next looks skip it until the state changes
+                self._capture_failed[cls] = key
+                self.stats["idle_capture_failed"] += 1
+                raise IdleCaptureFailed(cls, exc) from exc
             self._owed.pop(cls, None)
 
     @torch.no_grad()

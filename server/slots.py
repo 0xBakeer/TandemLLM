@@ -424,6 +424,7 @@ class Slot:
 
     def report(self) -> dict:
         eng = (self.values or {}).get("engine")
+        st = getattr(eng, "stats", None)
         return {"index": self.index, "max_len": self.max_len, "busy": self.busy,
                 "owner": self.owner, "served": self.served, "phase": self.phase,
                 "kv_length": getattr(getattr(eng, "kv", None), "length", None),
@@ -431,7 +432,9 @@ class Slot:
                 "carry": (int(self.carry["at"]) if self.carry is not None
                           and self.carry.get("gen") == self.gen else None),
                 # a side slot's own verify graphs (`--side-graphs`); None for slot 0 (always on)
-                "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
+                "graphs": (None if eng is None else not getattr(eng, "graphs_off", False)),
+                # SPD-271: the idle captures that failed on this slot's engine (recorded, not retried at that state)
+                "capture_failed": st.get("idle_capture_failed") if isinstance(st, dict) else None}
 
 
 def depth_cut(tree, max_depth: int | None):

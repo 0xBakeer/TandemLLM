@@ -251,6 +251,51 @@ def test_a_release_for_a_sandbox_gives_back_idle_memory_in_the_pools_order():
         kvpool.POOL, app._kv_reclaim_caches, app._lock_when_idle = old
 
 
+def test_spd271_every_kv_reclaim_resets_the_heads():
+    """SPD-271: each KV reclaim that empties a slot (an idle side slot's, slot 0's idle conversation, a lane that gives
+    its memory back) sets the engine's length to 0; on Flash-Next that restart now resets the MTP head with the
+    trunk and forgets the failed idle captures (before, slot 1's head stayed at 85,010 over a trunk at 0)."""
+    import types
+    from engine.models.flashnext import serving as FS
+    app = _app()
+
+    def fake_engine():
+        trims = []
+        pages = types.SimpleNamespace(committed_bytes=lambda: 3 * GiB, margin=256, rows=0,
+                                      trim=lambda n: trims.append(n) or 3 * GiB)
+        st = types.SimpleNamespace(length=85_010, pages=pages)
+        st.reset_inplace = lambda: setattr(st, "length", 0)
+        head = types.SimpleNamespace(st=types.SimpleNamespace(length=85_010, pool_n={1: 1}), depth=3)
+        head.reset = lambda: (setattr(head.st, "length", 0), setattr(head.st, "pool_n", {}))
+        srv = types.SimpleNamespace(_chain=None, picks=None, fn=types.SimpleNamespace(drop_parked=lambda st: None),
+                                    st=st, heads={"mtp": head}, _capture_failed={16384: 1}, max_len=262_144,
+                                    _settle_chain=lambda: None)
+        srv.restart = types.MethodType(FS.FlashNextServing.restart, srv)
+        return types.SimpleNamespace(kv=FS._KV(srv)), srv, head, trims
+
+    saved = {k: app.STATE.get(k) for k in ("pool", "engine", "resident")}
+    try:
+        for name in ("idle_side", "idle_slot0", "give_back_own"):
+            eng, srv, head, trims = fake_engine()
+            if name == "idle_side":
+                app.STATE["pool"] = slots.Pool([slots.Slot(0, 262_144), slots.Slot(
+                    1, 262_144, values={"engine": eng, "resident": None})])
+                got = app._kv_reclaim_side(GiB, "slot0")
+            else:
+                app.STATE["pool"], app.STATE["engine"], app.STATE["resident"] = None, eng, None
+                got = app._kv_reclaim_slot0(GiB, "slot3") if name == "idle_slot0" else app._kv_give_back_own()
+            assert got == 3 * GiB and trims == [0], (name, got, trims)
+            assert srv.st.length == 0 and head.st.length == 0 and head.st.pool_n == {}, (name, head.st)
+            assert srv._capture_failed == {}, (name, srv._capture_failed)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                app.STATE.pop(k, None)
+            else:
+                app.STATE[k] = v
+    return "idle side slot, slot 0's idle conversation, a lane's give-back: the head reset each time"
+
+
 def test_the_release_route_answers_trusted_local_and_the_admin_only():
     import contextlib
     import io
