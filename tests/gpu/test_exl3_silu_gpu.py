@@ -55,7 +55,9 @@ def test_down_silu_bit_identical():
 
 
 if __name__ == "__main__":
-    passed = 0
+    if not X._sm_supported(torch.device("cuda")):
+        sys.exit("skipped: the inline bit contract is the GB10 dispatch; this arch takes the non-inline paths")
+        passed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             print(f"  {name:40s} ok   {fn() or ''}", flush=True)

@@ -67,7 +67,16 @@ from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
 
-from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
+from tools.cuda_arch import capability as _capability, inline_supported as _inline_supported  # noqa: E402
+
+# the GB10 set only for now: the sources build for sm_89 (PDL/cluster compiled out, S
+# clamped to 1 below sm_90), but the fused down-silu and slab paths are not proven
+# row-invariant there -- tools/fn_kernels covers Ada dense and MoE instead
+_ARCHES = frozenset({(12, 1)})
+
+
+def _sm_supported(device=None) -> bool:
+    return _inline_supported(device, _ARCHES)
 
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
@@ -111,16 +120,24 @@ _CPP = nb.source(__file__, "exl3.cpp")
 _MOD = None
 
 
+def _gencode() -> str:
+    cap = _capability()
+    if cap == (12, 1):
+        return "-gencode=arch=compute_121a,code=sm_121a"
+    return f"-gencode=arch=compute_{cap[0]}{cap[1]},code=sm_{cap[0]}{cap[1]}"
+
+
 def _module():
     global _MOD
     if _MOD is None:
-        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL)}\n" + _CUDA
+        cap = _capability() or (0, 0)
+        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL and cap >= (9, 0))}\n" + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon",
                                   "exl3_rot_in_silu", "exl3_mlp_bridge"],
                        extra_cuda_cflags=["-O3", "-lineinfo",
-                                          "-gencode=arch=compute_121a,code=sm_121a"],
+                                          _gencode()],
                        verbose=False)
     return _MOD
 
@@ -632,6 +649,8 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
         return _slab_matmul(x, w, out, xh=xh)
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
+    if (_capability(dev) or (0, 0)) < (9, 0):
+        S_ = 1
     wk_ = tile["wk"] if wk is None else wk
     if M > SKINNY_MAX and ROWGRID:
         # ENG-213 row grid: one rotation and ONE launch for every 32-row chunk, the chunks of a

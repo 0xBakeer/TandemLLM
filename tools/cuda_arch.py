@@ -39,10 +39,11 @@ def capability(device: torch.device | str | int | None = None) -> tuple | None:
     return _cache[idx]
 
 
-def inline_supported(device: torch.device | str | int | None = None) -> bool:
+def inline_supported(device: torch.device | str | int | None = None,
+                     arches: frozenset | set | None = None) -> bool:
     """True when the inline extensions can run on `device`. False for cpu."""
     cap = capability(device)
-    return cap is not None and cap in _SUPPORTED
+    return cap is not None and cap in (_SUPPORTED if arches is None else arches)
 
 
 def _reset_for_tests() -> None:

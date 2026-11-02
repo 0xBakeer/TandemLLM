@@ -115,7 +115,10 @@ def test_exl3_matmul_and_dense_pass_out_through():
             if M <= 32 and kb in (2, 3, 4, 5, 6, 8, 15, 25, 35):
                 out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16,
                                   device="cuda")
-                assert _eq(FK.dense(x, w, out=out), ref), f"dense kb{kb} M{M}"
+                # the inline kernels' bits are their own: out= must equal the same call's
+                # fresh output; the Triton oracle only holds where dense falls back to it
+                expect = ref if not FK._sm_supported(x.device) else FK.dense(x, w)
+                assert _eq(FK.dense(x, w, out=out), expect), f"dense kb{kb} M{M}"
             cases += 1
     return f"{cases} matmul/dense cells: the out= bytes are the cat's"
 

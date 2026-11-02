@@ -12,8 +12,13 @@ __device__ __forceinline__ float bf_hi(uint32_t w) { return __uint_as_float(w & 
 // predecessor grid has completed and flushed; a no-op without the attribute). Every kernel here
 // triggers right after its wait, so its successor's CTAs can launch and prefetch their weights while
 // it runs. Neither changes what a thread computes.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+#else
+__device__ __forceinline__ void pdl_wait() {}
+__device__ __forceinline__ void pdl_trigger() {}
+#endif
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" :: "l"(p)); }
 
 // ------------------------------------------------------------------------------------- gemv
@@ -1283,6 +1288,7 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
     rg.run(xh - ka * 16, red);
     float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
     if (S > 1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
         cg::cluster_group cluster = cg::this_cluster();
         cluster.sync();
         if (rank == 0 && warp == 0) {
@@ -1298,6 +1304,7 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
         }
         cluster.sync();
         if (rank != 0) return;
+#endif
     } else if (warp == 0) {
         red_rot<WARPS>(red, lane, v0, v1, v2, v3);
     }
@@ -1431,8 +1438,10 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
             }
         }
     __syncthreads();
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     cg::cluster_group cluster = cg::this_cluster();
     if (S > 1) cluster.sync();
+#endif
     {
         const int c = 4 * lane, n = cb * 128 + 4 * lane;
         const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
@@ -1442,7 +1451,11 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
         for (int r = rank * WARPS + warp; r < R; r += S * WARPS) {
             float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
             for (int q = 0; q < S; ++q) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
                 const float* rr = S == 1 ? red : cluster.map_shared_rank(red, q);
+#else
+                const float* rr = red;
+#endif
                 float4 p[WARPS];
 #pragma unroll
                 for (int w = 0; w < WARPS; ++w) p[w] = *reinterpret_cast<const float4*>(rr + ((size_t)w * R + r) * 128 + c);
@@ -1465,7 +1478,9 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
             }
         }
     }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     if (S > 1) cluster.sync();                         // every rank keeps its RED until the others have read it
+#endif
 }
 
 // ------------------------------------------------------------------------- attention, a row's inputs
@@ -1582,7 +1597,7 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
     cudaLaunchAttribute at[1];
     at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     at[0].val.programmaticStreamSerializationAllowed = g_pdl;
-    cfg.attrs = at; cfg.numAttrs = 1;
+    cfg.attrs = at; cfg.numAttrs = g_pdl ? 1 : 0;
     cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
     TORCH_CHECK(e == cudaSuccess, "fn_kernels launch: ", cudaGetErrorString(e));
 }
@@ -1602,7 +1617,7 @@ static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t sm
     at[0].val.programmaticStreamSerializationAllowed = g_pdl;
     at[1].id = cudaLaunchAttributeClusterDimension;
     at[1].val.clusterDim.x = S; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;
-    cfg.attrs = at; cfg.numAttrs = S > 1 ? 2 : 1;
+    cfg.attrs = at; cfg.numAttrs = S > 1 ? 2 : (g_pdl ? 1 : 0);
     cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
     TORCH_CHECK(e == cudaSuccess, "fn_dense launch: ", cudaGetErrorString(e));
 }

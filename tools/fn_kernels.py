@@ -55,7 +55,31 @@ import torch  # noqa: E402
 from engine import native_build as nb  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
-from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
+from tools.cuda_arch import capability as _capability, inline_supported as _inline_supported  # noqa: E402
+
+# this module covers the GB10 set and Ada (sm_89): the kernels build there with the PDL
+# and cluster paths compiled out; a cluster-free launch keeps a weight its one order
+_ARCHES = frozenset({(12, 1), (8, 9)})
+
+# a non-GB10 arch counts only when the toolchain actually builds the module (a box without
+# a matching nvcc falls back to the Triton paths instead of raising at first use)
+_BUILD_OK: dict = {}
+
+
+def _sm_supported(device=None) -> bool:
+    if not _inline_supported(device, _ARCHES):
+        return False
+    cap = _capability(device)
+    if cap == (12, 1):
+        return True
+    if cap not in _BUILD_OK:
+        try:
+            _module()
+            _BUILD_OK[cap] = True
+        except Exception as e:
+            _BUILD_OK[cap] = False
+            print(f"[fn-kernels] inline build failed for sm_{cap[0]}{cap[1]} "                  f"({type(e).__name__}): the Triton paths serve", flush=True)
+    return _BUILD_OK[cap]
 
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
 # cp.async and the 128-point Hadamard; it ends inside the anonymous namespace
@@ -66,6 +90,13 @@ _CUDA = nb.source(__file__, "kernels.cu")
 _CPP = nb.source(__file__, "kernels.cpp")
 
 _MOD = None
+
+
+def _gencode() -> str:
+    cap = _capability()
+    if cap == (12, 1):
+        return "-gencode=arch=compute_121a,code=sm_121a"
+    return f"-gencode=arch=compute_{cap[0]}{cap[1]},code=sm_{cap[0]}{cap[1]}"
 
 
 def _module():
@@ -79,9 +110,9 @@ def _module():
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", _gencode()],
                        verbose=False)
-        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
+        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1" and (_capability() or (0, 0)) >= (9, 0)))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
@@ -200,12 +231,14 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
     few 128-column blocks (keeping >= ~96 CTAs), 4 warps a CTA. Keyed by the shape only: one order
     for every row count."""
     got = DENSE_SPLIT.get((N, Kin, kb))
-    if got:
-        return got
-    S = 1
-    while (N // 128) * S < 96 and S < 8 and (Kin // 16) % (8 * S * 2) == 0:
-        S *= 2
-    return S, 4
+    if got is None:
+        S = 1
+        while (N // 128) * S < 96 and S < 8 and (Kin // 16) % (8 * S * 2) == 0:
+            S *= 2
+        got = (S, 4)
+    if (_capability() or (0, 0)) < (9, 0):
+        return 1, got[1]                 # distributed shared memory is sm_90+: one rank covers K
+    return got
 
 
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:

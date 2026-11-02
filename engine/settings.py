@@ -37,6 +37,7 @@ KNOBS: dict[str, tuple] = {
     # read under a computed name (engine/router.py tree_nodes, tools/nvfp4_skinny.py _table)
     'TREE_NODES': ('0', 'engine/router.py'),
     'TREE_NODES_NARROW': ('0', 'engine/router.py'),
+    'NATIVE_NVCC_ANY': ('0', 'engine/native_build.py'),
     'SKINNY_TILES_B': (None, 'tools/nvfp4_skinny.py'),
     'SKINNY_TILES_C': (None, 'tools/nvfp4_skinny.py'),
     'SKINNY_TILES_WIDE_B': (None, 'tools/nvfp4_skinny.py'),

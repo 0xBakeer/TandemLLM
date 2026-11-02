@@ -51,6 +51,8 @@ def test_bridge_bit_identical():
 
 
 if __name__ == "__main__":
+    if not X._sm_supported(torch.device("cuda")):
+        sys.exit("skipped: the slab bridge is the inline path (GB10)")
     passed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

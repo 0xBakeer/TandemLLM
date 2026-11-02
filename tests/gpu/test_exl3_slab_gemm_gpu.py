@@ -101,7 +101,9 @@ def test_norm_rot_bits():
 
 
 if __name__ == "__main__":
-    test_slab_rot_bits()
+    if not X._sm_supported(torch.device("cuda")):
+        sys.exit("skipped: the inline bit contract is the GB10 dispatch; this arch takes the non-inline paths")
+        test_slab_rot_bits()
     test_mlp_bits()
     test_norm_rot_bits()
     test_add_norm_rot_store_y()
