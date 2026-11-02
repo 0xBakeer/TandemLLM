@@ -117,8 +117,9 @@ def _module():
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
-        _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
-        _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
+        _ada = (_capability() or (0, 0)) == (8, 9)
+        _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST") or ("4" if _ada else "3")))
+        _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS") or ("8" if _ada else "4")))
     return _MOD
 
 
