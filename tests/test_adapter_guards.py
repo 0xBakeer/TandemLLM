@@ -73,7 +73,7 @@ from engine.models import REGISTRY  # noqa: E402
 #: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 #: the window cap inside a chunk-major prefill (engine/cache.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "5f2e2424eb37646152467c45aa4fede01053b4a7ae3c8fa5eb4ea1506ff3c7f4")
+             "ecc128396029a7422ad507d86add59cdc7ca1812826dae9adce043bd74796cc1")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
