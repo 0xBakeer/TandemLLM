@@ -9075,6 +9075,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        if (conv_id is None and rec.client_kind == "hermes" and plan is not None
+                and getattr(plan, "session", None) is not None):
+            # Hermes sends no session id: the router's head key (`h:`, its messages through the
+            # first user message) names the session, so the disk tier saves a new session's head
+            # on its first request instead of after its second cold read
+            conv_id = plan.session.key
         # SRV-241: a regenerate (server/regenerate.py) samples with a fresh seed; every other
         # request keeps the sampler it had (greedy unless the client asked). Under an active plan
         # only: raw requests (benchmarks) and side requests are never looked at.
