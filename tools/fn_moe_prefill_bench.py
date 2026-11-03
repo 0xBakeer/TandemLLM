@@ -56,10 +56,17 @@ def main() -> None:
     real = eng._moe_pre
 
     def keep(x, li):
-        out = real(x, li)
-        got["x"], got["ids"] = x.clone(), out[1].clone()
-        return out
+        got["x"] = x.clone()
+        return real(x, li)
     eng._moe_pre = keep
+    from tools import fn_kernels as FK      # _moe_pre returns only the combined output now; the ids
+    real_router = FK.router                 # are the router's (captured here, 2026-10-30)
+
+    def keep_router(w, ne, nk):
+        ids, wts = real_router(w, ne, nk)
+        got["ids"] = ids.clone()
+        return ids, wts
+    FK.router = keep_router
     st = eng.new_state(eng.max_len)
     eng.prefill(torch.tensor(class_prompt(tok, "prose", max(rows))), st, chunk=max(rows), path="kernels")
     li = a.layers - 1

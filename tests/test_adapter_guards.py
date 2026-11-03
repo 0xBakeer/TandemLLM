@@ -141,12 +141,13 @@ GOLDEN_FP4 = {
     # tools/nvfp4_relu2.py): nemotron_h (flint reads nvfp4_relu2.py and may move)
     # #136: the dense kernels take 7-bit EXL3 tensors (tools/csrc/fn_kernels/kernels.cu, the LFM2.5, NemotronH and
     # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
+    # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): flint, lfm2_moe, qwen3_5_moe, qwen4_exp
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "895187ee496b1ef904f79d7ba27cd15f93ff2af70aadf97d4d4c232307f8414d",
+    "qwen4_exp": "6441d7ec024223bf8fd0cfe13bc925e1c492ad0d537f643a2c1de88dbfb03ee2",
     "nemotron_h": "b42ab12b898cbfb68580c024ff91b63d18c30b4c1e9e5b125215cbddb865fd2e",
-    "lfm2_moe": "0cf3c6cc3832a442dc230faeba2813c865764703f1caec9e3a34d6a68044ffdb",
-    "qwen3_5_moe": "addb73dda4640c0be39588491e81010154f71a4583bd7ec9df33b1902e822485",
-    "flint": "65b48c7202a82a922f41b118b56c2bc2b243c3dd561d213cd261f10f2cdf4367",
+    "lfm2_moe": "7a6080001edbb6d85b0e586cce67eb4bdf3ec2b3771b3f1fd7d6805045d9b254",
+    "qwen3_5_moe": "7d3fd9fdf5e19473f29fb9394eca39471979bb026aab0f39add5045a74743a71",
+    "flint": "0be79612e62686537b320ff35d56844f8d1005a0ce668600e2e43ab7590a475f",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

@@ -588,7 +588,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.routed_scaling_factor)
                 if li in self.banks:
                     from tools import fn_prefill_kernels as PK
-                    yd = PK.moe_grouped(n, ids, self.banks[li])
+                    yd = PK.moe_grouped(n, ids, self.banks[li], rows=32)   # 64 was checked on Flash-Next only
                 else:
                     yd = self._moe_bf16_chunk(n, ids, li)
                 m = FK.moe_combine(yd, ids, wts) if dev.type == "cuda" else K.combine_reference(yd, ids, wts)
