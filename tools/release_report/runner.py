@@ -57,6 +57,38 @@ def model_card(base: str, h: dict) -> dict:
     return {}
 
 
+def local_pid(base: str) -> int | None:
+    """The pid listening on a local server's port (Linux, a process of this user), read from /proc; None
+    elsewhere. Its environment and command line give the knobs /health does not show."""
+    from urllib.parse import urlsplit
+    u = urlsplit(base)
+    if u.hostname not in ("127.0.0.1", "localhost", "::1") or not os.path.isdir("/proc/net"):
+        return None
+    port = f"{u.port or 80:04X}"
+    inodes = set()
+    for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            for line in open(f).read().splitlines()[1:]:
+                x = line.split()
+                if x[1].rsplit(":", 1)[1] == port and x[3] == "0A":
+                    inodes.add(x[9])
+        except (OSError, IndexError):
+            continue
+    if not inodes:
+        return None
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            for fd in os.listdir(f"/proc/{d}/fd"):
+                link = os.readlink(f"/proc/{d}/fd/{fd}")
+                if link.startswith("socket:[") and link[8:-1] in inodes:
+                    return int(d)
+        except OSError:
+            continue
+    return None
+
+
 def tokenizer_for(a, h: dict):
     path = a.tokenizer or (h.get("weights") or {}).get("weights")
     if path and os.path.isdir(path):
@@ -225,8 +257,12 @@ def measure(a, base: str, variant: str | None = None, launch: dict | None = None
     joined = 0
     if elog and os.path.exists(os.path.expanduser(elog)):
         joined = logjoin.enrich(rows, logjoin.parse(Path(os.path.expanduser(elog)).read_text(errors="replace")))
-    from tools.gate.server import knobs as gate_knobs
+    from tools.gate import server as gserver
     env, argv = (launch or {}).get("env") or {}, (launch or {}).get("argv") or []
+    if not env and not argv:                      # a local server: its own process, read only
+        pid = local_pid(base)
+        if pid:
+            env, argv = gserver.environ_of(pid), gserver.argv_of(pid)
     w = h.get("weights") or {}
     priv = scrub.private_terms()
     priv["allow"] = [prof.fp.name or "", "DGX Spark" if prof.id == "gb10" else ""]
@@ -236,7 +272,7 @@ def measure(a, base: str, variant: str | None = None, launch: dict | None = None
            "weights": w.get("name"), "weights_repo": w.get("hf_repo"), "weights_revision": w.get("hf_revision"),
            "format": w.get("format"), "drafters": w.get("drafters"), "corrector": w.get("corrector"),
            "hardware": hardware_label(prof), "gpu": prof.fp.as_dict(), "hw_profile": prof.id,
-           "knobs": gate_knobs(h, env, argv), "health_end": pc.health_record(h_end),
+           "knobs": gserver.knobs(h, env, argv), "health_end": pc.health_record(h_end),
            "served_at_start": (h.get("inflight") or {}).get("served"), "uptime_at_start_s": h.get("uptime_s"),
            "box": sampler.summary(), "plan": pl.as_dict(), "estimate": est, "probe": pr,
            "prose": prose.describe(), "launch": {k: v for k, v in (launch or {}).items()

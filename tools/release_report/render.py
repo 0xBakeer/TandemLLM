@@ -506,7 +506,8 @@ def sec_k(data):
     runs = data.get("runs") or []
     if not runs:
         return "", "no runs"
-    last = runs[-1]
+    spec = [r for r in runs if r.get("variant") == "spec"] or runs
+    last = next((r for r in reversed(spec) if (r.get("knobs") or {}).get("env")), spec[-1])
     knobs = last.get("knobs") or {}
     keep = ("lanes", "max_running", "max_len", "windows", "max_queue", "prefill_chunk", "prefix_cache", "prefix_chunk",
             "cache_gb", "ceiling_gb", "peak_gb", "suffix_store", "response_cache", "drafter", "corrector_loaded",
