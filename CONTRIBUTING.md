@@ -9,6 +9,7 @@ Thank you for helping. Bug reports, measurements from other boards and pull requ
 - Run the dashboard tests if you touched `dashboard/`: `npm ci && npm test` in that folder.
 - GitHub runs the CPU suite on every pull request as the `cpu suite` check, with the engine's packages in their CPU builds.
 - A change must not change the text the engine writes. [docs/exactness.md](docs/exactness.md) lists the checks, and a speed claim needs the method in [docs/measurement.md](docs/measurement.md).
+- A pull request that changes the engine, a model, a kernel or the server carries a gate report: run `python -m tools.gate run` on your GPU and paste `gate-report.md` into the description. It measures main and your branch side by side on the same box. `python -m tools.gate map` names the level your diff needs; docs and dashboard changes need none. The `gate` check refuses a missing, stale or failing report, and [docs/quality-gate.md](docs/quality-gate.md) explains the suites and the verdicts.
 
 ## Issues and the board
 
@@ -23,7 +24,7 @@ A milestone is a release. `v0.14.1` holds what the next patch ships, and `Later`
 
 An issue whose title starts with "Epic:" tracks a larger goal, and its sub-issues are the steps. The [TandemLLM board](https://github.com/users/0xBakeer/projects/3) shows every issue and pull request with its status and release.
 
-A commit for work that started as a GitHub issue uses the issue number as its key: `#123: Keep the prefix cache across a profile switch`. A maintainer adds `run-gpu` to a pull request that needs the GPU tests in `tests/gpu/`, runs them on a DGX Spark, and posts the result on the pull request.
+A commit for work that started as a GitHub issue uses the issue number as its key: `#123: Keep the prefix cache across a profile switch`. A maintainer adds `run-gpu` to a pull request that needs the GPU tests in `tests/gpu/`, runs them on a DGX Spark, and posts the result on the pull request. For an engine or kernel change the maintainer also runs the gate on the DGX Spark and adds `gate-verified` when its report agrees.
 
 ## Commit messages and docs
 

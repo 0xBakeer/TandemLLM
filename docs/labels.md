@@ -59,4 +59,5 @@ GitHub's own `duplicate`, `invalid`, `wontfix`, `good first issue` and `help wan
 | hardware | `hw/rtx-pro-6000` | Seen on an NVIDIA RTX PRO 6000 |
 | hardware | `hw/other` | Seen on another GPU or machine |
 | process | `run-gpu` | A maintainer runs the GPU tests on a DGX Spark |
+| process | `gate-verified` | A maintainer re-ran the quality gate on a DGX Spark |
 | process | `skip-changelog` | Left out of the generated release notes |
