@@ -77,6 +77,7 @@ rules:
       - 'tools/small_linear.py'
       - 'tools/fp8_linear.py'
       - 'tools/iq2_linear.py'
+      - 'tools/gpu/**'
       - 'tests/gpu/**'
       - 'bench/**'
       - 'server/app.py'
@@ -134,6 +135,15 @@ rules:
       - 'ops/gate.sh'
 
 kernels:
+  - paths: ['tools/gpu/**']
+    tests:
+      - tests/gpu/test_gpu_profile_gpu.py
+      - tests/gpu/test_fn_kernels_gpu.py
+      - tests/gpu/test_fn_prefill_kernels_gpu.py
+      - tests/gpu/test_fn_seq_kernels_gpu.py
+      - tests/gpu/test_exl3_slab_gemm_gpu.py
+      - tests/gpu/test_exl3_silu_gpu.py
+      - tests/gpu/test_skinny_gpu.py
   - paths: ['engine/models/flashnext/**', 'tools/fn_*kernels*.py', 'tools/csrc/fn_*/**']
     tests:
       - tests/gpu/test_fn_kernels_gpu.py
