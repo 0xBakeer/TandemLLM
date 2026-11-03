@@ -36,7 +36,7 @@ except ImportError:                                  # pragma: no cover (the CPU
     HAVE_TRITON = False
 
 FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
-#: rows a program of FP8Linear covers; the row-invariant limit of both classes
+#: rows a program of FP8Linear covers; a verify block is ROWS_MAX + 1 rows and still takes the row kernel
 ROWS_MAX = 32
 
 
@@ -228,7 +228,7 @@ class FP8Linear:
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         M = x2.shape[0]
-        if not x2.is_cuda or M > ROWS_MAX:
+        if not x2.is_cuda or M > ROWS_MAX + 1:
             # a prompt chunk: the codes widened to bf16 (exact) for cuBLAS, the scale on the fp32 product
             y = torch.nn.functional.linear(x2.float() if not x2.is_cuda else x2, self.w.to(x2.dtype if x2.is_cuda else torch.float32))
             y = y.float() * self.scale.to(y.device)
