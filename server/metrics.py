@@ -822,11 +822,14 @@ def serve(handler) -> None:
     body with neither framing hangs the scraper until its own timeout.
     """
     raw = render().encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", CONTENT_TYPE)
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", CONTENT_TYPE)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionResetError):
+        pass                                        # the scraper went away; the qse_up row's pattern
 
 
 def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
