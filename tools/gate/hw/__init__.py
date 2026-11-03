@@ -13,12 +13,14 @@ import os
 import subprocess
 import sys
 
+from tools.gate.hw.ada import Ada
 from tools.gate.hw.base import Fingerprint, Profile
 from tools.gate.hw.fake import Fake
+from tools.gate.hw.gb10 import GB10
 from tools.gate.hw.generic import Generic
 
 #: adapters in the order they are asked; the generic one answers for any GPU none claims
-ADAPTERS: list[type[Profile]] = []
+ADAPTERS: list[type[Profile]] = [GB10, Ada]
 
 TORCH_PROBE = (
     "import json, torch\n"

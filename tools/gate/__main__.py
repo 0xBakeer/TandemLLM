@@ -30,8 +30,9 @@ def cmd_hw(argv) -> int:
     from tools.gate import hw
     ap = argparse.ArgumentParser(prog="python -m tools.gate hw")
     ap.add_argument("--hw", default="auto")
+    ap.add_argument("--python", default=sys.executable, help="the engine's Python (its torch)")
     a = ap.parse_args(argv)
-    p = hw.profile(a.hw)
+    p = hw.profile(a.hw, python=a.python)
     print(json.dumps(p.describe(), indent=1))
     return 0
 
