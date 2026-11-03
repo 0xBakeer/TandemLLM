@@ -222,6 +222,23 @@ def test_pid_alive():
     p.wait()
     assert not server.pid_alive(p.pid)
 
+def test_a_stopped_server_with_closed_connections_frees_its_port():
+    """The server closes first, so its side of each connection sits in TIME_WAIT on the port; the
+    port is free for the next server all the same (the GPU dry run's stops failed on this)."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.listen()
+    cli = socket.create_connection(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    assert server.port_busy(port)
+    conn.close()                                   # the server's side closes first: TIME_WAIT here
+    cli.recv(1)
+    cli.close()
+    srv.close()
+    assert not server.port_busy(port)
+
 
 if __name__ == "__main__":
     from scriptmode import run

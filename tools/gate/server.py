@@ -82,6 +82,9 @@ def port_busy(port: int) -> bool:
         if s.connect_ex(("127.0.0.1", port)) == 0:
             return True
     with socket.socket() as s:
+        # as a server binds: a stopped server's closed connections sit in TIME_WAIT on the port for
+        # a minute, and a bind without SO_REUSEADDR reads them as a server still there
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("0.0.0.0", port))
         except OSError:
