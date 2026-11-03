@@ -2880,7 +2880,10 @@ class FlashNextEngine(FlashNextRef):
         (`mtp_pre`) or the reference's `mtp_feed` with the pool built after."""
         path = path or self.prefill_path
         T = len(next_tokens)
-        chunk = PREFILL_CHUNK if path == "kernels" else 2048
+        # the trunk's chunk is QWEN38_FN_PREFILL_CHUNK, but the MTP layer reshapes its stack slice to
+        # T*hc rows for mtp.fc_hidden (a 16,384-row chunk crashes exl3_matmul with CUDA error:
+        # invalid argument, 2026-10-30): the catch-up caps its own chunk where that matmul holds
+        chunk = min(PREFILL_CHUNK, 8192) if path == "kernels" else 2048
         for i in range(0, T, chunk):
             j = min(i + chunk, T)
             nt = torch.tensor(next_tokens[i:j])
