@@ -272,25 +272,31 @@ def sec_c(data):
         return skips(rs), "no rows"
     ns = sorted({r["v"]["n"] for r in two if r.get("v")})
     pts, line, body = [], [], []
+    dpts, dline = [], []
     for i, n in enumerate(ns):
         lv = [r for r in two if r["v"]["n"] == n]
         ok = valid(lv)
         for r in lv:
             pts.append((i, r["v"].get("agg_tok_s") if r.get("valid") else None, True,
-                        f"{n} at once: {num(r['v'].get('agg_tok_s'))} tok/s aggregate, wall {num(r['v'].get('wall_s'))} s"))
+                        f"{n} at once: {num(r['v'].get('agg_tok_s'))} tok/s with prefill, wall {num(r['v'].get('wall_s'))} s"))
+            dpts.append((i, r["v"].get("decode_tok_s") if r.get("valid") else None, True,
+                         f"{n} at once: {num(r['v'].get('decode_tok_s'))} tok/s decode"))
         line.append((i, med([r["v"].get("agg_tok_s") for r in ok])))
+        dline.append((i, med([r["v"].get("decode_tok_s") for r in ok])))
         p = (lv[-1].get("cond") or {}).get("proof") or {}
-        body.append([str(n), num(med([r["v"].get("agg_tok_s") for r in ok])) if ok else bad_cell(lv[-1]),
-                     num(med([r["v"].get("decode_tok_s") for r in ok])) if ok else "–",
+        body.append([str(n), num(med([r["v"].get("decode_tok_s") for r in ok])) if ok else bad_cell(lv[-1]),
+                     num(med([r["v"].get("agg_tok_s") for r in ok])) if ok else "–",
                      num(med([r["v"].get("wall_s") for r in ok])) + " s" if ok else "–",
                      num(med([r["v"].get("ttft_max_s") for r in ok]), 2) + " s" if ok else "–",
                      f'{p.get("max_decoding_at_once", "–")} decoding / {p.get("max_running", "–")} running',
                      f"{len(ok)} of {len(lv)}"])
     out = ""
     if ns:
-        out += xy_chart([str(n) for n in ns], [{"name": "aggregate", "cls": "s1", "pts": pts, "line": line}],
-                        "aggregate tok/s, ~2k prompts, N released together", aria="Aggregate tokens per second by requests at once")
-        out += table(["at once", "aggregate tok/s", "decode tok/s", "wall", "slowest first token",
+        out += xy_chart([str(n) for n in ns], [{"name": "decode", "cls": "s1", "pts": dpts, "line": dline},
+                                               {"name": "with prefill (wall)", "cls": "s2", "pts": pts, "line": line}],
+                        "tok/s, ~2k prompts, N released together", aria="Decode and wall tokens per second by requests at once")
+        out += legend([("decode", "s1", True), ("with prefill (wall)", "s2", True)])
+        out += table(["at once", "decode tok/s", "with prefill tok/s", "wall", "slowest first token",
                       "proof (most seen)", "proved rounds"], body, "num")
     if t32:
         groups = []
@@ -559,8 +565,9 @@ METHODS = {
          "Decode = completion tokens after the first over the time from the first to the last token; the median of the runs. "
          "Drafting and tokens per pass are the engine's own counts for each request.",
     "b": "The same requests: prefill = prompt tokens over the time to the first token.",
-    "c": "N requests released together, each with its own ~2k-token prompt and a 512-token answer; aggregate = all "
-         "completion tokens over the wall time, prefill included. A round counts only when the server's decode set held N "
+    "c": "N requests released together, each with its own ~2k-token prompt and a 512-token answer. Decode = the tokens after "
+         "each request's first, over the time from the first first token to the last token; with prefill = all completion "
+         "tokens over the wall time, so the N prompts' prefill counts against it. A round counts only when the server's decode set held N "
          "requests at once and no more ran; a level without such a round is invalid. Below: N prompts of ~32k tokens, 16 "
          "tokens out, the first token of the fastest and the slowest; a request left in the queue makes the row invalid.",
     "d": "Chats released together on one new ~28k-token system prompt, each with its own short question, prompt cache on.",
@@ -597,8 +604,10 @@ def tiles(data) -> list[tuple[str, str, str]]:
     two = [r for r in valid(rows_of(data, "c")) if r["key"].startswith("2k/")]
     if two:
         top = max(r["v"]["n"] for r in two)
-        out.append((num(med([r["v"].get("agg_tok_s") for r in two if r["v"]["n"] == top])), "tok/s",
-                    f"{top} requests at once, aggregate"))
+        top_rows = [r for r in two if r["v"]["n"] == top]
+        out.append((num(med([r["v"].get("decode_tok_s") for r in top_rows])), "tok/s",
+                    f"{top} requests at once, decode ({num(med([r['v'].get('agg_tok_s') for r in top_rows]))} "
+                    f"with their 2k prefills counted)"))
     g = [r for r in valid(rows_of(data, "g")) if r["key"].startswith("fixed/levels/")]
     if g:
         r = max(g, key=lambda r: int(r["key"].split("/")[-1]))
@@ -641,7 +650,15 @@ def findings(data) -> list[tuple[str, str]]:
         if ns:
             a1 = med([r["v"]["agg_tok_s"] for r in ok if r["v"]["n"] == ns[0]])
             an = med([r["v"]["agg_tok_s"] for r in ok if r["v"]["n"] == ns[-1]])
-            if a1 and an:
+            d1 = med([r["v"].get("decode_tok_s") for r in ok if r["v"]["n"] == ns[0]])
+            dn = med([r["v"].get("decode_tok_s") for r in ok if r["v"]["n"] == ns[-1]])
+            if d1 and dn:
+                out.append(("good" if dn > 1.5 * d1 else "bad",
+                            f"{ns[-1]} requests at once decode at {num(dn)} tok/s against {num(d1)} for {ns[0]} "
+                            f"({dn / d1:.1f} times)."
+                            + (f" Counting their ~2k-token prefills in the wall time: {num(an)} against {num(a1)}."
+                               if a1 and an else "")))
+            elif a1 and an:
                 out.append(("good" if an > 1.5 * a1 else "bad",
                             f"{ns[-1]} requests at once total {num(an)} tok/s against {num(a1)} for {ns[0]} "
                             f"({an / a1:.1f} times), prefill included."))
