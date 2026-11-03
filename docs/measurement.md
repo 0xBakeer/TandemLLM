@@ -89,6 +89,59 @@ A row measures the engine (SPD-249). Every request goes to `/v1/completions` wit
 - Proof: `/health` every 0.2 s during every round. A round counts only when the most slots decoding at once equal N and no more than N requests ran (none came from elsewhere). An invalid round is run again. A level's `at_once` is the smallest maximum over its rounds, and the registry refuses a level whose `at_once` is not N or whose valid rounds are fewer than the row's. Before the levels the tool reads the server's live slot limit (`parallel.max_running`) and refuses to start when it is below the largest N.
 - Setup: the row names the setup file, the lanes, the window, the tokens a request, the sampling, the suffix store and the response cache (both off for a card row), the build and the commit.
 
+## Long prompts, and many lanes at once
+
+The weight cards' rows are 512-token requests. A real agentic workload is not: it is a
+conversation of tens of thousands of tokens, several at once. The two behave differently, and
+the difference is the pool.
+
+Measured on a DGX Spark (128 GB unified memory) with the flashnext-3.05 pack, upstream main
+`3675d4b4`, 8 lanes, the KV pool on, every lane at the 262,144-token window, the shared pool at
+772,144 tokens, the n-gram table cold (2 GB hot-row cache), the conductor on, the drafter MTP.
+Every request is an agentic conversation (a tool-call history, then one question), 24.5 k tokens
+of context, 80-150 tokens out, greedy, thinking off.
+
+| lanes / requests at once | wall | time to first token | decode per request | prefill | cache sheds | GPU (median) |
+|-|-|-|-|-|-|-|
+| 1 / 1 | 38.9 s | 34.5 s | 22.3 tok/s | 827 tok/s | 0 | 64 W |
+| 2 / 2 | 78.3 s | 68-70 s | 9.2, 13.4 tok/s | 462 tok/s | 0 | 65 W |
+| 3 / 3 | 101.8 s | 88-93 s | 7.4, 8.9, 10.9 tok/s | 357 tok/s | 0 | 76 W |
+| 8 / 2 | 485.9 s | 459-466 s | 5.1, 24.9 tok/s | 69 tok/s | 4 | 19 W |
+| 8 / 4 | 266.1 s | 230-242 s | 2.4, 3.6, 3.8, 4.2 tok/s | 134 tok/s | 0 | 41 W |
+
+**The lane count is not a throughput knob.** 8 lanes ask for 8 × 262,144 = 2,097,152 tokens of
+window over a 772,144-token pool — past `lanes_full` (the Setup Guide's own estimate, here ≈ 2) —
+and at the 64 KB of KV per context token a full-window lane is 16 GiB against ~40 GiB of
+MemAvailable and a 10 GiB floor. The lanes past the guarantee do not add throughput: they make
+every request wait for the turn (the `/health` `parallel.turn` counters read 664 acquisitions,
+200 handoffs and 408 waits for four lanes), the memory policy sheds caches under the floor, and
+the GPU goes back to idle (19 W against 65 W). The lever is fewer lanes or a shorter side window
+(`QSE_SIDE_MAX_LEN`), not more lanes.
+
+**A long prefill is served in the turn's slices.** One 169,493-token prompt prefilled at
+~110 tok/s (the live view's `prefill_live_tps`) against ~800 tok/s for a 29.5 k prompt on the same
+engine — and the manual publishes no prefill-against-prompt-length curve, only the decode one
+(the "sweep over prompt lengths … is not published yet", in the speculation chapter).
+
+**Decode against context length is the documented bandwidth bound** and needs no new claim: 64 KB
+of KV per context token, read every round, plus 15.01 GB of weights, at ~240 GB/s. The manual's
+two measured points (49.89 tok/s at 256 tokens, 36.02 tok/s at 16,350) and the measured 22-25
+tok/s at 29.5 k on this box are the same curve.
+
+### Traps this adds
+
+- **A lane count past the pool's guarantee reads as a slow model.** The requests are not slow
+  because the model is slow; they are slow because they wait for a lane and for the turn. A
+  Prometheus row of the decode rate alone cannot tell the two apart.
+- **A fresh engine measures better than a used one.** The engine's resident conversation and its
+  side slots keep their KV; a long-lived session has more of it, and the prepare/memory turns
+  work on it. Measure after a restart when comparing configurations.
+- **The engine's own turns look like a client's.** The preparer and the memory writer run
+  generations over the client's own context; the log shows them as `slot N prepare/memory job`
+  and they are in no metric (see the metrics contract).
+- **A first request after a restart is not a baseline.** The page cache of the 80 GB pack is
+  dropped at the start, so the first measurement runs on a busy disk.
+
 ## Baselines
 
 The paper compares StairCut with the same engine in two other configurations, on the same weights and the same box: plain greedy decoding (speculation off), and one drafter at a fixed block width (8 or 16) with its released tree budgets ([speculative-decoding.md](speculative-decoding.md)). On the benchmark row with the store off that is 49.89 tok/s for StairCut, 47.13 for block 8, 44.80 for block 16 and 13.69 for plain greedy decoding.
@@ -108,4 +161,4 @@ Each of these cost a wrong number once.
 
 ## Limits
 
-The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)). Parallel requests are measured on the weight cards only (above). The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
+The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)). Parallel requests are measured on the weight cards only (above), and long prompts with several lanes at once are measured in "Long prompts, and many lanes at once" (above). The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
