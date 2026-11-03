@@ -443,6 +443,27 @@ def test_a_cache_that_is_off_reports_nothing():
     assert "qse_cache_bytes" not in text and "qse_cache_hits_total" not in text
 
 
+def test_the_ngram_table_cache_counters_are_scrapeable():
+    """ENG-239's hot-row cache: a miss is an O_DIRECT disk read on the
+    decode path, so the miss rate is the engine's disk latency. It was in
+    the engine's report and in no metric."""
+    _fresh()
+    M.bind(cache_stats=lambda: {"resident_files": [
+        {"name": "ngram_table", "policy": "cold", "file_bytes": 32_640_156_672,
+         "resident_bytes": 3_321_856, "cache_bytes": 2_336_967_360, "direct": True,
+         "hits": 127_123, "misses": 62_475, "blocks_read": 62_475}]})
+    fam = parse(M.render())
+    assert _sample(fam, "qse_ngram_table_cache_hits_total") == 127_123
+    assert _sample(fam, "qse_ngram_table_cache_misses_total") == 62_475
+    assert _sample(fam, "qse_ngram_table_blocks_read_total") == 62_475
+    assert _sample(fam, "qse_ngram_table_cache_bytes") == 2_336_967_360
+    assert _sample(fam, "qse_ngram_table_file_bytes") == 32_640_156_672
+    # a family without a PLE table has no table: nothing is reported
+    M.bind(cache_stats=lambda: {"resident_files": []})
+    text = M.render()
+    assert "qse_ngram_table_cache_hits_total" not in text
+
+
 # --- the wiring ---------------------------------------------------------------------------------
 
 class _FakeHandler:

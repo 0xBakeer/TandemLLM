@@ -420,6 +420,42 @@ def _cache_bytes():
     return out
 
 
+#: the n-gram table's own report is a list (one table per PLE family), and
+#: `cache_stats()` is not cheap: the scrape-time gauges call it several
+#: times, so one call per scrape is memoised for a second. The source
+#: function is part of the key: a new source means a new report.
+_TABLE_STATS: tuple = (None, 0.0, {})
+
+
+def _ngram_table_stats() -> dict:
+    """The n-gram table's report: its policy, its hot-row cache and the
+    counters that say how often that cache is enough (ENG-239)."""
+    global _TABLE_STATS
+    fn = _SOURCES.get("cache_stats")
+    now = time.time()
+    if fn is not None and _TABLE_STATS[0] is fn and now - _TABLE_STATS[1] < 1.0:
+        return _TABLE_STATS[2]
+    out: dict = {}
+    if fn is not None:
+        for rep in (fn() or {}).get("resident_files") or []:
+            if isinstance(rep, dict) and rep.get("name") == "ngram_table":
+                out = rep
+                break
+    _TABLE_STATS = (fn, now, out)
+    return out
+
+
+def _ngram_table_field(field: str):
+    """One number out of the n-gram table's report, {} when the engine has
+    no table (a family without a PLE module) or the field is absent."""
+    def read():
+        rep = _ngram_table_stats()
+        if field not in rep:
+            return {}
+        return {(): float(rep[field])}
+    return read
+
+
 def _gpu_memory():
     try:
         from engine.cache import cuda_stats
@@ -503,6 +539,28 @@ REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay insid
                      ("cache",), collect=_cache_family("evictions")))
 REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
                    ("cache",), collect=_cache_bytes))
+
+# The n-gram table (ENG-239). Under the cold policy the table is read past
+# the page cache with O_DIRECT, through a hot-row cache of
+# QWEN38_FN_TABLE_CACHE_GB: a miss is a synchronous disk read on the
+# decode/prefill path, so the miss rate IS the engine's disk latency. It
+# was in the engine's report (cache_stats -> resident_files) and in no
+# metric, so a disk-bound decode looked like a slow model.
+REGISTRY.add(Counter("qse_ngram_table_cache_hits_total",
+                     "n-gram table rows served from the hot-row cache",
+                     collect=_ngram_table_field("hits")))
+REGISTRY.add(Counter("qse_ngram_table_cache_misses_total",
+                     "n-gram table rows read from disk (O_DIRECT) for a hot-row cache miss",
+                     collect=_ngram_table_field("misses")))
+REGISTRY.add(Counter("qse_ngram_table_blocks_read_total",
+                     "4 KiB blocks read from disk for the n-gram table",
+                     collect=_ngram_table_field("blocks_read")))
+REGISTRY.add(Gauge("qse_ngram_table_cache_bytes",
+                   "the n-gram table's hot-row cache, in bytes",
+                   collect=_ngram_table_field("cache_bytes")))
+REGISTRY.add(Gauge("qse_ngram_table_file_bytes",
+                   "the n-gram table's file size, in bytes",
+                   collect=_ngram_table_field("file_bytes")))
 
 
 def _memory_report() -> tuple | None:

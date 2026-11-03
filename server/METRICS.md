@@ -106,6 +106,11 @@ comes from the loop that pays for it rather than from a profiler, because
 | `qse_cache_entries` | gauge | `cache` | entries held |
 | `qse_prefill_tokens_reused_total` | counter | | prompt tokens restored from a snapshot |
 | `qse_prefill_tokens_forwarded_total` | counter | | prompt tokens run through the 64 layers |
+| `qse_ngram_table_cache_hits_total` | counter | | n-gram table rows served from the hot-row cache |
+| `qse_ngram_table_cache_misses_total` | counter | | n-gram table rows read from disk (O_DIRECT) for a hot-row cache miss |
+| `qse_ngram_table_blocks_read_total` | counter | | 4 KiB blocks read from disk for the n-gram table |
+| `qse_ngram_table_cache_bytes` | gauge | | the n-gram table's hot-row cache, in bytes |
+| `qse_ngram_table_file_bytes` | gauge | | the n-gram table's file size, in bytes |
 | `qse_memory_bytes` | gauge | `part` | OPS-47: the engine against its memory limits. `allocated` and `reserve` (the allocator's free blocks), the caches the policy caps (`resident_anchors`, `resident_stash`, `resident_pin`, `resident_park`, `state_store`), the limits themselves (`ceiling`, `peak`), and `prefill_peak`, the largest allocator peak a prefill has reached. The decision models are left out: they are roles with claims of their own |
 | `qse_memory_shed_total` | counter | `level` | caches given back to keep the engine under its ceiling or its declared peak, by level, cheapest first: `store`, `anchors`, `stash`, `park`, `pin` |
 | `qse_disk_cache_bytes` | gauge | `part` | C1, the disk tier: `entries` (what its files hold), `budget`, `free` (the file system's free space), `floor` (the free space it never takes it under, at least 50 GB), `staging` (the host buffer its reads and writes go through, 0 until first used) |
