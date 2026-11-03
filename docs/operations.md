@@ -191,7 +191,7 @@ After the tag, the release gets its benchmark report ([benchmark-report.md](benc
     python -m tools.release_report run --ref vX.Y.Z --pack flashnext-3.05 --out <dir> --prose wikitext2
     python -m tools.release_report render <dir>/data.json
 
-Check the page by eye: the verdict, every invalid row and its reason, any number far from the last release's. Then `publish` uploads it to the release as `tandemllm-X.Y.Z-report.html` (`gh release upload --clobber`). It measures nothing, and it refuses a page of another version or one that still names the box:
+Check the page by eye: the verdict, every invalid row and its reason, any number far from the last release's. Then `publish` uploads it to the release as `tandemllm-X.Y.Z-report-<model>.html` (`gh release upload --clobber`). It measures nothing, and it refuses a page of another version or one that still names the box:
 
     python -m tools.release_report publish <dir> --tag vX.Y.Z
 

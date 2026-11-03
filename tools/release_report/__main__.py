@@ -43,6 +43,8 @@ def cmd_publish(argv) -> int:
     ap.add_argument("dir")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--repo", default="0xBakeer/TandemLLM")
+    ap.add_argument("--name", default=None, help="the asset's file name (default: "
+                    "tandemllm-<version>-report-<model>.html; name the pack too for two packs of one model)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     d = Path(a.dir)
@@ -57,13 +59,20 @@ def cmd_publish(argv) -> int:
         print("[report] the page still names the box: " + "; ".join(bad[:8]), file=sys.stderr)
         return 2
     tmp = Path(tempfile.mkdtemp(prefix="report-"))
-    asset = tmp / f"tandemllm-{ver}-report.html"
+    asset = tmp / (a.name or asset_name(data, ver))
     shutil.copy(d / "report.html", asset)
     cmd = ["gh", "release", "upload", a.tag, str(asset), "--clobber", "--repo", a.repo]
     print("[report] " + " ".join(cmd))
     if a.dry_run:
         return 0
     return subprocess.run(cmd).returncode
+
+
+def asset_name(data: dict, ver: str) -> str:
+    """The release asset's name: the version and the model, so each model's page sits beside the
+    others on one release (Qwen3.8-Flash-Next -> qwen3.8-flash-next)."""
+    model = re.sub(r"[^a-z0-9.]+", "-", str(data.get("model") or "model").lower()).strip("-.")
+    return f"tandemllm-{ver}-report-{model}.html"
 
 
 def main(argv=None) -> int:

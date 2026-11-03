@@ -239,6 +239,13 @@ def test_data_json_merges_runs_and_keeps_one_version(tmp_path):
     json.loads((tmp_path / "data.json").read_text())
 
 
+def test_the_release_asset_is_named_by_version_and_model():
+    from tools.release_report.__main__ import asset_name
+    assert asset_name({"model": "Qwen3.8-Flash-Next"}, "0.15.1") == "tandemllm-0.15.1-report-qwen3.8-flash-next.html"
+    assert asset_name({"model": "Nemotron 3.5 Bolt"}, "0.16.0") == "tandemllm-0.16.0-report-nemotron-3.5-bolt.html"
+    assert asset_name({}, "0.16.0") == "tandemllm-0.16.0-report-model.html"
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())
