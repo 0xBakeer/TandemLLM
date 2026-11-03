@@ -6163,7 +6163,9 @@ def _par_window_cap() -> int | None:
     if pool is None:
         return None
     me = _par_index()
-    return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
+    # SPD-201: a slot the round runner decodes (phase "runner") is decoding too
+    return PAR_WINDOW_ROWS if any(s.index != me and s.phase in ("decode", "runner")
+                                  for s in pool.slots) else None
 
 
 def _roles_idle() -> bool:
