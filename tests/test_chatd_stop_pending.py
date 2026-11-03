@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import socket
 import sys
 import threading
@@ -80,6 +81,10 @@ def test_the_engines_silence_ends_when_the_connection_is_shut():
         data = b""
         while b"\r\n\r\n" not in data:
             data += c.recv(65536)
+        head, _, rest = data.partition(b"\r\n\r\n")
+        size = int(re.search(rb"(?i)\r\ncontent-length:\s*(\d+)", head).group(1))
+        while len(rest) < size:                    # the body can come in its own segment
+            rest += c.recv(65536)
         seen["request"] = data.split(b"\r\n", 1)[0]
         c.settimeout(10)
         try:
