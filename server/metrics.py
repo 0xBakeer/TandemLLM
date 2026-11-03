@@ -420,6 +420,66 @@ def _cache_bytes():
     return out
 
 
+#: the n-gram table's own report is a list (one table per PLE family), and
+#: `cache_stats()` is not cheap: the scrape-time gauges call it several
+#: times, so one call per scrape is memoised for a second. The source
+#: function is part of the key: a new source means a new report.
+_TABLE_STATS: tuple = (None, 0.0, {})
+
+
+def _ngram_table_stats() -> dict:
+    """The n-gram table's report: its policy, its hot-row cache and the
+    counters that say how often that cache is enough (ENG-239)."""
+    global _TABLE_STATS
+    fn = _SOURCES.get("cache_stats")
+    now = time.time()
+    if fn is not None and _TABLE_STATS[0] is fn and now - _TABLE_STATS[1] < 1.0:
+        return _TABLE_STATS[2]
+    out: dict = {}
+    if fn is not None:
+        for rep in (fn() or {}).get("resident_files") or []:
+            if isinstance(rep, dict) and rep.get("name") == "ngram_table":
+                out = rep
+                break
+    _TABLE_STATS = (fn, now, out)
+    return out
+
+
+def _ngram_table_field(field: str):
+    """One number out of the n-gram table's report, {} when the engine has
+    no table (a family without a PLE module) or the field is absent."""
+    def read():
+        rep = _ngram_table_stats()
+        if field not in rep:
+            return {}
+        return {(): float(rep[field])}
+    return read
+
+
+#: the engine's own work: the summary it prepares ahead of a request and the
+#: memory it writes after one. Both run generations on the engine, on the
+#: client's own context, and neither was in a metric — so an operator saw
+#: the engine "busy" with requests it had never sent.
+def _own_work_stats() -> dict:
+    fn = _SOURCES.get("own_work")
+    if fn is None:
+        return {}
+    try:
+        return fn() or {}
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _own_work_field(kind: str, field: str):
+    """One counter out of the engine's own work (`prepare` or `memory`)."""
+    def read():
+        got = _own_work_stats().get(kind)
+        if not isinstance(got, dict) or field not in got:
+            return {}
+        return {(): float(got[field])}
+    return read
+
+
 def _gpu_memory():
     try:
         from engine.cache import cuda_stats
@@ -503,6 +563,52 @@ REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay insid
                      ("cache",), collect=_cache_family("evictions")))
 REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
                    ("cache",), collect=_cache_bytes))
+
+# The n-gram table (ENG-239). Under the cold policy the table is read past
+# the page cache with O_DIRECT, through a hot-row cache of
+# QWEN38_FN_TABLE_CACHE_GB: a miss is a synchronous disk read on the
+# decode/prefill path, so the miss rate IS the engine's disk latency. It
+# was in the engine's report (cache_stats -> resident_files) and in no
+# metric, so a disk-bound decode looked like a slow model.
+REGISTRY.add(Counter("qse_ngram_table_cache_hits_total",
+                     "n-gram table rows served from the hot-row cache",
+                     collect=_ngram_table_field("hits")))
+REGISTRY.add(Counter("qse_ngram_table_cache_misses_total",
+                     "n-gram table rows read from disk (O_DIRECT) for a hot-row cache miss",
+                     collect=_ngram_table_field("misses")))
+REGISTRY.add(Counter("qse_ngram_table_blocks_read_total",
+                     "4 KiB blocks read from disk for the n-gram table",
+                     collect=_ngram_table_field("blocks_read")))
+REGISTRY.add(Gauge("qse_ngram_table_cache_bytes",
+                   "the n-gram table's hot-row cache, in bytes",
+                   collect=_ngram_table_field("cache_bytes")))
+REGISTRY.add(Gauge("qse_ngram_table_file_bytes",
+                   "the n-gram table's file size, in bytes",
+                   collect=_ngram_table_field("file_bytes")))
+
+# The engine's own work: the summary it prepares ahead of a client's request
+# and the memory it writes after one. Both are generations on the engine, over
+# the client's own context, and neither was in a metric: an operator saw the
+# engine busy with requests it had never sent, and the GPU at idle power.
+REGISTRY.add(Counter("qse_prepare_runs_total",
+                     "summaries the engine prepared ahead of a request",
+                     collect=_own_work_field("prepare", "prepared")))
+REGISTRY.add(Counter("qse_prepare_served_total",
+                     "prepared summaries a request went on from",
+                     collect=_own_work_field("prepare", "served")))
+REGISTRY.add(Counter("qse_prepare_yielded_total",
+                     "prepare runs that gave the engine to a client request",
+                     collect=_own_work_field("prepare", "yielded")))
+REGISTRY.add(Counter("qse_prepare_too_long_total",
+                     "prepare runs skipped: the conversation and the summary "
+                     "would not fit the context",
+                     collect=_own_work_field("prepare", "too_long")))
+REGISTRY.add(Counter("qse_memory_writer_runs_total",
+                     "memory writer turns the engine ran",
+                     collect=_own_work_field("memory", "runs")))
+REGISTRY.add(Counter("qse_memory_writer_notes_total",
+                     "memory notes the writer stored",
+                     collect=_own_work_field("memory", "written")))
 
 
 def _memory_report() -> tuple | None:
@@ -1088,7 +1194,7 @@ def instrument_drafter(drafter):
 
 
 def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
-         build: dict | None = None, suffix=None) -> None:
+         build: dict | None = None, suffix=None, own_work=None) -> None:
     """Point the scrape-time gauges at the server's own objects. Safe to call more than once."""
     if state is not None:
         _SOURCES["state"] = state
@@ -1103,6 +1209,8 @@ def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
         _SOURCES["cache_stats"] = cache_stats
     if info is not None:
         _SOURCES["info"] = {k: str(info.get(k, "")) for k in INFO_LABELS}
+    if own_work is not None:
+        _SOURCES["own_work"] = own_work
 
 
 def flags_hash(args: dict, env: dict | None = None) -> str:
@@ -1137,6 +1245,21 @@ def install(app) -> None:
     instrument_drafter(state.get("drafter"))
     eng = state.get("engine")
     w = getattr(eng, "w", None)
+    # The engine's own work: the summary it prepares ahead of a request and the
+    # memory it writes after one. Both are generations on the engine, and an
+    # operator could not see them at all.
+    def own_work() -> dict:
+        out: dict = {}
+        prep = state.get("prepared")
+        if prep is not None:
+            out["prepare"] = dict(getattr(prep, "stats", {}) or {})
+        cond = state.get("conductor")
+        mem = getattr(cond, "memory", None) if cond is not None else None
+        writer = getattr(mem, "writer", None)
+        if writer is not None:
+            out["memory"] = dict(getattr(writer, "stats", {}) or {})
+        return out
+    bind(own_work=own_work)
     bind(state, getattr(app, "INFLIGHT", None), getattr(app, "cache_stats", None), info={
         "version": VERSION,
         "model": state.get("model", ""),
