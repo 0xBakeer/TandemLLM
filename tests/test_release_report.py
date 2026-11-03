@@ -51,7 +51,7 @@ def test_plans_follow_the_server_and_the_gpu():
     assert q.lengths == [1024, 16384, 65536] and all(v == 1 for v in q.runs.values())
     assert q.conc_2k == [1, 4, 8] and q.conc_32k == [1, 8] and q.warm == [] and q.needles == [32768]
     est = plan.estimate(q, ["a", "c", "d", "e", "f", "g", "h"], 950.0, 60.0)
-    assert 12 < est["total"] < 26, est           # --quick: about 20 minutes on the reference box
+    assert 12 < est["total"] < 26, est           # --quick: 20 to 25 minutes on the reference box
 
 
 def test_a_server_without_a_drafter_is_plain():

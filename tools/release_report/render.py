@@ -652,8 +652,11 @@ def findings(data) -> list[tuple[str, str]]:
     d = valid(rows_of(data, "d"))
     if d:
         r = max(d, key=lambda r: r["v"]["chats"])
-        out.append(("note", f"{r['v']['chats']} chats arriving together on one new {kfmt(r['v'].get('prompt_tokens'))} system prompt "
-                            f"wait {num(r['v'].get('ttft_first_s'))} to {num(r['v'].get('ttft_last_s'))} s for a first token."))
+        none = not any(c for x in d for c in (x["v"].get("cached_tokens") or []))
+        out.append(("bad" if none else "note",
+                    f"{r['v']['chats']} chats arriving together on one new {kfmt(r['v'].get('prompt_tokens'))} system prompt "
+                    f"wait {num(r['v'].get('ttft_first_s'))} to {num(r['v'].get('ttft_last_s'))} s for a first token"
+                    + ("; none of them took a token of the shared prompt from the cache." if none else ".")))
     e = {r["key"]: r for r in valid(rows_of(data, "e"))}
     if "return" in e:
         v = e["return"]["v"]

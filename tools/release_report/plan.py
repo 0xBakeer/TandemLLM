@@ -157,7 +157,7 @@ def estimate(plan: Plan, sections, prefill_tok_s: float, decode_tok_s: float) ->
     s["f"] = len(plan.long_tasks) * plan.long_runs * ((plan.long_prompt or 0) / pf + LONG_ANSWER / dc) \
         if plan.long_prompt else 0
     lv = [n for n in (1, 2, 4, 8) if n <= plan.lanes]
-    levels = sum(4 * ANSWER / agg(n) for n in lv)
+    levels = sum(4 * n * ANSWER / agg(n) for n in lv)            # 1 warm-up + 3 rounds a level
     s["g"] = levels if plan.quick else 2 * levels + 6 * 400 / dc + 3 * (2048 / pf + 8192 / pf + 32768 / pf)
     s["h"] = 16 * 512 / dc + sum(plan.needles) / pf
     s["i"] = sum(n / pf + ANSWER / dc for n in plan.warm)

@@ -164,7 +164,7 @@ def print_plan(pl, est: dict, sections: list[str], h: dict, hw, log, card: dict 
     log(f"[report] sections {', '.join(sections)}; estimate (minutes): "
         + ", ".join(f"{k} {v}" for k, v in est.items()))
     if not pl.quick:
-        log("[report] --quick runs fewer lengths and one round each, about 20 minutes on a fast box")
+        log("[report] --quick runs fewer lengths and one round each: 20 to 25 minutes on a DGX Spark")
 
 
 def merge(out: Path, rows: list[dict], run: dict, sections: list[str], variant: str, new: bool) -> dict:
@@ -369,7 +369,7 @@ def main(argv=None) -> int:
     ap.add_argument("--url", default="http://127.0.0.1:8000", help="the running server (default the local one)")
     ap.add_argument("--out", required=True, help="the report's folder: data.json and raw/")
     ap.add_argument("--only", nargs="+", default=None, help=f"these sections ({', '.join(RUN_ORDER)}; b comes with a)")
-    ap.add_argument("--quick", action="store_true", help="fewer lengths and one round each (about 20 min)")
+    ap.add_argument("--quick", action="store_true", help="fewer lengths and one round each (20 to 25 min on a DGX Spark)")
     ap.add_argument("--plan", dest="plan_only", action="store_true", help="print the plan and the estimate, measure nothing")
     ap.add_argument("--hle", action="store_true", help="section j, the multiple-choice set (about 2.5 h)")
     ap.add_argument("--hle-data", default=None, help="the multiple-choice items (JSON lines, a local file)")
