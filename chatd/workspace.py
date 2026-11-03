@@ -495,11 +495,20 @@ class Workspace:
                             return out          # the budget is checked per chunk: a wedged
                                                     # regex can overrun it by one chunk at most
                         if skip:                # the rest of an over-window line: drop it,
-                            m = _GREP_EOL.search(buf)   # but the count keeps walking: the long
-                            if not m:                   # line ends at the FIRST boundary in the
-                                buf = ""                # buffer — lines past it belong to the
-                                held = False            # walk, not to the skip, so the rest of
-                                continue                # the chunk is never swallowed
+                            # but the count keeps walking: the long line ends at the FIRST
+                            # boundary in the buffer -- lines past it belong to the walk, not
+                            # to the skip. A \r at the chunk end is carried, not counted: a
+                            # \n opening the next chunk makes it one \r\n boundary.
+                            probe = buf[:-1] if buf.endswith("\r") else buf
+                            m = _GREP_EOL.search(probe)
+                            if not m:
+                                buf = buf[len(probe):]
+                                held = False
+                                if cliff:       # the 16 MiB cap holds inside a long line too
+                                    out.append(f"{self.show(p)}: <grep searched the first 16 MiB "
+                                               f"of this file — the rest of it is unread>")
+                                    break
+                                continue
                             n += 1
                             buf = buf[m.end():]
                             skip = False
@@ -538,7 +547,7 @@ class Workspace:
                                 out.append(f"{self.show(p)}:{n + 1}: {buf[:300]}")
                                 if len(out) >= limit:
                                     return out
-                            buf = ""
+                            buf = tail_s        # a held \r ends this line: keep it
                             skip = True
                             held = False
                         if cliff:               # the last chunk is searched, the rest is not:
@@ -550,6 +559,8 @@ class Workspace:
                         buf += tail
                     if buf and not skip:        # a final line with no newline
                         n += 1
+                        if buf.endswith("\r"):  # a lone \r ends it: not part of the line
+                            buf = buf[:-1]
                         if rx.search(buf[:GREP_LINE_MAX]):
                             out.append(f"{self.show(p)}:{n}: {buf[:300]}")
             except (PathError, OSError):

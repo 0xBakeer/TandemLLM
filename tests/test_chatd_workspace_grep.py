@@ -18,6 +18,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from chatd import workspace as W  # noqa: E402
 from chatd.workspace import Workspace
 
 
@@ -73,9 +74,9 @@ def test_a_genuine_no_match_still_says_so():
 
 
 def test_the_walk_is_lazy_so_a_limit_stops_it():
-    # `list(self.walk(start))` walked the whole tree before the first file was opened,
-    # so a grep that stopped at `limit` had already paid for the entire tree. The walk
-    # is streamed now, and the files it never reaches are not touched.
+    # `list(self.walk(start))` walked the whole tree before the first file was opened, so
+    # a grep that stopped at `limit` had already paid for the entire tree. Count the paths
+    # grep takes from walk(): a lazy walk hands over one file for `limit=1`, a list 2000.
     d = tempfile.mkdtemp(prefix="ws-lazy-")
     try:
         os.makedirs(d + "/uploads", exist_ok=True)
@@ -83,30 +84,36 @@ def test_the_walk_is_lazy_so_a_limit_stops_it():
             with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
                 f.write("LAZYNEEDLE\n")
         ws = Workspace(d)
-        t0 = time.monotonic()
+        taken = [0]
+        walk = ws.walk
+
+        def counting(*a, **kw):
+            for p in walk(*a, **kw):
+                taken[0] += 1
+                yield p
+        ws.walk = counting
         h = ws.grep("LAZYNEEDLE", "/workspace/uploads", limit=1)
-        took = time.monotonic() - t0
         assert len(h) == 1, h
-        # the whole tree is 2000 files; a lazy walk that stops at the limit is quick
-        assert took < 2.0, f"a limited grep over 2000 files took {took:.2f}s"
+        assert taken[0] <= 2, f"grep took {taken[0]} paths from the walk for limit=1"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_the_budget_covers_the_walk_too():
-    # a tree that is walked but never searched still counts against the 10 s budget
+    # the deadline is checked at the top of the file loop, so files that `include` filters
+    # out count against the budget: with the budget spent, grep says so
     d = tempfile.mkdtemp(prefix="ws-budget-")
+    saved = W.GREP_BUDGET_S
     try:
         os.makedirs(d + "/uploads", exist_ok=True)
-        for i in range(2000):
+        for i in range(20):
             with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
                 f.write("nothing to see here\n")
-        ws = Workspace(d)
-        t0 = time.monotonic()
-        h = ws.grep("LAZYNEEDLE-ABSENT", "/workspace/uploads")
-        took = time.monotonic() - t0
-        assert took < 12.0, f"the walk was not bounded: {took:.2f}s"
+        W.GREP_BUDGET_S = -1
+        h = Workspace(d).grep("ABSENT", "/workspace/uploads", include="*.none")
+        assert len(h) == 1 and "budget" in h[0], h
     finally:
+        W.GREP_BUDGET_S = saved
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -261,6 +268,87 @@ def run():
         t()
         print(f"ok   {t.__name__}")
     print(f"PASS ({len(tests)} tests)")
+
+
+def _numbers(path, data):
+    # grep's numbers for every line that starts with a marker, against splitlines()'
+    d = tempfile.mkdtemp(prefix="grep-cr-")
+    try:
+        os.makedirs(d + "/uploads")
+        with open(d + "/uploads/" + path, "wb") as f:
+            f.write(data)
+        h = Workspace(d).grep(r"^M\d+:", "/workspace/uploads/" + path, limit=10**6)
+        got = {int(x.split(": ", 1)[1].split(":")[0][1:]): int(x.split(":")[1]) for x in h
+               if ": M" in x}
+        want = {int(ln.split(":")[0][1:]): i + 1
+                for i, ln in enumerate(data.decode().splitlines()) if ln.startswith("M")}
+        return got, want
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_newline_less_file_over_16_mib_stops_at_the_cap():
+    # the skip of a line past its window went on to the end of the file: the cap holds there too
+    d = tempfile.mkdtemp(prefix="grep-cap-")
+    try:
+        os.makedirs(d + "/uploads")
+        with open(d + "/uploads/dump.bin", "wb") as f:
+            f.write(b"x" * (20 * 1024 * 1024))
+        h = Workspace(d).grep("ABSENT", "/workspace/uploads/dump.bin")
+        assert len(h) == 1 and "16 MiB" in h[0] and "unread" in h[0], h
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_lone_cr_ending_a_long_line_at_the_seam_keeps_the_next_line():
+    # the long line's \r is the last byte of chunk 1: the next line is its own, number 2
+    data = b"M0:" + b"a" * (W.GREP_CHUNK - 4) + b"\rM1: NEXT\nM2: last\n"
+    got, want = _numbers("cr.txt", data)
+    assert got == want == {0: 1, 1: 2, 2: 3}, (got, want)
+
+
+def test_a_crlf_across_the_seam_after_a_line_over_a_mib_counts_once():
+    data = b"M0:" + b"a" * (2 * W.GREP_CHUNK - 4) + b"\r\nM1: NEXT\nM2: last\n"
+    got, want = _numbers("crlf.txt", data)
+    assert got == want == {0: 1, 1: 2, 2: 3}, (got, want)
+
+
+def test_a_file_ending_in_a_lone_cr_matches_an_end_anchor():
+    d = tempfile.mkdtemp(prefix="grep-end-")
+    try:
+        os.makedirs(d + "/uploads")
+        with open(d + "/uploads/end.txt", "wb") as f:
+            f.write(b"one\ntwo END\r")
+        h = Workspace(d).grep("END$", "/workspace/uploads/end.txt")
+        assert len(h) == 1 and ":2:" in h[0], h
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_fuzz_of_long_lines_and_cr_on_the_seams_agrees_with_splitlines():
+    # long lines (past the window, past a chunk) whose \r, \r\n or \n lands on a seam
+    import random
+    rng = random.Random(65)
+    C = W.GREP_CHUNK
+    for k in range(40):
+        out, i = bytearray(), 0
+        while len(out) < 2_600_000:
+            sep = rng.choice([b"\n", b"\r", b"\r\n"])
+            head = b"M%d:" % i
+            mode = rng.random()
+            if mode < 0.4:                    # the separator's first byte ends a chunk
+                nxt = (len(out) // C + 1) * C
+                n = nxt - len(out) - len(head) - 1
+                if n < 0:
+                    n += C
+            elif mode < 0.7:
+                n = rng.randint(W.GREP_LINE_MAX, W.GREP_LINE_MAX + 4096)
+            else:
+                n = rng.randint(0, 80)
+            out += head + b"b" * n + sep
+            i += 1
+        got, want = _numbers(f"fz{k}.txt", bytes(out))
+        assert got == want, (k, sorted(set(want.items()) ^ set(got.items()))[:5])
 
 
 if __name__ == "__main__":
