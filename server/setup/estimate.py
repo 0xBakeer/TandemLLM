@@ -291,6 +291,8 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
                      f"conversations give their memory back first, and a lane that would take the "
                      f"box under its floor stops with memory_full; the Chat tab continues it once "
                      f"memory is free.")
+        notes.append("Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane "
+                     "its full window.")
     elif slots > 1:
         notes.append(f"All {slots} lanes can hold the full {window:,}-token window at once "
                      f"({_r(lane_full):.2f} GiB each).")

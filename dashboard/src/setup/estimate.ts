@@ -215,6 +215,7 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     notes.push(
       `${full} of ${slots} lanes can hold the full ${thousands(window)}-token window at once (${unit.toFixed(2)} GiB each); every lane at it would need ${r2(kvWorst - room).toFixed(2)} GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.`,
     );
+    notes.push('Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.');
   } else if (slots > 1) {
     notes.push(`All ${slots} lanes can hold the full ${thousands(window)}-token window at once (${unit.toFixed(2)} GiB each).`);
   }
