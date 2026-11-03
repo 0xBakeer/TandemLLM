@@ -132,6 +132,11 @@ class ReportClient(GateClient):
             rec["error"] = f"{type(exc).__name__}: {exc}"
         rec["e2e_s"] = round(time.monotonic() - t0, 4)
         rec["text"] = "".join(text)
+        if not rec["error"] and rec["id"] is None and not rec["left"]:
+            # the stream closed without one chunk: say whether the server itself went away
+            h = pc.health(self.base)
+            rec["error"] = (f"the stream closed after {rec['e2e_s']:.0f} s with no answer"
+                            + (", and the server stopped answering /health" if h.get("status") != "ok" else ""))
         return summarize(rec, self)
 
     def complete_rec(self, prompt: str, max_tokens: int, seed: int = 0, logprobs: int | None = None,
