@@ -193,7 +193,7 @@ def test_the_verdict_states_what_the_rows_show():
     text = " ".join(t for _, t in f)
     assert "Drafting runs up to 16k prompts and stops from 32k on" in text and "not isolated" in text
     assert any(k == "bad" and "after the rest of the suite" in t and "a fresh server" in t for k, t in f)
-    assert "measured rows are invalid" in text
+    assert "measured row" in text and "invalid" in text
 
 
 def test_scrub_and_leaks():

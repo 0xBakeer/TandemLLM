@@ -460,7 +460,7 @@ def warm_pairs(data) -> list[tuple[int, float | None, str, dict]]:
         if n in fresh:
             out.append((n, fresh[n]["v"].get("decode_tok_s"), "a fresh server", r))
         else:
-            out.append((n, med([x["v"].get("decode_tok_s") for x in L.get(n, [])]), "earlier (section a)", r))
+            out.append((n, med([x["v"].get("decode_tok_s") for x in L.get(n, [])]), "section a", r))
     return out
 
 
@@ -636,6 +636,15 @@ def findings(data) -> list[tuple[str, str]]:
                 out.append(("good" if an > 1.5 * a1 else "bad",
                             f"{ns[-1]} requests at once total {num(an)} tok/s against {num(a1)} for {ns[0]} "
                             f"({an / a1:.1f} times), prefill included."))
+        t32 = sorted((r for r in valid(c) if r["key"].startswith("32k/")), key=lambda r: r["v"]["n"])
+        if len(t32) >= 2:
+            top = t32[-1]["v"]
+            one = by_length(data).get(32768)
+            alone = med([r["v"].get("ttft_s") for r in one]) if one else None
+            out.append(("note", f"{top['n']} prompts of 32k released together get their first tokens after "
+                                f"{num(top.get('ttft_min_s'), 0)} to {num(top.get('ttft_max_s'), 0)} s"
+                                + (f"; one alone takes {num(alone, 0)} s" if alone else "")
+                                + ". None of them answers early."))
         if bad_ns:
             out.append(("bad", "No proof that " + ", ".join(map(str, bad_ns)) + " requests decoded at once: those levels "
                                "are invalid and show no number."))
@@ -652,7 +661,8 @@ def findings(data) -> list[tuple[str, str]]:
                     f"other long prompts (cold: {num(v.get('turn1_ttft_s'))} s)."))
     if "load" in e:
         v = e["load"]["v"]
-        out.append(("note", f"While a {kfmt(v.get('prompt_tokens'))} prompt prefills, two decoding chats drop from "
+        low = (v.get("decoders_during_tok_s") or 0) < 0.2 * (v.get("decoders_before_tok_s") or 0)
+        out.append(("bad" if low else "note", f"While a {kfmt(v.get('prompt_tokens'))} prompt prefills, two decoding chats drop from "
                             f"{num(v.get('decoders_before_tok_s'))} to {num(v.get('decoders_during_tok_s'))} tok/s combined; its "
                             f"first token comes after {num(v.get('ttft_s'))} s."))
     for n, early, what, r in warm_pairs(data):
@@ -660,8 +670,9 @@ def findings(data) -> list[tuple[str, str]]:
         if early and wv:
             ratio = wv / early
             out.append(("bad" if ratio < 0.8 else "good",
-                        f"A {kfmt(n)} prompt decodes at {num(wv)} tok/s after the rest of the suite against {num(early)} "
-                        f"on {what} ({ratio:.2f} times)" + (". The cause is not isolated." if ratio < 0.8 else ".")))
+                        f"A {kfmt(n)} prompt decodes at {num(wv)} tok/s after the rest of the suite against {num(early)}"
+                        + (" on a fresh server" if what == "a fresh server" else " in section a, earlier on the same server")
+                        + f" ({ratio:.2f} times)" + (". The cause is not isolated." if ratio < 0.8 else ".")))
     cmp_ = compare(rows_of(data, "h"))
     if cmp_:
         same = sum(1 for c in cmp_ if c["same"])
@@ -677,8 +688,9 @@ def findings(data) -> list[tuple[str, str]]:
                     f"Needles found: {len(found)} of {len(nd)} (" + ", ".join(kfmt(r["cond"]["target"]) for r in nd) + ")."))
     inv = [r for r in data.get("rows") or [] if not r.get("valid") and not r.get("skipped")]
     if inv:
-        out.append(("bad", f"{len(inv)} measured rows are invalid (a missing proof of concurrency, a failed request or a "
-                           "response not served raw); they show their reason and no number."))
+        out.append(("bad", (f"{len(inv)} measured rows are invalid" if len(inv) > 1 else "One measured row is invalid")
+                    + " (a missing proof of concurrency, a failed request or a response not served raw): "
+                    + ("they show" if len(inv) > 1 else "it shows") + " the reason and no number."))
     for x in data.get("notes") or []:
         out.append(("note", str(x)))
     return out
