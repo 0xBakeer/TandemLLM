@@ -1127,27 +1127,20 @@ def test_the_fetch_keeps_an_operators_own_choice():
     assert out.stdout.strip() == "0", out.stdout
 
 
-
-def test_the_fetch_keeps_an_operators_own_choice():
-    # setdefault: an operator's own HF_HUB_DISABLE_XET in the env stays in charge
-    import subprocess
-    import sys
-    import textwrap
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    script = textwrap.dedent("""
-        import os, sys
-        sys.path.insert(0, %r)
-        import ops.fetch_weights  # noqa: F401
-        print(os.environ.get("HF_HUB_DISABLE_XET", ""))
-    """) % repo
-    env = dict(os.environ)
-    env["HF_HUB_DISABLE_XET"] = "0"
-    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
-    assert out.returncode == 0, out.stderr[-800:]
-    assert out.stdout.strip() == "0", out.stdout
-
-
-
+def test_the_runner_and_its_steps_pass_the_xet_switch_through():
+    # an operator's HF_HUB_DISABLE_XET reaches the detached runner (`spawn`) and every step
+    # it runs (`Runner.env`): both keep-lists filter the environment by name
+    import inspect
+    saved = os.environ.get("HF_HUB_DISABLE_XET")
+    os.environ["HF_HUB_DISABLE_XET"] = "0"
+    try:
+        assert apply.Runner.env(object.__new__(apply.Runner))["HF_HUB_DISABLE_XET"] == "0"
+    finally:
+        if saved is None:
+            os.environ.pop("HF_HUB_DISABLE_XET", None)
+        else:
+            os.environ["HF_HUB_DISABLE_XET"] = saved
+    assert '"HF_HUB_DISABLE_XET"' in inspect.getsource(apply.spawn)
 
 
 if __name__ == "__main__":

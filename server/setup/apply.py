@@ -841,7 +841,7 @@ def spawn(jid: str) -> int:
     env = {k: v for k, v in os.environ.items()
            if k in ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "HF_TOKEN", "HF_HOME",
                     "HF_HUB_CACHE", "HF_TOKEN_PATH", "QSE_OPS_DIR", "BOX_LOCK", "TZ",
-                    "CUDA_HOME", "MEM_NEED_GB")}
+                    "CUDA_HOME", "MEM_NEED_GB", "HF_HUB_DISABLE_XET")}
     with open(os.path.join(d, "runner.out"), "ab") as out:
         p = subprocess.Popen([sys.executable, "-m", "server.setup.apply", "run", d], cwd=ROOT,
                              env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
@@ -939,7 +939,7 @@ class Runner:
 
     def env(self, **extra) -> dict:
         keep = ("PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
-                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB")
+                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB", "HF_HUB_DISABLE_XET")
         e = {k: v for k, v in os.environ.items() if k in keep}
         e.update({k: str(v) for k, v in extra.items()})
         return e
