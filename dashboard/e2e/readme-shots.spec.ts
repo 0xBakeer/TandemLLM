@@ -78,6 +78,8 @@ test.describe('desktop', () => {
 
   test("setup: Bolt's measured speed table", async ({ page, request }) => {
     await setupMock(request);
+    // the advanced flow: a fresh browser lands on the simple quant cards, not the overview
+    await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
     await openView(page, '#/setup/nemotron-3.5-bolt-74b-a9b');
     await page.locator('qse-setup').waitFor();
     await page.waitForTimeout(1500);

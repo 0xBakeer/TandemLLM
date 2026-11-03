@@ -1,6 +1,6 @@
 # The setup guide
 
-The dashboard's `#/setup` page walks through an install in eight steps, from picking a model and its weights to the tools beside it, the parallel requests and the memory they take. The last two steps show what will change and then install it. A small assistant called Wren answers questions on the side and can change the page when you ask. The server half lives in `server/setup/` and `server/setup_api.py` and answers under `/v1/setup/*`. None of it is on the serving path: a chat request never reaches it, and the engine imports it only when a `/v1/setup` route is called.
+The dashboard's `#/setup` page walks through an install. A new browser opens the simple guide, three pages: the model, its weights, and one page of folded settings. The switch at the top brings back all eight steps, from picking a model and its weights to the tools beside it, the parallel requests and the memory they take. The last two steps show what will change and then install it. A small assistant called Wren answers questions on the side and can change the page when you ask. The server half lives in `server/setup/` and `server/setup_api.py` and answers under `/v1/setup/*`. None of it is on the serving path: a chat request never reaches it, and the engine imports it only when a `/v1/setup` route is called.
 
 ## Setup mode
 
