@@ -37,7 +37,7 @@
 
 TandemLLM is an inference engine for one NVIDIA DGX Spark, and it runs several models: Qwen3.8-27B, Qwen3.8-Flash-Next, LiquidAI's LFM2.5-24B-A2B (from 0.9.0), NVIDIA's Nemotron 3.5 Bolt 74B-A9B (from 0.10.0) and NVIDIA's Nemotron 3.5 Super VL 120B-A12B (from 0.11.0). The box serves one at a time, and they share one server and one setup guide. LFM2.5 is the fast one. Its default pack decodes 153.5 tok/s for one request.
 
-We measure the engine's speed on raw `/v1/completions`, one request and 8 at once, with the chat layer out of the way. [CHANGELOG.md](CHANGELOG.md) has each release's rows, and each weight card on Hugging Face has its model's. The built-in chat (the dashboard's Chat tab, chatd and the conductor's chat profiles) is in beta and not measured.
+We measure the engine's speed on raw `/v1/completions`, one request and 8 at once, with the chat layer out of the way. [CHANGELOG.md](CHANGELOG.md) has each release's rows, and each weight card on Hugging Face has its model's. The built-in chat (the dashboard's Chat tab, chatd and the conductor's chat profiles) is in beta and not measured. Each release also carries a benchmark report, a page attached to its GitHub release, and you can make the same page for your own GPU and model with one command ([docs/benchmark-report.md](docs/benchmark-report.md)).
 
 On Qwen3.8-27B with the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
