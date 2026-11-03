@@ -141,7 +141,8 @@ GOLDEN_FP4 = {
     # tools/nvfp4_relu2.py): nemotron_h (flint reads nvfp4_relu2.py and may move)
     # #136: the dense kernels take 7-bit EXL3 tensors (tools/csrc/fn_kernels/kernels.cu, the LFM2.5, NemotronH and
     # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
-    # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): flint, lfm2_moe, qwen3_5_moe, qwen4_exp
+    # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): qwen4_exp, flint; lfm2_moe and
+    # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
     "qwen4_exp": "6441d7ec024223bf8fd0cfe13bc925e1c492ad0d537f643a2c1de88dbfb03ee2",
     "nemotron_h": "b42ab12b898cbfb68580c024ff91b63d18c30b4c1e9e5b125215cbddb865fd2e",
