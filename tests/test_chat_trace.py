@@ -164,6 +164,66 @@ def test_the_fork_cli_against_an_engine():
         srv.shutdown()
 
 
+NOTE = {"op": "add", "scope": "project", "kind": "gotcha", "title": "the planner build needs node 20",
+        "why": "node 18 failed twice", "body": "Node 18 fails on the import map; use node 20."}
+NOT_AVAILABLE = "The tool 'tandem_memory' is not available in this chat. Available: bash."
+
+
+def _memory_trace(alone: bool = False, note: dict = NOTE) -> dict:
+    """The 2026-11-03 shape: an answer, then its note as a `tandem_memory` call chatd answered as
+    not available, the note again as blocks with no text, then the nudged answer (synthetic).
+    `alone`: the call is the whole step, the answer comes in the next one."""
+    blocks = ('<tandem_memory op="add" scope="project" kind="gotcha">\ntitle: ' + note["title"]
+              + "\n\n" + note["body"] + "\n</tandem_memory>")
+    first = [{"type": "text", "text": "The planner builds; all 12 tests pass.", "step": 2}]
+    if alone:
+        first = []
+    steps = [_call(1, 1, "bash", {"command": "npm test"}, "12 passing\n", 0),
+             *first,
+             _call(2, 2, "tandem_memory", note, NOT_AVAILABLE, status="failed"),
+             {"type": "text", "text": ("The planner builds; all 12 tests pass." if alone
+                                       else blocks), "step": 3},
+             {"type": "text", "text": "Done: the planner builds.", "step": 4}]
+    return {"settings": {"effort": "auto", "thinking": True, "permission_mode": "yolo",
+                         "tools": ["bash", "read_file"], "max_steps": 100},
+            "messages": [{"role": "user", "parts": [{"type": "text", "text": "Build the planner"}]},
+                         {"role": "assistant", "parts": steps}]}
+
+
+def test_memory_calls_through_the_engine_filter():
+    """`--memory`: the recorded `tandem_memory` call goes through the engine's memory filter, is
+    stored as a note and never reaches chatd; the answer before it ends the turn. Without it the
+    replay shows the record's failure (chatd answers that the tool is not available)."""
+    import tempfile
+    res = T.replay(_memory_trace())
+    gone = [p for p in res["calls"] if p["name"] == "tandem_memory"]
+    assert gone and NOT_AVAILABLE.split(". ")[0] in gone[0]["output"]["content"], gone
+    bridge = T.MemoryBridge(tempfile.mkdtemp(prefix="trace-notes-"))
+    res = T.replay(_memory_trace(), memory=bridge)
+    assert not T.check(res) and not T.memory_report(res, bridge), T.memory_report(res, bridge)
+    assert [p["name"] for p in res["calls"]] == ["bash"], res["calls"]
+    # no working directory in a chat: the project note is kept at user scope, as the engine does
+    assert [(n["request"], n["scope"], n["kind"]) for n in bridge.stored] == [
+        (2, "user", "gotcha")], bridge.stored
+    note = bridge.store.notes("owner")[0]
+    assert note.title == NOTE["title"] and "why: node 18 failed twice" in note.body
+    last = res["snapshot"]["messages"][-1]
+    text = "".join(p.get("text") or "" for p in last["parts"] if p.get("type") == "text")
+    assert text.strip().endswith("The planner builds; all 12 tests pass."), text
+    assert len(res["requests"]) == 2 and res["statuses"] == ["idle"], res["statuses"]
+    # a call that is the whole step: the engine continues it, the next recorded step is its answer
+    bridge = T.MemoryBridge(tempfile.mkdtemp(prefix="trace-notes-"))
+    res = T.replay(_memory_trace(alone=True), memory=bridge)
+    assert not T.memory_report(res, bridge) and bridge.continued == [2], bridge.continued
+    assert len(bridge.stored) == 1 and len(res["requests"]) == 2
+    # a rule written in a tool turn is refused by the store as its block is (rule_from_tool):
+    # hidden all the same, and still no call reaches chatd
+    bridge = T.MemoryBridge(tempfile.mkdtemp(prefix="trace-notes-"))
+    res = T.replay(_memory_trace(note=dict(NOTE, kind="rule")), memory=bridge)
+    assert not T.memory_report(res, bridge) and bridge.stored == []
+    assert [n["why"] for n in bridge.refused] == ["rule_from_tool"], bridge.refused
+
+
 def test_the_recorded_traces():
     folder = os.environ.get("CHAT_TRACES")
     if not folder:
