@@ -81,6 +81,8 @@ The `gate` workflow runs on every pull request with read-only permissions and no
 
 After the re-run on the reference box, a maintainer adds `gate-verified`.
 
+No fitting GPU? Say so in the pull request. A maintainer adds `gate-maintainer`, the check passes, and the maintainer runs the gate on the reference box and posts the report.
+
 ## Hardware profiles
 
 `tools/gate/hw/` holds one adapter per GPU. Each adapter answers the gate's questions about that GPU, from the lanes and prompt sizes to the memory limits and the reference pack. Detection reads `nvidia-smi` and the engine's torch. A GPU no adapter claims gets `generic`, with small sizes and no reference pack (pass `--pack`). `python -m tools.gate hw` prints the profile for this box.

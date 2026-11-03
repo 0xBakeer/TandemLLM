@@ -60,4 +60,5 @@ GitHub's own `duplicate`, `invalid`, `wontfix`, `good first issue` and `help wan
 | hardware | `hw/other` | Seen on another GPU or machine |
 | process | `run-gpu` | A maintainer runs the GPU tests on a DGX Spark |
 | process | `gate-verified` | A maintainer re-ran the quality gate on a DGX Spark |
+| process | `gate-maintainer` | The author has no fitting GPU: a maintainer runs the quality gate instead |
 | process | `skip-changelog` | Left out of the generated release notes |

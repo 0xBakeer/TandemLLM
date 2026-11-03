@@ -75,6 +75,7 @@ hardware|hw/rtx-pro-6000|0598bc|Seen on an NVIDIA RTX PRO 6000
 hardware|hw/other|5fb3c4|Seen on another GPU or machine
 process|run-gpu|1f2328|A maintainer runs the GPU tests on a DGX Spark
 process|gate-verified|0e8a16|A maintainer re-ran the quality gate on a DGX Spark
+process|gate-maintainer|0e8a16|The author has no fitting GPU: a maintainer runs the quality gate instead
 process|skip-changelog|ededed|Left out of the generated release notes'
 
 if [ "$TABLE" = 1 ]; then

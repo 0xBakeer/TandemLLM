@@ -132,6 +132,7 @@ def summary_md(res: dict) -> str:
     lines += [f"- problem: {p}" for p in res["problems"]]
     lines += [f"- note: {n}" for n in res["notes"]]
     lines.append("- `gate-verified` is a maintainer's label after the re-run on the reference box")
+    lines.append("- no fitting GPU: say so, and a maintainer adds `gate-maintainer` and runs the gate")
     return "\n".join(lines) + "\n"
 
 

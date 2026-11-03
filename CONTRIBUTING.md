@@ -24,7 +24,7 @@ A milestone is a release. `v0.14.1` holds what the next patch ships, and `Later`
 
 An issue whose title starts with "Epic:" tracks a larger goal, and its sub-issues are the steps. The [TandemLLM board](https://github.com/users/0xBakeer/projects/3) shows every issue and pull request with its status and release.
 
-A commit for work that started as a GitHub issue uses the issue number as its key: `#123: Keep the prefix cache across a profile switch`. A maintainer adds `run-gpu` to a pull request that needs the GPU tests in `tests/gpu/`, runs them on a DGX Spark, and posts the result on the pull request. For an engine or kernel change the maintainer also runs the gate on the DGX Spark and adds `gate-verified` when its report agrees.
+A commit for work that started as a GitHub issue uses the issue number as its key: `#123: Keep the prefix cache across a profile switch`. A maintainer adds `run-gpu` to a pull request that needs the GPU tests in `tests/gpu/`, runs them on a DGX Spark, and posts the result on the pull request. For an engine or kernel change the maintainer also runs the gate on the DGX Spark and adds `gate-verified` when its report agrees. An author with no fitting GPU says so; the maintainer adds `gate-maintainer` and runs the gate instead.
 
 ## Commit messages and docs
 
