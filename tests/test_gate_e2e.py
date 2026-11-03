@@ -51,6 +51,8 @@ def gate(*args) -> dict:
     out = tempfile.mkdtemp(prefix="gate-e2e-")
     cmd = [sys.executable, "-m", "tools.gate", "run", "--pack", "fake", "--hw", "fake",
            "--base", "HEAD", "--head", "HEAD", "--suite", "quick", "--port", str(free_port()),
+           # every arm's port from the suite's shared counter, so no other test file is handed one
+           "--ports", ",".join(str(free_port()) for _ in range(4)),
            "--out", out, *args]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=1200,
                        env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))

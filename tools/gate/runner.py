@@ -167,6 +167,8 @@ def main(argv=None) -> int:
     ap.add_argument("--hw", default="auto")
     ap.add_argument("--python", default=sys.executable, help="the engine's Python (its torch)")
     ap.add_argument("--port", type=int, default=8100)
+    ap.add_argument("--ports", default="", help="comma list: the arms take these ports in order "
+                    "before --port's scan (a test suite hands out its own ports)")
     ap.add_argument("--pairs", type=int, default=0, help="servers a side (default 1; 2 at full)")
     ap.add_argument("--site", default=None)
     ap.add_argument("--lock", default=None, help="a lock file to hold for the GPU part (flock)")
@@ -241,7 +243,12 @@ def main(argv=None) -> int:
         if plan.kernels and not k_none:
             kern["head"] = ksuite.run_all(trees["head"], plan.kernels, a.python, log)
         for side, variant, suites in arms:
-            port = server.free_port(a.port, taken)
+            given = [int(p) for p in a.ports.split(",") if p.strip()]
+            if any(p < server.MIN_PORT for p in given):
+                raise SystemExit(f"[gate] --ports below {server.MIN_PORT}: the gate never starts "
+                                 "a server beside the box's own")
+            left = [p for p in given if p not in taken and not server.port_busy(p, strict=True)]
+            port = left[0] if left else server.free_port(a.port, taken)
             taken.add(port)
             env = arm_env(prof, pack, side, variant, head_env)
             arm = server.Arm(side, variant, trees[side], port,
