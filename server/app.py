@@ -3766,6 +3766,18 @@ def _answer(ctx, start: int, extra, think) -> str:
     return text[i + len("</think>"):] if i >= 0 else text
 
 
+def _disk_session_id(client_kind: str | None, plan, conv_id: str | None) -> str | None:
+    """The session the disk tier files a request under. A request's own id wins. Hermes sends
+    none, so under an active plan its main requests take the router's head key (`h:`, the messages
+    through the first user message) and a new session's head is saved on its first request. A side
+    request (Hermes' title call) shares `Session("side")` and keeps no name, as does a raw request."""
+    if conv_id is not None or client_kind != "hermes" or plan is None:
+        return conv_id
+    if not plan.active or plan.side is not None or plan.session is None:
+        return None
+    return plan.session.key
+
+
 def _remember(*args, **kw) -> None:
     """`_remember_turn`, its time the calling request's `remember` part of the [req] line (SPD-257,
     `cache.req_ms_fields`)."""
@@ -9077,6 +9089,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        # the name the prefix capture and the session snapshot (the disk tier) file this request
+        # under; conv_id itself, which compaction, the preparer and the memory writer key on, stays
+        disk_id = _disk_session_id(rec.client_kind, plan, conv_id)
         # SRV-241: a regenerate (server/regenerate.py) samples with a fresh seed; every other
         # request keeps the sampler it had (greedy unless the client asked). Under an active plan
         # only: raw requests (benchmarks) and side requests are never looked at.
@@ -10140,10 +10155,10 @@ class Handler(BaseHTTPRequestHandler):
                     # SRV-709: a lane the pool refuses gives way and goes on (`_recomputing`)
                     return rec.track(self._recomputing(
                         par, cid, rec, stream, prompt, max_new, budget_state,
-                        lambda p, n: generate_stream(p, n, eos, budget_state, conv_id, deadline,
+                        lambda p, n: generate_stream(p, n, eos, budget_state, disk_id, deadline,
                                                      pen=pen, pstop=guard, sampler=samp,
                                                      on_prefill=watch, **kw)))
-                return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
+                return rec.track(generate_stream(prompt, max_new, eos, budget_state, disk_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
 
@@ -10287,7 +10302,7 @@ class Handler(BaseHTTPRequestHandler):
                     mem_taken = _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt,
                                              comp is None and mm is None)
                     if (cached_ids is None or ci) and not micro:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                        _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
@@ -10937,7 +10952,7 @@ class Handler(BaseHTTPRequestHandler):
                                       comp is None and mm is None)
             if cached_ids is None and failed is None and not micro:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
