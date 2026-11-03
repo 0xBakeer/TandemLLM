@@ -1042,6 +1042,114 @@ def _sid(pid, default):
         return default + 1          # gone already: it ran in a session of its own
 
 
+def test_the_oom_death_names_itself():
+    # a runner killed mid-fetch is reported as the oom-killer it almost certainly was;
+    # a death in any other step keeps the plain message (we do not guess without evidence)
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="setup-job-")
+    jid = "a0b6d3fa00989455"
+    with open(os.path.join(tmp, "state.json"), "w") as fh:
+        pass
+    os.makedirs(os.path.join(tmp, jid), exist_ok=True)
+    real_dir, real_alive = apply.jobs_dir, apply._alive
+    try:
+        apply.jobs_dir = lambda: tmp
+        apply._alive = lambda *a, **k: False
+        def job_running(sid):
+            return {"state": "running", "created_at": time.time() - 60, "pid": 999999,
+                    "steps": [{"id": s, "label": s, "state": "running" if s == sid else "pending"}
+                              for s in ("check", "fetch", "switch")]}
+        with open(os.path.join(tmp, jid, "state.json"), "w") as fh:
+            json.dump(job_running("fetch"), fh)
+        job = apply.read_job(jid)
+        assert job["state"] == "failed" and "out-of-memory" in job["message"], job["message"]
+        # the message names the likely cause, not the only one: _alive() is also false
+        # after a reboot or a manual kill
+        assert "most often" in job["message"], job["message"]
+        with open(os.path.join(tmp, jid, "state.json"), "w") as fh:
+            json.dump(job_running("switch"), fh)
+        job = apply.read_job(jid)
+        assert job["message"] == "interrupted: the job's process is gone", job["message"]
+    finally:
+        apply.jobs_dir, apply._alive = real_dir, real_alive
+
+
+def test_the_fetch_avoids_the_xet_buffers():
+    # The download runs beside a loaded engine: the plain HTTP path is the default, so
+    # the hub's Xet backend does not ask for its ~2 GiB of buffers (that is what the
+    # oom-killer takes down).
+    #
+    # huggingface_hub reads HF_HUB_DISABLE_XET ONCE, when huggingface_hub.constants is
+    # first imported -- not when the download runs. assets() -> plan() -> hub_files()
+    # imports HfApi before fetch() is ever reached (the command-line path runs plan()
+    # first too), so setting it inside fetch() was too late: the hub had already read
+    # it as unset. The default is set at import time now.
+    #
+    # The stub hub is a real module on disk, so its constants module reads the env when
+    # IT is imported -- the way the real one does. A stub built in memory would read it
+    # when the test built it, which would prove nothing about the order.
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stub = tempfile.mkdtemp(prefix="hub-stub-")
+    os.makedirs(os.path.join(stub, "huggingface_hub"))
+    with open(os.path.join(stub, "huggingface_hub", "__init__.py"), "w") as fh:
+        fh.write("")
+    with open(os.path.join(stub, "huggingface_hub", "constants.py"), "w") as fh:
+        fh.write("import os\n"
+                 "HF_HUB_DISABLE_XET = os.environ.get('HF_HUB_DISABLE_XET', '')\n")
+    script = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, %r)      # the stub hub comes first
+        sys.path.insert(1, %r)      # the repo
+        import ops.fetch_weights    # the module sets the default, at import time
+        import huggingface_hub.constants
+        print(huggingface_hub.constants.HF_HUB_DISABLE_XET)
+    """) % (stub, repo)
+    env = dict(os.environ)
+    env.pop("HF_HUB_DISABLE_XET", None)
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip() == "1", f"the hub would read HF_HUB_DISABLE_XET={out.stdout.strip()!r}"
+
+
+def test_the_fetch_keeps_an_operators_own_choice():
+    # setdefault: an operator's own HF_HUB_DISABLE_XET in the env stays in charge
+    import subprocess
+    import sys
+    import textwrap
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = textwrap.dedent("""
+        import os, sys
+        sys.path.insert(0, %r)
+        import ops.fetch_weights  # noqa: F401
+        print(os.environ.get("HF_HUB_DISABLE_XET", ""))
+    """) % repo
+    env = dict(os.environ)
+    env["HF_HUB_DISABLE_XET"] = "0"
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip() == "0", out.stdout
+
+
+def test_the_runner_and_its_steps_pass_the_xet_switch_through():
+    # an operator's HF_HUB_DISABLE_XET reaches the detached runner (`spawn`) and every step
+    # it runs (`Runner.env`): both keep-lists filter the environment by name
+    import inspect
+    saved = os.environ.get("HF_HUB_DISABLE_XET")
+    os.environ["HF_HUB_DISABLE_XET"] = "0"
+    try:
+        assert apply.Runner.env(object.__new__(apply.Runner))["HF_HUB_DISABLE_XET"] == "0"
+    finally:
+        if saved is None:
+            os.environ.pop("HF_HUB_DISABLE_XET", None)
+        else:
+            os.environ["HF_HUB_DISABLE_XET"] = saved
+    assert '"HF_HUB_DISABLE_XET"' in inspect.getsource(apply.spawn)
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
