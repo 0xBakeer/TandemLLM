@@ -3676,6 +3676,12 @@ def _prefill(eng, drafter, ids, device, *, store, chunk, conv_id, checkpoint, re
                 t = min(grid.next(i) - i, n - i)
             else:
                 t = n - i
+            if cap is not None and int(cap) < t:
+                # SRV-309 on a family with no layer-major window (Flash-Next's `window_ok` is
+                # False): the cap splits this chunk so a decoding slot's turn is offered inside
+                # it, at most every `cap` rows, exactly as a capped window would. The anchors and
+                # snapshots still fire only on the `chunk` grid (`_after_chunk` tests i % chunk).
+                t = int(cap)
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
             # a chunk before the last one returns logits nobody reads: one row, not `t` of them
             got = (FIRST_FORWARD(eng, blk, i, i + t == n) if FIRST_FORWARD is not None and i == start
