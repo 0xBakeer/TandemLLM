@@ -70,8 +70,9 @@ from engine.models import REGISTRY  # noqa: E402
 #: SRV-775: that credit only on a live pools reading (engine/cache.py): v2's second value again
 #: the allocator's counters read off torch's nested dict, which leaves no cyclic garbage (`cache.cuda_stats`,
 #: engine/cache.py): v2's second value again
+#: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "b5104f9134a2d8d8ab75b31458ddd4a27c0d0a0cbb9822189c37ee9911c0e61a")
+             "b9326ce98ca9452cc6387ac0fcab3023c2cf7923cf6bfd0f98da0fe17a97e277")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
