@@ -66,3 +66,17 @@ def med(xs):
 def skips_for(ctx: Ctx, prefix: str, section: str) -> list[dict]:
     return [skipped(section, k, why) for k, why in ctx.plan.skipped.items()
             if k == prefix or k.startswith(prefix + ".")]
+
+
+def revalidate(rows: list[dict]) -> list[dict]:
+    """The proof rule applied again from each row's recorded proof (it is deterministic from the data):
+    a concurrency row whose server count shows more requests running than it sent overlapped with
+    another request and is INVALID. Rows measured before the rule (2026-11-03) get it here."""
+    for r in rows:
+        p = (r.get("cond") or {}).get("proof") or {}
+        n = (r.get("v") or {}).get("n") or (r.get("v") or {}).get("chats")
+        if r.get("valid") and r.get("section") in ("c", "d") and n and p.get("max_running", 0) > n:
+            r["valid"] = False
+            r["why"] = (f"{p['max_running']} requests ran at once, more than the {n} sent: another request "
+                        "overlapped")
+    return rows

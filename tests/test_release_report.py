@@ -123,7 +123,8 @@ def fixture() -> dict:
         rows.append(row("c", f"2k/{n}/0", {"n": n, "agg_tok_s": 50 * n ** 0.6, "wall_s": 10.0, "decode_tok_s": 40,
                                            "ttft_max_s": 2.0 * n},
                         {"proof": {"max_decoding_at_once": n, "max_running": n}}))
-    rows.append(row("c", "32k/2", {"n": 2, "ttft_min_s": 33.0, "ttft_max_s": 67.0}, {}))
+    rows.append(row("c", "32k/2", {"n": 2, "ttft_min_s": 33.0, "ttft_max_s": 67.0}, {"proof": {"max_running": 2}}))
+    rows.append(row("c", "32k/1", {"n": 1, "ttft_min_s": 35.4, "ttft_max_s": 35.4}, {"proof": {"max_running": 3}}))
     rows.append(row("c", "32k/8", {"n": 8}, {}, valid=False, why="only 6 of 8 ran at once"))
     rows.append(row("d", "5", {"chats": 5, "ttft_first_s": 120.3, "ttft_last_s": 126.5, "prompt_tokens": 28700,
                                "cached_tokens": [0, 0, 0, 0, 0]}, {}))
@@ -183,6 +184,7 @@ def test_the_page_renders_every_section_and_names_no_box():
     assert len(html.encode()) < 2 * 1024 * 1024
     assert re.search(r"<svg class=\"chart\"", html)
     assert "invalid" in html and "only 6 of 8 ran at once" in html     # an invalid row shows its reason
+    assert "3 requests ran at once, more than the 1 sent" in html      # the proof rule from the recorded proof
     assert "not run" in html                                             # section j without --hle
 
 
@@ -191,7 +193,7 @@ def test_the_verdict_states_what_the_rows_show():
     text = " ".join(t for _, t in f)
     assert "Drafting runs up to 16k prompts and stops from 32k on" in text and "not isolated" in text
     assert any(k == "bad" and "after the rest of the suite" in t and "a fresh server" in t for k, t in f)
-    assert "1 measured rows are invalid" in text
+    assert "measured rows are invalid" in text
 
 
 def test_scrub_and_leaks():

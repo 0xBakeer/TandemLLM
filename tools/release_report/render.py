@@ -16,6 +16,7 @@ import re
 import statistics
 
 from tools.release_report import BARE, SECTIONS, scrub
+from tools.release_report.sections import revalidate
 from tools.release_report.sections.fidelity import PROMPTS, compare
 
 
@@ -747,6 +748,7 @@ footer{color:var(--ink3);font-size:13px;border-top:1px solid var(--rule);padding
 def page(data: dict) -> str:
     private = data.get("private") or {}
     pub = scrub.deep({k: v for k, v in data.items() if k != "private"}, private)
+    revalidate(pub.get("rows") or [])
     ver = str(pub.get("version") or "").split("+")[0]
     model = pub.get("model") or "model"
     title = f"TandemLLM {ver} · {model}"

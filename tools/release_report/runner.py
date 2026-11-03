@@ -118,8 +118,8 @@ def sections_of(only: list[str] | None, hle: bool) -> list[str]:
     return out
 
 
-def print_plan(pl, est: dict, sections: list[str], h: dict, hw, log) -> None:
-    log(f"[report] server {h.get('version')} · {h.get('model')} · weights {(h.get('weights') or {}).get('name')}")
+def print_plan(pl, est: dict, sections: list[str], h: dict, hw, log, card: dict | None = None) -> None:
+    log(f"[report] server {h.get('version')} · {label_of(card or {}, h)} · weights {(h.get('weights') or {}).get('name')}")
     log(f"[report] GPU {hw.fp.name} ({hw.id}), {hw.fp.memory_gib} GiB; slot limit {pl.lanes}; window "
         f"{pl.window:,} ({pl.window_why}); drafter {'yes' if pl.drafter else 'no'}")
     log(f"[report] a/b lengths: {', '.join(planmod.kfmt(n) for n in pl.lengths)} "
@@ -194,7 +194,7 @@ def measure(a, base: str, variant: str | None = None, launch: dict | None = None
     sections = ["h"] if explicit == "plain" else sections_of(a.only, a.hle)
     pr = probe(cl, prose)
     est = planmod.estimate(pl, sections, pr["prefill_tok_s"], pr["decode_tok_s"])
-    print_plan(pl, est, sections, h, prof, log)
+    print_plan(pl, est, sections, h, prof, log, card)
     if a.plan_only:
         return {"plan": pl.as_dict(), "estimate": est, "probe": pr}
     out.mkdir(parents=True, exist_ok=True)

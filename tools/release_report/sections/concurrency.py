@@ -11,6 +11,7 @@ N running at once: a request left waiting in the queue makes the row INVALID."""
 
 from __future__ import annotations
 
+from tools import parallel_card as pc
 from tools.release_report.client import together
 from tools.release_report.plan import ANSWER
 from tools.release_report.prompts import sized
@@ -22,6 +23,7 @@ TASK_32 = "\n\nIn one sentence, what is the text above about?"
 
 def level(ctx: Ctx, n: int, rnd: int) -> dict:
     prompts = [sized(ctx.cl, ctx.prose, 2048, TASK, tag=f"c{n}.{rnd}.{i}")[0] for i in range(n)]
+    pc.wait_idle(ctx.base, 120)                   # the last round's requests have left the server
     got = together(ctx.cl, prompts, ANSWER, seeds=[1000 + i for i in range(n)])
     s, p = got["streams"], got["proof"]
     bad = check(s)
@@ -62,11 +64,14 @@ def measure(ctx: Ctx) -> list[dict]:
                            valid=got["bad"] is None, why=got["bad"], engine=got["engine"], ids=got["ids"]))
     for n in ctx.plan.conc_32k:
         prompts = [sized(ctx.cl, ctx.prose, 32768, TASK_32, tag=f"c32.{n}.{i}")[0] for i in range(n)]
+        pc.wait_idle(ctx.base, 120)
         got = together(ctx.cl, prompts, 16, seeds=[2000 + i for i in range(n)], period=0.5)
         s, p = got["streams"], got["proof"]
         bad = check(s)
         if bad is None and p["max_running"] < n:
             bad = f"only {p['max_running']} of {n} ran at once (the rest waited in the queue)"
+        if bad is None and p["max_running"] > n:
+            bad = f"{p['max_running']} requests ran at once, more than the {n} sent: another request overlapped"
         tt = [x["ttft_s"] for x in s if x.get("ttft_s") is not None]
         v = {"n": n, "ttft_max_s": max(tt) if tt else None, "ttft_min_s": min(tt) if tt else None,
              "prompt_tokens": max((x.get("prompt_tokens") or 0 for x in s), default=None),
