@@ -757,6 +757,48 @@ def test_the_full_0_2_0_page_parses_and_labels_stay_small():
     assert all(len(v) <= 16 for v in values.values()), {k: len(v) for k, v in values.items()}
 
 
+def test_one_cache_stats_call_a_scrape_and_none_kept_after():
+    _fresh()
+    calls = []
+
+    def cache_stats():
+        calls.append(1)
+        return {"resident_files": [{"name": "ngram_table", "hot_rows": 4}],
+                "suffix_store": {"entries": 1}, "state_store": None}
+    M.bind(cache_stats=cache_stats)
+    M._TABLE_STATS = (None, 0.0, {})
+    M.render()
+    assert len(calls) == 1, calls                  # every family, the n-gram table's too, shares one
+    M._TABLE_STATS = (None, 0.0, {})
+    M.render()
+    assert len(calls) == 2, calls                  # a second page asks again
+    assert getattr(M._REQ, "cache_stats", None) is None and not getattr(M._REQ, "in_scrape", False)
+    M._scrape_stats()
+    M._scrape_stats()
+    assert len(calls) == 4, calls                  # outside a page nothing is kept
+
+
+def test_serve_returns_when_the_scraper_is_gone():
+    _fresh()
+
+    class Gone:
+        def write(self, b):
+            raise BrokenPipeError
+
+    class H:
+        wfile = Gone()
+
+        def send_response(self, code):
+            pass
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
+    M.serve(H())                                   # no traceback for a scraper that left
+
+
 def _main():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     bad = 0

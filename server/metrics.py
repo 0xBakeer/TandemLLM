@@ -354,12 +354,14 @@ def _scrape_stats() -> dict:
     """The scrape's one `app.cache_stats()`: every family that reads a cache section shares the
     answer rather than asking again. cache_stats() walks every cache's report under its locks, and
     a scrape that asked once a family kept the disk tier's walk inside the decode path's locks for
-    the whole page (2026-10-24). The answer lives on the scrape's thread; serve() clears it before
-    rendering, so two scrapes on one keep-alive connection each get a fresh answer and any caller
-    outside a scrape always recomputes."""
+    the whole page (2026-10-24). The answer lives on the scrape's thread for that page only:
+    render() clears it before and after, so two scrapes on one keep-alive connection each get a
+    fresh answer and any caller outside a scrape always recomputes."""
+    fn = _SOURCES.get("cache_stats")
+    if not getattr(_REQ, "in_scrape", False):
+        return fn() if fn is not None else {}
     rep = getattr(_REQ, "cache_stats", None)
     if rep is None:
-        fn = _SOURCES.get("cache_stats")
         rep = fn() if fn is not None else {}
         _REQ.cache_stats = rep
     return rep
@@ -452,7 +454,7 @@ def _ngram_table_stats() -> dict:
         return _TABLE_STATS[2]
     out: dict = {}
     if fn is not None:
-        for rep in (fn() or {}).get("resident_files") or []:
+        for rep in (_scrape_stats() or {}).get("resident_files") or []:
             if isinstance(rep, dict) and rep.get("name") == "ngram_table":
                 out = rep
                 break
@@ -915,7 +917,12 @@ _REQ = threading.local()
 
 def render() -> str:
     _REQ.cache_stats = None                        # one page, one cache_stats() for every family
-    return REGISTRY.render()
+    _REQ.in_scrape = True
+    try:
+        return REGISTRY.render()
+    finally:
+        _REQ.in_scrape = False                     # nothing outlives the page on this thread
+        _REQ.cache_stats = None
 
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
