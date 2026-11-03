@@ -6107,9 +6107,10 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
             "mem_available_bytes": after}
 
 
-#: SRV-309: while another slot decodes, a prefill's layer-major window takes at most this many
-#: rows, so the GPU turn is offered to the decoders at least that often (0: no cap, the default).
-#: Bit-identical (tests/gpu/test_kvpool_identity_gpu.py --window-cap), but it did not help: on
+#: SRV-309: while another slot decodes, a prefill step takes at most this many rows, so the GPU
+#: turn is offered to the decoders at least that often (0: no cap, the default). A layer-major
+#: window stays bit-identical (tests/gpu/test_kvpool_identity_gpu.py --window-cap); a chunk-major
+#: step splits its chunk into shorter forwards, whose bits are not yet shown to match. On
 #: 2026-10-10 three decoding chats still wrote 0.6-1 tok/s while an 87k prompt prefilled with the
 #: cap at 2,048 (0.9-1.3 without it). The stall was the rounds' barrier (SRV-311, slots.py
 #: `barrier`); with that fixed the cap still added nothing measurable (11.2-12.4 vs 10.3-11.4 tok/s)
