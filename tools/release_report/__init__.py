@@ -26,7 +26,7 @@ BARE = "TandemLLM bare engine: raw /v1/completions, no conductor or chat layer."
 #: id -> (title, module under tools/release_report/sections)
 SECTIONS = {
     "a": ("Decode by prompt length", "lengths"),
-    "b": ("Prefill and time to first token", "lengths"),
+    "b": ("Time to the first token", "lengths"),
     "c": ("Requests at once", "concurrency"),
     "d": ("Chats on one new system prompt", "shared"),
     "e": ("Latency under load and a returning conversation", "load"),

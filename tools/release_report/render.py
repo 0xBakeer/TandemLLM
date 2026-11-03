@@ -256,12 +256,13 @@ def sec_b(data):
             pts.append((i, r["v"].get("prefill_tok_s"), True,
                         f"{kfmt(n)}: {num(r['v'].get('prefill_tok_s'), 0)} tok/s, first token {num(r['v'].get('ttft_s'))} s"))
         line.append((i, med([r["v"].get("prefill_tok_s") for r in rs])))
-    chart = xy_chart(cats, [{"name": "prefill", "cls": "s1", "pts": pts, "line": line}], "prefill tok/s",
-                     aria="Prefill tokens per second by prompt length")
+    chart = xy_chart(cats, [{"name": "first-token rate", "cls": "s1", "pts": pts, "line": line}],
+                     "prompt tokens over the time to the first token, tok/s",
+                     aria="Prompt tokens over the time to the first token, by prompt length")
     body = [[kfmt(n), num(med([r["v"].get("prompt_tokens") for r in rs]), 0),
              num(med([r["v"].get("prefill_tok_s") for r in rs]), 0), num(med([r["v"].get("ttft_s") for r in rs]), 2) + " s"]
             for n, rs in L.items()]
-    return chart + table(["prompt", "prompt tokens", "prefill tok/s", "first token"], body, "num"), ""
+    return chart + table(["prompt", "prompt tokens", "first-token rate tok/s", "first token"], body, "num"), ""
 
 
 def sec_c(data):
@@ -564,9 +565,11 @@ METHODS = {
     "a": "One request at a time, real prose with a fresh nonce first, greedy, thinking off, 512-token answers. "
          "Decode = completion tokens after the first over the time from the first to the last token; the median of the runs. "
          "Drafting and tokens per pass are the engine's own counts for each request.",
-    "b": "The same requests: prefill = prompt tokens over the time to the first token.",
+    "b": "The same requests, which ask for a 512-token answer: prompt tokens over the time to the first token. That "
+         "time holds more than the prefill, so this rate is below the card's prefill (one token out, section g) at "
+         "the same length; the cause of the gap is not isolated.",
     "c": "N requests released together, each with its own ~2k-token prompt and a 512-token answer. Decode = the tokens after "
-         "each request's first, over the time from the first first token to the last token; with prefill = all completion "
+         "each request's first, over the time from the earliest first token to the last token; with prefill = all completion "
          "tokens over the wall time, so the N prompts' prefill counts against it. A round counts only when the server's decode set held N "
          "requests at once and no more ran; a level without such a round is invalid. Below: N prompts of ~32k tokens, 16 "
          "tokens out, the first token of the fastest and the slowest; a request left in the queue makes the row invalid.",
@@ -599,19 +602,21 @@ def tiles(data) -> list[tuple[str, str, str]]:
         out.append((num(med([r["v"].get("decode_tok_s") for r in L[n0]])), "tok/s", f"one request, {kfmt(n0)} prompt"))
         nl = max(L)
         out.append((num(med([r["v"].get("decode_tok_s") for r in L[nl]])), "tok/s", f"one request, {kfmt(nl)} prompt"))
+    gp = {int(r["key"].split("/")[-1]): r["v"] for r in valid(rows_of(data, "g"))
+          if r["key"].startswith("default/prefill/")}
+    if gp:
+        d = min(gp, key=lambda n: abs(n - 32768))
+        out.append((num(gp[d].get("tok_s"), 0), "tok/s", f"prefill at {kfmt(d)} (one token out)"))
+    elif L:
         n32 = min(L, key=lambda n: abs(n - 32768))
-        out.append((num(med([r["v"].get("prefill_tok_s") for r in L[n32]]), 0), "tok/s", f"prefill at {kfmt(n32)}"))
-    two = [r for r in valid(rows_of(data, "c")) if r["key"].startswith("2k/")]
-    if two:
-        top = max(r["v"]["n"] for r in two)
-        top_rows = [r for r in two if r["v"]["n"] == top]
-        out.append((num(med([r["v"].get("decode_tok_s") for r in top_rows])), "tok/s",
-                    f"{top} requests at once, decode ({num(med([r['v'].get('agg_tok_s') for r in top_rows]))} "
-                    f"with their 2k prefills counted)"))
+        out.append((num(med([r["v"].get("prefill_tok_s") for r in L[n32]]), 0), "tok/s",
+                    f"prompt over the first token at {kfmt(n32)}"))
     g = [r for r in valid(rows_of(data, "g")) if r["key"].startswith("fixed/levels/")]
     if g:
         r = max(g, key=lambda r: int(r["key"].split("/")[-1]))
-        out.append((num(r["v"].get("wall_tok_s")), "tok/s", f"card tool, {r['key'].split('/')[-1]} at once, fixed prompts"))
+        n = r["key"].split("/")[-1]
+        out.append((num(r["v"].get("wall_tok_s")), "tok/s",
+                    f"{n} requests at once (card tool, fixed prompts; decode {num(r['v'].get('decode_tok_s'))})"))
     cmp_ = compare(rows_of(data, "h"))
     if cmp_:
         same = sum(1 for c in cmp_ if c["same"] or c["near_tie"])
@@ -639,7 +644,12 @@ def findings(data) -> list[tuple[str, str]]:
         elif drafted and not plain:
             out.append(("good", f"The engine drafted at every prompt length measured, up to {kfmt(nl)}."))
         pf = {n: med([r["v"].get("prefill_tok_s") for r in rs]) for n, rs in L.items()}
-        out.append(("note", f"Prefill reads {num(max(pf.values()), 0)} tok/s at best and {num(pf[nl], 0)} tok/s at {kfmt(nl)}; "
+        gp = {int(r["key"].split("/")[-1]): r["v"].get("tok_s") for r in valid(rows_of(data, "g"))
+              if r["key"].startswith("default/prefill/")}
+        lead = (f"The card's prefill alone (one token out) reads {num(min(gp.values()), 0)} to {num(max(gp.values()), 0)} "
+                f"tok/s at {kfmt(min(gp))} to {kfmt(max(gp))}. " if gp else "")
+        out.append(("note", lead + f"A request for a 512-token answer gets its first token at {num(max(pf.values()), 0)} "
+                            f"tok/s of prompt at best and {num(pf[nl], 0)} at {kfmt(nl)}; "
                             f"a {kfmt(nl)} prompt waits {num(med([r['v'].get('ttft_s') for r in L[nl]]), 0)} s for its first token."))
     c = rows_of(data, "c")
     two = [r for r in c if r["key"].startswith("2k/")]
@@ -654,8 +664,9 @@ def findings(data) -> list[tuple[str, str]]:
             dn = med([r["v"].get("decode_tok_s") for r in ok if r["v"]["n"] == ns[-1]])
             if d1 and dn:
                 out.append(("good" if dn > 1.5 * d1 else "bad",
-                            f"{ns[-1]} requests at once decode at {num(dn)} tok/s against {num(d1)} for {ns[0]} "
-                            f"({dn / d1:.1f} times)."
+                            f"With ~2k-token prompts each, {ns[-1]} requests at once decode at {num(dn)} tok/s "
+                            f"against {num(d1)} for {ns[0]} ({dn / d1:.1f} times), timed from the earliest first token "
+                            f"while the later prompts still prefill."
                             + (f" Counting their ~2k-token prefills in the wall time: {num(an)} against {num(a1)}."
                                if a1 and an else "")))
             elif a1 and an:
