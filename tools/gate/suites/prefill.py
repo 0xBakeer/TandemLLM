@@ -34,8 +34,9 @@ def measure(ctx: Ctx) -> dict:
     words = pc.filler_words(ctx.pj, depth)
     rounds = []
     for r in range(ctx.profile.warmups + ctx.profile.rounds):
-        prompts = [ctx.cl.render([{"role": "user", "content": f"Burst {pc.nonce('b', r, i)}.\n"
-                                   + " ".join(words[:k])}]) for i in range(n)]
+        prompts = [ctx.cl.render([{"role": "user", "content": f"Burst {pc.nonce('b', r, i)}."
+                                   + ctx.pack.get("burst_word", "") + "\n" + " ".join(words[:k])}])
+                   for i in range(n)]
         pc.wait_idle(ctx.base)
         got = released_together(ctx.cl, prompts, 1, [300 + i for i in range(n)], poll=0.05)
         ttfts = [s["ttft_s"] for s in got["streams"] if s.get("ttft_s") is not None]

@@ -7,6 +7,8 @@
 #   plain_env      the arm environment that turns speculation off (lossless: spec vs plain)
 #   wide_chunk_env the arm environment of the wide prefill chunk case (long suite)
 #   hold_word      a word added to the api suite's long requests (the fake's FAKE_LONG: a long answer)
+#   burst_word     a word added to the prefill burst's prompts (the fake's FAKE_SLOW_PREFILL: its burst
+#                  requests overlap for seconds, so the N-at-once proof holds on a slow runner)
 #   proof          what proves N requests decoded at once: `decoding` (the default: the slots in the
 #                  server's decode set, /health parallel.decoding) or `running` (the fake engine, whose
 #                  writer has no decode phase: the requests running at once)
@@ -16,6 +18,7 @@ fake:
   family: fake
   proof: running
   hold_word: ' FAKE_LONG'
+  burst_word: ' FAKE_SLOW_PREFILL'
 
 flashnext-3.05:
   launcher: ops
