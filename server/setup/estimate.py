@@ -291,6 +291,14 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
                      f"conversations give their memory back first, and a lane that would take the "
                      f"box under its floor stops with memory_full; the Chat tab continues it once "
                      f"memory is free.")
+        notes.append(f"The lanes past {full} do not add throughput, and with long prompts they "
+                     f"cost every request: a long prefill is served in the turn's slices, so the "
+                     f"requests behind one wait (measured on a DGX Spark, 2026-10-28, a 3.05 bpw "
+                     f"pack: one 24.5k-token request decoded at 22 tok/s with 35 s to its first "
+                     f"token; two of them on an 8-lane pool at 9-25 tok/s and 460 s; four at "
+                     f"2-4 tok/s and 240 s. A pool that holds {full} lanes gave the same two "
+                     f"requests 78 s and 9-13 tok/s each). Fewer lanes, or a shorter side window "
+                     f"(QSE_SIDE_MAX_LEN), is the lever — more lanes is not.")
     elif slots > 1:
         notes.append(f"All {slots} lanes can hold the full {window:,}-token window at once "
                      f"({_r(lane_full):.2f} GiB each).")
