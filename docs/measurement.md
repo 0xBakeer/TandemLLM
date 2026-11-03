@@ -106,10 +106,10 @@ Each of these cost a wrong number once.
 - Two runs that agree to six decimals have not agreed. They are the same run: once, a test server had bound its port beside another.
 - A quiet log is not a hung process. Python block-buffers into a pipe, so use `python -u`.
 - A lane count past the pool's guarantee reads as a slow model. Requests that wait for a lane and for the turn look the same as slow decoding, and a Prometheus row of the decode rate alone cannot tell the two apart. Compare the `/health` `parallel.turn` waits with the lane count.
-- A fresh engine measures better than a used one. The resident conversation and the side slots keep their KV, and a long-lived session has more of it. Restart before comparing configurations.
+- A fresh engine can measure better than a used one. The resident conversation and the side slots keep their KV, and a long-lived session has more of it. Restart before comparing configurations.
 - The engine's own turns look like a client's. The preparer and the memory writer run generations over the client's context; count them with `qse_prepare_runs_total` and `qse_memory_writer_runs_total` (server/METRICS.md), or measure raw with the conductor off.
 - A first request after a restart is not a baseline. The pack's page cache is dropped at the start, so the first measurement runs on a busy disk.
 
 ## Limits
 
-The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)). Parallel requests are measured on the weight cards only (above), and long prompts with several lanes at once are measured in "Long prompts, and many lanes at once" (above). The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
+The published numbers come from one board, one model and one request at a time. Long prompts are measured separately ([caches.md](caches.md)). Parallel requests are measured on the weight cards only (above). The quality gates are held-out loss, confident argmax agreement and free generation. No task benchmark suite has been run, so this repository makes no claim about task accuracy.
