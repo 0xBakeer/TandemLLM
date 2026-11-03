@@ -44,7 +44,8 @@ def table(rows: list[dict]) -> str:
         delta = f"{r['delta_pct']:+.2f} %" if r.get("delta_pct") is not None else "-"
         noise = f"{r['noise_pct']:.2f} %" if r.get("noise_pct") is not None else "-"
         verdict = r["verdict"] if r["verdict"] == "PASS" else f"**{r['verdict']}**"
-        if r["verdict"] != "PASS" or r.get("delta_pct") is None:
+        resolved = r.get("delta_pct") is not None and not r["why"].startswith("not resolved")
+        if r["verdict"] != "PASS" or r.get("delta_pct") is None or resolved:
             verdict += f": {r['why']}"
         out.append(f"| {r['suite']} | {r['metric']}{unit} | {cell(r, 'base')} | "
                    f"{cell(r, 'head')} | {delta} | {noise} | {verdict.replace('|', '/')} |")

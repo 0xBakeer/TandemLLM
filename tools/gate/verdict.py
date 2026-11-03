@@ -11,8 +11,6 @@ two runs a side (its noise is unknown).
 
 from __future__ import annotations
 
-import statistics
-
 from tools.gate import (BLOCKING, CHANGED_TEXT, FAIL, INVALID, NEEDS_REASON, PASS, SKIPPED,
                         WORSE)
 from tools.row3 import across, resolve
@@ -75,23 +73,30 @@ def first_difference(a: list, b: list) -> int | None:
 
 def text_row(rid: str, suite: str, metric: str, base: dict, head: dict,
              what: str = "base and head") -> dict:
-    """A lossless row: the two sides' greedy outputs must be the same token ids.
+    """A lossless row: the two sides' outputs must be the same text.
 
-    `base` and `head` are {"ids": [...], "text_sha256": ..., "finish": ..., "gap": {pos: logprob
-    gap}} for one prompt; `gap` (optional) is the top-2 logprob gap where a side recorded it."""
+    `base` and `head` are one prompt's records: `text_sha256` (decides when both have it), `ids`
+    (token ids or pieces: decide when there is no hash, and place a difference), `gaps` ({position:
+    the top-2 log probability gap}, where the side recorded it) and `error`."""
     if base.get("error") or head.get("error"):
         side = "base" if base.get("error") else "head"
         return row(rid, suite, metric, FAIL, f"the {side} request failed: "
                    f"{(base.get('error') or head.get('error'))[:200]}")
     bi, hi = base.get("ids") or [], head.get("ids") or []
-    at = first_difference(bi, hi)
-    tokens = {"base_tokens": len(bi), "head_tokens": len(hi)}
+    bn = (base.get("usage") or {}).get("completion_tokens") or len(bi)
+    hn = (head.get("usage") or {}).get("completion_tokens") or len(hi)
+    tokens = {"base_tokens": bn, "head_tokens": hn}
+    bs, hs = base.get("text_sha256"), head.get("text_sha256")
+    same = (bs == hs) if bs and hs else (bi == hi)
+    if same:
+        return row(rid, suite, metric, PASS, f"{what}: the same text ({bn} tokens)", **tokens)
+    at = first_difference(bi, hi) if bi and hi else None
     if at is None:
-        return row(rid, suite, metric, PASS, f"{what}: the same {len(bi)} token ids", **tokens)
+        return row(rid, suite, metric, CHANGED_TEXT, f"{what}: the texts differ", **tokens)
     gap = (base.get("gaps") or {}).get(str(at))
     near = f", the base's top-2 gap there {gap:.4f} nats" if gap is not None else ""
     return row(rid, suite, metric, CHANGED_TEXT,
-               f"{what}: the token ids differ from position {at}{near}",
+               f"{what}: the texts differ from token {at}{near}",
                first_diff=at, base_at=_at(bi, at), head_at=_at(hi, at), gap_at_diff=gap, **tokens)
 
 
@@ -117,9 +122,6 @@ def skipped(rid: str, suite: str, metric: str, why: str) -> dict:
     return row(rid, suite, metric, SKIPPED, why)
 
 
-ORDER = (FAIL, INVALID, WORSE, CHANGED_TEXT, PASS)
-
-
 def overall(rows: list[dict]) -> str:
     """The report's verdict: FAIL when any row is FAIL or INVALID, else WORSE, else CHANGED_TEXT,
     else PASS (SKIPPED rows do not count)."""
@@ -137,8 +139,3 @@ def unexplained(rows: list[dict], reasons: dict) -> list[str]:
     from tools.gate import MIN_REASON
     return [r["id"] for r in rows if r["verdict"] in NEEDS_REASON
             and len((reasons.get(r["id"]) or "").strip()) < MIN_REASON]
-
-
-def median(xs):
-    xs = [x for x in xs if x is not None]
-    return statistics.median(xs) if xs else None
