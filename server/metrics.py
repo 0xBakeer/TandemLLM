@@ -350,6 +350,21 @@ _SOURCES: dict = {"state": None, "inflight": None, "cache_stats": None, "info": 
                   "started": time.time()}
 
 
+def _scrape_stats() -> dict:
+    """The scrape's one `app.cache_stats()`: every family that reads a cache section shares the
+    answer rather than asking again. cache_stats() walks every cache's report under its locks, and
+    a scrape that asked once a family kept the disk tier's walk inside the decode path's locks for
+    the whole page (2026-10-24). The answer lives on the scrape's thread; serve() clears it before
+    rendering, so two scrapes on one keep-alive connection each get a fresh answer and any caller
+    outside a scrape always recomputes."""
+    rep = getattr(_REQ, "cache_stats", None)
+    if rep is None:
+        fn = _SOURCES.get("cache_stats")
+        rep = fn() if fn is not None else {}
+        _REQ.cache_stats = rep
+    return rep
+
+
 def _inflight(field: str):
     def read():
         d = _SOURCES.get("inflight")
@@ -363,7 +378,7 @@ def _cache_field(section: str, field: str, scale: float = 1.0):
         fn = _SOURCES.get("cache_stats")
         if fn is None:
             return {}
-        rep = (fn() or {}).get(section)
+        rep = _scrape_stats().get(section)
         if not isinstance(rep, dict) or field not in rep:
             return {}
         return float(rep[field]) * scale
@@ -381,7 +396,7 @@ def _refused():
     d = _SOURCES.get("inflight")
     out = {("queue",): float(d.get("refused", 0))} if d else {}
     fn = _SOURCES.get("cache_stats")
-    mem = (fn() or {}).get("memory") if fn is not None else None
+    mem = _scrape_stats().get("memory") if fn is not None else None
     if isinstance(mem, dict):
         out[("memory",)] = float(mem.get("refused") or 0)        # OPS-47: the 503 before a wedge
     return out
@@ -393,7 +408,7 @@ def _cache_family(field: str, scale: float = 1.0):
         fn = _SOURCES.get("cache_stats")
         if fn is None:
             return {}
-        stats = fn() or {}
+        stats = _scrape_stats()
         out: dict[tuple[str, ...], float] = {}
         for label, section in (("state", "state_store"), ("response", "response_cache"),
                                ("resident", "resident")):
@@ -408,7 +423,7 @@ def _suffix_bytes():
     fn = _SOURCES.get("cache_stats")
     if fn is None:
         return {}
-    rep = (fn() or {}).get("suffix_store")
+    rep = _scrape_stats().get("suffix_store")
     if not isinstance(rep, dict) or "tokens" not in rep:
         return {}
     return {("suffix",): float(rep["tokens"]) * 4.0}        # int32 token ids on disk
@@ -536,7 +551,7 @@ def _cache_hits():
     report the split keeps the one `cache="state"` row it always had."""
     out = _cache_family("hits")()
     fn = _SOURCES.get("cache_stats")
-    rep = ((fn() or {}).get("state_store") if fn is not None else None)
+    rep = (_scrape_stats().get("state_store") if fn is not None else None)
     if isinstance(rep, dict) and "hits_session" in rep:
         out.pop(("state",), None)
         for kind in ("session", "prefix"):
@@ -615,7 +630,7 @@ def _memory_report() -> tuple | None:
     fn = _SOURCES.get("cache_stats")
     if fn is None:
         return None
-    stats = fn() or {}
+    stats = _scrape_stats()
     return stats.get("memory"), stats.get("resident"), stats.get("state_store")
 
 
@@ -658,7 +673,7 @@ REGISTRY.add(Gauge("qse_cache_entries", "entries held by each cache",
 def _disk():
     """The disk tier's report (C1) from `/v1/cache/stats`, or None with the tier off."""
     fn = _SOURCES.get("cache_stats")
-    rep = (fn() or {}).get("disk_cache") if fn is not None else None
+    rep = _scrape_stats().get("disk_cache") if fn is not None else None
     return rep if isinstance(rep, dict) else None
 
 
@@ -899,6 +914,7 @@ _REQ = threading.local()
 
 
 def render() -> str:
+    _REQ.cache_stats = None                        # one page, one cache_stats() for every family
     return REGISTRY.render()
 
 
@@ -912,11 +928,14 @@ def serve(handler) -> None:
     body with neither framing hangs the scraper until its own timeout.
     """
     raw = render().encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", CONTENT_TYPE)
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", CONTENT_TYPE)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionResetError):
+        pass                                        # the scraper went away; the qse_up row's pattern
 
 
 def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
