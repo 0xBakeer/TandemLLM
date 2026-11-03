@@ -445,23 +445,45 @@ def sec_h(data):
     return out + invalids(rs) + skips(rs), "" if out else "no rows"
 
 
+def warm_pairs(data) -> list[tuple[int, float | None, str, dict]]:
+    """(prompt, the comparison's tok/s, what it is, the warm row): the fresh run's row where there is one,
+    else section a's median at the same length."""
+    rs = valid(rows_of(data, "i"))
+    fresh = {int(r["cond"]["target"]): r for r in rs if r["key"].startswith("fresh/")}
+    L = by_length(data)
+    out = []
+    for r in rs:
+        if not r["key"].startswith("warm/"):
+            continue
+        n = int(r["cond"]["target"])
+        if n in fresh:
+            out.append((n, fresh[n]["v"].get("decode_tok_s"), "a fresh server", r))
+        else:
+            out.append((n, med([x["v"].get("decode_tok_s") for x in L.get(n, [])]), "earlier (section a)", r))
+    return out
+
+
 def sec_i(data):
     rs = rows_of(data, "i")
+    pairs = warm_pairs(data)
     ok = valid(rs)
     if not ok:
         return invalids(rs) + skips(rs), "not run"
-    L = by_length(data)
     groups, body = [], []
-    for r in ok:
-        n = int(r["cond"]["target"])
-        early = med([x["v"].get("decode_tok_s") for x in L.get(n, [])])
-        groups.append((kfmt(n), [("earlier", early, "s2", "section a, earlier in the server's life"),
+    for n, base, what, r in pairs:
+        groups.append((kfmt(n), [(what, base, "s2", what),
                                  ("warm", r["v"].get("decode_tok_s"), "s1", "after the rest of the suite")]))
-        body.append([kfmt(n), num(early), num(r["v"].get("decode_tok_s")),
+        body.append([kfmt(n), esc(what), num(base), num(r["v"].get("decode_tok_s")),
                      "yes" if drafting_of(r) else "no", num(r["cond"].get("served_before"), 0)])
-    return (legend([("earlier (section a)", "s2", True), ("after the rest of the suite", "s1", True)])
-            + bar_chart(groups, "decode tok/s, one request", aria="Long prompt decode, earlier and warm")
-            + table(["prompt", "earlier tok/s", "warm tok/s", "drafting (warm)", "requests served before"], body, "num")
+    fresh_only = [r for r in ok if r["key"].startswith("fresh/") and not any(p[0] == int(r["cond"]["target"]) for p in pairs)]
+    for r in fresh_only:
+        body.append([kfmt(r["cond"]["target"]), "a fresh server", num(r["v"].get("decode_tok_s")), "–",
+                     "yes" if drafting_of(r) else "no", num(r["cond"].get("served_before"), 0)])
+    what = pairs[0][2] if pairs else "a fresh server"
+    return ((legend([(what, "s2", True), ("after the rest of the suite", "s1", True)])
+             + bar_chart(groups, "decode tok/s, one request", aria="Long prompt decode, fresh and warm") if groups else "")
+            + table(["prompt", "compared with", "its tok/s", "warm tok/s", "drafting (warm)",
+                     "requests served before (warm)"], body, "num")
             + invalids(rs) + skips(rs)), ""
 
 
@@ -541,8 +563,8 @@ METHODS = {
     "h": "Eight fixed prompts, greedy, thinking off, 512 tokens, with speculation on and on a second server with it off "
          "(--drafter none): identical, or parting at a near tie (top-2 gap ≤ 0.125 nats). Needles: a passphrase in the "
          "middle of ~32k and ~128k tokens of prose.",
-    "i": "The longest prompts again, one request each, after the rest of the suite on the same server, beside section a's "
-         "rows of the same length.",
+    "i": "The longest prompts, one request each, after the rest of the suite on the same server (warm), against the same "
+         "prompts as the first requests of a freshly started server, or else section a's rows of the same length.",
     "j": "A multiple-choice set graded by the letter, no judge, 95 % Wilson interval. Run only on request.",
     "k": "Every limit the server ran with, read from the running server, and the box during each run.",
 }
@@ -632,16 +654,13 @@ def findings(data) -> list[tuple[str, str]]:
         out.append(("note", f"While a {kfmt(v.get('prompt_tokens'))} prompt prefills, two decoding chats drop from "
                             f"{num(v.get('decoders_before_tok_s'))} to {num(v.get('decoders_during_tok_s'))} tok/s combined; its "
                             f"first token comes after {num(v.get('ttft_s'))} s."))
-    w = valid(rows_of(data, "i"))
-    for r in w:
-        n = int(r["cond"]["target"])
-        early = med([x["v"].get("decode_tok_s") for x in L.get(n, [])])
+    for n, early, what, r in warm_pairs(data):
         wv = r["v"].get("decode_tok_s")
         if early and wv:
             ratio = wv / early
             out.append(("bad" if ratio < 0.8 else "good",
                         f"A {kfmt(n)} prompt decodes at {num(wv)} tok/s after the rest of the suite against {num(early)} "
-                        f"earlier in the same server's life ({ratio:.2f} times)" + (". The cause is not isolated." if ratio < 0.8 else ".")))
+                        f"on {what} ({ratio:.2f} times)" + (". The cause is not isolated." if ratio < 0.8 else ".")))
     cmp_ = compare(rows_of(data, "h"))
     if cmp_:
         same = sum(1 for c in cmp_ if c["same"])

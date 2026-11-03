@@ -139,6 +139,8 @@ def fixture() -> dict:
     rows.append(row("h", "needle/32768", {"found": True}, {"target": 32768}))
     rows.append(row("i", "warm/131072", {"decode_tok_s": 21.8}, {"target": 131072, "served_before": 140},
                     engine=[{"drafting": False}]))
+    rows.append(row("i", "fresh/131072", {"decode_tok_s": 35.2}, {"target": 131072, "served_before": 1},
+                    engine=[{"drafting": False}]))
     rows.append(skipped("j", "score", "not run (it takes about 2.5 hours: --hle --hle-data FILE)"))
     run = {"started": "2026-11-03T16:00:00+0100", "ended": "2026-11-03T17:00:00+0100", "minutes": 60.0,
            "sections": ["a", "c"], "variant": "spec", "version": "0.15.1+flashnext-3.05", "model": "Qwen3.8-Flash-Next",
@@ -179,7 +181,7 @@ def test_the_verdict_states_what_the_rows_show():
     f = render.findings(fixture())
     text = " ".join(t for _, t in f)
     assert "Drafting runs up to 16k prompts and stops from 32k on" in text and "not isolated" in text
-    assert any(k == "bad" and "after the rest of the suite" in t for k, t in f)
+    assert any(k == "bad" and "after the rest of the suite" in t and "a fresh server" in t for k, t in f)
     assert "1 measured rows are invalid" in text
 
 
@@ -215,6 +217,9 @@ def test_data_json_merges_runs_and_keeps_one_version(tmp_path):
     assert keys == ["1024/0", "spec/code", "plain/code"] and len(d2["runs"]) == 2 and d1["private"]["hosts"] == ["a"]
     d3 = merge(tmp_path, [row("a", "1024/0", {"x": 2})], dict(run), ["a"], "spec", False)
     assert [r["v"].get("x") for r in d3["rows"] if r["section"] == "a"] == [2]
+    merge(tmp_path, [row("i", "warm/131072", {})], dict(run), ["i"], "spec", False)
+    d4 = merge(tmp_path, [row("i", "fresh/131072", {})], dict(run), ["i"], "spec", False)
+    assert sorted(r["key"] for r in d4["rows"] if r["section"] == "i") == ["fresh/131072", "warm/131072"]
     try:
         merge(tmp_path, [], dict(run, version="0.15.2"), ["a"], "spec", False)
         raise AssertionError("two versions merged")

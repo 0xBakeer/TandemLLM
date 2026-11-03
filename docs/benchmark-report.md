@@ -31,9 +31,9 @@ The estimate comes from your box. On one DGX Spark with Qwen3.8-Flash-Next, `--q
 
     python -m tools.release_report run --out ~/tandem-report --only a h
     python -m tools.release_report run --out ~/tandem-report --only c d e i
-    python -m tools.release_report run --out ~/tandem-report --only f g
+    python -m tools.release_report run --out ~/tandem-report --only i f g      # after a restart
 
-The order matters for section i, which repeats the longest prompts after the rest of the suite on the same server.
+The order matters for section i. After the rest of the suite it measures the longest prompts on a warm engine; as the first requests of a freshly started server it measures them fresh. The page compares the two.
 
 ## What each section measures
 
@@ -46,7 +46,7 @@ The order matters for section i, which repeats the longest prompts after the res
 | f | One ~56k prompt, up to 1,024 tokens, three tasks: a summary, code, and a copy of text in the prompt | Mean decode and the best one-second window |
 | g | `tools/parallel_card.py` against the same server, its default arguments and `--fixed-prompts` | The card tool's own rows |
 | h | Eight fixed prompts, greedy, 512 tokens; needles in ~32k and ~128k of prose | The texts, and, after a second run on a server with speculation off, whether they are identical |
-| i | The 128k and 192k prompts again, after the rest of the suite | Their decode speed beside section a's |
+| i | The 128k and 192k prompts after the rest of the suite, and as the first requests of a fresh server | Warm against fresh (or against section a's rows when there is no fresh run) |
 | j | A multiple-choice set (`--hle --hle-data FILE`, a local JSON-lines file), off by default | The score with its 95 % interval |
 | k | Nothing | Every limit the server runs with, the GPU (name, memory, compute capability, driver, CUDA, torch) and the box during each run: GPU clock and power under load, the highest temperature, the lowest free memory |
 

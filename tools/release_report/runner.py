@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -142,6 +143,8 @@ def merge(out: Path, rows: list[dict], run: dict, sections: list[str], variant: 
         raise SystemExit(f"[report] {p} holds {data.get('version')} / {data.get('weights')}, this server is "
                          f"{run['version']} / {run['weights']}: use another --out, or --new to start over")
 
+    states_i = {r["key"].split("/")[0] for r in rows if r["section"] == "i"} | {"skip"}
+
     def replaced(r):
         if r["section"] not in sections:
             return False
@@ -149,6 +152,8 @@ def merge(out: Path, rows: list[dict], run: dict, sections: list[str], variant: 
             return r["key"].startswith("plain/")             # a plain arm adds its texts only
         if r["section"] == "h" and variant == "spec":
             return not r["key"].startswith("plain/")
+        if r["section"] == "i":                              # fresh and warm rows come from two runs
+            return r["key"].split("/")[0] in states_i
         return True
     data.update({"kind": "tandem-benchmark-report", "schema": SCHEMA, "tool": VERSION,
                  "version": run["version"], "model": run["model"], "weights": run["weights"],
@@ -245,8 +250,15 @@ def measure(a, base: str, variant: str | None = None, launch: dict | None = None
 
 
 def label_of(card: dict, h: dict) -> str:
+    """The model's name for the page: the card's label, unless it is only the served name (as
+    "TandemLLM"), then the card's model id, then the weights' name."""
     t = card.get("tandem") or {}
-    return t.get("label") or t.get("model") or h.get("model") or "model"
+    served = {str(h.get("model") or ""), "TandemLLM"}
+    for x in (t.get("label"), t.get("model"), (h.get("weights") or {}).get("hf_repo"),
+              (h.get("weights") or {}).get("name")):
+        if x and str(x) not in served:
+            return re.sub(r"[-_](exl3|gguf|nvfp4|fp8|awq|gptq|bf16)$", "", str(x).split("/")[-1], flags=re.I)
+    return str(h.get("model") or "model")
 
 
 def hardware_label(prof) -> str:
