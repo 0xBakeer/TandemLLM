@@ -119,8 +119,11 @@ def test_a_busy_server_is_refused():
         body = json.dumps({"model": "TandemLLM", "prompt": "Write a long text. FAKE_SLOW FAKE_LONG", "max_tokens": 2000,
                            "stream": True}).encode()
         req = urllib.request.Request(f.base + "/v1/completions", data=body, headers={"Content-Type": "application/json"})
-        holder = threading.Thread(target=lambda: urllib.request.urlopen(req, timeout=120).read(200), daemon=True)
-        holder.start()
+        def hold():                         # read the whole stream: a client that leaves frees its slot
+            with urllib.request.urlopen(req, timeout=300) as r:
+                while r.read(64):
+                    pass
+        threading.Thread(target=hold, daemon=True).start()
         time.sleep(2.0)
         rc, out, _ = report("run", "--only", "a", url=f.base)
     finally:

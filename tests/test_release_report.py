@@ -81,11 +81,20 @@ def test_the_bare_check_refuses_a_response_cache_and_a_sick_server():
 def test_no_chat_endpoint_anywhere_in_the_report_code():
     for root, _, files in os.walk(PKG):
         for f in files:
-            if f.endswith(".py"):
-                text = open(os.path.join(root, f)).read()
+            if f.endswith(".py") and not f.startswith("._"):
+                text = open(os.path.join(root, f), encoding="utf-8", errors="replace").read()
                 assert "chat/completions" not in text, f"{f} names the chat endpoint"
     from tools.release_report import client
     assert client.ENDPOINT == "/v1/completions" and client.RAW_HEADERS == {"X-Tandem": "raw"}
+
+
+def test_the_summary_passage_does_not_move():
+    from tools.release_report.prompts import Prose
+    from tools.release_report.sections.fidelity import passage
+    p = Prose("repo")
+    first = passage(p)
+    p.take(5000)
+    assert passage(p) == first and p.cursor == 5000
 
 
 def test_sections_and_rows():

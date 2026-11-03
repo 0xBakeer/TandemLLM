@@ -24,17 +24,27 @@ PROMPTS = {
              "oldest? Answer with the name, then one sentence.",
     "fact": "In three sentences, what is the Chandrasekhar limit?",
     "translate": "Translate into French: \"We shipped it on Friday, and by Monday it had already broken twice.\"",
-    "summarise": None,            # a passage of the run's prose, summarised in three bullet points
+    "summarise": None,            # the prose's first 600 tokens, summarised in three bullet points
 }
 NEEDLE = "The passphrase for the archive room is {word}."
 WORDS = ("amber-falcon-41", "cobalt-river-77")
 
 
+def passage(prose, tokens: int = 600) -> str:
+    """The summary prompt's passage: always the prose's first `tokens` tokens, so every run and
+    every server summarises the same text."""
+    keep = prose.cursor
+    prose.cursor = 0
+    try:
+        return prose.take(tokens)
+    finally:
+        prose.cursor = keep
+
+
 def prompt_of(ctx: Ctx, pid: str) -> str:
     text = PROMPTS[pid]
     if text is None:
-        text = ("Summarise this passage in three bullet points:\n\n"
-                + (ctx.__dict__.setdefault("_passage", ctx.prose.take(600))))
+        text = "Summarise this passage in three bullet points:\n\n" + passage(ctx.prose)
     return ctx.cl.render([{"role": "user", "content": text}])
 
 
