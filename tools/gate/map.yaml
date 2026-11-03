@@ -48,6 +48,12 @@ rules:
       - 'server/static.py'
       - 'server/METRICS.md'
       - 'tools/gate/**'
+      # the gate's own instruments (CPU tests hold them) and the label list
+      - 'tools/row3.py'
+      - 'tools/rowlog.py'
+      - 'tools/parallel_card.py'
+      - 'tools/soak.py'
+      - 'tools/gh_labels.sh'
 
   # the engine, the models and the kernels: the quick gate
   - level: quick

@@ -37,6 +37,7 @@ def test_docs_and_dashboard_need_nothing():
     r = need("docs/exactness.md", "README.md", "dashboard/src/views/usage.ts", "CHANGELOG.md",
              "models/flint/community/x.json", "tests/test_cache.py", "chatd/agent.py")
     assert r["level"] == "none" and r["suites"] == [] and r["kernels"] == [], r
+    assert need("tools/gate/runner.py", "tools/row3.py", "tools/parallel_card.py")["level"] == "none"
 
 
 def test_engine_and_models_need_quick():
