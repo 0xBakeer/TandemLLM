@@ -1827,7 +1827,7 @@ def _req_peak_start() -> None:
     alone = int(INFLIGHT.get("running", 0)) <= 1 and busy <= 1
     if alone:
         torch.cuda.reset_peak_memory_stats()
-    _REQ_PEAK_AT[threading.get_ident()] = (int(torch.cuda.memory_allocated()), alone)
+    _REQ_PEAK_AT[threading.get_ident()] = (cache.cuda_stats("allocated_bytes.all.current")[0], alone)
 
 
 def _req_peak_field() -> str:
@@ -1837,7 +1837,7 @@ def _req_peak_field() -> str:
     if a0 is None or not alone:
         return " peak_gib=-"
     try:
-        return f" peak_gib={(torch.cuda.max_memory_allocated() - a0) / 2**30:.2f}"
+        return f" peak_gib={(cache.cuda_stats('allocated_bytes.all.peak')[0] - a0) / 2**30:.2f}"
     except Exception:                                              # noqa: BLE001
         return " peak_gib=-"
 
@@ -7143,10 +7143,10 @@ def _system() -> dict:
     try:
         if torch.cuda.is_available():
             budget = STATE.get("mem")
-            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
-                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+            mem = {"gpu_allocated_bytes": alloc, "gpu_reserved_bytes": res,
                    "gpu_max_allocated_bytes": int(budget.lifetime() if budget is not None
-                                                  else torch.cuda.max_memory_allocated())}
+                                                  else cache.cuda_stats("allocated_bytes.all.peak")[0])}
     except Exception:                                              # noqa: BLE001
         pass
     mem.update(dashboard_api.meminfo())
@@ -11089,10 +11089,10 @@ def _memory() -> dict:
     out = {}
     mem = STATE.get("mem")
     try:
-        out["allocated_gb"] = round(torch.cuda.memory_allocated() / 2**30, 3)
-        out["reserved_gb"] = round(torch.cuda.memory_reserved() / 2**30, 3)
+        out["allocated_gb"] = round(cache.cuda_stats("allocated_bytes.all.current")[0] / 2**30, 3)
+        out["reserved_gb"] = round(cache.cuda_stats("reserved_bytes.all.current")[0] / 2**30, 3)
         out["max_allocated_gb"] = round((mem.lifetime() if mem is not None
-                                         else torch.cuda.max_memory_allocated()) / 2**30, 3)
+                                         else cache.cuda_stats("allocated_bytes.all.peak")[0]) / 2**30, 3)
     except Exception as exc:                                      # noqa: BLE001
         out["error"] = str(exc)
     if mem is not None and mem.on:
@@ -11174,7 +11174,7 @@ def _mem_load_mark(stages=None) -> None:
             mem.empty("load")
             alloc, res = mem.memory()
         else:
-            alloc, res = int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     except Exception:                                              # noqa: BLE001
         return
     by = _caches_by_owner()
@@ -11223,7 +11223,7 @@ def memory_owners(pools: bool = False) -> dict:
     mem = dict.get(STATE, "mem")
     try:
         alloc, res = (mem.memory() if mem is not None
-                      else (int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())))
+                      else (cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")))
     except Exception as exc:                                       # noqa: BLE001
         return {"error": str(exc)}
     by = _caches_by_owner()
@@ -12789,7 +12789,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]
-    a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    a0, r0 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     depth0 = a.depth
     paged = kvpool.POOL is not None and kvpool.Driver.get() is not None
     not_built = None
@@ -12806,7 +12806,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
             print(f"[parallel] {not_built}", flush=True)
             break
         mi0 = slots_mod.read_meminfo() or {}
-        a1 = torch.cuda.memory_allocated()
+        a1 = cache.cuda_stats("allocated_bytes.all.current")[0]
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
         e2, d2 = make(L, drafter0) if make is not None else hooks["make"](L, drafter0)
@@ -12850,15 +12850,15 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         torch.cuda.synchronize()
         mi1 = slots_mod.read_meminfo() or {}
         print(f"[parallel] slot {i}: window {L:,}, built in {time.time() - t0:.1f}s, "
-              f"+{_gib(torch.cuda.memory_allocated() - a1)} GiB allocated, MemAvailable "
+              f"+{_gib(cache.cuda_stats('allocated_bytes.all.current')[0] - a1)} GiB allocated, MemAvailable "
               f"{_gib(mi0.get('MemAvailable'))} -> {_gib(mi1.get('MemAvailable'))} GiB "
               f"(estimate {_gib(need)})", flush=True)
     if len(slots) < 2:
         print(f"[parallel] no side slot fits under the {a.parallel_floor_gb:g} GiB floor: one "
               f"sequence, as without --parallel", flush=True)
         return
-    added_a = torch.cuda.memory_allocated() - a0
-    added_r = torch.cuda.memory_reserved() - r0
+    a1, r1 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+    added_a, added_r = a1 - a0, r1 - r0
     mem = dict.get(STATE, "mem")
     if mem is not None and mem.on:
         side = max(added_a, added_r)

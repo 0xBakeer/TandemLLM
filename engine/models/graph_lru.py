@@ -23,7 +23,8 @@ JOINT_GRAPHS_MAX = 32
 
 
 def _reserved() -> int:
-    return torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+    from engine.cache import cuda_stats
+    return cuda_stats("reserved_bytes.all.current")[0] if torch.cuda.is_available() else 0
 
 
 class GraphLRU:

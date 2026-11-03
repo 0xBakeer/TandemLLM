@@ -68,8 +68,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: SRV-775: the policy's free default-pool bytes a prefill admitted over the peak takes first
 #: (`Budget.workspace_spare`, engine/cache.py): v2's second value again
 #: SRV-775: that credit only on a live pools reading (engine/cache.py): v2's second value again
+#: the allocator's counters read off torch's nested dict, which leaves no cyclic garbage (`cache.cuda_stats`,
+#: engine/cache.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "e7eb61e20ac0e8dcb8dd3fef0feff3458d5cf65ffcf5b1bb6dbb6e13fe23408e")
+             "b5104f9134a2d8d8ab75b31458ddd4a27c0d0a0cbb9822189c37ee9911c0e61a")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
