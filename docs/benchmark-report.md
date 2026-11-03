@@ -66,6 +66,6 @@ The prompt text is `bench/heldout_prose.txt` by default, repeated to the length.
 
 ## Share the page
 
-The page is one HTML file of about 100 KB with its charts inline, and it loads nothing from the network. Paths, host names, user names and addresses are taken out of every string that comes from the run, and `render` refuses to write a page that still names your box. It is safe to attach to an issue or a pull request. The raw files under `--out/raw` are not scrubbed; keep them local.
+The page is one HTML file of about 50 KB with its charts inline, and it loads nothing from the network. Paths, host names, user names and addresses are taken out of every string that comes from the run, and `render` refuses to write a page that still names your box. It is safe to attach to an issue or a pull request. The raw files under `--out/raw` are not scrubbed; keep them local.
 
 For every release the maintainers run the full report on the reference DGX Spark and attach the page to the GitHub release as `tandemllm-<version>-report.html` ([operations.md](operations.md#release-checklist)). `publish` is that upload step. It measures nothing, and you do not need it to make or share your own page.

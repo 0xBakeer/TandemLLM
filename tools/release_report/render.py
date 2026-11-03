@@ -59,7 +59,7 @@ def valid(rs):
 
 # ---- charts -------------------------------------------------------------------------------------
 
-W, PAD_L, PAD_R, PAD_T, PAD_B = 720, 56, 20, 16, 44
+W, PAD_L, PAD_R, PAD_T, PAD_B = 600, 48, 16, 16, 48
 
 
 def nice_max(v: float) -> float:
@@ -73,7 +73,15 @@ def nice_max(v: float) -> float:
     return 10 * e
 
 
-def ticks(top: float, n: int = 4) -> list[float]:
+def tick_label(t: float, top: float) -> str:
+    return f"{t:,.1f}" if top < 10 else f"{t:,.0f}"
+
+
+def ticks(top: float, n: int | None = None) -> list[float]:
+    """Gridlines from 0 to `top` at a round step: 4 steps where that is round, else 5, else 3."""
+    if n is None:
+        n = next((k for k in (4, 5, 3) if (top / k) == round(top / k)
+                  and round(top / k) % (5 if top / k >= 10 else 1) == 0), 4)
     return [top * i / n for i in range(n + 1)]
 
 
@@ -96,7 +104,7 @@ def xy_chart(cats: list[str], series: list[dict], ylabel: str, height: int = 260
     for t in ticks(top):
         y = Y(t)
         out.append(f'<line class="grid" x1="{PAD_L}" x2="{W - PAD_R}" y1="{y:.1f}" y2="{y:.1f}"/>')
-        out.append(f'<text class="tick" x="{PAD_L - 8}" y="{y + 4:.1f}" text-anchor="end">{t:,.0f}</text>')
+        out.append(f'<text class="tick" x="{PAD_L - 8}" y="{y + 4:.1f}" text-anchor="end">{tick_label(t, top)}</text>')
     for i, c in enumerate(cats):
         out.append(f'<text class="tick" x="{X(i):.1f}" y="{h - PAD_B + 18}" text-anchor="middle">{esc(c)}</text>')
     out.append(f'<text class="axis" x="{PAD_L}" y="{h - 6}">{esc(ylabel)}</text>')
@@ -120,22 +128,22 @@ def bar_chart(groups: list[tuple[str, list[tuple[str, float | None, str, str]]]]
               aria: str = "") -> str:
     """Horizontal bars: groups of (label, [(series name, value, cls, tip)])."""
     rows = sum(len(g[1]) for g in groups)
-    bh, gap, ggap, left = 14, 2, 14, 168
-    h = PAD_T + rows * (bh + gap) + len(groups) * ggap + 30
+    bh, gap, ggap, left = 14, 2, 14, 132
+    h = PAD_T + rows * (bh + gap) + len(groups) * ggap + 48
     vals = [v for _, bs in groups for _, v, _, _ in bs if v is not None]
     top = nice_max(max(vals) * 1.05) if vals else 1
     iw = W - left - PAD_R - 64
     out = [f'<svg class="chart" viewBox="0 0 {W} {h}" role="img" aria-label="{esc(aria or unit)}">']
     for t in ticks(top):
         x = left + iw * t / top
-        out.append(f'<line class="grid" x1="{x:.1f}" x2="{x:.1f}" y1="{PAD_T - 4}" y2="{h - 26}"/>')
-        out.append(f'<text class="tick" x="{x:.1f}" y="{h - 10}" text-anchor="middle">{t:,.0f}</text>')
+        out.append(f'<line class="grid" x1="{x:.1f}" x2="{x:.1f}" y1="{PAD_T - 4}" y2="{h - 44}"/>')
+        out.append(f'<text class="tick" x="{x:.1f}" y="{h - 28}" text-anchor="middle">{tick_label(t, top)}</text>')
     y = PAD_T
     for label, bs in groups:
         out.append(f'<text class="lab" x="{left - 10}" y="{y + bh - 2}" text-anchor="end">{esc(label)}</text>')
         for name, v, cls, tip in bs:
-            if v is None:
-                out.append(f'<text class="tick" x="{left + 4}" y="{y + bh - 3}">{esc(tip)}</text>')
+            if v is None:                       # an invalid row: its reason is listed under the chart
+                out.append(f'<text class="inv-mark" x="{left + 4}" y="{y + bh - 3}">invalid<title>{esc(tip)}</title></text>')
             else:
                 w = max(2.0, iw * v / top)
                 out.append(f'<path class="bar {cls}" d="M{left},{y} h{w - 4:.1f} a4,4 0 0 1 4,4 v{bh - 8} '
@@ -143,7 +151,7 @@ def bar_chart(groups: list[tuple[str, list[tuple[str, float | None, str, str]]]]
                 out.append(f'<text class="val" x="{left + w + 6:.1f}" y="{y + bh - 3}">{num(v)}</text>')
             y += bh + gap
         y += ggap
-    out.append(f'<text class="axis" x="{left}" y="{h - 10}" text-anchor="end" dx="-10">{esc(unit)}</text>')
+    out.append(f'<text class="axis" x="{left}" y="{h - 6}">{esc(unit)}</text>')
     out.append("</svg>")
     return "".join(out)
 
@@ -732,9 +740,10 @@ border-radius:8px;padding:8px 12px;justify-self:start}
 .tag.good{color:var(--good)}.tag.bad{color:var(--bad)}
 section{display:grid;gap:12px;min-width:0;border-top:1px solid var(--rule);padding-top:24px}
 .method{color:var(--ink2);font-size:14px;margin:0;max-width:78ch}
-.chart{width:100%;height:auto;display:block;max-width:100%}
+.chart{width:100%;height:auto;display:block;max-width:760px}
 .grid{stroke:var(--rule);stroke-width:1}
-.tick,.axis,.val,.lab{font-family:var(--mono);font-size:12px;fill:var(--ink3)}
+.tick,.axis,.val,.lab,.inv-mark{font-family:var(--mono);font-size:13px;fill:var(--ink3)}
+.inv-mark{fill:var(--bad)}
 .lab{fill:var(--ink2)}.val{fill:var(--ink2)}
 .ln{fill:none;stroke-width:2}.ln.s1{stroke:var(--s1)}.ln.s2{stroke:var(--s2)}
 .pt{stroke:var(--surface);stroke-width:2}.pt.s1{fill:var(--s1)}.pt.s2{fill:var(--s2)}.pt.s3{fill:var(--s3)}
@@ -776,7 +785,7 @@ def page(data: dict) -> str:
             + f" · measured {esc(' and '.join(dates) or '–')} · version {esc(pub.get('version'))}")
     parts = [f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
              f'content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{esc(title)}</title>'
-             f'<meta name="claude:viewport-fit-sides" content="cover"><style>{CSS}</style></head><body><div class="wrap">']
+             f'<style>{CSS}</style></head><body><div class="wrap">']
     parts.append(f'<header><h1>{esc(title)}</h1><p class="meta">{head}</p><div class="bare">{esc(BARE)}</div></header>')
     tl = tiles(pub)
     if tl:
