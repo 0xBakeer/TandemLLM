@@ -71,8 +71,9 @@ from engine.models import REGISTRY  # noqa: E402
 #: the allocator's counters read off torch's nested dict, which leaves no cyclic garbage (`cache.cuda_stats`,
 #: engine/cache.py): v2's second value again
 #: the spill codec's import answer remembered (engine/spill.py): v2's second value again
+#: the window cap inside a chunk-major prefill (engine/cache.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "b9326ce98ca9452cc6387ac0fcab3023c2cf7923cf6bfd0f98da0fe17a97e277")
+             "5f2e2424eb37646152467c45aa4fede01053b4a7ae3c8fa5eb4ea1506ff3c7f4")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
