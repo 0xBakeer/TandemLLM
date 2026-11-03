@@ -11,6 +11,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - chatd's Stop ends a model call whose response has not started (SRV-777). The engine sends no headers while a request waits for memory, so Stop had no stream to close and the run waited for chatd's 15-minute read timeout. Stop now shuts the connection the call opened, the message ends "stopped" within a second, and the engine sees the close.
 - A request whose client leaves while it waits for memory is booked abandoned, with a `[req] <id> left while waiting for memory` line (SRV-777). Before, it got no `[req]` line, no `abandoned` count, and its live row said "error: internal error after 0 tokens".
 - NemotronH's packed IQ2, Q8 and FP8 weights multiply a 33-row verify block on their row kernels (#142). They sent it to dequantisation and cuBLAS, so the 0.15.1 entry that a 33-row verify block runs on the row kernels did not hold for GGUF and ModelOpt weights. Each row now matches its one-row call bit for bit. The Q8 kernel also guards its K loop for a K that is not a multiple of 256; no shipped model has such a K.
+- The native dense kernels take 7-bit EXL3 tensors (#136). Flash-Next's dense path refused a 7-bit projection at its launch check, and LFM2.5, NemotronH and Flint sent their 7-bit tensors of up to 32 rows to the library fallback. They now run on the dense kernel, so the text of a pack with 7-bit tensors, LFM2.5's 6.0 pack among them, can change. The 5.05 Flash-Next pack's full load and generation are not yet validated.
 
 ## 0.15.1, 2026-10-31
 

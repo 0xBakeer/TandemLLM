@@ -139,11 +139,13 @@ GOLDEN_FP4 = {
     # the MTP catch-up's own prefill chunk cap (engine/models/flashnext/engine.py): qwen3_5_moe, qwen4_exp
     # #142: IQ2, Q8 and FP8 weights keep a 33-row verify block on their row kernels (tools/iq2_linear.py,
     # tools/nvfp4_relu2.py): nemotron_h (flint reads nvfp4_relu2.py and may move)
+    # #136: the dense kernels take 7-bit EXL3 tensors (tools/csrc/fn_kernels/kernels.cu, the LFM2.5, NemotronH and
+    # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "f5fc09b67b793fa69d222643d66cd89bac8276b17e3c231a22a5610f11c8b647",
-    "nemotron_h": "dd670d5c7864f48c7383d43e4534e147125d8b520abc3a32431c0e629df12178",
-    "lfm2_moe": "cd8c37de23b3dab664bdaf603d2eb5dd2aa526a52e6375746444f64372649433",
-    "qwen3_5_moe": "43428e023c6acf48c0d8ee8b05d2bffb0af81ffbdd031dfed424a69e89831c13",
+    "qwen4_exp": "895187ee496b1ef904f79d7ba27cd15f93ff2af70aadf97d4d4c232307f8414d",
+    "nemotron_h": "b42ab12b898cbfb68580c024ff91b63d18c30b4c1e9e5b125215cbddb865fd2e",
+    "lfm2_moe": "0cf3c6cc3832a442dc230faeba2813c865764703f1caec9e3a34d6a68044ffdb",
+    "qwen3_5_moe": "addb73dda4640c0be39588491e81010154f71a4583bd7ec9df33b1902e822485",
     "flint": "65b48c7202a82a922f41b118b56c2bc2b243c3dd561d213cd261f10f2cdf4367",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

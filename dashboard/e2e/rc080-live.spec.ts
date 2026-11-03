@@ -165,7 +165,7 @@ test('the Setup Guide shows both models, the Flash-Next windows and the 5.05 bad
   await page.goto('./#/setup/qwen3.8-flash-next/weights');
   await page.locator('[data-profile-card="flashnext-5.05"]').waitFor({ timeout: 20_000 });
   for (const id of ['2.05', '3.05', '4.05', '5.05', '6.05']) await expect(page.locator(`[data-profile-card="flashnext-${id}"]`)).toHaveCount(1);
-  await expect(page.locator('[data-profile-card="flashnext-5.05"]')).toContainText('does not load yet');
+  await expect(page.locator('[data-profile-card="flashnext-5.05"]')).toContainText('load/generation unverified');
   const body = await page.locator('body').innerText();
   console.log(`[rc080] setup weights: 262,144 ${body.includes('262,144')}, 212,992 ${body.includes('212,992')}`);
   await page.screenshot({ path: `${SHOTS}/rc080-4-setup-flashnext-weights.png`, fullPage: true });
