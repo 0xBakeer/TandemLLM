@@ -51,7 +51,7 @@ bash install.sh --setup --yes
 
 The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant, and the two Wikipedia shards of the lookup corpus (1.2~GB). The corpus itself needs the model's tokenizer, so \code{ops/use-profile.sh} builds it once the model is on the disk. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model loaded.
 
-Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; it walks through the model, the weights, the tools and the parallel slots in eight steps. \code{docs/setup.md} describes the page.
+Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; a new browser opens its simple form, three pages: the model, its weights, and one page of folded settings. The switch at the top brings back all eight steps, through the model, the weights, the tools and the parallel slots. \code{docs/setup.md} describes the page.
 
 \begin{itemize}
 \item On the box itself, open \texttt{http://127.0.0.1:8000/dashboard/\#/setup}.

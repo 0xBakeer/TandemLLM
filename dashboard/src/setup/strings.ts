@@ -546,7 +546,7 @@ export const SIMPLE = {
   modeNoteSimple: 'Three short pages, sensible answers already in.',
   modeNoteAdvanced: 'The full eight steps, exactly as before.',
   settingsTitle: 'Settings',
-  settingsIntro: 'All good defaults are already set. The model’s full window, as many chats at it as the box carries, the deciders and the cache where the model offers them. Open a title to look at anything; you never have to.',
+  settingsIntro: 'All good defaults are already set. The model’s full window, as many chats at it as the box carries, and the cache where the model offers it. Open a title to look at anything; you never have to.',
   showAll: 'Show every option',
   stepSettings: 'Settings',
   of3: (n: number) => `Step ${String(n)} of 3`,

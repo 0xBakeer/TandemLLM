@@ -80,6 +80,18 @@ test('Wren ticks a box: the field pulses, the bar drops, Undo puts it back', asy
   await expect(chip).toHaveClass(/is-undone/);
 });
 
+test('simple mode: Wren opens the fold that holds the field it changes', async ({ page }) => {
+  // the beforeEach asked for the advanced flow; this context asks for the simple one after it
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '1'));
+  await open(page, `#/setup/${MODEL}/components`);
+  const fold = page.locator('details.setup-fold[data-fold="components"]');
+  await expect(page.locator('[data-simple-settings]')).toBeVisible();
+  await expect(fold).not.toHaveAttribute('open', '');
+  await ask(page, 'turn off the vision tower');
+  await expect(fold).toHaveAttribute('open', '', { timeout: 10_000 });
+  await expect(page.locator('[data-field="components.vision"][data-wren-acting]')).toBeVisible();
+});
+
 test('Wren fills a form field: slots 2', async ({ page }) => {
   await open(page, `#/setup/${MODEL}/parallelism`);
   await ask(page, 'use 2 slots please');

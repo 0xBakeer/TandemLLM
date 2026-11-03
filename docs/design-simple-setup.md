@@ -32,8 +32,8 @@ the folded page when it ends.
 
 A first-opened model with nothing running yet gets the simple answers — the model's full
 window, as many chats at it as the card measured it can carry (never past the card's own
-measurement, `slots.max`), the deciders and the response cache where the model offers
-them. The pool is turned on only when it buys chats the plain reservation cannot carry.
+measurement, `slots.max`), and the response cache where the model offers it. Laya stays
+off: it needs the chat (beta), which is off by default. The pool is turned on only when it buys chats the plain reservation cannot carry.
 A box that already serves the model keeps its own settings: opening the guide in a new
 browser must never change what is running.
 

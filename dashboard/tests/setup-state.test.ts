@@ -407,6 +407,19 @@ describe('the simple answers', () => {
     const w = windowMax(buy, sel().profile);
     expect(estimateLoose(buy, { ...sel(), window: w, kv_pool: false, slots: n })?.fits).toBe(false);
   });
+  it('asks for nothing the reducer refuses (Laya needs the chat, which is off by default)', () => {
+    for (const card of [FLASH, M]) {
+      const start = run([{ type: 'open', model: card, seed: defaults(card) }]);
+      let s = start;
+      for (const a of simpleDefaultsActions(card, start.selection!)) {
+        s = setupReducer(s, a, card);
+        expect(s.notice ?? '', JSON.stringify(a)).not.toMatch(/[Nn]eeds? the chat/);
+        if (a.type === 'component') expect(s.selection!.components?.[a.id], a.id).toBe(a.on);
+        if (a.type === 'parallel') expect((s.selection as unknown as Record<string, unknown>)[a.key], a.key).toBe(a.value);
+      }
+      expect(simpleDefaultsActions(card, start.selection!).some((a) => a.type === 'component' && a.id === 'laya')).toBe(false);
+    }
+  });
   it('leaves the pool as the box left it when the plain reservation already carries the chats', () => {
     const free = pooledCard(16_000);
     const acts = simpleDefaultsActions(free, sel());

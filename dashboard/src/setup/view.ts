@@ -213,7 +213,7 @@ export class QseSetup extends LightElement {
     this.dispatch({ type: 'open', model: m, step, seed }, false);
     if (this.wiz.step === 'weights') void this.syncCommunity();
     // a first-opened model with nothing running yet gets the simple answers (full window, up
-    // to four chats, deciders + cache on) — as ordinary actions, so the reducer's clamps and
+    // to four chats, the response cache on) — as ordinary actions, so the reducer's clamps and
     // the memory bar see a plain click. A box that already serves this model keeps its own
     // window, chats and components: opening the guide in a new browser must not change them.
     if (this.simple && fresh && !seed && this.wiz.selection) {
@@ -425,7 +425,10 @@ export class QseSetup extends LightElement {
       }
     }
     if (plan.kind === 'explain') {
-      if (plan.target.step === this.wiz.step) void this.highlight(plan.target.step, plan.target.field);
+      // simple mode folds several steps into one page: compare the pages, not the steps
+      if (normalizeStep(plan.target.step, this.simple) === normalizeStep(this.wiz.step, this.simple)) {
+        void this.highlight(plan.target.step, plan.target.field);
+      }
       return { ok: true, result: plan.result, summary: null, undo: null };
     }
     const { target } = plan;
@@ -454,6 +457,12 @@ export class QseSetup extends LightElement {
   private async highlight(step: SetupStepId, field: string | null): Promise<void> {
     if (!field) return;
     await this.updateComplete;
+    // on the folded simple page the field sits in its step's fold: open it, or the pulse is unseen
+    const fold = this.querySelector<HTMLDetailsElement>(`details.setup-fold[data-fold="${CSS.escape(step)}"]`);
+    if (fold && !fold.open) {
+      fold.open = true;
+      await this.updateComplete;
+    }
     const el = this.querySelector<HTMLElement>(`[data-field="${CSS.escape(fieldKey(step, field))}"]`);
     if (!el) return;
     const r = el.getBoundingClientRect();

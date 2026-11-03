@@ -2,8 +2,8 @@
 // them: three pages instead of eight — 1 the cards, 2 the quant cards with the noise lines
 // stripped, 3 everything else folded into title bars nobody has to open — and it answers the
 // quiet questions itself: the model's full context window (not the 32K a cautious default
-// picks), up to four chats, never past the card's slots.max, the decision models and the
-// response cache on. Every page can
+// picks), up to four chats, never past the card's slots.max, and the response cache on (the
+// chat stays off, and Laya with it). Every page can
 // open the full options; the switch at the top returns to the eight steps at any time.
 //
 // The mode is a browser memory (localStorage), never a server state: a shared box has several
@@ -41,8 +41,9 @@ export function setSimple(on: boolean): void {
 /** the wizard answers a newcomer would not ask, as ordinary actions — so the reducer, the
  *  memory bar and the plan see exactly what a click would have produced. The window is the
  *  model's own longest one the profile takes (the model was made for it); the parallel chats
- *  go to four where the model takes them; the decision models and the response cache come on
- *  when the model offers them. */
+ *  go to four where the model takes them; the response cache comes on when the model offers it.
+ *  Laya stays off: it needs the chat (beta), which is off by default, and the reducer would
+ *  refuse it. */
 export function simpleDefaultsActions(m: SetupModel, sel: SetupSelection): SetupAction[] {
   const a: SetupAction[] = [];
   const w = windowMax(m, sel.profile);
@@ -60,9 +61,9 @@ export function simpleDefaultsActions(m: SetupModel, sel: SetupSelection): Setup
   const pool = pooled > plain ? true : sel.kv_pool;
   if (sel.kv_pool !== pool) a.push({ type: 'parallel', key: 'kv_pool', value: pool });
   if (sel.slots !== slots) a.push({ type: 'parallel', key: 'slots', value: slots });
-  for (const id of ['laya', 'response_cache']) {
-    // these two are components (memory-bearing toggles, not methods) where a model has them
-    if ((m.components ?? []).some((c) => c.id === id) && sel.components?.[id] !== true) a.push({ type: 'component', id, on: true });
+  // a component (a memory-bearing toggle, not a method) where the model has it
+  if ((m.components ?? []).some((c) => c.id === 'response_cache') && sel.components?.response_cache !== true) {
+    a.push({ type: 'component', id: 'response_cache', on: true });
   }
   return a;
 }
