@@ -15,10 +15,11 @@ workspace floor plus a whole state-store entry) against 6.4 to 8.4 GiB of cache 
      with no hidden tokens unchanged (W05: 1.00); the ledger row's engine_cached and forwarded
   2  the positions of a served prompt: merged, the think block at the tail; a count that does not
      add up gives None (the clamp)
-  3  the need is the request's own workspace; the engine's growth is capped by its room to the
-     memory policy's peak; 576 tokens beside a 9,000-token request at 25 GiB available pass
+  3  the need is the request's own workspace; the engine's growth and the workspaces in flight are
+     capped by its room to the memory policy's peak; 576 tokens beside a 9,000-token request at
+     22.7 GiB available pass
   4  a held request: its wait is queue time, `wait_mem_ms` books it, the waiting line is said; a
-     request alone says so in the log
+     request alone is checked as well (SRV-775) and the log says so
 
 Run: python tests/test_client_cached.py
 """
@@ -95,6 +96,15 @@ class _Mem:
     def workspace(self, n):
         return max(self.ws_floor, self.ws_per_token * int(n))
 
+    def workspace_rows(self, n, rows=None, line=True):            # SRV-773: no model of its own, the line
+        return self.workspace(n)
+
+    def gate(self, n, count=True, rows=None, others=0, ceiling=True):   # SRV-775: every prefill's; this one admits
+        return {}
+
+    def refused(self, exc):
+        pass
+
 
 class _Handler:
     def __init__(self):
@@ -124,7 +134,8 @@ def test_3_the_need_and_the_engines_room():
     assert abs(app._par_room() - int(7.2 * GiB)) < GiB // 100  # the engine's room to its peak
     # FX7's live case on MemAvailable 25.0, growth 6.6, in flight 2.1, need 2.1 ->
     # 14.1 (< 15): the 576-token request waited 63 s. Now its need is its workspace and the
-    # engine's room caps what all of it may take
+    # engine's room caps what all of it may take (SRV-775: as before; the gate keeps each prefill
+    # under the peak)
     adm = slots_mod.Admission(int(15 * GiB), meminfo=lambda: {"MemAvailable": int(22.7 * GiB)},
                               growth=lambda: int(6.6 * GiB), room=app._par_room)
     pool = types.SimpleNamespace(admission=adm, turn=None)
@@ -142,11 +153,11 @@ def test_3_the_need_and_the_engines_room():
     app.STATE["mem"]._r = int(84 * GiB)
     assert abs(app._par_room() - int(0.6 * GiB)) < GiB // 100
     # where MemAvailable itself is low the floor still holds: 15.7 GiB with 0.6 of room passes,
-    # 15.5 GiB does not
+    # 15.5 GiB does not (SRV-775: a lone request is checked as well, under the same room)
     for avail, want in ((15.7, True), (15.5, False)):
         a2 = slots_mod.Admission(int(15 * GiB), meminfo=lambda v=avail: {"MemAvailable": int(v * GiB)},
                                  growth=lambda: int(6.6 * GiB), room=app._par_room)
-        assert a2.reserve("big", GiB)[0]                  # alone
+        assert a2.reserve("big", GiB)[0] is want, avail   # alone, checked
         assert a2.reserve("small", cache.WORKSPACE_FLOOR)[0] is want, avail
 
 
@@ -154,7 +165,7 @@ def test_4_a_held_request_waits_in_the_queue_and_says_so():
     import torch
     app.STATE.clear()
     app.STATE["queue_timeout"] = 30.0
-    pool, box = _pool(16.0, growth=0)
+    pool, box = _pool(18.0, growth=0)                 # SRV-775: the lone "big" is checked: 18 - 2 >= 15
     assert pool.admission.reserve("big", 2 * GiB)[0]
     rec = _rec()
     rec.lock_acquired()
@@ -174,10 +185,10 @@ def test_4_a_held_request_waits_in_the_queue_and_says_so():
     assert rec.t_lock - lock_at >= 1.0, "the wait moved the lock time: queue_ms holds it"
     rec.t_first = time.perf_counter()
     assert rec.prompt_ms < 100, rec.prompt_ms
-    # alone: admitted without the check, and the log says so
+    # alone: checked as well (SRV-775), and the log says so
     pool2, _ = _pool(1.0)
     ok, d = pool2.admission.reserve("only", GiB)
-    assert ok and "admitted alone" in slots_mod.Admission.describe(d)
+    assert not ok and slots_mod.Admission.describe(d).startswith("alone: MemAvailable 1.0"), d
 
 
 if __name__ == "__main__":

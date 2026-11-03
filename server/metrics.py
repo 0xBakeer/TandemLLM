@@ -446,7 +446,11 @@ def _unified_free():
     """
     try:
         import torch
-        return float(torch.cuda.mem_get_info()[0])
+        from engine import capture_lock
+        # SPD-249: a scrape runs on its own thread, and its driver call landed inside idle captures
+        with capture_lock.off_thread("metrics.unified_free"):
+            capture_lock.check("metrics.unified_free")
+            return float(torch.cuda.mem_get_info()[0])
     except Exception:                                              # noqa: BLE001
         pass
     try:

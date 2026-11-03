@@ -25,9 +25,11 @@ describe('planToolCall', () => {
     expect(st.selection!.components.vision).toBe(true);
   });
   it('undo of a cascade puts every dependent back', () => {
-    const p = planToolCall({ name: 'toggle', args: { component: 'conductor', on: false } }, ctx());
-    if (!p.ok || p.kind !== 'action') throw new Error('expected an action');
+    // OPS-260: the chat (beta) is off by default; on first, with Laya and the shadow reader
     let st = setupReducer(emptyState(), { type: 'open', model: M }, M);
+    for (const id of ['conductor', 'laya', 'shadow']) st = setupReducer(st, { type: 'component', id, on: true }, M);
+    const p = planToolCall({ name: 'toggle', args: { component: 'conductor', on: false } }, ctx({ selection: st.selection! }));
+    if (!p.ok || p.kind !== 'action') throw new Error('expected an action');
     for (const a of p.actions) st = setupReducer(st, a, M);
     expect(st.selection!.components.laya).toBe(false);
     for (const a of p.undo) st = setupReducer(st, a, M);
@@ -99,7 +101,7 @@ describe('planToolCall', () => {
   it('a component disabled by a dependency cannot be switched on: the reason goes back', () => {
     const sel = defaults(M);
     sel.components = { ...sel.components, conductor: false, narrator: false, laya: false, shadow: false };
-    expect(planToolCall({ name: 'toggle', args: { component: 'shadow', on: true } }, ctx({ selection: sel }))).toEqual({ ok: false, error: 'Needs the conductor' });
+    expect(planToolCall({ name: 'toggle', args: { component: 'shadow', on: true } }, ctx({ selection: sel }))).toEqual({ ok: false, error: 'Needs the chat (beta)' });
   });
   it('security fields are the user’s only', () => {
     expect(planToolCall({ name: 'set_field', args: { step: 'methods', field: 'admin_password', value: 'generate' } }, ctx())).toMatchObject({ ok: false, error: expect.stringMatching(/security setting/) });

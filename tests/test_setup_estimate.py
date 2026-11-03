@@ -78,9 +78,10 @@ def _est(**kw) -> dict:
     return E.estimate(m, E.check(m, dict({"model": m["id"]}, **kw)))
 
 
-# the reference box's tools: the narrator on beside Laya and the shadow reader (off by default since
-# 0.11.3, SRV-534)
-REF = {"narrator": True}
+# the reference box's tools: the chat (beta) with Laya and the shadow reader (off by default since OPS-260)
+# and the narrator (off by default since 0.11.3, SRV-534)
+CHAT = {"conductor": True, "laya": True, "shadow": True}
+REF = dict(CHAT, narrator=True)
 
 
 def test_the_worked_example():
@@ -158,8 +159,9 @@ def test_lanes_full():
     assert e["kv_worst_gb"] == round(4 * lane, 2), "every lane the one window"
     assert e["lanes_full"] == 4 and e["fits_worst"] is True
     assert any(n.startswith("All 4 lanes can hold the full 65,536-token window") for n in e["notes"])
-    e = _est()                                   # the default: 8 lanes of 262,144 on the pool
+    e = _est(components=CHAT)                    # the default: 8 lanes of 262,144 on the pool, the chat on
     assert e["lanes_full"] == min(8, int(e["room_gb"] // e["lane_full_gb"])) == 1, e
+    assert _est()["lanes_full"] == 2, "engine only (OPS-260): Laya's and the shadow reader's 3.12 GiB more room"
     kv = next(p for p in e["parts"] if p["id"] == "kv")
     assert kv["gb"] == round(8 * 32_768 * 106_752 / GIB, 2) and kv["worst_gb"] == round(8 * lane * 4, 2)
     assert any("1 of 8 lanes" in n and "memory_full" in n for n in e["notes"]), e["notes"]
@@ -192,7 +194,7 @@ def test_the_selection_check():
     _refused(dict(base, profile="exl3-9.9"), 400, "unknown_profile")
     _refused(dict(base, components={"turbo": True}), 400, "unknown_component")
     _refused(dict(base, device="mac"), 400, "unknown_device")
-    _refused(dict(base, components={"conductor": False}), 422, "invalid_combination", "laya")
+    _refused(dict(base, components={"laya": True}), 422, "invalid_combination", "laya")   # OPS-260: the conductor is off
     _refused(dict(base, components={"drafters": False}), 422, "invalid_combination", "drafters")
     _refused(dict(base, components={"disk_tier": False}), 422, "invalid_combination", "nvme_spill")
     _refused(dict(base, components={"vision": "yes"}), 422, "invalid_selection")
@@ -239,6 +241,10 @@ def _cases() -> list[dict]:
             continue
         on = not c["default"]
         comps = {c["id"]: on}
+        if on:
+            comps.update({d: True for d in c["depends_on"]})   # OPS-260: Laya on needs the chat on
+            # one tool at a time: the chat's own small models (with_parent) stay off beside it
+            comps.update({o["id"]: False for o in m["components"] if o.get("with_parent") and o["id"] != c["id"]})
         if c["id"] == "conductor":
             comps.update(narrator=False, laya=False, shadow=False)
         if c["id"] == "disk_tier":

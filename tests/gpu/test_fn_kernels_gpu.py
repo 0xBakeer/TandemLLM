@@ -356,6 +356,119 @@ def test_moe_every_k():
     return ", ".join(out)
 
 
+def test_moe_group_grid_rows():
+    """SPD-249: the grouped kernels on fewer grid rows than pairs (a CTA loops over groups), with the
+    gate|up rows staged once a pair and with a lower group cap give today's bits; today's grouped bits
+    are the per-pair kernels'."""
+    bank, _ = _bank(24, (3,), 5)
+    mod = K._module()
+    out = []
+    for M in (2, 8, 24):
+        x = _x(M, H, 70 + M, 0.5)
+        ids, _ = _ids(M, 24, 10, 70 + M)
+        old = K.MOE_GROUP
+        try:
+            K.MOE_GROUP = False
+            pair = K.moe_experts(x, ids, bank).clone()
+            K.MOE_GROUP = True
+            mod.fn_set_moe_gy(0)
+            want = K.moe_experts(x, ids, bank).clone()
+            assert torch.equal(want, pair), M
+            for gr in (8, 4, 3, 1):
+                mod.fn_set_moe_gr(gr)
+                for stage in (False, True):
+                    K.MOE_STAGE = stage
+                    for gy in (0, 1, 3, 16, 4096):
+                        mod.fn_set_moe_gy(gy)
+                        assert torch.equal(K.moe_experts(x, ids, bank), want), (M, gy, stage, gr)
+        finally:
+            mod.fn_set_moe_gy(0)
+            mod.fn_set_moe_gr(8)
+            K.MOE_GROUP = old
+            K.MOE_STAGE = False
+        out.append(str(M))
+    return f"rows {', '.join(out)}: grid rows 1, 3, 16, 4096 x staged or not x cap 8, 4, 3, 1 = today = per-pair, bit for bit"
+
+
+def test_moe_rows_streamed():
+    """SPD-249 (FN_MOE_AS): the grouped kernels with the rows staged once a pair and streamed beside the tiles
+    give the grouped kernels' bits at every K, group cap and row count, and leave a pad row (expert -1) alone."""
+    mod = K._module()
+    out = []
+    old = K.MOE_GROUP
+    try:
+        for kbs in ((3,), (2, 4, 5), (6, 8)):
+            bank, _ = _bank(24, kbs, 5, seed=300 + kbs[0])
+            for M in (2, 5, 8, 24, 32):
+                x = _x(M, H, 90 + M, 0.5)
+                ids, _ = _ids(M, 24, 10, 90 + M)
+                K.MOE_GROUP = True
+                for gr in (8, 6, 4, 1):
+                    mod.fn_set_moe_gr(gr)
+                    K.MOE_AS = 0
+                    want = K.moe_experts(x, ids, bank).clone()
+                    for asv in (1, 2):
+                        K.MOE_AS = asv
+                        for gp in (0, 1):
+                            mod.fn_set_moe_gpar(gp)
+                            assert torch.equal(K.moe_experts(x, ids, bank), want), (kbs, M, gr, asv, gp)
+                    mod.fn_set_moe_gpar(0)
+                if M == 24:
+                    pad = ids.clone()
+                    pad[-3:] = -1                              # a joint graph's pad rows
+                    K.MOE_AS = 0
+                    want = K.moe_experts(x, pad, bank).clone()
+                    real = (pad.reshape(-1) >= 0)
+                    for asv in (1, 2):
+                        K.MOE_AS = asv
+                        for gp in (0, 1):
+                            mod.fn_set_moe_gpar(gp)
+                            got = K.moe_experts(x, pad, bank)
+                            assert torch.equal(got[real], want[real]), (kbs, asv, gp)
+                    mod.fn_set_moe_gpar(0)
+            out.append("K" + "/".join(map(str, kbs)))
+    finally:
+        mod.fn_set_moe_gr(8)
+        mod.fn_set_moe_gpar(0)
+        K.MOE_AS = 0
+        K.MOE_GROUP = old
+    return (f"{', '.join(out)} x rows 2, 5, 8, 24, 32 x cap 8, 6, 4, 1 (+ pad rows) x streamed / fused gate-up-down x "
+            f"groups walked / scanned = grouped, bit for bit")
+
+
+def test_moe_groups_scanned():
+    """SPD-249 (FN_MOE_GPAR): the scanned groups are the walked ones: the same count, and in every group the same
+    expert, size and pairs in the same slots (random ids in expert order, pads -1 among them, P 1..1024, caps)."""
+    mod = K._module()
+    g = torch.Generator().manual_seed(5)
+    n = 0
+    try:
+        for P in (1, 2, 7, 33, 240, 352, 1000, 1024):
+            for gr in (8, 6, 3, 1):
+                mod.fn_set_moe_gr(gr)
+                ids = torch.randint(0, 24, (P,), generator=g, dtype=torch.int32)
+                ids[torch.rand(P, generator=g) < 0.1] = -1
+                order = torch.argsort(ids.long(), stable=True).to(torch.int32)
+                if P % 2:
+                    order = order[torch.randperm(P, generator=g)]      # any order, not only sorted runs
+                ids, order = ids.to(DEV), order.to(DEV)
+                res = []
+                for gp in (0, 1):
+                    mod.fn_set_moe_gpar(gp)
+                    G = torch.full((P, 2 + K.MOE_GR), -7, dtype=torch.int32, device=DEV)
+                    NG = torch.zeros(1, dtype=torch.int32, device=DEV)
+                    mod.fn_moe_groups(ids, order, G, NG, 24)
+                    ng = int(NG)
+                    rows = [G[r, :2 + int(G[r, 1])].tolist() for r in range(ng)]
+                    res.append((ng, rows))
+                assert res[0] == res[1], (P, gr)
+                n += 1
+    finally:
+        mod.fn_set_moe_gr(8)
+        mod.fn_set_moe_gpar(0)
+    return f"{n} cases (P 1..1024, caps 8/6/3/1, pads, sorted and shuffled orders): scanned groups = walked groups"
+
+
 def test_combine_inject_norm_equals_combine_then_inject():
     bank, _ = _bank(24, (3,), 5)
     x = _x(5, H, 61, 0.5)

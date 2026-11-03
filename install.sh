@@ -33,7 +33,12 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.15.0 runs 8 lanes by default, each with the full window, one round runner
+# The engine release. v0.15.1 cuts the launches of Flash-Next's joint pass (every lane's attention,
+# PLE and GDN prep at once, streamed expert rows, CUDA graphs for a dense pass), drafts Flash-Next's
+# seeded sampled requests under the target's keyed noise with a learned corrector on 3.05 (its file
+# comes with ops/use-profile.sh flashnext-3.05) and fixes a fresh server's first raw request waiting
+# behind a whole generation;
+# v0.15.0 runs 8 lanes by default, each with the full window, one round runner
 # with joint verify passes (CUDA graphs on the 27B), the burst prefill and the card's sampling filters;
 # v0.14.2 moves reasoning written with thinking off to its field, gives Ornith its
 # card's answer limit and the plain step at long context, and builds the lookup corpus for each tokenizer;
@@ -63,7 +68,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.15.0}"
+TANDEM_REF="${TANDEM_REF:-v0.15.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -171,6 +176,7 @@ DRY=0
 SYSTEMD=0
 UNINSTALL=0
 REPO_SET=0
+MODE_ARG=""
 
 usage() {
     cat <<EOF
@@ -188,6 +194,10 @@ Usage: bash install.sh [options]
   --hf-token TOKEN  a Hugging Face token (or set HF_TOKEN; a stored 'hf auth login' works too)
   --no-corpus       skip the lookup corpus (the lookup drafter then copies from the conversation only)
   --no-start        install and configure, but do not start the engine
+  --with-chat       the chat (beta) too: the conductor (router, user memory, packages), its small
+                    models and chatd, the Chat tab's service. Without it a new install serves the
+                    engine alone and a re-run keeps the box's mode
+  --engine-only     the engine alone, a new install's default; on a re-run it turns the chat off
   --setup           set up in the browser instead: install the code and Wren's model only, then
                     start setup mode (the dashboard's #/setup page; docs/setup.md); 127.0.0.1
                     unless --host says otherwise
@@ -221,6 +231,8 @@ while [ $# -gt 0 ]; do
         --hf-token=*) export HF_TOKEN="${1#*=}"; shift ;;
         --no-corpus) CORPUS_MODE=none; shift ;;
         --no-start) START=0; shift ;;
+        --with-chat) MODE_ARG=chat; shift ;;
+        --engine-only) MODE_ARG=engine; shift ;;
         --setup) SETUP=1; shift ;;
         --force-setup) FORCE_SETUP=1; shift ;;
         --systemd) SYSTEMD=1; shift ;;
@@ -794,6 +806,15 @@ else
     setv CKPT16 "$(q "$SNAP_B16")"
 fi
 setv CORPUS "$(q "$CORPUS_VALUE")"
+# OPS-260: the mode (QSE_MODE, ops/serve.env). A flag decides; a re-run keeps the mode this install
+# wrote, or none for a config from before the key, which then keeps what the box ran (serve.env: chat
+# when the conductor's directory exists); a new install serves the engine alone
+MODE_OLD=""
+if [ -f "$RUN/ops/serve.env" ]; then MODE_OLD="$(sed -n 's/^QSE_MODE=//p' "$RUN/ops/serve.env" | tail -1 | tr -d "'\"")"; fi
+if [ -n "$MODE_ARG" ]; then setv QSE_MODE "$MODE_ARG"
+elif [ "$MODE_OLD" = engine ] || [ "$MODE_OLD" = chat ]; then setv QSE_MODE "$MODE_OLD"
+elif [ ! -f "$RUN/ops/serve.env" ]; then setv QSE_MODE engine
+fi
 setv QSE_USAGE_LEDGER "$(q "$DIR/state/usage/ledger.sqlite3")"
 setv DROP_PAGE_CACHE 0              # bin/tandem drops the weights' page cache with this install's paths
 setv QWEN38_MODEL "$(q "$SNAP_BASE")"
@@ -813,14 +834,17 @@ if [ "$SPARK" != 1 ]; then
 fi
 render_env() {
     printf '# Written by install.sh on %s for %s. Regenerated on every run of the installer:\n' "$(date -Iseconds 2>/dev/null || date)" "$DIR"
-    printf '# put your own settings in %s/local.env, which is read last.\n' "$RUN"
+    printf '# put your own settings in %s/local.env, which is read after the template but before its mode block.\n' "$RUN"
     printf '# The template is the release'"'"'s ops/serve.env (%s); these keys are this machine'"'"'s:\n' "$TANDEM_REF"
     printf '#   %s\n\n' "${ENV_KEYS[*]}"
     # The keys the template lacks go in before its weight profile (OPS-143), which may replace them: an
     # EXL3 profile's QWEN38_MODEL is base-plain on a box without the FP8 snapshot, a standalone
     # community pack's is the pack. Appended after it, install.sh's values replaced the profile's.
+    # run/local.env is read just before the template's mode block (OPS-260), so a mode set there counts;
+    # a template without the block reads it last, as before
     # shellcheck disable=SC2016  # the $0/$1 are awk's
-    env "${ENV_ASSIGN[@]}" awk -v keys="${ENV_KEYS[*]}" '
+    env "${ENV_ASSIGN[@]}" LOCAL_LINE="$(printf 'if [ -f %s ]; then . %s; fi' "$(q "$RUN/local.env")" "$(q "$RUN/local.env")")" \
+        awk -v keys="${ENV_KEYS[*]}" '
         BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
         function mine() {
             if (done++) return
@@ -830,13 +854,13 @@ render_env() {
         }
         FNR == NR { if (match($0, /^[A-Za-z_][A-Za-z0-9_]*=/)) tmpl[substr($0, 1, RLENGTH - 1)] = 1; next }
         /^# Weight profile \(ops\/use-profile\.sh\)/ { mine() }
+        /^# OPS-260: the mode \(QSE_MODE above\), applied last/ && !lp { printf "%s\n\n", ENVIRON["LOCAL_LINE"]; lp = 1 }
         match($0, /^[A-Za-z_][A-Za-z0-9_]*=/) {
             key = substr($0, 1, RLENGTH - 1)
             if (key in want) { if (!(key in seen)) print key "=" ENVIRON["TV_" key]; seen[key] = 1; next }
         }
         { print }
-        END { if (!done) { printf "\n"; mine() } }' "$TEMPLATE" "$TEMPLATE"
-    printf '\nif [ -f %s ]; then . %s; fi\n' "$(q "$RUN/local.env")" "$(q "$RUN/local.env")"
+        END { if (!done) { printf "\n"; mine() }; if (!lp) printf "\n%s\n", ENVIRON["LOCAL_LINE"] }' "$TEMPLATE" "$TEMPLATE"
 }
 if [ ! -f "$TEMPLATE" ]; then
     note "render $SRC/ops/serve.env with this machine's paths into $RUN/ops/serve.env"
@@ -913,6 +937,7 @@ chat_auto() {
     bash "$CHATD" start || echo "[tandem] WARNING: chatd did not start (above); the engine serves without the Chat tab. Log: $REPO/logs/chatd.log" >&2
 }
 chat_line() {
+    if [ "${QSE_MODE:-}" = engine ] && ! chat_up; then echo "[tandem] chat: off (engine only; QSE_MODE=chat in $RUN/local.env, then restart, turns it on)"; return 0; fi
     if [ "${QSE_CHATD:-on}" = off ] && ! chat_up; then echo "[tandem] chat: off (QSE_CHATD=off)"; return 0; fi
     bash "$CHATD" status 2>&1 | head -1 || true
 }
@@ -1086,7 +1111,7 @@ if [ "$SETUP" = 1 ]; then
     fi
     # no model is loaded yet: the user picks one in the Setup Guide (OPS-149)
     printf '\n%sSetup mode%s: no model is loaded yet. Open the Setup Guide in a browser and pick a model there.\n' "$B" "$N"
-    printf 'The Chat tab starts with the engine once the setup is done (%s/bin/tandem chat status).\n\n' "$DIR"
+    printf 'The Chat tab starts with the engine once the setup is done (%s/bin/tandem chat status) when Chat (beta) is on in the guide; engine only is the default.\n\n' "$DIR"
     case "$HOST" in 127.0.0.1|0.0.0.0) printf '  On this machine:        http://127.0.0.1:%s/dashboard/#/setup\n' "$PORT" ;; esac
     if [ "$HOST" = 127.0.0.1 ]; then
         printf '  From another computer:  ssh -L %s:127.0.0.1:%s %s@%s\n' "$PORT" "$PORT" \
@@ -1118,6 +1143,29 @@ else
 fi
 
 API_HOST="$HOST"; [ "$HOST" = 0.0.0.0 ] && API_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"; API_HOST="${API_HOST:-127.0.0.1}"
+# OPS-260: the mode the config resolves to (run/setup.env and run/local.env included)
+MODE_NOW="${MODE_ARG:-engine}"
+if [ "$DRY" != 1 ] && [ -f "$RUN/ops/serve.env" ]; then
+    MODE_NOW="$(bash -c 'set -a; . "$1" >/dev/null 2>&1; echo "${QSE_MODE:-engine}"' - "$RUN/ops/serve.env" 2>/dev/null || echo "$MODE_NOW")"
+fi
+if [ "$MODE_NOW" = chat ]; then
+    CHAT_LINE="$(cat <<EOF
+Chat:      http://$API_HOST:$PORT/dashboard/#/chat  chatd starts and stops with the engine
+             ($DIR/bin/tandem chat status). The sandbox is optional: without a container runtime
+             the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest
+EOF
+)"
+else
+    CHAT_LINE="$(cat <<EOF
+Mode:      engine only (the default): no conductor, user memory, small models or chatd.
+             The chat (beta): re-run the installer with --with-chat, or QSE_MODE=chat in
+             $RUN/local.env and $DIR/bin/tandem restart
+EOF
+)"
+fi
+if [ -n "$MODE_ARG" ] && [ "$MODE_NOW" != "$MODE_ARG" ]; then
+    warn "the mode is $MODE_NOW, not $MODE_ARG: $SRC/run/setup.env (the Setup Guide's Chat (beta) switch) or $RUN/local.env sets QSE_MODE"
+fi
 cat <<EOF
 
 ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
@@ -1129,9 +1177,7 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read
              and change it, the memory included; keep the port on a trusted network)
-  Chat:      http://$API_HOST:$PORT/dashboard/#/chat  chatd starts and stops with the engine
-             ($DIR/bin/tandem chat status). The sandbox is optional: without a container runtime
-             the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest
+  $CHAT_LINE
 
   OpenAI-compatible API at http://$API_HOST:$PORT/v1, model "$SERVED_MODEL", no API key needed:
 

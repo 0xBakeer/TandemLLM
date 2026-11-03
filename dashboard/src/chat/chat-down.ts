@@ -38,6 +38,8 @@ export function downText(d: ChatDown): DownText {
       return { title: 'Finish the setup first.', lead: 'The box is in setup mode. The Chat tab starts with the engine once the Setup Guide is done.', link: { href: '#/setup', label: 'Open the Setup Guide' }, button: 'Check again' };
     case 'not_an_engine':
       return { title: 'This address does not serve the chat API.', lead: "The chat routes answered with a page, not JSON: a static server or a proxy's own page is in front of the engine. Use the dashboard on the engine server's own port.", button: 'Check again' };
+    case 'chat_off':
+      return { title: 'The chat is off.', lead: 'Engine only. Turn on Chat (beta) in the Setup Guide.', link: { href: '#/setup', label: 'Open the Setup Guide' }, button: 'Check again' };
     case 'offline':
       return { title: 'Cannot reach the engine server.', lead: 'It may be restarting. This page tries again by itself; on the box, tandem status shows the engine.', command: '~/TandemLLM/bin/tandem status', button: 'Retry' };
     default:

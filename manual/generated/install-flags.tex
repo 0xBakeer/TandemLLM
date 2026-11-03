@@ -4,11 +4,13 @@
 \texttt{-{}-dir DIR} & install directory (default \textasciitilde{}/TandemLLM) \\
 \texttt{-{}-port PORT} & the API port (default 8000) \\
 \texttt{-{}-host ADDR} & the address to bind (default 127.0.0.1; 0.0.0.0 serves the LAN, with no auth on the OpenAI routes) \\
-\texttt{-{}-ref REF} & the engine release: tag, branch or commit (default v0.15.0) \\
+\texttt{-{}-ref REF} & the engine release: tag, branch or commit (default v0.15.1) \\
 \texttt{-{}-repo URL} & the git repository to clone (default the public repository) \\
 \texttt{-{}-hf-\allowbreak{}token TOKEN} & a Hugging Face token (or set HF\_TOKEN; a stored 'hf auth login' works too) \\
 \texttt{-{}-no-\allowbreak{}corpus} & skip the lookup corpus (the lookup drafter then copies from the conversation only) \\
 \texttt{-{}-no-\allowbreak{}start} & install and configure, but do not start the engine \\
+\texttt{-{}-with-\allowbreak{}chat} & the chat (beta) too: the conductor (router, user memory, packages), its small models and chatd, the Chat tab's service. Without it a new install serves the engine alone and a re-run keeps the box's mode \\
+\texttt{-{}-engine-\allowbreak{}only} & the engine alone, a new install's default; on a re-run it turns the chat off \\
 \texttt{-{}-setup} & set up in the browser instead: install the code and Wren's model only, then start setup mode (the dashboard's \#/setup page; docs/setup.md); 127.0.0.1 unless -\kern0pt-host says otherwise \\
 \texttt{-{}-force-\allowbreak{}setup} & with -\kern0pt-setup, on a directory that already has a configured engine \\
 \texttt{-{}-systemd} & also install a systemd user unit, tandemllm.service (off by default) \\

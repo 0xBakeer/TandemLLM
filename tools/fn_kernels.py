@@ -105,10 +105,11 @@ def _module():
         src = "#define EXL3_ST 3\n" + _HELPERS + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
-                       functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
-                                  "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
+                       functions=["fn_gemv", "fn_mix_up", "fn_gemv_mix", "fn_mix_up_a", "fn_router", "fn_moe_gu", "fn_moe_down",
+                                  "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_gu_stage", "fn_moe_down_group",
+                                  "fn_moe_gu_group_s", "fn_moe_down_stage", "fn_moe_down_group_s", "fn_moe_gud", "fn_set_moe_gpar",
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_st_group", "fn_set_moe_warps", "fn_attn_prep",
+                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_st_group", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm", "fn_set_dense_st", "fn_set_dense_st_rows"],
                        extra_cuda_cflags=["-O3", "-lineinfo", _gencode()],
                        verbose=False)
@@ -123,6 +124,9 @@ def _module():
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_moe_st_group(int(_S.get("FN_MOE_ST_GROUP") or ("2" if _ada else _S.get("FN_MOE_ST") or "3")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS") or ("8" if _ada else "4")))
+        _MOD.fn_set_moe_gy(int(_S.get("FN_MOE_GY") or 0))
+        _MOD.fn_set_moe_gr(int(_S.get("FN_MOE_GR") or MOE_GR))
+        _MOD.fn_set_moe_gpar(int(_S.get("FN_MOE_GPAR") == "1"))
     return _MOD
 
 
@@ -329,6 +333,36 @@ def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, io
     return q
 
 
+#: SPD-249: the int64 fields of an `attn_prep_multi` lane entry
+APM_FIELDS = 16
+
+
+def attn_prep_entry(row0: int, M: int, kc, vc, ikc, pos, slot, iq=None) -> list:
+    """SPD-249: one lane of `attn_prep_multi`: its rows row0.. row0 + M - 1 of the joint qkv, its caches kc / vc
+    [Hk, cap, D] bf16 (and indexer keys ikc [cap, ihd] or None), pos / slot int64 [>= M] on the device, and with a
+    sparse class its indexer queries iq [M, heads, ihd] bf16 (None: a dense lane)."""
+    assert kc.is_contiguous() and vc.is_contiguous() and kc.shape == vc.shape and kc.dtype == torch.bfloat16
+    assert pos.dtype == slot.dtype == torch.int64 and pos.numel() >= M and slot.numel() >= M
+    assert ikc is None or (ikc.is_contiguous() and ikc.shape[0] == kc.shape[1])
+    assert iq is None or (iq.is_contiguous() and iq.shape[0] == M and iq.dtype == torch.bfloat16)
+    return [row0, M, kc.data_ptr(), vc.data_ptr(), ikc.data_ptr() if ikc is not None else 0, pos.data_ptr(),
+            slot.data_ptr(), iq.data_ptr() if iq is not None else 0, iq.shape[1] if iq is not None else 0,
+            kc.shape[1]] + [0] * (APM_FIELDS - 10)
+
+
+def attn_prep_multi(qkv, iqk, ent, qw, kw, cos, sin, hq: int, hk: int, ioff: int, ihd: int, nhi_max: int, eps: float,
+                    qln=None) -> torch.Tensor:
+    """SPD-249: `attn_prep` of every lane's rows in one launch: qkv [M, Hq 2D + 2 Hk D] the joint rows, `ent` int64
+    [E, 16] on the device (`attn_prep_entry` a lane, row0 ascending); each lane's caches, positions and slots its own,
+    its indexer queries when its entry names them. Every row is attn_prep's row (the same kernel body) -> q [M, Hq, D]."""
+    D = 256
+    qkv = qkv.reshape(-1, qkv.shape[-1])
+    q = torch.empty(qkv.shape[0], hq, D, dtype=torch.bfloat16, device=qkv.device)
+    _module().fn_attn_prep_multi(qkv, None if iqk is None else iqk.reshape(-1, iqk.shape[-1]), ent, qw, kw, cos, sin,
+                                 q, hq, hk, ioff, ihd, nhi_max, eps, qln)
+    return q
+
+
 def gate_mul(o: torch.Tensor, qkv: torch.Tensor, D: int) -> torch.Tensor:
     """bf16(o * bf16(sigmoid(gate))) per row and query head, the gate beside each head in qkv's row:
     o [M, Hq, D] (any view of M Hq D contiguous values) -> [M, Hq D]."""
@@ -350,6 +384,28 @@ def mix_up(d: torch.Tensor, n: torch.Tensor, w_up, hc: int, out: torch.Tensor | 
         _module().fn_mix_up(d[r0:r0 + MIX_ROWS], n[r0:r0 + MIX_ROWS], q, s, out[r0:r0 + MIX_ROWS], hc)
     return out
 
+
+
+def gemv_mix(x: torch.Tensor, w, R: int, hc: int, out: torch.Tensor | None = None):
+    """SPD-249: `gemv` of the mixer's down|inject weight (int8 rows) and the mix_up's A in the same launch:
+    -> (d fp32 [M, N], a bf16 [M, R]); `mix_up_a` then takes a. Each the bits `gemv` + `mix_up` compute."""
+    q, s = w.q, w.s
+    d = out if out is not None else torch.empty(x.shape[0], q.shape[0], dtype=torch.float32, device=x.device)
+    a = torch.empty(x.shape[0], R, dtype=torch.bfloat16, device=x.device)
+    for r0 in range(0, x.shape[0], MIX_ROWS):
+        _module().fn_gemv_mix(x[r0:r0 + MIX_ROWS], q, s, d[r0:r0 + MIX_ROWS], a[r0:r0 + MIX_ROWS], hc)
+    return d, a
+
+
+def mix_up_a(a: torch.Tensor, n: torch.Tensor, w_up, hc: int, out: torch.Tensor | None = None) -> torch.Tensor:
+    """SPD-249: `mix_up` from the A `gemv_mix` wrote (int8 up weight): x [M, H] bf16, `mix_up`'s bits."""
+    q, s = w_up.q, w_up.s
+    H = q.shape[0] // hc
+    if out is None:
+        out = torch.empty(a.shape[0], H, dtype=torch.bfloat16, device=a.device)
+    for r0 in range(0, a.shape[0], MIX_ROWS):
+        _module().fn_mix_up_a(a[r0:r0 + MIX_ROWS], n[r0:r0 + MIX_ROWS], q, s, out[r0:r0 + MIX_ROWS], hc)
+    return out
 
 MIX_ROWS = 64
 
@@ -435,7 +491,28 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
         g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
         ng = torch.empty(1, dtype=torch.int32, device=x.device)
         mod.fn_moe_groups(flat, order, g, ng, bank.n)
-        mod.fn_moe_gu_group(x, g, ng, S, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
+        if MOE_AS:
+            # SPD-249: the rows staged once a pair and streamed beside the tiles (no rows in shared memory)
+            xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
+            mod.fn_moe_gu_stage(x, flat, S, bank.tr, bank.kb, bank.su, bank.sv, xs)
+            xd = torch.empty(M * S, bank.I, dtype=torch.float16, device=x.device)
+            if MOE_AS == 2:
+                # gate and up of a column block in one CTA, the down input written in its epilogue (no YGU)
+                mod.fn_moe_gud(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, xd, bank.ks[-1])
+            else:
+                mod.fn_moe_gu_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, ygu, bank.ks[-1])
+                mod.fn_moe_down_stage(ygu, flat, bank.tr, bank.kb, bank.su, bank.sv, xd)
+            mod.fn_moe_down_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xd, yd, bank.ks[-1])
+            return yd
+        if MOE_STAGE:
+            # SPD-249: every pair's gate and up rows rotated once, not in each of a group's CTAs
+            xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
+            mod.fn_moe_gu_stage(x, flat, S, bank.tr, bank.kb, bank.su, bank.sv, xs)
+        else:
+            xs = _EMPTY_H.get(x.device)
+            if xs is None:
+                xs = _EMPTY_H[x.device] = torch.empty(0, dtype=torch.float16, device=x.device)
+        mod.fn_moe_gu_group(x, g, ng, S, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1], xs)
         mod.fn_moe_down_group(ygu, g, ng, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
         return yd
     mod.fn_moe_gu(x, flat, order, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
@@ -448,6 +525,12 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
 #: (M=16: -4.5ms of 23.8ms); at M=2 the groups-of-1 prep is a net loss -- hence the M>=4 gate.
 MOE_GROUP = True
 MOE_GR = 8
+#: SPD-249: the grouped gate|up kernel reads rows rotated once a pair (moe_gu_stage) (FN_MOE_STAGE)
+MOE_STAGE = _S.get("FN_MOE_STAGE") == "1"
+#: SPD-249: the grouped kernels with the rows staged once a pair and streamed beside the tiles (FN_MOE_AS 1), and
+#: gate and up of a column block in one CTA writing the down input in its epilogue (2); the grouped kernels' bits
+MOE_AS = int(_S.get("FN_MOE_AS") or 0)
+_EMPTY_H: dict = {}
 #: the experts' bits the MoE kernels decode (the half-integer rates as ten times the rate)
 MOE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 

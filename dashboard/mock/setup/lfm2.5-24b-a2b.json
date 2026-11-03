@@ -535,14 +535,14 @@
   ]
  },
  "parallel": {
-  "method": "tools/parallel_card.py against the served profile on a DGX Spark, one profile at a time: prompts bench/card-prompts-v1.json, thinking off, X-Tandem raw, cache_prompt false, a nonce line and a seed of its own a request, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, 512 tokens, the median of 3 runs. Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each, 1 warm-up round and 3 measured, total tok/s from the send (wall, the first tokens included) and over the decode window; a round counts only when /health shows N decoding at once and no other request running. Suffix store and response cache off.",
+  "method": "tools/parallel_card.py --fixed-prompts against the served profile on a DGX Spark, one profile at a time, on raw /v1/completions (the engine; the tool renders the chat template with thinking off and checks its ids with /v1/tokenize): prompts bench/card-prompts-v1.json, X-Tandem raw, cache_prompt false, temperature 1.0, top-k 20, top-p 0.95. Decode: the code and the prose workload alone, a nonce line and a seed of its own a run, 512 tokens, the median of 3 runs. First token: cold prompts of 2,048, 8,192 and 32,768 tokens, 1 token out, the median time to first token of 3. At once: 1, 2, 4 and 8 prose requests released together, 512 tokens each; request i carries the nonce 0000-<i> and the seed 1000 + i in every round, so every round decodes the same tokens; 1 warm-up round and 3 measured, back to back; total tok/s from the send (wall, the first tokens included) and over the decode window; a round counts only when /health shows N decoding at once and no other request running. The server runs the profile's shipped defaults with the conductor raw; suffix store, response cache and disk tier off. Rows before 0.15.1 gave every request of a level a nonce and a seed of its own and waited for an idle server before each round.",
   "rows": [
    {
     "profile": "lfm25-exl3-4.0",
-    "build": "0.14.2",
-    "commit": "05fce721",
-    "date": "2026-10-26",
-    "raw": "models/lfm2.5-24b-a2b/measurements/parallel-2026-10-26-lfm25-exl3-4.0-srv723.json",
+    "build": "0.15.1",
+    "commit": "311f2e5f",
+    "date": "2026-11-01",
+    "raw": "models/lfm2.5-24b-a2b/measurements/parallel-2026-11-01-lfm25-exl3-4.0.json",
     "setup": {
      "env": "v3-lfm-4.0",
      "lanes": 8,
@@ -556,65 +556,65 @@
       "top_k": 20,
       "top_p": 0.95,
       "min_p": 0.0,
-      "seed": "one per request"
+      "seed": "levels: 1000 + request, the same prompts every round, rounds back to back; decode: one per run"
      },
      "prompts": {
       "set": "card-v1",
       "sha256": "eb44b3d5e32e2b9c",
       "prompt_tokens": {
-       "code": 240,
-       "prose": 181
+       "code": 239,
+       "prose": 183
       }
      }
     },
     "rounds": 3,
     "decode": {
-     "code": 130.8,
-     "prose": 129.9
+     "code": 128.3,
+     "prose": 126.7
     },
     "prefill": {
      "2048": {
-      "ttft_s": 0.37,
-      "tok_s": 5600.0,
-      "prompt_tokens": 2055
+      "ttft_s": 0.38,
+      "tok_s": 5366.0,
+      "prompt_tokens": 2054
      },
      "8192": {
-      "ttft_s": 1.41,
-      "tok_s": 5798.0,
-      "prompt_tokens": 8200
+      "ttft_s": 1.37,
+      "tok_s": 5969.0,
+      "prompt_tokens": 8202
      },
      "32768": {
-      "ttft_s": 5.67,
-      "tok_s": 5782.0,
+      "ttft_s": 5.7,
+      "tok_s": 5754.0,
       "prompt_tokens": 32775
      }
     },
     "levels": {
      "1": {
-      "wall_tok_s": 122.8,
-      "decode_tok_s": 125.9,
-      "ttft_s": 0.11,
+      "wall_tok_s": 121.7,
+      "decode_tok_s": 125.4,
+      "ttft_s": 0.13,
       "at_once": 1,
       "rounds": 3
      },
      "2": {
-      "wall_tok_s": 164.8,
-      "decode_tok_s": 171.1,
-      "ttft_s": 0.22,
+      "wall_tok_s": 160.9,
+      "decode_tok_s": 163.5,
+      "ttft_s": 0.18,
       "at_once": 2,
       "rounds": 3
      },
      "4": {
-      "wall_tok_s": 202.7,
-      "decode_tok_s": 212.2,
-      "ttft_s": 0.48,
+      "wall_tok_s": 202.2,
+      "decode_tok_s": 204.3,
+      "ttft_s": 0.27,
       "at_once": 4,
       "rounds": 3
      },
      "8": {
-      "wall_tok_s": 238.6,
-      "decode_tok_s": 252.3,
-      "ttft_s": 0.98,
+      "wall_tok_s": 233.1,
+      "decode_tok_s": 234.5,
+      "ttft_s": 0.52,
       "at_once": 8,
       "rounds": 3
      }
@@ -656,10 +656,10 @@
  "components": [
   {
    "id": "conductor",
-   "label": "Conductor",
+   "label": "Chat (beta)",
    "group": "features",
-   "what": "Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.",
-   "default": true,
+   "what": "On: the Chat tab with its service (chatd) and the conductor, which gives each request the right instructions and helper packages, keeps your memory notes and watches long sessions so they do not get stuck. Off (the default): the engine alone serves its API and the dashboard.",
+   "default": false,
    "required": false,
    "memory_gib": 0.0,
    "memory_max_gib": null,
@@ -675,11 +675,15 @@
     "QSE_CONDUCTOR_CONFIG": {
      "on": "${HOME}/.qwen38-spark-engine/conductor",
      "off": "off"
+    },
+    "QSE_MODE": {
+     "on": "chat",
+     "off": "engine"
     }
    },
    "assets": [],
    "docs": "docs/server.md",
-   "note": "On by default, with the model fit its adapter declares (SRV-441): Laya alone answers the class question, a turn nobody classified thinks at the profile's default level with nothing added, and a class sets the level and budget with only its core skill in the note: no other package, rule, effort sentence or memory note. Measured on 2.5, 2026-10-14: four short chat asks thought 2,234 tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks, two runs each, succeeded 14 of 14 as raw did."
+   "note": "On, with the model fit its adapter declares (SRV-441): Laya alone answers the class question, a turn nobody classified thinks at the profile's default level with nothing added, and a class sets the level and budget with only its core skill in the note: no other package, rule, effort sentence or memory note. Measured on 2.5, 2026-10-14: four short chat asks thought 2,234 tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks, two runs each, succeeded 14 of 14 as raw did."
   },
   {
    "id": "narrator",
@@ -717,7 +721,8 @@
    "label": "Laya decision models",
    "group": "roles",
    "what": "Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.",
-   "default": true,
+   "default": false,
+   "with_parent": true,
    "required": false,
    "memory_gib": 1.6,
    "memory_max_gib": null,
@@ -1104,7 +1109,7 @@
    "fields": [
     {
      "field": "conductor",
-     "label": "Conductor",
+     "label": "Chat (beta)",
      "type": "bool"
     },
     {

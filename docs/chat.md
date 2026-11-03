@@ -1,5 +1,7 @@
 # The Chat tab and chatd
 
+The Chat tab and chatd are in beta.
+
 The dashboard's Chat tab (`#/chat`) is a chat with history whose runs live on the server: close the
 browser in the middle of an answer, open the chat on a phone, and it shows the answer at the token
 the engine is writing now and keeps streaming. The wire contract is
@@ -34,7 +36,10 @@ its Retry-After, then the chat is compacted and the smaller prompt sent; from th
 compacts at 80 % of the refused size, not only of the window. A 400 that says the request is over
 the model's context window (a tool result grew it past the guard's estimate) compacts the chat
 and sends the call once more when the compaction made it smaller; when it cut nothing, or the
-smaller call is refused too, the run fails with the engine's message.
+smaller call is refused too, the run fails with the engine's message. Stop also ends a call whose
+response has not started, such as one the engine holds while it waits for memory and sends no
+headers: chatd shuts the connection, the message ends `stopped`, and the engine books the request
+abandoned (SRV-777).
 
 One step's tool results share the room the model has left (#18): half of what is left under the
 compaction line, 2,000 tokens at least, never past the window less twice the answer's room, and
@@ -82,7 +87,9 @@ restarts the engine for it. A chatd that cannot start is a warning; the engine s
 ```
 
 `tandem status` has one chatd line. `QSE_CHATD=off` in `run/local.env` keeps the engine's start
-from starting chatd. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
+from starting chatd. A box in engine-only mode (`QSE_MODE=engine`, a new install's default, OPS-260)
+starts no chatd either and stops one this checkout started (`ops/chatd.sh stop --this-tree`), and its Chat tab says the chat is off and how to turn it on, without asking a
+chat route; `QSE_MODE=chat` (`install.sh --with-chat`, the Setup Guide's Chat (beta) switch) turns it on. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
 ops/chatd.sh start|stop|restart|status` in a checkout); `start` exits 1 with the log's last lines
 when chatd does not answer `/health`. It runs chatd under the first of: `CHATD_PY`, serve.env's
 `PY`, the install's venv (`~/TandemLLM/venv`), `./venv`, `$VIRTUAL_ENV`, `python3` (said so, with a

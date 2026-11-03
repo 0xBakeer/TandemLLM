@@ -6,7 +6,9 @@ This page is the overview. Each section links to the full rules.
 
 ## Modes and headers
 
-`--conductor-config DIR` (`QSE_CONDUCTOR_CONFIG` in serve.env) switches the conductor on. Without it the server serves its own model name and none of this runs. With it, `/v1/models` lists `TandemLLM` alone, and a request that names any other model, the engine's own name included, runs as a `TandemLLM` request.
+`--conductor-config DIR` (`QSE_CONDUCTOR_CONFIG` in serve.env) switches the conductor on. Without it the server serves its own model name and none of this runs.
+
+The box's mode decides whether `ops/start.sh` passes a directory (OPS-260). `QSE_MODE=engine`, a new install's default, starts the engine alone: no config directory, `--conductor raw`, no decision models, narrator, shadow reader or roles, and no chatd. `QSE_MODE=chat` (`install.sh --with-chat`, the Setup Guide's Chat (beta) switch, or `run/local.env`) starts the conductor with its directory, the small models the profile names and chatd. Left empty, a box whose conductor directory exists (it ran the conductor before the setting; a leading `~` counts as the server reads it) is a chat box, and any other box is engine only, so an upgrade keeps each box's mode; `QSE_CONDUCTOR_CONFIG=off` set by hand stays engine only. `install.sh` and the Setup Guide always write the setting, so only a bare checkout with it empty goes by the directory: a tool that makes the default directory there (`tools/library_install.py`, `tools/conductor_eval.py`) turns that checkout into a chat box at its next start. The last block of `ops/serve.env` applies the mode after the profile, `run/setup.env` and `run/local.env`. `/health` and `/v1/models` say `"mode": "engine"` or `"chat"` and what is `loaded` (the conductor and its monitor's mode, the decision models, the narrator, the loaded roles, whether chatd answers). On an engine-only box there is no conductor: `X-Tandem-Profile` picks no profile, and every request runs on the raw path under the engine's own name. With it, `/v1/models` lists `TandemLLM` alone, and a request that names any other model, the engine's own name included, runs as a `TandemLLM` request.
 
 | mode | what runs |
 |-|-|
@@ -32,9 +34,9 @@ The journal row says which rule picked it (`extra.profile_source`).
 |-|-|-|
 | `raw`, `bench` | locked | nothing: the raw engine |
 | `coding` | opencode | every routing decision, packages, the loop guards, the tool-call checks, the claim check, status lines |
-| `chat-app` | the Chat tab | `coding`'s policy without status lines in the answer |
+| `chat-app` | the Chat tab (beta) | `coding`'s policy without status lines in the answer |
 | `hermes` | the Hermes agent | `coding`'s policy, with status lines in the reasoning |
-| `chat` | Open WebUI, the Playground | class-aware effort and packages, the reasoning guards, the same-call guard |
+| `chat` | Open WebUI, the Playground (beta) | class-aware effort and packages, the reasoning guards, the same-call guard |
 | `overnight` | unattended opencode runs, by header | `coding` plus the session tasks, higher caps, a push when the client has gone |
 | `tools` | API clients that offer tools | the client's prompt, token for token; the loop guards and tool-call checks act |
 | `general` | any other client | class-aware effort and packages |
@@ -111,7 +113,7 @@ The tool-argument loop guard stops a tool call whose arguments repeat. In one ca
 
 ### The Chat tab's run monitor
 
-chatd, the service behind the Chat tab, runs its own agent loop and its own limits ([chat.md](chat.md)). A run ends `interrupted` after 100 model calls, and the same call with the same arguments three times in a row ends it too. The stall rule (SRV-677, [chatd/stall.py](../chatd/stall.py)) catches a run that edits the wrong place. A check is a `render_page` call or a shell command the run has already run once. A check makes progress when its target is new, when its text changed (numbers are masked), or when its screenshot changed in kind (a 32 × 18 thumbnail, correlation under 0.3). The rule fires on a streak of at least 4 checks with no progress, at least max(12, 3 × the run's median gap) steps long, with at least 3 edits and 60 % of them on three files or fewer.
+chatd, the service behind the Chat tab (both in beta), runs its own agent loop and its own limits ([chat.md](chat.md)). A run ends `interrupted` after 100 model calls, and the same call with the same arguments three times in a row ends it too. The stall rule (SRV-677, [chatd/stall.py](../chatd/stall.py)) catches a run that edits the wrong place. A check is a `render_page` call or a shell command the run has already run once. A check makes progress when its target is new, when its text changed (numbers are masked), or when its screenshot changed in kind (a 32 × 18 thumbnail, correlation under 0.3). The rule fires on a streak of at least 4 checks with no progress, at least max(12, 3 × the run's median gap) steps long, with at least 3 edits and 60 % of them on three files or fewer.
 
 It acts twice. First, a note in the tool result tells the model to step back, list its hypotheses and test the cheapest one with a minimal repro. If the streak goes on as long again, a second note follows and the run ends `interrupted`; Continue goes on from there. The note rides in the tool result, so the prompt prefix stays the same. In the case behind it, a three.js page rendered near black, and 37 steps changed the lighting and the exposure in three files and rendered the page seven times. The cause was the materials' colours, and the same-call guard never fired because no call repeated.
 
@@ -154,7 +156,7 @@ The configuration is a set of versioned JSON documents outside any repository: p
 | tool-call checks, the claim check, the loop guard, session tasks | [server.md](server.md#tool-call-checks-srv-113), [the claim check](server.md#the-claim-check-e2-2026-10-02), [the loop guard](server.md#the-tool-argument-loop-guard-0326-test), [session tasks](server.md#session-level-tasks-srv-121) |
 | the journal and metrics | [server.md](server.md#observability-srv-115), [server/METRICS.md](../server/METRICS.md) |
 | compaction as a continuation | [caches.md](caches.md#compaction-as-a-continuation) |
-| the Chat tab and chatd | [chat.md](chat.md) |
+| the Chat tab and chatd (beta) | [chat.md](chat.md) |
 | memory notes | [memory.md](memory.md) |
 | the dashboard's Conductor view | [dashboard.md](dashboard.md#views) |
 | the `/v1/conductor/*` API | [contract/conductor-v1](contract/conductor-v1/README.md) |

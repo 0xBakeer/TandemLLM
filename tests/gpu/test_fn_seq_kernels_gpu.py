@@ -469,7 +469,90 @@ def test_commit_multi_equals_the_commits_gathers():
     return f"{len(keep)} states, {len(ents)} entries in one launch: rows, streams and windows as the commit's gathers"
 
 
-TESTS = [test_tree_helpers, test_commit_multi_equals_the_commits_gathers, test_gdn_rows_multi_equals_each_states_call,
+
+def test_gdn_pre_multi_equals_each_states_call():
+    """SPD-249: `gdn_pre_multi` over three states (rows 5, 1 and 3; taps from rows and from the conv state) in one
+    launch leaves each state's y, g and beta of its own `gdn_pre` call, bit for bit."""
+    g = _g(31)
+    Cc, Hh = C, H
+    w = (torch.randn(Cc, 4, generator=g, device=DEV) * 0.3).to(torch.bfloat16)
+    alog = torch.randn(Hh, generator=g, device=DEV) * 0.2
+    dtb = torch.randn(Hh, generator=g, device=DEV) * 0.2
+    ents, cases = [], []
+    for k, M in enumerate((5, 1, 3)):
+        x = torch.randn(M, Cc + 64, generator=g, device=DEV).to(torch.bfloat16)
+        cs = torch.randn(1, Cc, 3, generator=g, device=DEV).to(torch.bfloat16)
+        src = torch.tensor([[(m - 3 + j) if m - 3 + j >= 0 else -1 - (m + j) for j in range(3)] for m in range(M)],
+                           dtype=torch.int32, device=DEV)
+        ab = torch.randn(M, 2 * Hh, generator=g, device=DEV).to(torch.bfloat16)
+        want = SK.gdn_pre(x, cs, w, src, ab, alog, dtb)
+        y = torch.empty(M, Cc, dtype=torch.bfloat16, device=DEV)
+        gg = torch.empty(M, Hh, device=DEV)
+        bt = torch.empty(M, Hh, device=DEV)
+        ents.append(SK.gdn_pre_entry(x, cs, src, y, ab, gg, bt))
+        cases.append((want, (y, gg, bt), (x, cs, src, ab)))     # the entries' inputs stay alive
+    SK.gdn_pre_multi(torch.tensor(ents, dtype=torch.int64, device=DEV), w, alog, dtb, 5)
+    torch.cuda.synchronize()
+    for k, (want, got, _) in enumerate(cases):
+        assert all(torch.equal(a_, b_) for a_, b_ in zip(want, got)), k
+    return "3 states (5, 1, 3 rows) in one launch = each state's gdn_pre, bit for bit"
+
+
+def test_gdn_rows_deferred_write_back_equals_written_back():
+    """SPD-249: rounds of one state through `gdn_rows_multi` with a limit (rows parked are walked again and the state
+    is written back only past the limit or without room) against the same rounds written back every call: every
+    round's out equal, and after a flush (the single-state call that applies the parked rows) the states equal,
+    bit for bit. A commit parks its path after the rows still parked (`rows_entry` with the count as offset)."""
+    torch.manual_seed(0)
+    rounds, limit = 7, 6
+    stk = torch.zeros(31, H, D, D, device=DEV)
+    S0 = _gdn_inputs(1, 40)[3]
+    states = {"now": S0.clone(), "defer": S0.clone()}
+    pend = {k: (torch.zeros(33, C, dtype=torch.bfloat16, device=DEV), torch.zeros(33, H, device=DEV),
+                torch.zeros(33, H, device=DEV), torch.zeros(1, dtype=torch.int32, device=DEV)) for k in states}
+    kept = 0
+    for r in range(rounds):
+        M = 3 + r % 3
+        qkv, gg, beta, _ = _gdn_inputs(M, 100 + r)
+        ctl = torch.tensor([[-2, -1]] + [[-1, -1]] * (M - 1), dtype=torch.int32, device=DEV)
+        outs = {}
+        for k in states:
+            py, pg, pb, pn = pend[k]
+            o = torch.empty(M, H, D, dtype=torch.bfloat16, device=DEV)
+            lim = limit if k == "defer" else 0
+            e = SK.gdn_rows_entry(qkv, gg, beta, states[k], stk, ctl, o, False, pre=(py, pg, pb, pn), limit=lim)
+            SK.gdn_rows_multi(torch.tensor([e], dtype=torch.int64, device=DEV), KD, H, 3)
+            P = int(pn.item())
+            if lim and P > 0 and P <= lim and P + M <= 33:
+                kept += 1                                # the count stays: the rows stay parked
+            else:
+                pn.zero_()
+            outs[k] = o
+            # the commit: the path (the first rows) parked after the rows still parked
+            n = 1 + r % M
+            idx = torch.arange(n, device=DEV)
+            off = pn if k == "defer" else None
+            ents = [SK.rows_entry(qkv, py, idx, n, off=off), SK.rows_entry(gg, pg, idx, n, off=off),
+                    SK.rows_entry(beta, pb, idx, n, off=off)]
+            SK.commit_multi(torch.tensor(ents, dtype=torch.int64, device=DEV))
+            if k == "defer":
+                pn.add_(n)
+            else:
+                pn.fill_(n)
+        torch.cuda.synchronize()
+        assert torch.equal(outs["now"], outs["defer"]), r
+    for k in states:                                     # flush: the single-state call applies what is parked
+        py, pg, pb, pn = pend[k]
+        z = torch.zeros(0, 2, dtype=torch.int32, device=DEV)
+        SK.gdn_rows(py[:0], KD, pg[:0], pb[:0], states[k], stk, z, 3, False,
+                    out=torch.empty(0, H, D, dtype=torch.bfloat16, device=DEV), pre=(py, pg, pb, pn))
+        pn.zero_()
+    torch.cuda.synchronize()
+    assert kept > 0 and torch.equal(states["now"], states["defer"]), kept
+    return f"{rounds} rounds, {kept} with the rows left parked: every out and the flushed state equal"
+
+
+TESTS = [test_gdn_pre_multi_equals_each_states_call, test_gdn_rows_deferred_write_back_equals_written_back, test_tree_helpers, test_commit_multi_equals_the_commits_gathers, test_gdn_rows_multi_equals_each_states_call,
          test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
          test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows,

@@ -239,6 +239,10 @@ class RequestRecord:
         self.harness: dict | None = None
         # the park or the pin the rows came back from before the prefill resumed (None: in place)
         self.cache_via: str | None = None
+        # SRV-763: called once at the first token (server/app.py `_alone_watch`), and whether the
+        # prompt (t_lock to the first token) had the GPU turn alone; None: not known
+        self.on_first = None
+        self.prefill_alone: bool | None = None
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -249,6 +253,8 @@ class RequestRecord:
             now = time.perf_counter()
             if self.t_first is None:
                 self.t_first = now
+                if self.on_first is not None:
+                    self.on_first()
             self.t_last = now
             self.n_live += 1
             yield t

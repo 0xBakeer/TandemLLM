@@ -84,7 +84,7 @@ def _module():
     if _MOD is None:
         tag = nb.tag(_CPP, _CUDA)
         _MOD = nb.load(f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
+                       functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv", "seq_ple_conv_multi",
                                   "seq_qsa_pool", "seq_qsa_pool_multi", "seq_qsa_scores", "seq_qsa_topk"],
                        extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                        verbose=False)
@@ -103,13 +103,15 @@ def commit_multi(entries: torch.Tensor) -> None:
     _module().seq_commit_multi(entries)
 
 
-def rows_entry(src: torch.Tensor, dst: torch.Tensor, idx: torch.Tensor, n: int) -> list:
-    """A kind 0 entry: dst rows 0..n-1 = src rows idx (rows of 4-byte words, unit stride within a row)."""
+def rows_entry(src: torch.Tensor, dst: torch.Tensor, idx: torch.Tensor, n: int, off=None) -> list:
+    """A kind 0 entry: dst rows 0..n-1 = src rows idx (rows of 4-byte words, unit stride within a row). SPD-249:
+    `off` (an int32 tensor on the device) moves the first destination row to its value, read at the copy."""
     eb = src.element_size()
     words = src.shape[1] * eb // 4
     assert src.stride(1) == 1 and dst.stride(1) == 1 and (src.shape[1] * eb) % 4 == 0 and src.dtype == dst.dtype
+    assert off is None or (off.dtype == torch.int32 and off.numel() >= 1)
     return [0, src.data_ptr(), src.stride(0) * eb // 4, dst.data_ptr(), dst.stride(0) * eb // 4, words,
-            idx.data_ptr(), n] + [0] * (COMMIT_FIELDS - 8)
+            idx.data_ptr(), n, off.data_ptr() if off is not None else 0] + [0] * (COMMIT_FIELDS - 9)
 
 
 def window_entry(win: torch.Tensor, src: torch.Tensor, cols: list[int]) -> list:
@@ -136,6 +138,24 @@ def gdn_pre(x, conv_state, conv_w, src, ab, a_log, dt_bias, shift: bool = False,
     return y, g, beta
 
 
+def gdn_pre_entry(x, conv_state, src, y, ab, g, beta) -> list:
+    """SPD-249: one state's `gdn_pre` call (verify rows, no shift) as a `gdn_pre_multi` entry: x [M, >= C] bf16,
+    conv_state [1, C, 3] bf16, src int32 [M, 3], y [M, C] bf16, ab [M, 2 H] bf16, g / beta [M, H] fp32 (outputs)."""
+    M = x.shape[0]
+    assert x.dtype == y.dtype == ab.dtype == conv_state.dtype == torch.bfloat16 and x.stride(1) == 1 and y.stride(1) == 1
+    assert ab.stride(1) == 1 and conv_state.is_contiguous() and src.dtype == torch.int32 and src.is_contiguous()
+    assert src.numel() == 3 * M and y.shape[0] == M and g.is_contiguous() and beta.is_contiguous()
+    assert g.dtype == beta.dtype == torch.float32 and g.shape[0] == M
+    return [x.data_ptr(), x.stride(0), conv_state.data_ptr(), src.data_ptr(), y.data_ptr(), y.stride(0),
+            ab.data_ptr(), ab.stride(0), g.data_ptr(), beta.data_ptr(), M] + [0] * (COMMIT_FIELDS - 11)
+
+
+def gdn_pre_multi(entries: torch.Tensor, conv_w, a_log, dt_bias, rows_max: int) -> None:
+    """SPD-249: `gdn_pre` of several states in one launch (`entries` int64 [states, 16] on the device, one
+    `gdn_pre_entry` a state; the layer's conv taps, A_log and dt_bias shared): each row's own arithmetic."""
+    _module().seq_gdn_pre_multi(entries, conv_w, a_log, dt_bias, int(rows_max))
+
+
 def gdn_rows(qkv, key_dim: int, g, beta, S, scratch, ctl, rep: int, write: bool, out=None, pre=None):
     """The delta rule over M rows of qkv [M, 2 key_dim + H 128] bf16 (q | k | v after the conv),
     g / beta [M, H] fp32, S [1, H, 128, 128] fp32 (the entry state; written with `write`), scratch
@@ -151,7 +171,7 @@ def gdn_rows(qkv, key_dim: int, g, beta, S, scratch, ctl, rep: int, write: bool,
     return out
 
 
-def gdn_rows_entry(qkv, g, beta, S, scratch, ctl, out, write: bool, pre=None) -> list:
+def gdn_rows_entry(qkv, g, beta, S, scratch, ctl, out, write: bool, pre=None, limit: int = 0) -> list:
     """SPD-239: one state's `gdn_rows` call as a `gdn_rows_multi` entry (the same tensors and checks' shapes; the
     scratch is this state's own slots)."""
     M = qkv.shape[0]
@@ -162,7 +182,7 @@ def gdn_rows_entry(qkv, g, beta, S, scratch, ctl, out, write: bool, pre=None) ->
     return [qkv.data_ptr(), qkv.stride(0), g.data_ptr(), beta.data_ptr(), S.data_ptr(), scratch.data_ptr(),
             ctl.data_ptr(), M, out.data_ptr(), pr.data_ptr() if pr is not None else 0,
             pr.stride(0) if pr is not None else 0, pg.data_ptr() if pg is not None else 0,
-            pb.data_ptr() if pb is not None else 0, pn.data_ptr() if pn is not None else 0, int(write), 0]
+            pb.data_ptr() if pb is not None else 0, pn.data_ptr() if pn is not None else 0, int(write), int(limit)]
 
 
 def gdn_rows_multi(entries: torch.Tensor, key_dim: int, H: int, rep: int) -> None:
@@ -254,6 +274,24 @@ def ple_conv(gvn, gv, state, w_bf16, src):
     y = torch.empty_like(gv)
     _module().seq_ple_conv(gvn, gv, state, w_bf16, src, y)
     return y
+
+
+def ple_conv_entry(gvn, gv, state, w_bf16, src, y) -> list:
+    """SPD-249: one lane's `ple_conv` call as a `ple_conv_multi` entry: gvn, gv, y [M, C] bf16 (the lane's rows),
+    state [1, C, slen] bf16, w [C, 4] bf16, src int32 [M, 3] (lane-relative rows)."""
+    M, C = gvn.shape
+    assert gvn.is_contiguous() and gv.is_contiguous() and y.is_contiguous() and state.is_contiguous() and w_bf16.is_contiguous()
+    assert gvn.dtype == gv.dtype == y.dtype == state.dtype == w_bf16.dtype == torch.bfloat16
+    assert gv.shape == y.shape == (M, C) and state.numel() == C * state.shape[-1] and w_bf16.numel() == 4 * C
+    assert src.dtype == torch.int32 and src.is_contiguous() and src.numel() == 3 * M
+    return [gvn.data_ptr(), gv.data_ptr(), state.data_ptr(), state.shape[-1], w_bf16.data_ptr(), src.data_ptr(),
+            y.data_ptr(), M] + [0] * 8
+
+
+def ple_conv_multi(entries: torch.Tensor, C: int, rows_max: int) -> None:
+    """SPD-249: `ple_conv` of several lanes in one launch (`entries` int64 [lanes, 16] on the device, one
+    `ple_conv_entry` a lane): each row's own arithmetic."""
+    _module().seq_ple_conv_multi(entries, int(C), int(rows_max))
 
 
 # ------------------------------------------------------------------------------------- QSA
@@ -416,6 +454,109 @@ if HAVE_TRITON:
             den = den + tl.load(PL + b0 + s * BM) * w
         o = num / tl.where(den == 0.0, 1.0, den)
         tl.store(OUT + (t * HQ + qh) * D + od, o.to(tl.bfloat16))
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _attn_rows_split_multi(Q, PT, LANE, PM, PL, PACC, s_kh, s_kn, s_vh, s_vn,
+                               SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr,
+                               HK: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, CHUNK: tl.constexpr,
+                               NA: tl.constexpr, NSEL: tl.constexpr, NS: tl.constexpr):
+        # SPD-249: `_attn_rows_split` over the rows of several lanes: row t (of the joint q) is lane LANE[t]'s row
+        # t - row0; the lane's caches and control from PT[lane] = (row0, K, V, CTL, ANCT, SEL). The body after the
+        # pointers is `_attn_rows_split`'s (the same row, the same bits).
+        t = tl.program_id(0)
+        kvh = tl.program_id(1)
+        sp = tl.program_id(2)
+        ln = tl.load(LANE + t)
+        e = PT + ln * 8
+        r = t - tl.load(e)
+        K = tl.load(e + 1).to(tl.pointer_type(tl.bfloat16))
+        V = tl.load(e + 2).to(tl.pointer_type(tl.bfloat16))
+        CTL = tl.load(e + 3).to(tl.pointer_type(tl.int32))
+        ANCT = tl.load(e + 4).to(tl.pointer_type(tl.int32))
+        SEL = tl.load(e + 5).to(tl.pointer_type(tl.int32))
+        n = tl.load(CTL + r * 4)
+        L = tl.load(CTL + r * 4 + 1)
+        dense = tl.load(CTL + r * 4 + 2)
+        rows = tl.arange(0, BM)
+        rmask = rows < REP
+        qh = kvh * REP + rows
+        od = tl.arange(0, D)
+        q = tl.load(Q + (t * HQ + qh[:, None]) * D + od[None, :], mask=rmask[:, None], other=0.0)
+        c0 = sp * CHUNK
+        c1 = tl.minimum(c0 + CHUNK, n)
+        m_i = tl.full([BM], -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros([BM], dtype=tl.float32)
+        acc = tl.zeros([BM, D], dtype=tl.float32)
+        for n0 in range(c0, c1, BN):
+            cols = n0 + tl.arange(0, BN)
+            cmask = cols < c1
+            sel = tl.load(SEL + r * NSEL + cols, mask=cmask & (dense == 0), other=0)
+            pos = tl.where(dense != 0, cols, sel)
+            tail = pos >= L
+            a = tl.load(ANCT + r * NA + (pos - L), mask=cmask & tail, other=0)
+            slot = tl.where(tail, a, pos)
+            k = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
+            s = tl.dot(q, tl.trans(k))
+            s = s * SCALE
+            vis = cmask[None, :] & rmask[:, None]
+            s = tl.where(vis, s, -float("inf"))
+            m_new = tl.maximum(m_i, tl.max(s, 1))
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            p = tl.exp(s - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(p, 1)
+            v = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
+            acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
+            m_i = m_new
+        base = ((t * HK + kvh) * NS + sp) * BM + rows
+        tl.store(PM + base, m_i)
+        tl.store(PL + base, l_i)
+        tl.store(PACC + base[:, None] * D + od[None, :], acc)
+
+
+#: SPD-249: the int64 fields of an `attn_rows_multi` lane entry (row0, K, V, CTL, ANC, SEL, -, -)
+ARM_FIELDS = 8
+
+
+def attn_rows_entry(row0: int, kc, vc, ctl, anc, sel) -> list:
+    """SPD-249: one lane of `attn_rows_multi`: its first row in the joint q, its caches [Hk, cap, D] bf16 and its
+    control (`attn_rows`' ctl [M, 4], anc [M, ANC], sel [M, NSEL], int32, contiguous)."""
+    assert kc.dtype == vc.dtype == torch.bfloat16 and kc.stride(2) == 1 and vc.stride(2) == 1
+    assert ctl.dtype == anc.dtype == sel.dtype == torch.int32 and ctl.is_contiguous() and anc.is_contiguous()
+    assert sel.is_contiguous() and anc.shape[1] == ANC and sel.shape[1] == NSEL
+    return [row0, kc.data_ptr(), vc.data_ptr(), ctl.data_ptr(), anc.data_ptr(), sel.data_ptr(), 0, 0]
+
+
+def attn_rows_multi(q, pt, lane, strides: tuple, HK: int, bufs: dict | None = None):
+    """SPD-249: `attn_rows` over the rows of several lanes in one split launch and one combine: q [M, Hq, D] bf16
+    (the joint rows), `pt` int64 [E, 8] on the device (`attn_rows_entry` a lane), `lane` int32 [M] (a row's lane),
+    `strides` the caches' (s_kh, s_kn, s_vh, s_vn), the same for every lane. Each row's arithmetic is `attn_rows`'
+    -> o [M, Hq, D] bf16."""
+    M, HQ, D = q.shape
+    REP = HQ // HK
+    BM = 16
+    assert REP <= BM
+    b = bufs if bufs is not None else {}
+    pm = b.get("pm")
+    if pm is None or pm.shape[0] != M * HK * ATTN_SPLITS * BM:
+        pm = torch.empty(M * HK * ATTN_SPLITS * BM, dtype=torch.float32, device=q.device)
+        pl = torch.empty_like(pm)
+        pacc = torch.empty(pm.shape[0], D, dtype=torch.float32, device=q.device)
+        if bufs is not None:
+            bufs.update(pm=pm, pl=pl, pacc=pacc)
+    else:
+        pl, pacc = b["pl"], b["pacc"]
+    out = torch.empty(M, HQ, D, dtype=torch.bfloat16, device=q.device)
+    _attn_rows_split_multi[(M, HK, ATTN_SPLITS)](
+        q, pt, lane, pm, pl, pacc, *strides,
+        SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, BN=32, CHUNK=ATTN_CHUNK,
+        NA=ANC, NSEL=NSEL, NS=ATTN_SPLITS, num_warps=4, num_stages=2)
+    _attn_rows_combine[(M, HQ)](pm, pl, pacc, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ATTN_SPLITS,
+                                num_warps=4)
+    return out
 
 
 def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None):

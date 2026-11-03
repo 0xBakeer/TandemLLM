@@ -108,9 +108,10 @@ def test_the_seed():
     assert t["best_speed"] == {"tok_s": 84.44, "task": "code", "profile": "exl3-4.5"}, t
     assert t["recommended"] is True
     # every tool's memory and default is there, and the defaults are the reference box's but the
-    # narrator, off by default since 0.11.3 (SRV-534)
+    # narrator, off by default since 0.11.3 (SRV-534), and the chat with its small models, off by
+    # default since OPS-260 (engine only)
     on = {c["id"] for c in m["components"] if c["default"]}
-    assert on == {"drafters", "lookup", "conductor", "laya", "shadow", "vision",
+    assert on == {"drafters", "lookup", "vision",
                   "prompt_cache", "state_store", "disk_tier", "nvme_spill"}, on
 
 
@@ -352,7 +353,7 @@ def test_the_validator_rules():
     x["components"][2]["depends_on"] = ["narrator"]                # conductor <-> narrator
     _refused(x, "depends on itself")
     x = copy.deepcopy(d)
-    x["components"][2]["default"] = False                          # conductor off, narrator on
+    x["components"][3]["default"] = True                           # narrator on, the chat off (OPS-260)
     _refused(x, "on by default, but 'conductor' it depends on is not")
     x = copy.deepcopy(d)
     x["components"][1]["conflicts"] = ["vision"]

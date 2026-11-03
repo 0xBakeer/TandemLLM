@@ -25,9 +25,12 @@ INDEX.md filtering the candidates. The top `candidates` go to the router's packa
 replayed at its position by every later turn (exact cache), and a skill already live in the
 session is not offered again. `shadow`: the row says what would have gone in. The `card` package
 (how the model searches the library itself) is kept live like the harness card. A pick is asked
-once per message (or outcome signature) and session; a plan decided under the engine lock (the
-in-context stage) cannot ask Qwen through the server's own port, so it asks the decider stages
-only, and journals `locked` when there is none.
+once per message (or outcome signature) and session; with `LIBRARY_HOLD=class`, on a class whose
+package answer holds for the class, once per class (VIS-119). A plan decided under the engine lock
+(the in-context stage) cannot ask Qwen through the server's own port, so it asks the decider stages
+only, and journals `locked` when there is none. A shadow question bound for Qwen on the server's
+own port is asked after the turn, when the server is idle (server/conductor/deferred.py); the
+proxy's stage override (`--backends`) leaves this server's own requests on that port.
 
 The row's `extra.library`: the trigger, the query's size, the candidates with their scores, the
 picks and how they were made, the search's and the question's time. No text of the message.
@@ -41,9 +44,18 @@ import os
 import re
 import threading
 import time
+import types
 
-from server.conductor import schema, signals
+from server.conductor import deferred, schema, signals
+from server.conductor.classify import PARENT
 from server.conductor.packages import SHIPPED_ROOT, split_frontmatter, split_reference
+from server.knobs import SETTINGS as _S
+
+#: VIS-119: `message` (the default): a library question on every new user message, as before;
+#: `class`: on a class whose package answer holds for the session's class (`package_sticky:
+#: class`), a new user message the class question keeps in that class asks none, the class's first
+#: answer holds, picks and none alike. An outcome's question is asked as before
+LIBRARY_HOLD = (_S.get("LIBRARY_HOLD") or "message").strip().lower()
 
 K1, B = 1.2, 0.75
 WEIGHTS = {"name": 3, "description": 2, "body": 1}
@@ -264,6 +276,9 @@ def _ask(router, plan, cands, text, line, cfg, router_doc, roles,
         if not stages:
             return [], "locked", []
         router_doc = dict(router_doc, classifier=dict(clf, stages=stages))
+    if getattr(plan, "fail_open", False):
+        # SRV-763: the class question could not be answered in time; this one would wait as long
+        return [], "fail_open", []
     picks, how, asked = [], "none", []
     left = [e for e, _ in cands]
     for _ in range(int(cfg["max_picks"])):
@@ -284,6 +299,69 @@ def _ask(router, plan, cands, text, line, cfg, router_doc, roles,
         how = ans.stage
         left = [e for e in left if e.name != ans.label]
     return picks, how, asked
+
+
+def _hold_key(plan, trigger: str, cls: str):
+    """VIS-119 (`LIBRARY_HOLD`): the session key of the class's library answer, for a new user
+    message on a class whose package answer holds for the class; None otherwise."""
+    if LIBRARY_HOLD != "class" or trigger != "message" or \
+            getattr(plan, "sticky", "message") != "class":
+        return None
+    return ("library", "class", cls)
+
+
+def _keep(sess, key, hold, picks, how) -> None:
+    """An answer into the session's picks: the message's key, and the class's when it holds."""
+    with sess.lock:
+        if len(sess.package_pick) > 32:
+            sess.package_pick.clear()
+        sess.package_pick[key] = (list(picks), how)
+        if hold is not None:
+            sess.package_pick[hold] = (list(picks), how)
+
+
+#: what `_ask` reads of a plan, for a question asked after the turn: never under the engine lock
+_AFTER_TURN = types.SimpleNamespace(locked=False)
+
+
+def _deferred_job(router, hits, text, line, cfg, router_doc, roles, about, sess, key, row, info,
+                  trigger) -> dict:
+    """VIS-119: the shadow library question as a job for server/conductor/deferred.py: asked with
+    the candidates the plan found; its answer goes into the session's picks for the message (not
+    the class's: a shadow question asked off the path holds nothing for the class) and, as a new
+    `extra.library` (and `shadow.library` for a pick), into the request's journal row. The job
+    keeps no reference to the plan (its body, tools and ids), only what the question reads."""
+    def land(new: dict, picks=()) -> None:
+        extra = dict(row.get("extra") or {}, library=new)
+        fields = {"extra": extra}
+        row["extra"] = extra
+        if picks:
+            fields["shadow"] = row["shadow"] = dict(row.get("shadow") or {}, library={
+                "chosen": list(picks), "trigger": trigger})
+        if row.get("id"):
+            router.journal.update(row["id"], **fields)
+
+    def run(waited_ms: float) -> None:
+        hit = sess.package_pick.get(key)
+        if hit is not None:
+            # the same message's earlier job (a regenerate inside the idle time) answered it
+            land(dict(info, chosen=list(hit[0]), how=hit[1], cached=True,
+                      deferred={"waited_ms": round(float(waited_ms), 1)}), hit[0])
+            return
+        PARENT.set(row.get("request_id"))          # VIS-60: the question names its turn
+        t0 = time.perf_counter()
+        picks, how, asked = _ask(router, _AFTER_TURN, hits, text, line, cfg, router_doc, roles,
+                                 about)
+        if how not in ("no_answer", "locked"):
+            _keep(sess, key, None, picks, how)
+        land(dict(info, chosen=list(picks), how=how, stages=asked,
+                  ask_ms=round((time.perf_counter() - t0) * 1e3, 2),
+                  deferred={"waited_ms": round(float(waited_ms), 1)}), picks)
+
+    def drop(why: str) -> None:
+        land(dict(info, deferred={"dropped": why}))
+
+    return {"what": "library", "run": run, "drop": drop}
 
 
 def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls, row,
@@ -328,22 +406,48 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         return
     t1 = time.perf_counter()
     hit = sess.package_pick.get(key)
+    want = deferred.mode() if mode == "shadow" and not dry and not plan.locked else "inline"
+    # VIS-119: a shadow answer the request never reads, from Qwen through this server's own port
+    # first, is asked after the turn (`idle`) or not at all (`off`); a turn that failed open
+    # (SRV-763) asks nothing, after it neither
+    later = hit is None and want != "inline" and not getattr(plan, "fail_open", False) and \
+        router.own_port_first(router_doc, roles, "packages")
+    # ... and has no class hold: asked off the request's path it costs the turn nothing, and the
+    # shadow journal keeps an answer per message
+    hold = None if later else _hold_key(plan, trigger, cls)
+    held = False
+    if hit is None and hold is not None and not getattr(plan, "class_new", True):
+        hit = sess.package_pick.get(hold)
+        held = hit is not None
+        if held:
+            info["held"] = "class"          # VIS-119: the class's answer, no question
     if hit is not None:
         picks, how = hit
         info["cached"] = True
+    elif later:
+        info.update(chosen=[], how="deferred" if want == "idle" else "shadow_off")
+        if want == "idle":
+            from server.conductor.router import _about
+            plan.deferred.append(_deferred_job(
+                router, hits, sh.user_text or "", line, cfg, router_doc, roles,
+                _about(cls, {c["id"]: c for c in router_doc["classes"]}), sess, key, row, info,
+                trigger))
+        return
     else:
         from server.conductor.router import _about
         picks, how, asked = _ask(router, plan, hits, sh.user_text or "", line, cfg, router_doc,
                                  roles, _about(cls, {c["id"]: c for c in router_doc["classes"]}))
         info["stages"] = asked
-        if how not in ("no_answer", "locked") and not dry:
-            if len(sess.package_pick) > 32:
-                sess.package_pick.clear()
-            sess.package_pick[key] = (picks, how)
+        if how not in ("no_answer", "locked", "fail_open") and not dry:
+            _keep(sess, key, hold, picks, how)
     info.update(chosen=list(picks), how=how, ask_ms=round((time.perf_counter() - t1) * 1e3, 2))
     if not picks:
         return
     if mode == "shadow":
+        if held:
+            # VIS-119: an answer held from the class's first message is no answer for this one;
+            # the shadow journal counts the messages that were asked (`extra.library.held`)
+            return
         row["shadow"] = dict(row.get("shadow") or {}, library={"chosen": list(picks),
                                                                 "trigger": trigger})
         return

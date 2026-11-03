@@ -93,6 +93,11 @@ from server import activity as act
 from server.activity import REPLAY
 from server.usage import client_cached_of
 
+try:
+    from engine.methods import busy          # SPD-249: the round runner's GPU-wait windows
+except ImportError:                          # the standalone proxy ships `server` without the engine (#108)
+    busy = None
+
 
 def _own_blocks(rec, bs, slot_blocks=None):
     """The block counts a row reads: a side-lane job's own (server/preempt.py), a side slot's
@@ -436,6 +441,10 @@ class LiveRegistry:
                 self._wake.wait()
                 self._wake.clear()
                 continue
+            # SPD-249: while the round runner holds GPU-wait windows (QSE_RUNNER_BUSY_WORK) the tick waits for the
+            # next one (at most a cadence); else at once
+            if busy is not None:
+                busy.gate(min(0.25, self.cadence()))
             self.tick()
             self._stop.wait(self.cadence())
 

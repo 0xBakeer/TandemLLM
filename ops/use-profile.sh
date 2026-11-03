@@ -138,6 +138,21 @@ if ! weights_ok; then
 else
     say "$NAME: weights $WDIR present"
 fi
+# SPD-249: the drafts' corrector a profile names (flashnext-3.05): QSE_CORRECTOR_HF at the commit
+# QSE_CORRECTOR_REVISION to QSE_CORRECTOR_PATH, where the engine reads it, checked against QSE_CORRECTOR_SHA256
+# (fetch_weights.py --file). It decides speed only: without it the drafts stay plain coupled and every token is the
+# same, so a download that fails or a hub that does not answer is a warning and the switch goes on.
+CORR_HF="$(pv QSE_CORRECTOR_HF)"
+if [ -n "$CORR_HF" ]; then
+    CORR_REV="$(pv QSE_CORRECTOR_REVISION)"; CORR_PATH="$(pv QSE_CORRECTOR_PATH)"; CORR_SHA="$(pv QSE_CORRECTOR_SHA256)"
+    if [ "$MODE" = "--dry-run" ]; then
+        say "dry run: the drafts' corrector $CORR_PATH: $( [ -f "$CORR_PATH" ] && echo 'on this box; its sha256 is checked' \
+            || echo "would fetch https://huggingface.co/$CORR_HF/resolve/$CORR_REV/$(basename "$CORR_PATH")") (sha256 ${CORR_SHA:0:16})"
+    elif ! "$PY" "$HERE/fetch_weights.py" --file "$CORR_HF" "$CORR_REV" "$CORR_PATH" "$CORR_SHA"; then
+        say "WARNING: the drafts' corrector did not fetch: $NAME starts with plain coupled drafts (every token the same," \
+            "fewer drafts accepted); 'ops/use-profile.sh $NAME --fetch-only' tries again"
+    fi
+fi
 # #97: the lookup corpus of the profile's tokenizer, built once from public text into CORPUS/tokenizers/
 # (server/setup/corpus.py), so a box the setup guide installs drafts from a corpus too. It decides speed
 # only: a build that fails leaves the lookup to the conversation and the switch goes on.
