@@ -456,6 +456,30 @@ def _ngram_table_field(field: str):
     return read
 
 
+#: the engine's own work: the summary it prepares ahead of a request and the
+#: memory it writes after one. Both run generations on the engine, on the
+#: client's own context, and neither was in a metric — so an operator saw
+#: the engine "busy" with requests it had never sent.
+def _own_work_stats() -> dict:
+    fn = _SOURCES.get("own_work")
+    if fn is None:
+        return {}
+    try:
+        return fn() or {}
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _own_work_field(kind: str, field: str):
+    """One counter out of the engine's own work (`prepare` or `memory`)."""
+    def read():
+        got = _own_work_stats().get(kind)
+        if not isinstance(got, dict) or field not in got:
+            return {}
+        return {(): float(got[field])}
+    return read
+
+
 def _gpu_memory():
     try:
         from engine.cache import cuda_stats
@@ -561,6 +585,30 @@ REGISTRY.add(Gauge("qse_ngram_table_cache_bytes",
 REGISTRY.add(Gauge("qse_ngram_table_file_bytes",
                    "the n-gram table's file size, in bytes",
                    collect=_ngram_table_field("file_bytes")))
+
+# The engine's own work: the summary it prepares ahead of a client's request
+# and the memory it writes after one. Both are generations on the engine, over
+# the client's own context, and neither was in a metric: an operator saw the
+# engine busy with requests it had never sent, and the GPU at idle power.
+REGISTRY.add(Counter("qse_prepare_runs_total",
+                     "summaries the engine prepared ahead of a request",
+                     collect=_own_work_field("prepare", "prepared")))
+REGISTRY.add(Counter("qse_prepare_served_total",
+                     "prepared summaries a request went on from",
+                     collect=_own_work_field("prepare", "served")))
+REGISTRY.add(Counter("qse_prepare_yielded_total",
+                     "prepare runs that gave the engine to a client request",
+                     collect=_own_work_field("prepare", "yielded")))
+REGISTRY.add(Counter("qse_prepare_too_long_total",
+                     "prepare runs skipped: the conversation and the summary "
+                     "would not fit the context",
+                     collect=_own_work_field("prepare", "too_long")))
+REGISTRY.add(Counter("qse_memory_writer_runs_total",
+                     "memory writer turns the engine ran",
+                     collect=_own_work_field("memory", "runs")))
+REGISTRY.add(Counter("qse_memory_writer_notes_total",
+                     "memory notes the writer stored",
+                     collect=_own_work_field("memory", "written")))
 
 
 def _memory_report() -> tuple | None:
@@ -1146,7 +1194,7 @@ def instrument_drafter(drafter):
 
 
 def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
-         build: dict | None = None, suffix=None) -> None:
+         build: dict | None = None, suffix=None, own_work=None) -> None:
     """Point the scrape-time gauges at the server's own objects. Safe to call more than once."""
     if state is not None:
         _SOURCES["state"] = state
@@ -1161,6 +1209,8 @@ def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
         _SOURCES["cache_stats"] = cache_stats
     if info is not None:
         _SOURCES["info"] = {k: str(info.get(k, "")) for k in INFO_LABELS}
+    if own_work is not None:
+        _SOURCES["own_work"] = own_work
 
 
 def flags_hash(args: dict, env: dict | None = None) -> str:
@@ -1195,6 +1245,21 @@ def install(app) -> None:
     instrument_drafter(state.get("drafter"))
     eng = state.get("engine")
     w = getattr(eng, "w", None)
+    # The engine's own work: the summary it prepares ahead of a request and the
+    # memory it writes after one. Both are generations on the engine, and an
+    # operator could not see them at all.
+    def own_work() -> dict:
+        out: dict = {}
+        prep = state.get("prepared")
+        if prep is not None:
+            out["prepare"] = dict(getattr(prep, "stats", {}) or {})
+        cond = state.get("conductor")
+        mem = getattr(cond, "memory", None) if cond is not None else None
+        writer = getattr(mem, "writer", None)
+        if writer is not None:
+            out["memory"] = dict(getattr(writer, "stats", {}) or {})
+        return out
+    bind(own_work=own_work)
     bind(state, getattr(app, "INFLIGHT", None), getattr(app, "cache_stats", None), info={
         "version": VERSION,
         "model": state.get("model", ""),

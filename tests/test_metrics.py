@@ -464,6 +464,29 @@ def test_the_ngram_table_cache_counters_are_scrapeable():
     assert "qse_ngram_table_cache_hits_total" not in text
 
 
+def test_the_engines_own_work_is_counted():
+    """The summary the engine prepares ahead of a request and the memory it
+    writes after one are generations on the engine, over the client's own
+    context. Neither was in a metric: the engine was 'busy' with requests
+    nobody had sent."""
+    _fresh()
+    M.bind(own_work=lambda: {
+        "prepare": {"prepared": 7, "served": 5, "yielded": 2, "too_long": 1},
+        "memory": {"runs": 9, "written": 31, "refused": 2, "gate_no": 0,
+                   "stopped": 0, "skipped": 3}})
+    fam = parse(M.render())
+    assert _sample(fam, "qse_prepare_runs_total") == 7
+    assert _sample(fam, "qse_prepare_served_total") == 5
+    assert _sample(fam, "qse_prepare_yielded_total") == 2
+    assert _sample(fam, "qse_prepare_too_long_total") == 1
+    assert _sample(fam, "qse_memory_writer_runs_total") == 9
+    assert _sample(fam, "qse_memory_writer_notes_total") == 31
+    # an engine without the features reports nothing
+    M.bind(own_work=lambda: {})
+    text = M.render()
+    assert "qse_prepare_runs_total" not in text and "qse_memory_writer_runs_total" not in text
+
+
 # --- the wiring ---------------------------------------------------------------------------------
 
 class _FakeHandler:
