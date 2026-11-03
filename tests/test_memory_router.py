@@ -29,6 +29,14 @@ The test matrix:
      the note and name it), and the stats count it as a body (they read body_notes 0 before)
                                                         test_fresh_session_recall
 
+ 11  the call form (2026-11-03): the note written as a `tandem_memory` tool call is the block,
+     streamed and not, in Qwen's form and the JSON form: stored, hidden, never a call the client
+     gets, finish `stop`; another call beside it passes whole; a call that is the whole answer
+     continues after a hidden result (E1 case M), so the client gets the answer and not
+     an empty turn; memory absent, `X-Tandem-Memory: off`, a client with its own `tandem_memory`
+     tool: the call goes out as before; `read`: hidden, nothing stored
+                                                        test_call_form_*
+
  10  SRV-471 (QA SRV-472): the Chat tab (client `chat-app`, the shipped profile): the turn's row
      and its usage frame carry the memory part (mode on, the index's notes); the card says the
      notes are its memory between chats and never to deny one; "remember ..." writes a note a
@@ -48,7 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from test_ui_states import OPENCODE_UA, TOOLS, _go, lines, serve  # noqa: E402
+from test_ui_states import M, OPENCODE_UA, TOOLS, _go, lines, serve  # noqa: E402
 
 from server import app  # noqa: E402
 
@@ -123,6 +131,109 @@ def test_non_streamed_write():
     out = ask("Please keep it short. FAKE_MEMORY", stream=False)
     assert BLOCK_OPEN not in out["content"] and out["content"].strip()
     assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+# ------------------------------------------------------------- the call form (2026-11-03)
+def _finish(out):
+    if out["raw"].lstrip().startswith("{"):
+        return json.loads(out["raw"])["choices"][0]["finish_reason"]
+    got = None
+    for ln in out["raw"].splitlines():
+        if ln.startswith("data: {"):
+            for ch in json.loads(ln[6:]).get("choices") or []:
+                got = ch.get("finish_reason") or got
+    return got
+
+
+def _names(out):
+    return [(c.get("function") or {}).get("name") for c in out["calls"]
+            if (c.get("function") or {}).get("name")]
+
+
+def _no_call_text(out):
+    assert "<tool_call>" not in out["content"] and "tandem_memory" not in out["content"], \
+        out["content"]
+    assert "tandem_memory" not in out["reasoning"].split("</think>")[-1]
+
+
+def test_call_form_streamed_write():
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL")
+    _no_call_text(out)
+    assert out["content"].strip() and out["calls"] == [] and _finish(out) == "stop", out["calls"]
+    ns = cond.notes.notes("owner")
+    assert [n.title for n in ns] == ["short answers"] and ns[0].writer == "qwen-inline"
+    assert ns[0].scope == "user" and ns[0].kind == "rule" and ns[0].status == "provisional"
+    assert ns[0].body.startswith("The user wants answers of at most five sentences.")
+    assert "why: the user asked for it" in ns[0].body, ns[0].body
+    assert "remembered: short answers" in lines(out["reasoning"]) + lines(out["content"]), out
+
+
+def test_call_form_non_streamed_and_json():
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", stream=False)
+    _no_call_text(out)
+    assert out["content"].strip() and out["calls"] == [] and _finish(out) == "stop"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL_JSON", sid="ses_mem_json")
+    _no_call_text(out)
+    assert out["calls"] == [] and _finish(out) == "stop"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+def test_call_form_before_a_call():
+    cond, _ = setup()
+    call = json.dumps({"name": "bash", "arguments": {"command": "ls -la"}})
+    for stream in (True, False):
+        out = ask("Keep it short. FAKE_MEMORY_CALL FAKE_CALL_JSON " + call, stream=stream,
+                  sid=f"ses_mem_before_{stream}")
+        _no_call_text(out)
+        assert _names(out) == ["bash"], out["calls"]
+        args = "".join((c.get("function") or {}).get("arguments") or "" for c in out["calls"])
+        assert json.loads(args) == {"command": "ls -la"}, out["calls"]
+        assert _finish(out) == "tool_calls"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+def test_call_form_alone_continues_the_turn():
+    from server import fake_engine
+    words = set(fake_engine.WORDS)
+    for stream in (True, False):
+        cond, _ = setup()
+        out = ask("Please keep it short. FAKE_MEMORY_CALL_ONLY", stream=stream,
+                  sid=f"ses_mem_alone_{stream}")
+        _no_call_text(out)
+        assert out["calls"] == [] and _finish(out) == "stop", (out["calls"], _finish(out))
+        answer = " ".join(ln for ln in out["content"].split("\n") if not ln.startswith(M))
+        assert answer.strip(), "the client got an empty turn: " + repr(out["content"])
+        assert set(answer.lower().replace(".", " ").split()) <= words, answer
+        assert [n.title for n in cond.notes.notes("owner")] == ["short answers"], stream
+        acts = [r for r in app.STATE["monitor"].journal.actions()
+                if r.get("task") == "E1" and r.get("decision") == "CONTINUE_HIDDEN"]
+        assert acts and "case=M" in acts[-1]["reason"], acts
+
+
+def test_call_form_follows_the_switches():
+    # memory absent: the call goes to the client as it did, nothing is written
+    cond, _ = setup(memory=None)
+    out = ask("Please keep it short. FAKE_MEMORY_CALL")
+    assert len(out["calls"]) >= 1 and cond.notes.notes("owner") == [], out["calls"]
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_off",
+              headers={"X-Tandem-Memory": "off"})
+    assert len(out["calls"]) >= 1 and cond.notes.notes("owner") == [], out["calls"]
+    # read: the reads only; the call is hidden and dropped as a block is
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_read",
+              headers={"X-Tandem-Memory": "read"})
+    _no_call_text(out)
+    assert out["calls"] == [] and cond.notes.notes("owner") == []
+    # a client that offers its own `tandem_memory` tool gets its call
+    props = {k: {"type": "string"} for k in ("op", "scope", "kind", "title", "why", "body")}
+    own = TOOLS + [{"type": "function", "function": {"name": "tandem_memory", "parameters": {
+        "type": "object", "properties": props}}}]
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_own", tools=own)
+    assert _names(out)[:1] == ["tandem_memory"] and cond.notes.notes("owner") == [], out["calls"]
 
 
 def _tail_notes(text):

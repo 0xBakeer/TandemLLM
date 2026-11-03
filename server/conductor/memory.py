@@ -51,6 +51,12 @@ journaled `read_only`). Every other value, and none, is the profile's switch. A 
 is visible as the `› remembered: ...` line and in the Notes screen (its writer and request), where
 it is archived or deleted.
 
+THE CALL FORM (2026-11-03). With the tools of a chat in view the model wrote its note as a
+`tandem_memory` tool call; no client offers that tool, so the call went to the client, which
+answered that the tool is not available. Where the block is taken, the call is taken as the same
+block (server/memblock.py): written, hidden, never a call the client gets. The switches above
+apply to it as to the block; a client that offers its own `tandem_memory` tool gets its calls.
+
 THE USER. `owner` on the engine; a request the proxy relayed names the proxy user (the proxy's key
 label in process, `X-Tandem-User` from a trusted proxy address). None: nothing is read or written.
 The project is the working directory opencode writes into its system prompt (`Working directory:`),
@@ -250,11 +256,12 @@ class Memory:
             return []
         return [r["id"] for r in rows if r.get("decision") in ("low_quality", "stuck")][:8]
 
-    def filter(self, ctx: dict | None, ui=None) -> memblock.MemFilter | None:
-        """The stream's filter for a request whose memory is not off."""
+    def filter(self, ctx: dict | None, ui=None, calls: bool = True) -> memblock.MemFilter | None:
+        """The stream's filter for a request whose memory is not off; `calls`: a `tandem_memory`
+        tool call is a block too (server/memblock.py, THE CALL FORM)."""
         if not ctx or ctx.get("mode") not in ("on", "shadow"):
             return None
-        return memblock.MemFilter(lambda raw: self.take(ctx, raw, ui))
+        return memblock.MemFilter(lambda raw: self.take(ctx, raw, ui), calls=calls)
 
 
 def _line(title: str) -> str:

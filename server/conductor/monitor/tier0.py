@@ -172,6 +172,11 @@ def _liftable(text: str, sup) -> list[str] | None:
     return names
 
 
+#: E1 case M's hidden result when the policy names none (a stored policy from before it)
+NOTED = ("The runtime took your memory note; the user sees neither it nor this result. Now answer "
+         "the user, or make the next tool call.")
+
+
 @register("empty_turn", "SP2",
           params={"close": dict(_CLOSE, description="case A, the end token inside the "
                                                     "reasoning: the hidden close"),
@@ -179,10 +184,19 @@ def _liftable(text: str, sup) -> list[str] | None:
                              "description": "case B, an empty answer after the reasoning: the "
                                             "hidden user turn's text, the n-th for the n-th act "
                                             "(the last one repeats)"},
-                  "tries": dict(_POS, description="acts before GIVE_UP")},
+                  "tries": dict(_POS, description="acts before GIVE_UP"),
+                  "noted": dict(_TEXT, description="case M, an answer of memory notes alone: "
+                                                   "the hidden result after the notes, after "
+                                                   "which the model answers")},
           required=("close", "nudges", "tries"))
 def empty_turn(ev, task, sup):
     """E1: a request that offered tools ends with no tool call and no text -> continue hidden.
+
+    Case M (2026-11-03): the answer held memory notes and nothing else (`ev.notes`, taken out of
+    `ev.answer`: the client never gets them). The turn continues after a hidden result
+    (`noted`), a tool response when the note was a `tandem_memory` call, so the client gets the
+    answer the model writes next instead of an empty turn. The result says the runtime took the
+    note, not that it was stored: the store may refuse it, and `X-Tandem-Memory: read` stores none.
 
     Case C (SRV-199): the output ends with complete tool calls written inside the reasoning
     (`ev.calls`), each of a tool the request offers and each parsing. The model's own call tokens
@@ -196,6 +210,11 @@ def empty_turn(ev, task, sup):
     if done >= task["tries"]:
         return Action(GIVE_UP, reason=f"empty_turn(tries={done})",
                       detail={"case": "A" if ev.inside else "B"})
+    if getattr(ev, "notes", 0) and not ev.inside:
+        return Action(CONTINUE_HIDDEN, reason="empty_turn(case=M)",
+                      text=task.get("noted") or NOTED,
+                      detail={"case": "M", "act": done + 1, "notes": ev.notes,
+                              "call": bool(getattr(ev, "note_calls", 0))})
     names = _liftable(ev.calls, sup) if getattr(ev, "calls", "") else None
     if names:
         return Action(CONTINUE_HIDDEN, reason="empty_turn(case=C)",

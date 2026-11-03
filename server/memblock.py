@@ -28,6 +28,15 @@ model is not writing a note any more), `<tandem_memoryx`. Only the answer writes
 the reasoning is a thought about remembering, as a call inside the reasoning is a thought about
 calling, and stays as the model wrote it.
 
+THE CALL FORM (2026-11-03). With tools in view the model may write the note as a tool call,
+`<tool_call><function=tandem_memory><parameter=op>add</parameter>...</function></tool_call>` (or
+the JSON form, `{"name": "tandem_memory", "arguments": {...}}`). No client offers that tool, so
+the call is the block: `MemFilter(calls=True)` holds it back, `call_block()` turns it into the
+block it means (the same function the background writer reads its calls with), and it is written
+and hidden as the block is. Every other call passes as it came, once its function is named. A
+client that offers a tool named `tandem_memory` gets its calls (the server then passes
+`calls=False`).
+
 THE CACHE. The rows hold the block; the client's copy of the answer does not. `token_spans()`
 finds the block's tokens in the generation, and the server records them as hidden spans, which
 the end anchor's replay puts back on the next turn (engine/cache.py `ResidentPrefix.replay`), as
@@ -40,6 +49,7 @@ Standard library only.
 
 from __future__ import annotations
 
+import json
 import re
 
 OPEN = "<tandem_memory"
@@ -101,12 +111,103 @@ def strip_blocks(text: str) -> tuple[str, list[str]]:
     return (BLOCK.sub("", text) if found else text), found
 
 
-def _partial_open(s: str) -> int:
-    """The length of the longest end of `s` that the opener could still begin with."""
-    for n in range(min(len(s), len(OPEN)), 0, -1):
-        if OPEN.startswith(s[-n:]):
+# ------------------------------------------------------------------------ the call form
+TOOL = "tandem_memory"
+CALL_OPEN = "<tool_call>"
+CALL_CLOSE = "</tool_call>"
+CALL_DECIDE = 64                 # characters after `<tool_call>` within which a call names its function
+_FUNC_XML = re.compile(r"<function=" + TOOL + r">([\s\S]*?)</function>")
+_PARAM = re.compile(r"<parameter=([a-z_]+)>\n?([\s\S]*?)\n?</parameter>")
+_NAME = re.compile(r'\s*(?:<function=([^>\s]*)>|\{\s*"name"\s*:\s*"([^"]*)")')
+_ATTRS = ("op", "scope", "kind")
+_HEADS = ("title", "tags", "id", "reason", "verify_by", "name", "mode")
+_BODIES = ("body", "content", "text")
+_ANY_CALL = re.compile(re.escape(CALL_OPEN) + r"[\s\S]*?" + re.escape(CALL_CLOSE) + r"|"
+                       + _FUNC_XML.pattern)
+
+
+def _value(v) -> str:
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v)
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+
+def params_block(params: dict) -> str:
+    """A call's parameters as the `<tandem_memory>` block they mean: op, scope and kind in the
+    opener; title, tags, id, reason, verify_by (and a proposal's name, mode) as head lines; the
+    `body` (or `content`, `text`) as the body, and any other parameter (a `why`, an `evidence`)
+    after it as `name: value` lines, so nothing the model wrote is lost. `parse` checks it."""
+    p = {k: _value(v).strip() for k, v in params.items() if isinstance(k, str) and v is not None}
+    attrs = " ".join(f'{k}="{p[k]}"' for k in _ATTRS if p.get(k) and '"' not in p[k])
+    heads = "".join(f"{k}: {' '.join(p[k].split())}\n" for k in _HEADS if p.get(k))
+    body = next((p[k] for k in _BODIES if p.get(k)), "")
+    extra = "\n".join(f"{k}: {p[k]}" for k in p
+                      if p[k] and k not in _ATTRS + _HEADS + _BODIES)
+    body = "\n\n".join(x for x in (body, extra) if x)
+    return f"{OPEN} {attrs}>\n{heads}\n{body}\n{CLOSE}"
+
+
+def call_block(call: str) -> str | None:
+    """One `tandem_memory` call (`<tool_call>...</tool_call>`, or the bare
+    `<function=tandem_memory>...</function>` a tokenizer that drops `<tool_call>` leaves) as its
+    block; None when `call` is not one."""
+    m = _FUNC_XML.search(call or "")
+    if m is not None:
+        return params_block(dict(_PARAM.findall(m.group(1))))
+    inner = (call or "").strip()
+    if inner.startswith(CALL_OPEN):
+        inner = inner[len(CALL_OPEN):]
+    if inner.endswith(CALL_CLOSE):
+        inner = inner[:-len(CALL_CLOSE)]
+    try:
+        doc = json.loads(inner)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("name") != TOOL:
+        return None
+    args = doc.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    return params_block(args) if isinstance(args, dict) else None
+
+
+def tool_blocks(text: str) -> list[str]:
+    """Every `tandem_memory` call in `text` as its block, in order: the XML form wherever its
+    function appears (with or without `<tool_call>`), the JSON form inside `<tool_call>`."""
+    out = []
+    for m in _ANY_CALL.finditer(text or ""):
+        xs = _FUNC_XML.findall(m.group(0))
+        if xs:
+            out += [params_block(dict(_PARAM.findall(x))) for x in xs]
+            continue
+        b = call_block(m.group(0))
+        if b is not None:
+            out.append(b)
+    return out
+
+
+def without_notes(text: str, calls: bool = True) -> tuple[str, int, int]:
+    """`text` as the client gets it from `MemFilter`: (the text, closed blocks taken out, closed
+    `tandem_memory` calls taken out). The supervisor reads the answer this way (an answer of
+    notes alone is an empty answer)."""
+    f = MemFilter(lambda raw: None, calls=calls)
+    out = f.feed(text or "") + f.finish()
+    return out, len(f.hidden) - f.called, f.called
+
+
+def _partial(s: str, opener: str) -> int:
+    """The length of the longest end of `s` that `opener` could still begin with."""
+    for n in range(min(len(s), len(opener)), 0, -1):
+        if opener.startswith(s[-n:]):
             return n
     return 0
+
+
+def _partial_open(s: str) -> int:
+    return _partial(s, OPEN)
 
 
 class MemFilter:
@@ -115,17 +216,48 @@ class MemFilter:
     `on_block(raw)` is called once a block closes; it returns None when the block was taken
     (written), else the reason it was not. Either way a closed block is hidden (SRV-277).
     `feed()` returns the text the client gets now; `finish()` the rest (an unclosed block as
-    text)."""
+    text). With `calls`, a closed `tandem_memory` tool call is a block too (THE CALL FORM):
+    `on_block` gets the block it means, `hidden` and `taken` the call as the model wrote it (its
+    tokens are the hidden span). Any other call is held only until its function is named."""
 
-    def __init__(self, on_block):
+    def __init__(self, on_block, calls: bool = False):
         self.on_block = on_block
+        self.calls = bool(calls)
         self.pending = ""
         self.inside = False
-        self.blocks = 0                  # blocks seen closed this turn
+        self.in_call = False
+        self.blocks = 0                  # blocks seen closed this turn (calls included)
+        self.called = 0                  # of them, `tandem_memory` calls
         self.taken: list[str] = []       # the raw text of the blocks that were written
         self.hidden: list[str] = []      # every closed block kept from the client (taken or not)
         self.failed: list[str] = []      # why each block that was not written was not
         self.shown: list[str] = []       # why each piece that looked like a block went out as text
+
+    def _close(self, raw: str, block: str | None) -> None:
+        self.blocks += 1
+        why = ("schema" if block is None else
+               "too_long" if len(block) > MAX_CHARS else
+               "too_many" if self.blocks > MAX_BLOCKS else self.on_block(block))
+        self.hidden.append(raw)
+        if why is None:
+            self.taken.append(raw)
+        else:
+            self.failed.append(why)
+
+    def _call_opens(self, out: list) -> bool:
+        """`pending` starts with `<tool_call>`: True once it is ours (`in_call` set), else the
+        opener goes out (False: go on), or None while the function is not named yet."""
+        rest = self.pending[len(CALL_OPEN):]
+        m = _NAME.match(rest)
+        if m is None:
+            if len(rest) < CALL_DECIDE and rest.lstrip()[:1] in ("", "<", "{"):
+                return None                      # the function's name decides
+        elif (m.group(1) if m.group(1) is not None else m.group(2)) == TOOL:
+            self.in_call = True
+            return True
+        out.append(CALL_OPEN)                    # another tool's call: the client's
+        self.pending = rest
+        return False
 
     def feed(self, piece: str) -> str:
         if not piece and not self.pending:
@@ -133,52 +265,71 @@ class MemFilter:
         self.pending += piece
         out = []
         while self.pending:
-            if not self.inside:
+            if not self.inside and not self.in_call:
                 i = self.pending.find(OPEN)
-                if i < 0:
-                    keep = _partial_open(self.pending)
+                c = self.pending.find(CALL_OPEN) if self.calls else -1
+                if c >= 0 and (i < 0 or c < i):
+                    out.append(self.pending[:c])
+                    self.pending = self.pending[c:]
+                    got = self._call_opens(out)
+                    if got is None:
+                        break
+                    if not got:
+                        continue
+                elif i < 0:
+                    keep = max(_partial(self.pending, OPEN),
+                               _partial(self.pending, CALL_OPEN) if self.calls else 0)
                     out.append(self.pending[:len(self.pending) - keep])
                     self.pending = self.pending[len(self.pending) - keep:]
                     break
-                after = self.pending[i + len(OPEN):i + len(OPEN) + 1]
-                if not after:
+                else:
+                    after = self.pending[i + len(OPEN):i + len(OPEN) + 1]
+                    if not after:
+                        out.append(self.pending[:i])
+                        self.pending = self.pending[i:]
+                        break                       # the character after the opener decides
+                    if not (after.isspace() or after == ">"):
+                        out.append(self.pending[:i + 1])
+                        self.pending = self.pending[i + 1:]
+                        continue                    # `<tandem_memoryx`: not ours
                     out.append(self.pending[:i])
                     self.pending = self.pending[i:]
-                    break                       # the character after the opener decides
-                if not (after.isspace() or after == ">"):
-                    out.append(self.pending[:i + 1])
-                    self.pending = self.pending[i + 1:]
-                    continue                    # `<tandem_memoryx`: not ours
-                out.append(self.pending[:i])
-                self.pending = self.pending[i:]
-                self.inside = True
-            j = self.pending.find(CLOSE)
+                    self.inside = True
+            close = CALL_CLOSE if self.in_call else CLOSE
+            j = self.pending.find(close)
             if j < 0:
-                if len(self.pending) > HOLD_CHARS + len(CLOSE):
+                if len(self.pending) > HOLD_CHARS + len(close) + (CALL_DECIDE if self.in_call
+                                                                    else 0):
                     self.failed.append("too_long")
                     self.shown.append("too_long")
                     out.append(self.pending)
-                    self.pending, self.inside = "", False
+                    self.pending, self.inside, self.in_call = "", False, False
                 break
-            raw = self.pending[:j + len(CLOSE)]
-            self.pending = self.pending[j + len(CLOSE):]
-            self.inside = False
-            self.blocks += 1
-            why = ("too_long" if len(raw) > MAX_CHARS else
-                   "too_many" if self.blocks > MAX_BLOCKS else self.on_block(raw))
-            self.hidden.append(raw)
-            if why is None:
-                self.taken.append(raw)
+            raw = self.pending[:j + len(close)]
+            self.pending = self.pending[j + len(close):]
+            if self.in_call:
+                self.in_call = False
+                self.called += 1
+                self._close(raw, call_block(raw))
             else:
-                self.failed.append(why)
+                self.inside = False
+                self._close(raw, raw)
         return "".join(out)
 
     def finish(self) -> str:
         rest, self.pending = self.pending, ""
-        if self.inside:
+        if self.in_call and "</function>" in rest:
+            # the end token right after `</function>`: the call is whole without its closer
+            k = rest.index("</function>", max(0, rest.find("<function="))) + len("</function>")
+            raw, rest = rest[:k], rest[k:]
+            self.in_call = False
+            self.called += 1
+            self._close(raw, call_block(raw))
+            return rest
+        if self.inside or self.in_call:
             self.failed.append("unclosed")
             self.shown.append("unclosed")
-        self.inside = False
+        self.inside = self.in_call = False
         return rest
 
 

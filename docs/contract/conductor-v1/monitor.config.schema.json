@@ -400,6 +400,11 @@
                 "type": "integer",
                 "minimum": 1,
                 "description": "acts before GIVE_UP"
+              },
+              "noted": {
+                "type": "string",
+                "minLength": 1,
+                "description": "case M, an answer of memory notes alone: the hidden result after the notes, after which the model answers"
               }
             },
             "required": [

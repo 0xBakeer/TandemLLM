@@ -60,7 +60,11 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_MEMORY   the answer ends with a memory block (server/memblock.py): a user rule
                   "short answers"; FAKE_MEMORY_PROJECT a project gotcha instead; FAKE_MEMORY_BAD
                   a block of a kind that does not exist; FAKE_MEMORY_OPEN one that never closes;
-                  with FAKE_CALL_JSON the block sits before the call
+                  with FAKE_CALL_JSON the block sits before the call. FAKE_MEMORY_CALL: the same
+                  note as a `tandem_memory` tool call in Qwen's form (with a `why` parameter
+                  besides the body), after the text; FAKE_MEMORY_CALL_JSON in the JSON form;
+                  FAKE_MEMORY_CALL_ONLY the call is the whole answer, and after a hidden action
+                  the writer answers with its text
     FAKE_STRAY_CLOSE  the answer starts with a sentence and a bare `</think>` line (SRV-187)
     FAKE_PYTHONIC   with `tools`: a sentence, then LFM2's Pythonic call block to the first tool,
                   `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`
@@ -242,6 +246,23 @@ def _json_call(user: str, first: bool = False) -> str | None:
 
 MEMORY_BLOCK = ('<tandem_memory op="add" scope="{scope}" kind="{kind}">\ntitle: {title}\n\n'
                 '{body}\n</tandem_memory>')
+MEMORY_CALL = ("<tool_call>\n<function=tandem_memory>\n<parameter=op>\nadd\n</parameter>\n"
+               "<parameter=scope>\nuser\n</parameter>\n<parameter=kind>\nrule\n</parameter>\n"
+               "<parameter=title>\nshort answers\n</parameter>\n<parameter=why>\nthe user asked "
+               "for it\n</parameter>\n<parameter=body>\nThe user wants answers of at most five "
+               "sentences.\n</parameter>\n</function>\n</tool_call>")
+MEMORY_CALL_JSON = ('<tool_call>\n{"name": "tandem_memory", "arguments": {"op": "add", "scope": '
+                    '"user", "kind": "rule", "title": "short answers", "body": "The user wants '
+                    'answers of at most five sentences."}}\n</tool_call>')
+
+
+def _plain(user: str) -> str:
+    """The plain answer to a prompt: words chosen by its hash."""
+    h = int(hashlib.sha256(user.encode()).hexdigest(), 16)
+    words = [WORDS[(h >> (3 * i)) % len(WORDS)] for i in range(24 + h % 40)]
+    if "FAKE_LONG" in user:
+        words = words * 10
+    return " ".join(words).capitalize() + "."
 
 
 def _memory_block(user: str, answer: str) -> str:
@@ -257,6 +278,10 @@ def _memory_block(user: str, answer: str) -> str:
                                 body="The user wants answers of at most five sentences.")
     if "FAKE_MEMORY_OPEN" in user:
         b = b[:b.index("</tandem_memory>")]
+    if "FAKE_MEMORY_CALL" in user:
+        b = MEMORY_CALL_JSON if "FAKE_MEMORY_CALL_JSON" in user else MEMORY_CALL
+        if "FAKE_MEMORY_CALL_ONLY" in user:
+            return b
     if answer.startswith("<tool_call>"):
         return "Noted.\n\n" + b + "\n\n" + answer
     return answer + "\n\n" + b
@@ -269,7 +294,8 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     if "FAKE_LONG" in user:
         words = words * 10
     answer = " ".join(words).capitalize() + "."
-    if tools and "tool" in user.lower():
+    # (the call form's own words: the memory card's text says "tool call" too)
+    if tools and "tool" in user.lower() and "FAKE_MEMORY_CALL" not in user:
         answer = _call(tools[0], user)
         if "FAKE_TWO_CALLS" in user:
             answer += "\n" + (BAD_CALL if "FAKE_SECOND_BAD" in user
@@ -428,7 +454,8 @@ def load(app, a) -> None:
             ids = tok.encode_text(reasoning) + close + tok.encode_text(answer) + [EOS]
         # what the writer answers after a hidden action: a call when tools were offered
         after = ([EOS] if "FAKE_EMPTY_ALWAYS" in user else
-                 tok.encode_text(BAD_CALL if tools and "FAKE_BAD_ALWAYS" in user else
+                 tok.encode_text(_plain(user) if "FAKE_MEMORY_CALL_ONLY" in user else
+                                 BAD_CALL if tools and "FAKE_BAD_ALWAYS" in user else
                                  _json_call(user, first=True) if tools and
                                  "FAKE_AFTER_FIRST" in user and _json_call(user) else
                                  _json_call(user) if tools and "FAKE_AFTER_SAME" in user and

@@ -3486,13 +3486,19 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
+    notes = note_calls = 0
+    takes = getattr(sup, "memory_notes", None)
+    if takes is not None and answer:
+        # the memory notes the client never gets (server/memblock.py): not the answer's calls,
+        # and an answer of notes alone is empty (E1 case M continues it after a hidden result)
+        answer, notes, note_calls = memblock.without_notes(answer, calls=bool(takes))
     fmt = _tool_format()
     # the checks read the model's own call format as the stream and the final parse do: an
     # arg-key or Pythonic call is a call here too, not a block that does not parse
     answer = rewrite_native(answer, fmt, eos=True)
     calls = ""
     sup.lift_ids = None
-    if (not answer.strip() and getattr(sup.req, "tools_offered", False)
+    if (not answer.strip() and not notes and getattr(sup.req, "tools_offered", False)
             and getattr(sup.req, "n", 1) == 1):
         # SRV-199: the calls a turn wrote inside its reasoning and then stopped (E1's case C)
         try:
@@ -3513,7 +3519,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     try:
         act = sup.at_finish(conductor.FinishEvent(
             "eos", inside, answer, think.n if think is not None else 0, n_out,
-            len(ctx) + len(extra), calls=calls), room)
+            len(ctx) + len(extra), calls=calls, notes=notes + note_calls,
+            note_calls=note_calls), room)
     finally:
         if extra and real is not None:
             sup.on_event = real
@@ -9843,6 +9850,9 @@ class Handler(BaseHTTPRequestHandler):
                     and plan.session is not None else None)
                 if ui is not None:
                     sup.on_event = ui.monitor
+                # SP2 reads the answer as the client gets it: without the memory notes the
+                # filter takes out (an answer of notes alone is an empty answer)
+                sup.memory_notes = _memory_takes(plan, chat, n_choices, tool_names)
                 if plan is not None and plan.acts:
                     sup.adopt(plan.acts)            # the router's outcome note (J1)
                 if plan is not None and plan.outcome is not None and \
@@ -10300,7 +10310,7 @@ class Handler(BaseHTTPRequestHandler):
                         _finishing(rec, "saving_state")
                     # 2026-10-05: the answer's memory blocks, written and taken out of the text
                     mem_taken = _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt,
-                                             comp is None and mm is None)
+                                             comp is None and mm is None, tool_names)
                     if (cached_ids is None or ci) and not micro:
                         _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
@@ -10494,7 +10504,7 @@ class Handler(BaseHTTPRequestHandler):
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
-            mf = [_memory_filter(plan, chat, n_choices, ui)]
+            mf = [_memory_filter(plan, chat, n_choices, ui, tool_names)]
             # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
             # client (a conductor plan only: the raw path is the release's, byte for byte)
             stray = [StrayClose() if chat and plan is not None and plan.active else None]
@@ -11377,14 +11387,25 @@ def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = No
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
-def _memory_filter(plan, chat: bool, n_choices: int, ui):
-    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
-    choice of a chat request; None otherwise (the stream is the release's)."""
+def _memory_takes(plan, chat: bool, n_choices: int, tool_names=()) -> bool | None:
+    """What the memory filter takes out of this request's answer: None (no filter: the stream
+    is the release's), False (the blocks), True (the blocks and the `tandem_memory` calls,
+    unless the client offers a tool of that name: then the calls are its own)."""
     cond = STATE.get("conductor")
     if (cond is None or plan is None or not plan.active or not chat or n_choices != 1
-            or getattr(plan, "memory", None) is None):
+            or not getattr(plan, "memory", None)
+            or plan.memory.get("mode") not in ("on", "shadow")):
         return None
-    return cond.memory.filter(plan.memory, ui)
+    return memblock.TOOL not in (tool_names or ())
+
+
+def _memory_filter(plan, chat: bool, n_choices: int, ui, tool_names=()):
+    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
+    choice of a chat request; None otherwise (the stream is the release's)."""
+    takes = _memory_takes(plan, chat, n_choices, tool_names)
+    if takes is None:
+        return None
+    return STATE["conductor"].memory.filter(plan.memory, ui, calls=takes)
 
 
 def _answer_mask(plan, chat: bool, body: dict):
@@ -11458,10 +11479,12 @@ def _memory_close(plan, mfilter, ids: list[int], n_prompt: int, spans_ok: bool) 
     return hidden, (_memory_spans(hidden, ids, n_prompt) if spans_ok else [])
 
 
-def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -> tuple:
+def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok,
+                 tool_names=()) -> tuple:
     """The non-streamed answer's memory blocks: each closed block of the answer written, every
-    closed one returned with its hidden span (the text drops them later)."""
-    f = _memory_filter(plan, chat, n_choices, ui)
+    closed one returned with its hidden span (the text drops them later, a call form before
+    the calls are read)."""
+    f = _memory_filter(plan, chat, n_choices, ui, tool_names)
     if f is None:
         return [], []
     text = STATE["tok"].decode(ids, skip_special_tokens=True)
