@@ -10,7 +10,7 @@ import dataclasses
 
 #: the single-request ladder (section a/b), tokens
 LADDER = (1024, 4096, 16384, 32768, 56320, 65536, 98304, 131072, 196608, 245760)
-QUICK_LADDER = (1024, 16384, 65536, 131072)
+QUICK_LADDER = (1024, 16384, 65536)
 #: an answer's tokens in a/b and c, f's answer, and the room a request keeps beside its prompt
 ANSWER, LONG_ANSWER, MARGIN = 512, 1024, 256
 
@@ -96,7 +96,7 @@ def make(health: dict, card: dict | None, profile=None, quick: bool = False,
     lengths = [n for n in ladder if fits(n, ANSWER, f"a.{kfmt(n)}")]
     runs = {n: (1 if quick else (3 if n <= 16384 else 2)) for n in lengths}
     if quick:
-        skipped["a.more"] = "--quick: four lengths, one run each"
+        skipped["a.more"] = "--quick: three lengths, one run each"
     conc = list(range(1, lanes + 1)) if not quick else sorted({1, max(1, lanes // 2), lanes})
     c32 = [n for n in (conc if not quick else sorted({1, lanes})) if fits(32768, 32, f"c.32k.{n}")]
     if lanes < 2:
@@ -104,10 +104,12 @@ def make(health: dict, card: dict | None, profile=None, quick: bool = False,
     chats = sorted({min(5, lanes), lanes}) if lanes >= 2 else []
     if not chats:
         skipped["d"] = "the server serves one request at a time"
-    shared = 28672 if fits(28672, 64, "d.prompt") else 0
+    shared = (8192 if quick else 28672)
+    shared = shared if fits(shared, 64, "d.prompt") else 0
     if quick:
         chats = [lanes] if lanes >= 2 else []
-    load = 65536 if lanes >= 3 and fits(65536, 64, "e.load") else None
+    load = (32768 if quick else 65536)
+    load = load if lanes >= 3 and fits(load, 64, "e.load") else None
     if lanes < 3:
         skipped["e.load"] = "needs three requests at once (two decoding, one arriving)"
     ret = 98304 if fits(98304 + 1024, 64, "e.return") else None
@@ -117,7 +119,7 @@ def make(health: dict, card: dict | None, profile=None, quick: bool = False,
         skipped["e.return"] = "--quick"
     lp = 57344 if fits(57344, LONG_ANSWER, "f") else None
     tasks = ["summary"] if quick else ["summary", "code", "copy"]
-    needles = [n for n in (32768, 131072) if fits(n, 64, f"h.needle.{kfmt(n)}")]
+    needles = [n for n in ((32768,) if quick else (32768, 131072)) if fits(n, 64, f"h.needle.{kfmt(n)}")]
     warm = [] if quick else [n for n in (131072, 196608) if fits(n, ANSWER, f"i.{kfmt(n)}")]
     if quick:
         skipped["i"] = "--quick"
@@ -133,8 +135,15 @@ def make(health: dict, card: dict | None, profile=None, quick: bool = False,
 def estimate(plan: Plan, sections, prefill_tok_s: float, decode_tok_s: float) -> dict:
     """Minutes a section takes at the probe's rates (a prefill is serial; N decoders share the
     engine at about 2.5 times one's rate at 8). A rough figure for the plan, never a result."""
-    pf = max(prefill_tok_s, 1.0)
+    pf0 = max(prefill_tok_s, 1.0)
     dc = max(decode_tok_s, 1.0)
+
+    class _PF:
+        """Prefill time of n tokens: the probe's rate, slowing with the length (attention grows with it;
+        on the reference box about 0.9x at 64k and 0.6x at 240k)."""
+        def __rtruediv__(self, n):
+            return n / (pf0 / (1 + n / 400_000))
+    pf = _PF()
 
     def agg(n):
         return dc * min(n, 1 + 0.22 * (n - 1))
@@ -147,9 +156,9 @@ def estimate(plan: Plan, sections, prefill_tok_s: float, decode_tok_s: float) ->
         ((plan.return_prompt or 0) * 1.2 / pf + 3 * (plan.flood_prompt or 0) / pf if plan.return_prompt else 0)
     s["f"] = len(plan.long_tasks) * plan.long_runs * ((plan.long_prompt or 0) / pf + LONG_ANSWER / dc) \
         if plan.long_prompt else 0
-    lv = [1, 2, 4, 8]
-    s["g"] = 2 * (sum(4 * ANSWER / agg(min(n, plan.lanes)) for n in lv) + 6 * 400 / dc) + \
-        (3 * (2048 + 8192 + 32768) / pf)
+    lv = [n for n in (1, 2, 4, 8) if n <= plan.lanes]
+    levels = sum(4 * ANSWER / agg(n) for n in lv)
+    s["g"] = levels if plan.quick else 2 * levels + 6 * 400 / dc + 3 * (2048 / pf + 8192 / pf + 32768 / pf)
     s["h"] = 16 * 512 / dc + sum(plan.needles) / pf
     s["i"] = sum(n / pf + ANSWER / dc for n in plan.warm)
     s["j"] = 0

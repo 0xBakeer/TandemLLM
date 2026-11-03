@@ -48,10 +48,10 @@ def test_plans_follow_the_server_and_the_gpu():
     one = plan.make(health(lanes=1, window=65536), None, None)
     assert one.chats == [] and "one request at a time" in one.skipped["c"]
     q = plan.make(health(), None, GB10(Fingerprint(name="NVIDIA GB10")), quick=True)
-    assert q.lengths == [1024, 16384, 65536, 131072] and all(v == 1 for v in q.runs.values())
-    assert q.conc_2k == [1, 4, 8] and q.warm == []
-    est = plan.estimate(q, ["a", "c", "d", "e", "f", "g", "h"], 1000.0, 40.0)
-    assert 10 < est["total"] < 40, est
+    assert q.lengths == [1024, 16384, 65536] and all(v == 1 for v in q.runs.values())
+    assert q.conc_2k == [1, 4, 8] and q.conc_32k == [1, 8] and q.warm == [] and q.needles == [32768]
+    est = plan.estimate(q, ["a", "c", "d", "e", "f", "g", "h"], 950.0, 60.0)
+    assert 12 < est["total"] < 26, est           # --quick: about 20 minutes on the reference box
 
 
 def test_a_server_without_a_drafter_is_plain():

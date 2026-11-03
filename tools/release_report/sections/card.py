@@ -1,5 +1,6 @@
 """g: the repository's own card tool, tools/parallel_card.py, against the same server: once with its
-default arguments and once with `--fixed-prompts` (its levels only: the flag changes nothing else).
+default arguments and once with `--fixed-prompts` (its levels only: the flag changes nothing else);
+`--quick` runs the second only.
 Its levels are capped at the server's slot limit. Its raw files go to the report's raw folder; the rows
 are the tool's own (wall tok/s, TTFT and decode at 1/2/4/8 at once, decode by workload, prefill), and a
 level the tool calls invalid stays invalid here."""
@@ -39,7 +40,10 @@ def run_card(ctx: Ctx, tag: str, extra: list[str]) -> dict:
 
 def measure(ctx: Ctx) -> list[dict]:
     out = []
-    for tag, extra in (("default", []), ("fixed", ["--fixed-prompts", "--parts", "levels"])):
+    runs = (("default", []), ("fixed", ["--fixed-prompts", "--parts", "levels"]))
+    if ctx.plan.quick:                       # --quick: the fixed-prompt levels only
+        runs = runs[1:]
+    for tag, extra in runs:
         got = run_card(ctx, tag, extra)
         if "raw" not in got:
             out.append(row("g", tag, {}, {"args": tag}, valid=False, why=f"the card tool failed: {got['error']}"))

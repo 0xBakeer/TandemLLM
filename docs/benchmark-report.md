@@ -27,11 +27,11 @@ A loaded conductor is fine: its router hands raw requests to `/v1/completions` b
 
 ## How long it takes
 
-The estimate comes from your box. On one DGX Spark with Qwen3.8-Flash-Next, `--quick` takes about 20 minutes and the full run about 2.5 hours, most of it in long prompts: a 240k-token prompt prefills for about 7 minutes. Run the full report in parts with `--only`; every run adds its sections to the same `data.json`:
+The estimate comes from your box. On one DGX Spark with Qwen3.8-Flash-Next, `--quick` takes about 20 minutes and the full run about 2.5 hours (estimated from the probe), most of it in long prompts: a 240k-token prompt prefills for about 7 minutes. Run the full report in parts with `--only`; every run adds its sections to the same `data.json`:
 
     python -m tools.release_report run --out ~/tandem-report --only a h
-    python -m tools.release_report run --out ~/tandem-report --only c d e i
-    python -m tools.release_report run --out ~/tandem-report --only i f g      # after a restart
+    python -m tools.release_report run --out ~/tandem-report --only c e i
+    python -m tools.release_report run --out ~/tandem-report --only i d f g    # after a restart
 
 The order matters for section i. After the rest of the suite it measures the longest prompts on a warm engine; as the first requests of a freshly started server it measures them fresh. The page compares the two.
 
