@@ -91,7 +91,15 @@ def test_the_arm_setup_env_and_serve_env():
     local.write_text("PY=/opt/py\n")
     src = d / "corrector.bin"
     src.write_bytes(b"x")
-    site = {"setup_env": str(box), "local_env": str(local), "copies": {"ops/correctors/c.bin": str(src)},
+    (d / "community").mkdir()
+    (d / "community" / "a.env").write_text("A=1\n")
+    cond = d / "conductor"
+    cond.mkdir()
+    (cond / "config.json").write_text("{}")
+    (cond / "decisions-1.jsonl").write_text("secret")
+    (cond / "x.token").write_text("secret")
+    site = {"setup_env": str(box), "local_env": str(local), "conductor_from": str(cond),
+            "copies": {"ops/correctors/c.bin": str(src), "run/community": str(d / "community")},
             "links": {"corpus": str(d)}}
     pack = {"launcher": "ops", "profile": "flashnext-3.05"}
     ol = server.OpsLauncher(Generic(Fingerprint(memory_gib=48)), pack, site)
@@ -102,8 +110,13 @@ def test_the_arm_setup_env_and_serve_env():
     assert (tree / "run" / "local.env").read_text() == "PY=/opt/py\n"
     assert oct((tree / "run").stat().st_mode)[-3:] == "700"
     assert (tree / "ops/correctors/c.bin").read_bytes() == b"x" and (tree / "corpus").is_symlink()
+    assert (tree / "run/community/a.env").read_text() == "A=1\n"
     arm = server.Arm("head", "plain", tree, 8105, d / "home",
                      {"QSE_PARALLEL": "4", "QSE_ENGINE_FLAGS": "--model ${QSE_WEIGHTS_DIR} --drafter none"})
+    ol.arm_state(arm)
+    got = sorted(os.listdir(d / "home" / "conductor"))
+    assert got == ["config.json"], got
+    assert (d / "home" / "secrets.env").read_text() == ""
     env = ol.setup_env(arm)
     assert env.index("RESPONSE_CACHE='on'") < env.index("RESPONSE_CACHE='off'"), env
     assert "PORT='8105'" in env and "CONDUCTOR='raw'" in env and "QSE_USAGE_LEDGER='off'" in env

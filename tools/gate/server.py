@@ -290,9 +290,12 @@ class OpsLauncher:
             if not d.exists():
                 os.symlink(os.path.realpath(os.path.expanduser(srcp)), d)
         for dst, srcp in (self.site.get("copies") or {}).items():
-            d = tree / dst
+            d, srcp = tree / dst, os.path.expanduser(srcp)
             d.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(os.path.expanduser(srcp), d)
+            if os.path.isdir(srcp):
+                shutil.copytree(srcp, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(srcp, d)
 
     def setup_env(self, arm: Arm) -> str:
         """The arm's run/setup.env: the box's own (site `setup_env`), then the arm's overrides."""
@@ -305,11 +308,19 @@ class OpsLauncher:
                **arm.env}
         return base.rstrip("\n") + "\n# tools/gate: this arm's own settings\n" + env_lines(own)
 
-    def start(self, arm: Arm) -> dict:
+    def arm_state(self, arm: Arm) -> None:
+        """The arm's own state: a conductor config (the site's copy, never its decisions or tokens),
+        a probe folder and an empty secrets file."""
+        src = self.site.get("conductor_from")
+        if src and not (arm.home / "conductor").exists():
+            shutil.copytree(os.path.expanduser(src), arm.home / "conductor",
+                            ignore=shutil.ignore_patterns("decisions*", "*.token", "session-tokens.json"))
         for d in ("conductor", "probe"):
             (arm.home / d).mkdir(parents=True, mode=0o700, exist_ok=True)
-        secrets = arm.home / "secrets.env"
-        secrets.touch(mode=0o600)
+        (arm.home / "secrets.env").touch(mode=0o600)
+
+    def start(self, arm: Arm) -> dict:
+        self.arm_state(arm)
         (arm.tree / "run" / "setup.env").write_text(self.setup_env(arm))
         env = {k: v for k, v in os.environ.items()
                if not (k.startswith(("QSE_", "QWEN38_")) or k in ("REPO", "PORT"))}

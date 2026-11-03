@@ -14,8 +14,9 @@ tools/parallel_card.py, tools/soak.py) is this checkout's, the same instrument f
 
 `--site FILE` (YAML) names what this box adds beside a checkout: `serve_env` (its ops/serve.env;
 REPO is rewritten for each tree), `setup_env` (its run/setup.env, under the arm's own settings),
-`local_env`, and `links` / `copies` ({path in the tree: path on the box}). Without it an install's
-run/local.env is used where there is one.
+`local_env`, `links` / `copies` ({path in the tree: path on the box}, a file or a folder), and
+`conductor_from` (a conductor config each arm copies, without its decisions or tokens). Without it
+an install's run/local.env is used where there is one.
 
 `--head-patch FILE` plants a change in the head's tree (a dry run of the gate itself); the report
 says so and the CI check refuses it.
