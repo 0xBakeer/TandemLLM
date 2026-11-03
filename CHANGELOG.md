@@ -4,6 +4,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## Unreleased
 
+### Setup Guide
+
+- A new browser opens the Setup Guide in a simple mode (#103): three pages with the model's own defaults, and one switch brings back all eight steps. Simple mode turns the response cache on and leaves the chat (beta) off.
+
 ### Fixes
 
 - A prefill the memory gate admits over the engine's peak is charged at the box's floor for the new memory it takes: its workspace less the allocator's free default-pool blocks, which it takes first and which MemAvailable already leaves out (SRV-775). Before, the whole workspace was charged. On a server whose reserve sat 3.9 GiB over its 75.8 GiB peak, a lone chat of 31,053 rows was charged 3.9 GiB with 2.3 GiB of it free in the reserve, found 9.7 GiB under its 10 GiB floor and waited until the client gave up. Its line now names the new part, for example "1.6 new (2.3 of its 3.9 in the allocator's free blocks)". The roles' pools' free bytes are not credited, and a failed reading of the pools credits nothing.
