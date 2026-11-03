@@ -76,15 +76,18 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def port_busy(port: int) -> bool:
+def port_busy(port: int, strict: bool = False) -> bool:
+    """Whether something holds `port`. The default binds as a server that sets SO_REUSEADDR does,
+    so a stopped server's closed connections (TIME_WAIT for a minute) do not count: that is the
+    check after a stop. `strict` binds without it, as a server that does not set it would: that is
+    the check for a port to hand to a new server."""
     with socket.socket() as s:
         s.settimeout(0.5)
         if s.connect_ex(("127.0.0.1", port)) == 0:
             return True
     with socket.socket() as s:
-        # as a server binds: a stopped server's closed connections sit in TIME_WAIT on the port for
-        # a minute, and a bind without SO_REUSEADDR reads them as a server still there
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if not strict:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("0.0.0.0", port))
         except OSError:
@@ -97,7 +100,7 @@ def free_port(start: int, taken: set, floor: int = MIN_PORT) -> int:
         raise SystemExit(f"[gate] port {start} is under {floor}: the gate starts its servers on "
                          f"{floor} or above and never beside the box's own")
     for p in range(start, start + 50):
-        if p not in taken and not port_busy(p):
+        if p not in taken and not port_busy(p, strict=True):
             return p
     raise SystemExit(f"[gate] no free port in {start}-{start + 49}")
 

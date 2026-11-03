@@ -238,6 +238,9 @@ def test_a_stopped_server_with_closed_connections_frees_its_port():
     cli.close()
     srv.close()
     assert not server.port_busy(port)
+    # a new server gets no port that is in TIME_WAIT: one that binds without SO_REUSEADDR would fail
+    assert server.port_busy(port, strict=True)
+    assert server.free_port(port, set(), floor=1024) != port
 
 
 if __name__ == "__main__":
