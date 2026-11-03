@@ -143,11 +143,11 @@ GOLDEN_FP4 = {
     # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
     # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): flint, lfm2_moe, qwen3_5_moe, qwen4_exp
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "24ee82e0149528aa1e3a4d0e5904f9c5b6e73f8e6440272bb1fa06c2f7dbbad2",
+    "qwen4_exp": "6441d7ec024223bf8fd0cfe13bc925e1c492ad0d537f643a2c1de88dbfb03ee2",
     "nemotron_h": "b42ab12b898cbfb68580c024ff91b63d18c30b4c1e9e5b125215cbddb865fd2e",
-    "lfm2_moe": "b1f6ed6c9af0e3b283cc146a5a9c33ff5d6a39d6a95d67b2f407c1c616c1a634",
-    "qwen3_5_moe": "202d27564c48968fdaa64268893319d9ff1b55afaa5f2ee787227183a7f0f50a",
-    "flint": "c4d9897326d761203a90a4384b6711ff5d8c953d9d594baabe852490c515c961",
+    "lfm2_moe": "7a6080001edbb6d85b0e586cce67eb4bdf3ec2b3771b3f1fd7d6805045d9b254",
+    "qwen3_5_moe": "7d3fd9fdf5e19473f29fb9394eca39471979bb026aab0f39add5045a74743a71",
+    "flint": "0be79612e62686537b320ff35d56844f8d1005a0ce668600e2e43ab7590a475f",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
