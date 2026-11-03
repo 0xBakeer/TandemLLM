@@ -445,6 +445,7 @@ KNOBS: dict[str, tuple] = {
     # ENG-225: a prompt chunk (and the MTP layer's catch-up) through the prefill kernels
     # (tools/fn_prefill_kernels.py: experts grouped by expert, mixers and the router on the library
     # GEMM, attention over each row's visible keys); "ref" = the reference's batched forward
+    'FN_GROUP_ROWS': ('64', 'tools/fn_prefill_kernels.py'),
     'FN_PREFILL': ('kernels', 'engine/models/flashnext/engine.py'),
     # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
     'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),

@@ -63,8 +63,10 @@ def _module():
 
 
 # rows an item of the group GEMM takes (16 MT; 32 or 64): 32 measured faster at 2k and 4k rows a chunk
-# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer)
-GROUP_ROWS = 32
+# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer); 64 measures
+# faster at every chunk rows now (2026-10-30, same bench on a DGX Spark: 11.8 vs 12.5 ms at 2k,
+# 19.0 vs 20.9 at 4k, 34.5 vs 40.0 at 8k) -- QWEN38_FN_GROUP_ROWS switches it back
+GROUP_ROWS = int(_S.get("FN_GROUP_ROWS") or 64)
 
 
 def group_plan(ids_flat: torch.Tensor, groups: int, rows: int = GROUP_ROWS) -> dict:
