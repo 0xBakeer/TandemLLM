@@ -136,11 +136,12 @@ GOLDEN_FP4 = {
     # the joint prefill and the MTP lanes' lookup backoff (off), the round runner's host counters, busy work and
     # collector control (off; engine/methods/busy.py, mtp_drafter.py, staircut.py, the runner): every adapter but
     # qwen3_5 and nemotron_h
+    # the MTP catch-up's own prefill chunk cap (engine/models/flashnext/engine.py): qwen3_5_moe, qwen4_exp
     "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "97db6053996643b5530b442bf2aba5b64c258ed557ce0cfbcd4c366bd1aa7941",
+    "qwen4_exp": "f5fc09b67b793fa69d222643d66cd89bac8276b17e3c231a22a5610f11c8b647",
     "nemotron_h": "e0e4b9c5a88dac18997664f592d55a7ae29d46093a3ecf526a0588df9d50a051",
     "lfm2_moe": "cd8c37de23b3dab664bdaf603d2eb5dd2aa526a52e6375746444f64372649433",
-    "qwen3_5_moe": "c41b271d33350691fc97be300184e27355dfc4eb6ec3afb2ff1d90440ffb3c99",
+    "qwen3_5_moe": "43428e023c6acf48c0d8ee8b05d2bffb0af81ffbdd031dfed424a69e89831c13",
     "flint": "65b48c7202a82a922f41b118b56c2bc2b243c3dd561d213cd261f10f2cdf4367",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
