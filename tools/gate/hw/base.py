@@ -1,6 +1,7 @@
 """The questions the gate asks about a GPU, with conservative answers; each GPU's adapter
 (tools/gate/hw/<gpu>.py) overrides what it knows. Nothing outside these files holds a GPU-specific
-size, limit or setting.
+size, limit or setting. Which GPU a box has is tools/gpu's answer: a profile names the tools/gpu
+adapter it sizes for (`gpu_adapter`) and matches the boxes that adapter claims.
 
 A profile answers:
 
@@ -24,6 +25,8 @@ A profile answers:
 from __future__ import annotations
 
 import dataclasses
+
+from tools import gpu as _gpu
 
 
 @dataclasses.dataclass
@@ -55,13 +58,16 @@ class Profile:
     drift_max_pct = 10.0
     decode_tokens = 512
     c1_tokens = 256
+    #: the tools/gpu adapter (its `id`) whose boxes this profile sizes; None: picked by name only
+    gpu_adapter: str | None = None
 
     def __init__(self, fp: Fingerprint):
         self.fp = fp
 
     @classmethod
     def matches(cls, fp: Fingerprint) -> bool:
-        return False
+        return (cls.gpu_adapter is not None
+                and _gpu.adapter_for(_gpu.parse_cc(fp.cc), fp.name).id == cls.gpu_adapter)
 
     # -- sizes ------------------------------------------------------------------------------
     def mem(self) -> float:

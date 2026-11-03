@@ -53,6 +53,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
@@ -79,15 +80,17 @@ def _module():
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_kernels")],
                        verbose=False)
-        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
+        gpu = _gpu.profile()
+        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1" and gpu.pdl()))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
-        _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
-        _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
+        stages, warps = gpu.moe_launch()
+        _MOD.fn_set_moe_st(stages)
+        _MOD.fn_set_moe_warps(warps)
         _MOD.fn_set_moe_gy(int(_S.get("FN_MOE_GY") or 0))
         _MOD.fn_set_moe_gr(int(_S.get("FN_MOE_GR") or MOE_GR))
         _MOD.fn_set_moe_gpar(int(_S.get("FN_MOE_GPAR") == "1"))
@@ -190,16 +193,9 @@ DENSE_SPLIT: dict = {}
 
 
 def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
-    """The split of an EXL3 projection for `dense`: a cluster of S CTAs over K when the output has
-    few 128-column blocks (keeping >= ~96 CTAs), 4 warps a CTA. Keyed by the shape only: one order
-    for every row count."""
-    got = DENSE_SPLIT.get((N, Kin, kb))
-    if got:
-        return got
-    S = 1
-    while (N // 128) * S < 96 and S < 8 and (Kin // 16) % (8 * S * 2) == 0:
-        S *= 2
-    return S, 4
+    """The split of an EXL3 projection for `dense`: the GPU's answer (tools/gpu `dense_split`), from
+    the measured table, else its rule. Keyed by the shape only: one order for every row count."""
+    return _gpu.profile().dense_split(N, Kin, kb, DENSE_SPLIT)
 
 
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:

@@ -7,17 +7,14 @@ a second engine beside another wedges the box)."""
 
 from __future__ import annotations
 
-from tools.gate.hw.base import Fingerprint, Profile
+from tools.gate.hw.base import Profile
 
 
 class GB10(Profile):
     id = "gb10"
     about = "NVIDIA GB10 (DGX Spark): unified memory, the reference box"
+    gpu_adapter = "gb10"
     stability_minutes = 30
-
-    @classmethod
-    def matches(cls, fp: Fingerprint) -> bool:
-        return "GB10" in (fp.name or "").upper() or fp.cc == "12.1"
 
     def mem(self) -> float:
         return float(self.fp.memory_gib or 119.7)

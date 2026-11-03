@@ -5,6 +5,8 @@ outside them.
   2  gb10          the GB10's answers are the ones the engine gave before the adapters, exactly
   3  base, ada     no inline build, the Triton paths; Ada answers like the base until its kernels land
   4  once          `profile` asks the driver once a device
+  5  users         gate/hw, device_id, the setup presets and the fingerprints read the adapters
+  6  grep          no capability check, arch flag or GPU name test outside tools/gpu (allow-list below)
 
 CPU. Run: python tests/test_gpu_adapters.py
 """
@@ -12,6 +14,7 @@ CPU. Run: python tests/test_gpu_adapters.py
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -81,7 +84,10 @@ def test_gb10_moe_launch_reads_its_knobs_with_mains_defaults():
             os.environ.pop(k, None)
             if v is not None:
                 os.environ[k] = v
-    return "(3, 4) by default, the knobs read live"
+    from engine.settings import KNOBS
+    assert KNOBS["FN_MOE_ST"] == ("3", "tools/gpu/gb10.py")
+    assert KNOBS["FN_MOE_WARPS"] == ("4", "tools/gpu/gb10.py")
+    return "(3, 4) by default, the knobs read live, owned by gb10.py"
 
 
 def test_gb10_dense_split_is_mains():
@@ -160,14 +166,102 @@ def test_profile_asks_the_driver_once_a_device():
     return f"{len(calls)} driver calls for 103 asks on one device"
 
 
+# ------------------------------------------------------------------ 5: users
+def test_gate_hw_matches_through_tools_gpu():
+    from tools.gate.hw import pick
+    from tools.gate.hw.base import Fingerprint
+    assert pick(Fingerprint(name="NVIDIA GB10", cc="12.1")).id == "gb10"
+    assert pick(Fingerprint(name="NVIDIA GB10")).id == "gb10"
+    assert pick(Fingerprint(name="unknown", cc="12.1")).id == "gb10"
+    assert pick(Fingerprint(name="NVIDIA GeForce RTX 4090", cc="8.9", memory_gib=24.0)).id == "ada"
+    assert pick(Fingerprint(name="NVIDIA H100", cc="9.0", memory_gib=80.0)).id == "generic"
+    from tools.gate import hw
+    assert hw.TORCH_PROBE is gpu.PROBE
+    return "gb10 by capability or name, ada by capability, generic otherwise; tools/gpu's probe"
+
+
+def test_device_keys_and_presets():
+    from engine.methods.device import device_id
+    assert device_id("NVIDIA GB10") == "dgx-spark"
+    assert device_id("NVIDIA RTX PRO 6000 Blackwell") == "nvidia-rtx-pro-6000-blackwell"
+    assert gpu.key_matches("dgx-spark", "NVIDIA GB10")
+    assert not gpu.key_matches("dgx-spark", "NVIDIA GeForce RTX 4090")
+    assert gpu.key_matches("nvidia-geforce-rtx-4090", "NVIDIA GB10"), "a key no adapter owns"
+    from server.setup.device import preset
+    m = {"devices": [{"id": "dgx-spark", "total_gib": 119.7}]}
+    assert preset(m, 119.5, "NVIDIA GB10") == "dgx-spark"
+    assert preset(m, 119.5, None) == "dgx-spark"
+    assert preset(m, 119.5, "NVIDIA RTX PRO 6000 Blackwell") is None
+    return "dgx-spark only on a GB10; any other preset by memory alone"
+
+
+def test_the_fingerprints_read_the_adapters():
+    from engine import disk_cache as dc
+    got = {os.path.relpath(p, ROOT) for p in dc._tools_modules(ROOT, [os.path.join(ROOT, "tools", "fn_kernels.py")])}
+    want = {os.path.join("tools", "gpu", f) for f in os.listdir(os.path.join(ROOT, "tools", "gpu")) if f.endswith(".py")}
+    assert want <= got, sorted(want - got)
+    return f"tools/fn_kernels.py reaches {len(want)} adapter files"
+
+
+# ------------------------------------------------------------------ 6: grep
+#: what a per-GPU choice looks like in Python or shell
+PATTERNS = [r"get_device_capability\s*\(", r"-gencode", r"arch=compute_\d", r"TORCH_CUDA_ARCH_LIST",
+            r"__CUDA_ARCH__", r"\(\s*12\s*,\s*1\s*\)", r"\(\s*8\s*,\s*9\s*\)", r"[\"']12\.1[\"']",
+            r"[\"']8\.9[\"']", r"[\"']GB10[\"']\s+in\b", r"\.major\s*[<>=]", r"\bcc\s*=="]
+#: files under the scan that may keep a GPU check, each with its reason
+ALLOWED = {
+    # the installer checks the GPU before the repository is on disk, to size the install
+    "install.sh": "runs before the repository is on disk",
+    # builds the third-party exllamav3 on a quantization box and logs its capability
+    "tools/exl3/common.sh": "the third-party exllamav3 build, not this engine's kernels",
+    # the standalone proxy ships without tools/; it reports a GB10 backend's memory as unified
+    "proxy/hostcollect.py": "the standalone proxy has no tools/; a monitoring view, not an engine choice",
+    "proxy/scrape.py": "the standalone proxy has no tools/; a monitoring view, not an engine choice",
+    # a stub nvidia-smi that plays a GB10 for the release gate's install check
+    "tools/release_gate_setup.sh": "a stub nvidia-smi, not a choice",
+}
+SCAN = ("engine", "tools", "server", "proxy", "chatd", "ops", "bench")
+
+
+def _scanned():
+    out = ["install.sh"]
+    for top in SCAN:
+        for d, dirs, files in os.walk(os.path.join(ROOT, top)):
+            dirs[:] = [x for x in dirs if x not in ("__pycache__", "node_modules")]
+            for f in files:
+                if f.endswith((".py", ".sh", ".env")):
+                    out.append(os.path.relpath(os.path.join(d, f), ROOT))
+    return sorted(out)
+
+
+def test_no_gpu_choice_outside_tools_gpu():
+    rx = re.compile("|".join(PATTERNS))
+    bad, seen = [], set()
+    for rel in _scanned():
+        if rel.startswith(os.path.join("tools", "gpu") + os.sep):
+            continue
+        with open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                code = line.split("#", 1)[0] if rel.endswith((".sh", ".env")) else line
+                if line.lstrip().startswith("#") or not rx.search(code):
+                    continue
+                if rel in ALLOWED:
+                    seen.add(rel)
+                    continue
+                bad.append(f"{rel}:{i}: {line.strip()[:100]}")
+    assert not bad, "a GPU choice outside tools/gpu:\n" + "\n".join(bad)
+    assert seen == set(ALLOWED), f"an allow-list entry no longer needed: {sorted(set(ALLOWED) - seen)}"
+    return f"{len(_scanned())} files, {len(ALLOWED)} allowed with reasons"
+
+
 def test_the_package_imports_without_torch():
     code = ("import sys; sys.modules['torch'] = None; sys.path.insert(0, %r)\n"
             "from tools import gpu\n"
             "assert gpu.profile_for((12, 1)).id == 'gb10' and gpu.by_name('NVIDIA GB10').unified_memory\n"
-            % ROOT)
+            "from tools.gate.hw import pick\n" % ROOT)
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr[-2000:]
-    return "tools.gpu imports with torch blocked"
+    return "tools.gpu and tools.gate.hw import with torch blocked"
 
 
 if __name__ == "__main__":

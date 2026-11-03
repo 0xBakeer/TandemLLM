@@ -23,8 +23,9 @@
 # start (and a reboot) comes back in setup mode. It binds 127.0.0.1 unless --host says otherwise.
 #
 # The primary target is one NVIDIA DGX Spark (GB10, aarch64, sm_121). Other CUDA GPUs are best
-# effort: the served profile's skinny NVFP4 kernel is built for sm_121a only and is switched off
-# there, and StairCut's cost tables were measured on the Spark.
+# effort: the engine's GPU adapter (tools/gpu) builds the skinny NVFP4 kernel for sm_121a only and
+# keeps it off elsewhere, and StairCut's cost tables were measured on the Spark. The check below runs
+# before the repository is on disk, so it reads the capability itself.
 #
 # Nothing here needs root. The repository's own ops/serve.env is never modified.
 set -euo pipefail
@@ -830,9 +831,8 @@ setv QSE_SECRETS "$(q "$DIR/state/secrets.env")"
 [ "$PORT" -le 65526 ] && setv QSE_STATUS_PORT "$((PORT + 9))"
 if [ -n "$CUDA_HOME_FOUND" ]; then setv CUDA_HOME "$(q "$CUDA_HOME_FOUND")"; fi
 if [ "$SPARK" != 1 ]; then
-    # best effort off the Spark: the skinny kernel is sm_121a code; a smaller context below 100 GiB
-    setv QWEN38_NVFP4_SKINNY 0
-    setv QWEN38_SKINNY_SRUN 0
+    # best effort off the Spark: a smaller context below 100 GiB (the skinny kernel's switch is the
+    # GPU adapter's, tools/gpu)
     if [ "$GPU_MEM_GIB" -lt 100 ]; then setv MAX_LEN 65536; fi
 fi
 render_env() {

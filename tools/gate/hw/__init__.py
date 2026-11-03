@@ -1,5 +1,6 @@
 """The box's GPU profile: detected once from nvidia-smi and the engine's torch, then the first adapter
-that claims it, else the generic one (tools/gate/hw/base.py lists the questions).
+that claims it, else the generic one (tools/gate/hw/base.py lists the questions). Which adapter claims a
+box is tools/gpu's answer for its compute capability and name; the sizes are this folder's.
 
     profile("auto")    detect and pick
     profile("gb10")    a named adapter, on the detected fingerprint
@@ -18,18 +19,13 @@ from tools.gate.hw.base import Fingerprint, Profile
 from tools.gate.hw.fake import Fake
 from tools.gate.hw.gb10 import GB10
 from tools.gate.hw.generic import Generic
+from tools.gpu import PROBE
 
 #: adapters in the order they are asked; the generic one answers for any GPU none claims
 ADAPTERS: list[type[Profile]] = [GB10, Ada]
 
-TORCH_PROBE = (
-    "import json, torch\n"
-    "d = {'torch': torch.__version__, 'cuda': torch.version.cuda}\n"
-    "if torch.cuda.is_available():\n"
-    "    p = torch.cuda.get_device_properties(0)\n"
-    "    d.update(name=p.name, memory_gib=round(p.total_memory / 2**30, 1),\n"
-    "             cc=f'{p.major}.{p.minor}', count=torch.cuda.device_count())\n"
-    "print(json.dumps(d))\n")
+#: what the engine's torch sees, as JSON (tools/gpu owns the probe)
+TORCH_PROBE = PROBE
 
 
 def _run(cmd, run=subprocess.run, timeout=60) -> str | None:

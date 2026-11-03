@@ -447,9 +447,11 @@ class NVFP4Linear:
         if self.blk is not None:
             if f32:
                 raise ValueError("NVFP4Linear writes bf16 rows on the GPU")
+            from tools import gpu as _gpu
             from tools.nvfp4_linear import nvfp4_matmul
             from tools.nvfp4_skinny import SKINNY_MAX, nvfp4_matmul_skinny
-            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if M <= SKINNY_MAX else nvfp4_matmul(x2, self.blk, out=out)
+            skinny = M <= SKINNY_MAX and M <= _gpu.profile(x2.device).skinny_rows()
+            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if skinny else nvfp4_matmul(x2, self.blk, out=out)
             return y.view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)

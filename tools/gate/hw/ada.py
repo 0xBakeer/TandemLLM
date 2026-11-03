@@ -9,16 +9,13 @@ from __future__ import annotations
 
 import subprocess
 
-from tools.gate.hw.base import Fingerprint, Profile
+from tools.gate.hw.base import Profile
 
 
 class Ada(Profile):
     id = "ada"
     about = "NVIDIA Ada (sm_89), discrete memory; sizes not yet checked on an Ada card"
-
-    @classmethod
-    def matches(cls, fp: Fingerprint) -> bool:
-        return fp.cc == "8.9"
+    gpu_adapter = "ada"
 
     def big(self) -> bool:
         return self.mem() >= 40

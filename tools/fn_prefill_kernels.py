@@ -38,6 +38,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
@@ -57,7 +58,7 @@ def _module():
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_prefill_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_prefill_kernels")],
                        verbose=False)
     return _MOD
 

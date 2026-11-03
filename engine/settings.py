@@ -407,10 +407,10 @@ KNOBS: dict[str, tuple] = {
     # Flash-Next kernels launched with programmatic dependent launch (overlap a launch with its
     # predecessor's tail; the bits do not change)
     'FN_PDL': ('1', 'tools/fn_kernels.py'),
-    # cp.async stages of a warp in the MoE kernels (2..4; the bits do not depend on it)
-    'FN_MOE_ST': ('3', 'tools/fn_kernels.py'),
-    # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
-    'FN_MOE_WARPS': ('4', 'tools/fn_kernels.py'),
+    # cp.async stages of a warp in the MoE kernels on the GB10 (2..4; the bits do not depend on it)
+    'FN_MOE_ST': ('3', 'tools/gpu/gb10.py'),
+    # warps a MoE CTA splits its K range over on the GB10 (4 or 8; sets the order of the partial sums)
+    'FN_MOE_WARPS': ('4', 'tools/gpu/gb10.py'),
     # SPD-249: grid rows of the grouped MoE kernels (0: one a pair); a CTA then loops over every
     # n-th group, each group's arithmetic unchanged (the bits do not depend on it)
     'FN_MOE_GY': ('0', 'tools/fn_kernels.py'),
