@@ -184,6 +184,44 @@ def test_packs_name_real_profiles():
         if p["launcher"] == "ops":
             assert os.path.isfile(os.path.join(ROOT, "ops", "profiles", p["profile"] + ".env")), pid
 
+def test_ops_scripts_resolve_the_arm_port_whatever_the_caller_exports():
+    """A caller's QSE_SETUP_ENV, REPO or PORT (a hold's shell exports them) pointed ops/stop.sh at
+    another server's settings, so the arm's stop went to :8000. The ops env drops them and names the
+    arm's own run/setup.env; serve.env's own chain then resolves the arm's port."""
+    d = Path(tempfile.mkdtemp(prefix="gate-ops-env-"))
+    tree = d / "tree"
+    (tree / "ops").mkdir(parents=True)
+    (tree / "run").mkdir()
+    (tree / "ops" / "serve.env").write_text(
+        f"REPO={tree}\nPORT=8000\nQSE_SETUP_ENV_FILE=${{QSE_SETUP_ENV:-${{REPO}}/run/setup.env}}\n"
+        "if [ -f \"${QSE_SETUP_ENV_FILE}\" ]; then . \"${QSE_SETUP_ENV_FILE}\"; fi\n")
+    (tree / "run" / "setup.env").write_text("PORT='8107'\n")
+    other = d / "live-setup.env"
+    other.write_text("PORT='8000'\n")
+    arm = server.Arm("base", "main", tree, 8107, d / "home", {})
+    saved = {k: os.environ.get(k) for k in ("QSE_SETUP_ENV", "REPO", "PORT")}
+    os.environ.update(QSE_SETUP_ENV=str(other), REPO="/elsewhere", PORT="8000")
+    try:
+        env = server.OpsLauncher.ops_env(arm)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert env["QSE_SETUP_ENV"] == str(tree / "run" / "setup.env"), env.get("QSE_SETUP_ENV")
+    assert "REPO" not in env and "PORT" not in env and env["QSE_STATUS_KEEP"] == "1"
+    out = subprocess.run(["bash", "-c", "set -a; . ops/serve.env; echo $PORT"], cwd=tree, env=env,
+                         capture_output=True, text=True)
+    assert out.stdout.strip() == "8107", out.stdout + out.stderr
+
+
+def test_pid_alive():
+    assert server.pid_alive(os.getpid())
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    assert not server.pid_alive(p.pid)
+
 
 if __name__ == "__main__":
     from scriptmode import run

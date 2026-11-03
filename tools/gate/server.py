@@ -66,6 +66,16 @@ def make_tree(repo: str, sha: str, dest: Path, patch: str | None = None) -> str:
     return code_hash(dest)
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def port_busy(port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(0.5)
@@ -322,12 +332,9 @@ class OpsLauncher:
     def start(self, arm: Arm) -> dict:
         self.arm_state(arm)
         (arm.tree / "run" / "setup.env").write_text(self.setup_env(arm))
-        env = {k: v for k, v in os.environ.items()
-               if not (k.startswith(("QSE_", "QWEN38_")) or k in ("REPO", "PORT"))}
-        env.update(HOLD_RESTART="1", QSE_STATUS_KEEP="1", START_REASON="a gate arm")
         t0 = time.monotonic()
         with open(arm.home / "start.log", "w") as fh:
-            r = subprocess.run(["bash", "ops/start.sh"], cwd=arm.tree, env=env, stdout=fh,
+            r = subprocess.run(["bash", "ops/start.sh"], cwd=arm.tree, env=self.ops_env(arm), stdout=fh,
                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=self.deadline)
         pidf = arm.tree / "logs" / "engine.pid"
         arm.pid = int(pidf.read_text().strip()) if pidf.exists() else None
@@ -342,11 +349,32 @@ class OpsLauncher:
             arm.guard = MemGuard(PidProc(arm.pid), floor_gb=floor, period=0.5).start()
         return knobs(h, environ_of(arm.pid) if arm.pid else {}, argv_of(arm.pid) if arm.pid else [])
 
+    @staticmethod
+    def ops_env(arm: Arm) -> dict:
+        """The environment for the tree's ops scripts: nothing of the caller's engine settings, and
+        the arm's own run/setup.env named, so start and stop both resolve the arm's port. A caller's
+        QSE_SETUP_ENV pointed stop.sh at another server's settings, and so at its port."""
+        env = {k: v for k, v in os.environ.items()
+               if not (k.startswith(("QSE_", "QWEN38_")) or k in ("REPO", "PORT"))}
+        env.update(HOLD_RESTART="1", QSE_STATUS_KEEP="1", START_REASON="a gate arm",
+                   QSE_SETUP_ENV=str(arm.tree / "run" / "setup.env"))
+        return env
+
     def stop(self, arm: Arm) -> None:
         if arm.guard is not None:
             arm.guard.stop()
-        subprocess.run(["bash", "ops/stop.sh", "120"], cwd=arm.tree, capture_output=True,
-                       stdin=subprocess.DEVNULL, timeout=300)
+        r = subprocess.run(["bash", "ops/stop.sh", "120"], cwd=arm.tree, env=self.ops_env(arm),
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300)
+        (arm.home / "stop.log").write_text(r.stdout + r.stderr)
+        if arm.pid and pid_alive(arm.pid):            # the server this arm started, by its own pid
+            os.kill(arm.pid, signal.SIGTERM)
+            for _ in range(60):
+                if not pid_alive(arm.pid):
+                    break
+                time.sleep(1)
+            else:
+                os.kill(arm.pid, signal.SIGKILL)
+                time.sleep(2)
         log = arm.tree / "logs" / "engine.log"
         if log.exists():
             shutil.copy(os.path.realpath(log), arm.home / "engine.log")
