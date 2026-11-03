@@ -119,6 +119,62 @@ def test_spd273_idle_captures_pause_while_the_reserve_is_at_the_peak():
     return "74.0 + 2.75 > 75.8: paused, one line; 70.0: captured; policy off or none: captured"
 
 
+def test_spd273_a_window_stops_before_the_capture_after_the_reserve_crosses_the_bound():
+    """SPD-273: the bound was read once, before the window; one window of 222 graphs took the reserve from 67.6 to
+    74.2 GiB (2026-11-03), over the 75.82 GiB peak less the 2.75 floor (73.07), so a window that starts just under
+    the bound ended over it. Now it is read again before each capture: from 72.0 GiB with 0.4 GiB a graph, the
+    third graph takes the reserve to 73.2 and the window stops there ("peak", one line), the fourth is not taken;
+    the next look says nothing more. A read that raises inside the window stops it too."""
+    import contextlib
+    import io
+    GiB = 1 << 30
+
+    class _Mem:
+        on, ws_floor, peak = True, int(2.75 * GiB), int(75.82 * GiB)
+
+        def __init__(self, eng, start, per):
+            self.eng, self.start, self.per, self.reads, self.fail_at = eng, start, per, [], None
+
+        def memory(self):
+            if self.fail_at is not None and len(self.reads) >= self.fail_at:
+                raise RuntimeError("no reading")
+            res = self.start + self.per * len(self.eng.locked)      # one entry a capture taken
+            self.reads.append(round(res, 2))
+            return 60 * GiB, int(res * GiB)
+
+    eng = _Eng(5)
+    _with(eng)
+    mem = _Mem(eng, 72.0, 0.4)
+    app.STATE["mem"] = mem
+    app.STATE.pop("graphs_peak_said", None)
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app.graphs_once()
+            assert got == "peak" and eng.owed == 2 and eng.locked == [True] * 3, (got, eng.owed, out.getvalue())
+            assert mem.reads == [72.0, 72.4, 72.8, 73.2], mem.reads
+            assert not app.LOCK.locked()
+            assert app.graphs_once() == "peak" and eng.owed == 2 and len(mem.reads) == 5
+        lines = out.getvalue().splitlines()
+        paused = [ln for ln in lines if ln.startswith("[graphs] idle captures paused")]
+        assert paused == ["[graphs] idle captures paused: reserve 73.2 GiB + the workspace floor 2.75 > peak 75.8"], \
+            out.getvalue()
+        assert [ln for ln in lines if ln.startswith("[graphs] idle captures over")][0].startswith(
+            "[graphs] idle captures over 1 engine(s): 3 graphs, peak, "), out.getvalue()
+        mem.start, mem.per = 70.0, 0.0             # back under: the rest is captured, the flag cleared
+        assert app.graphs_once() == "captured" and eng.owed == 0
+        assert app.STATE.get("graphs_peak_said") is False
+        eng.owed, eng.locked, mem.reads, mem.fail_at = 3, [], [], 1     # the read after the first graph raises
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            assert app.graphs_once() == "peak" and eng.owed == 2 and eng.locked == [True]
+        assert "no reading" in err.getvalue() and not app.LOCK.locked()
+    finally:
+        app.STATE.pop("mem", None)
+        app.STATE.pop("graphs_peak_said", None)
+    return "72.0 + 0.4 a graph: stopped after 3 of 5 at 73.2 (4 reads, one line); a raising read: stopped after 1"
+
+
 def test_a_length_the_drafter_takes_plain_captures_nothing():
     eng = _Eng(4)
     seen = []

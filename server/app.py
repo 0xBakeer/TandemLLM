@@ -5140,6 +5140,30 @@ def _idle_capture_failed(eng) -> "type | tuple":
     return ()
 
 
+def _graphs_at_peak(mem) -> bool:
+    """SPD-273: is the reserve plus the smallest prefill's workspace over the memory policy's peak? Read off
+    `Budget.memory()` without the policy's lock; "[graphs] idle captures paused" is said once until the reserve is
+    back under. No policy, or one that is off: never. A read that raises counts as over."""
+    if mem is None or not getattr(mem, "on", False):
+        return False
+    try:
+        _, res = mem.memory()
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return True
+    if res + int(mem.ws_floor) <= int(mem.peak):
+        STATE["graphs_peak_said"] = False
+        return False
+    # every capture keeps a private pool no shed or `empty` lowers (about 20 MB a graph; 1,280 pools in 80 minutes
+    # on 2026-11-02, 635 of the 1,390 captures from these windows); past here a capture ahead of the state takes the
+    # reserve over the peak, where the smallest prefill no longer fits under it
+    if not STATE.get("graphs_peak_said"):
+        STATE["graphs_peak_said"] = True
+        print(f"[graphs] idle captures paused: reserve {res / 2**30:.1f} GiB + the workspace floor "
+              f"{int(mem.ws_floor) / 2**30:.2f} > peak {int(mem.peak) / 2**30:.1f}", flush=True)
+    return True
+
+
 def graphs_once() -> str:
     """One look for the graphs the engines' context classes lack (`idle_captures`: an engine's verify,
     commit and draft graphs of a class its rounds have not used yet), slot 0's and each side slot's,
@@ -5148,8 +5172,8 @@ def graphs_once() -> str:
     of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`). An engine also takes
     the classes ahead of its state's length (`idle_captures(wants=...)`): a conductor-planned prompt
     starts in a class the class of a short state never reached (SRV-713). SPD-273: none while the reserve
-    plus the smallest prefill's workspace is over the memory policy's peak ("peak"; a request's own class
-    still captures at its first use)."""
+    plus the smallest prefill's workspace is over the memory policy's peak ("peak"), checked before the
+    window and again before each capture in it (a request's own class still captures at its first use)."""
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
@@ -5170,18 +5194,8 @@ def graphs_once() -> str:
     if not engines:
         return "plain"
     mem = STATE.get("mem")
-    if mem is not None and getattr(mem, "on", False):
-        _, res = mem.memory()
-        if res + int(mem.ws_floor) > int(mem.peak):
-            # SPD-273: every capture keeps a private pool no shed or `empty` lowers (about 20 MB a graph; 1,280
-            # pools in 80 minutes on 2026-11-02, 635 of the 1,390 captures from these windows); past here a capture
-            # ahead of the state takes the reserve over the peak, where the smallest prefill no longer fits under it
-            if not STATE.get("graphs_peak_said"):
-                STATE["graphs_peak_said"] = True
-                print(f"[graphs] idle captures paused: reserve {res / 2**30:.1f} GiB + the workspace floor "
-                      f"{int(mem.ws_floor) / 2**30:.2f} > peak {int(mem.peak) / 2**30:.1f}", flush=True)
-            return "peak"
-        STATE["graphs_peak_said"] = False
+    if _graphs_at_peak(mem):
+        return "peak"
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         return "busy"
@@ -5198,6 +5212,11 @@ def graphs_once() -> str:
                     n += 1
                     if _waiting():
                         why = "stopped"
+                        return why
+                    # SPD-273: again before the next capture; one window of 222 graphs took the reserve from 67.6
+                    # to 74.2 GiB (2026-11-03), so a window that starts under the bound can end over the peak
+                    if _graphs_at_peak(mem):
+                        why = "peak"
                         return why
             except Exception as exc:                               # noqa: BLE001
                 # SPD-271: one engine's failed capture leaves the others their idle window; the engine records
