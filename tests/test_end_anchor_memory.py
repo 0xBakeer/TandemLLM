@@ -178,6 +178,12 @@ class SegAlloc:
         return {"reserved_bytes.all.current": res, "allocated_bytes.all.current": alloc,
                 "segment.all.current": len(self.segs)}
 
+    def nested_stats(self) -> dict:
+        """`torch.cuda.memory_stats_as_nested_dict`, what `cache.cuda_stats` reads."""
+        alloc, res = self.probe()
+        return {"reserved_bytes": {"all": {"current": res}}, "allocated_bytes": {"all": {"current": alloc}},
+                "segment": {"all": {"current": len(self.segs)}}}
+
     # --- a cache that holds some of it
     def cache(self, order: list, level: str, gib: float, pieces: int = 1, safe_ok: bool = True,
               between: float = 0.0):
@@ -203,7 +209,7 @@ class SegAlloc:
 
 
 class FakeTorchCuda:
-    """The three readings `cache.TorchPools` takes (`torch.cuda.memory_stats`, the snapshot call with `None`
+    """The three readings `cache.TorchPools` takes (the allocator's counters, the snapshot call with `None`
     and the calling stream), over a `SegAlloc`, for a `with` block. The snapshot is the one call the engine
     makes, `torch._C._cuda_memorySnapshot(None)`: `torch.cuda.memory_snapshot()` drops references on torch
     2.13.0 (tests/test_pool_snapshot_refcount.py)."""
@@ -221,14 +227,15 @@ class FakeTorchCuda:
 
     def __enter__(self):
         self.saved = (torch.cuda.memory_stats, getattr(torch._C, "_cuda_memorySnapshot", None),
-                      torch.cuda.current_stream)
+                      torch.cuda.current_stream, torch.cuda.memory_stats_as_nested_dict)
         torch.cuda.memory_stats = self.sa.stats
+        torch.cuda.memory_stats_as_nested_dict = self.sa.nested_stats
         torch._C._cuda_memorySnapshot = self._snapshot
         torch.cuda.current_stream = lambda *a: SimpleNamespace(cuda_stream=0)
         return self
 
     def __exit__(self, *a):
-        torch.cuda.memory_stats, snap, torch.cuda.current_stream = self.saved
+        torch.cuda.memory_stats, snap, torch.cuda.current_stream, torch.cuda.memory_stats_as_nested_dict = self.saved
         if snap is None:
             del torch._C._cuda_memorySnapshot
         else:

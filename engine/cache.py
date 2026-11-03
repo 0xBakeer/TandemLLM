@@ -389,9 +389,27 @@ class MemoryRefused(RuntimeError):
                          f"given back; the engine's peak is {peak / GIB:.1f} GiB")
 
 
-def _torch_memory() -> tuple[int, int]:
+def cuda_stats(*names: str) -> tuple[int, ...]:
+    """The caching allocator's counters by dotted name ("allocated_bytes.all.current"), 0 for one it lacks,
+    read off torch's nested dict. `torch.cuda.memory_stats` (and `memory_allocated`, `memory_reserved`,
+    `max_memory_allocated`, which call it) flattens that dict through a closure that refers to itself: each
+    call leaves its (key, value) tuples, ~4K with the graphs' pools, in a reference cycle that only the cycle
+    collector frees. Read every round, that was 50-80K objects a round for the young collection at a round's
+    end (QSE_RUNNER_GC: 40-80 ms a collection, decode 46 -> 23 t/s in 25 minutes); the nested dict is
+    freed by its reference count."""
     import torch as _t
-    return int(_t.cuda.memory_allocated()), int(_t.cuda.memory_reserved())
+    st = _t.cuda.memory_stats_as_nested_dict()
+    out = []
+    for name in names:
+        v = st
+        for part in name.split("."):
+            v = v.get(part, 0) if isinstance(v, dict) else 0
+        out.append(int(v) if isinstance(v, int) else 0)
+    return tuple(out)
+
+
+def _torch_memory() -> tuple[int, int]:
+    return cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
 
 
 def _torch_empty() -> None:
@@ -404,7 +422,7 @@ def _torch_peak(reset: bool = False) -> int:
     if reset:
         _t.cuda.reset_peak_memory_stats()
         return 0
-    return int(_t.cuda.max_memory_allocated())
+    return cuda_stats("allocated_bytes.all.peak")[0]
 
 
 
@@ -496,10 +514,7 @@ class TorchPools:
         self._lk = threading.Lock()
 
     def _read(self) -> tuple[int, int, int]:
-        import torch as _t
-        st = _t.cuda.memory_stats()
-        res = int(st.get("reserved_bytes.all.current", 0))
-        alloc = int(st.get("allocated_bytes.all.current", 0))
+        res, alloc = cuda_stats("reserved_bytes.all.current", "allocated_bytes.all.current")
         gen = int(capture_lock.GEN["captures"])        # before the walk: a capture during it walks again
         if self.walk is None or gen != self.gen:
             t0 = time.perf_counter()

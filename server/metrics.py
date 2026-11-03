@@ -422,16 +422,16 @@ def _cache_bytes():
 
 def _gpu_memory():
     try:
-        import torch
-        return float(torch.cuda.memory_allocated())
+        from engine.cache import cuda_stats
+        return float(cuda_stats("allocated_bytes.all.current")[0])
     except Exception:                                              # noqa: BLE001
         return {}
 
 
 def _gpu_reserved():
     try:
-        import torch
-        return float(torch.cuda.memory_reserved())
+        from engine.cache import cuda_stats
+        return float(cuda_stats("reserved_bytes.all.current")[0])
     except Exception:                                              # noqa: BLE001
         return {}
 
