@@ -19,6 +19,8 @@ A box whose layout differs from a plain checkout (its own `ops/serve.env`, a `ru
 
 `tools/gate/map.yaml` maps each changed path to a level. Every file takes the highest level of the rules it matches, and the pull request takes the highest of its files. A path no rule names takes `quick`.
 
+A new GPU test in `tests/gpu/` needs a line under `kernels` in the same file, with the paths it covers; `tests/test_gate_map.py` fails until it has one.
+
 | Level | Paths | Suites |
 |-|-|-|
 | none | docs, the manual, the dashboard, `chatd/`, the proxy, packages, CPU tests, community packs | no report |

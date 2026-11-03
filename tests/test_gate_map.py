@@ -75,7 +75,11 @@ def test_every_named_gpu_test_exists_and_every_gpu_test_is_named():
     for t in named:
         assert os.path.isfile(os.path.join(ROOT, t)), t
     have = {os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "tests/gpu/test_*.py"))}
-    assert have - named == set(), sorted(have - named)
+    missing = sorted(have - named)
+    assert not missing, (
+        f"{missing}: a new GPU test needs a line in tools/gate/map.yaml under `kernels`, with the "
+        "paths it covers, so the gate runs it for a pull request that changes them "
+        "(docs/quality-gate.md)")
 
 
 if __name__ == "__main__":
