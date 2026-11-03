@@ -68,8 +68,9 @@ from engine.models import REGISTRY  # noqa: E402
 #: SRV-775: the policy's free default-pool bytes a prefill admitted over the peak takes first
 #: (`Budget.workspace_spare`, engine/cache.py): v2's second value again
 #: SRV-775: that credit only on a live pools reading (engine/cache.py): v2's second value again
+#: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "e7eb61e20ac0e8dcb8dd3fef0feff3458d5cf65ffcf5b1bb6dbb6e13fe23408e")
+             "608cfe57bb31d99293e63e4ccc2ce5b8b2391a4dd40eeeb540494a1889a8af4a")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
