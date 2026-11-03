@@ -14,6 +14,10 @@ class Fake(Profile):
     # rounds of 0.6-1 s at the fake's 400 tok/s: longer than the 0.2 s /health poll that proves them
     decode_tokens = 400
     c1_tokens = 256
+    # the fake decodes on the CPU, so a shared CI runner with other test files beside it moves its
+    # speed by several percent between two identical servers (an A/A row resolved 8.2 % worse with
+    # 6.7 % noise); the planted slowdowns the tests check halve the speed, far above this
+    min_effect_pct = 20.0
 
     def __init__(self, fp: Fingerprint | None = None):
         super().__init__(fp or Fingerprint(name="fake", memory_gib=0.0))
