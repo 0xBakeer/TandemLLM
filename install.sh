@@ -91,6 +91,8 @@ PYPI_INDEX="https://pypi.org/simple"
 # build only. pillow decodes a request's images (server/images.py) and torchvision is the image
 # processor's pinned backend (`--image-backend`, server/images.py): without it transformers
 # picks the PIL backend, whose patches differ slightly, and the engine refuses to start.
+# zstandard is the session spill's configured codec (--session-spill-codec zstd): without it the
+# codec is off and spill.py's codec_ok() pays a failed import on every /health and /metrics.
 LOCK="$(cat <<'EOF'
 annotated-doc==0.0.5
 anyio==4.15.1
@@ -149,6 +151,7 @@ transformers==5.12.1
 triton==3.7.1
 typer==0.27.2
 typing-extensions==4.16.0
+zstandard==0.25.0
 EOF
 )"
 
