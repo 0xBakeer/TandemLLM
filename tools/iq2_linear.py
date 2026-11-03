@@ -56,7 +56,7 @@ except Exception:          # noqa: BLE001
 
 QK = 256
 BLOCK_BYTES = 66
-#: rows up to which a packed weight multiplies on its row-invariant kernel (the engine's ROWS_MAX)
+#: the engine's ROWS_MAX; up to ROWS_MAX + 1 rows (a verify block) multiply on a packed weight's row kernel
 ROWS_MAX = 32
 # the format's IQ2_XXS grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
 # little-endian u16s): the packing gguf-py uses
@@ -489,7 +489,7 @@ if HAVE_TRITON:
 
 
 class Q8Linear:
-    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX on
+    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX + 1 on
     the tile kernel (row-invariant; Bolt's head: 3.8 ms for 1 to 32 rows on GB10, the bf16 head 4.7), a
     prompt chunk on cuBLAS over the twin in bf16."""
 
