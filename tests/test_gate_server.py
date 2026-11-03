@@ -23,7 +23,7 @@ from tools.gate import server  # noqa: E402
 from tools.gate.hw.fake import Fake  # noqa: E402
 from tools.gate.hw.generic import Generic  # noqa: E402
 from tools.gate.hw.base import Fingerprint  # noqa: E402
-from tools.gate.runner import arms_of, load_packs, plan_of  # noqa: E402
+from tools.gate.runner import arm_env, arms_of, load_packs, plan_of  # noqa: E402
 from tools.row3 import code_hash  # noqa: E402
 
 HEALTH = {
@@ -166,6 +166,16 @@ def test_arm_order_and_variants():
     assert p.pairs == 2 and [s for s, v, _ in arms_of(p) if v == "main"] == ["base", "head", "base", "head"]
     assert "stability" in arms_of(p)[0][2]
     assert plan("auto", ["docs/a.md"]).level == "none"
+
+
+def test_arm_env_takes_the_variant_and_the_planted_head_settings():
+    flash = dict(load_packs()["flashnext-3.05"], id="flashnext-3.05")
+    g = Generic(Fingerprint(memory_gib=48))
+    plant = {"REP_PENALTY": "1.05"}
+    assert arm_env(g, flash, "base", "main", plant) == g.arm_env()
+    assert arm_env(g, flash, "head", "main", plant) == {**g.arm_env(), **plant}
+    assert "--drafter none" in arm_env(g, flash, "head", "plain")["QSE_ENGINE_FLAGS"]
+    assert arm_env(g, flash, "base", "wide")["QWEN38_FN_PREFILL_CHUNK"] == "16384"
 
 
 def test_packs_name_real_profiles():

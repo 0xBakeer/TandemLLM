@@ -18,8 +18,8 @@ REPO is rewritten for each tree), `setup_env` (its run/setup.env, under the arm'
 `conductor_from` (a conductor config each arm copies, without its decisions or tokens). Without it
 an install's run/local.env is used where there is one.
 
-`--head-patch FILE` plants a change in the head's tree (a dry run of the gate itself); the report
-says so and the CI check refuses it.
+`--head-patch FILE` plants a change in the head's tree and `--head-env K=V` a setting in the head's
+servers (a dry run of the gate itself); the report says so and the CI check refuses it.
 """
 
 from __future__ import annotations
@@ -87,6 +87,19 @@ def arms_of(plan: Plan) -> list[tuple[str, str, list[str]]]:
     if "long" in plan.suites and plan.level in ("quick+long", "full") and plan.pack.get("wide_chunk_env"):
         out += [("base", "wide", ["long:wide"]), ("head", "wide", ["long:wide"])]
     return out
+
+
+def arm_env(prof, pack: dict, side: str, variant: str, head_env: dict | None = None) -> dict:
+    """An arm's environment: the hardware profile's, the variant's (plain: speculation off; wide:
+    the wide prefill chunk), and on the head a dry run's planted knobs (`--head-env`)."""
+    env = dict(prof.arm_env())
+    if variant == "plain":
+        env.update(pack.get("plain_env") or {})
+    if variant == "wide":
+        env.update(pack.get("wide_chunk_env") or {})
+    if side == "head":
+        env.update(head_env or {})
+    return env
 
 
 @contextlib.contextmanager
@@ -160,12 +173,15 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--only", default=None, help="these suites only (comma list; a partial report)")
     ap.add_argument("--head-patch", default=None, help="plant this patch in the head's tree (dry run)")
+    ap.add_argument("--head-env", action="append", default=[], metavar="K=V",
+                    help="plant this setting in the head's servers (dry run; repeatable)")
     ap.add_argument("--note", default=None)
     ap.add_argument("--keep-trees", action="store_true")
     ap.add_argument("--dry", action="store_true", help="print the plan, run nothing")
     a = ap.parse_args(argv)
     log = lambda *x: print(*x, flush=True)  # noqa: E731
 
+    head_env = dict(kv.split("=", 1) for kv in a.head_env)
     repo = str(REPO)
     base_sha = server.git(repo, "rev-parse", f"{a.base}^{{commit}}")
     head_sha = server.git(repo, "rev-parse", f"{a.head}^{{commit}}")
@@ -227,8 +243,7 @@ def main(argv=None) -> int:
         for side, variant, suites in arms:
             port = server.free_port(a.port, taken)
             taken.add(port)
-            env = {**prof.arm_env(), **(pack.get("plain_env") or {} if variant == "plain" else {}),
-                   **(pack.get("wide_chunk_env") or {} if variant == "wide" else {})}
+            env = arm_env(prof, pack, side, variant, head_env)
             arm = server.Arm(side, variant, trees[side], port,
                              out / "arms" / f"{side}-{variant}-{len(knobs)}", env)
             if pack["launcher"] == "ops":
@@ -261,8 +276,10 @@ def main(argv=None) -> int:
            "base": {"ref": a.base, "sha": base_sha, "tree_sha256": tree_sha["base"]},
            "head": {"ref": a.head, "sha": head_sha, "tree_sha256": tree_sha["head"]},
            "knobs": knobs, "profile": prof.describe(), "pairs": plan.pairs,
-           "planted": ({"patch_sha256": hashlib.sha256(Path(a.head_patch).read_bytes()).hexdigest(),
-                        "note": a.note or os.path.basename(a.head_patch)} if a.head_patch else None),
+           "planted": ({"patch_sha256": hashlib.sha256(Path(a.head_patch).read_bytes()).hexdigest()
+                        if a.head_patch else None, "env": head_env or None,
+                        "note": a.note or os.path.basename(a.head_patch or "") or "head settings"}
+                       if a.head_patch or head_env else None),
            "rows": rows, "reasons": {}, "verdict": overall(rows),
            "wall_s": round(time.monotonic() - t_start, 1)}
     (out / "raw.json").write_text(server.dumps({"raw": raw, "kernels": kern}))
