@@ -615,6 +615,13 @@ METHODS = {
     "j": "A multiple-choice set graded by the letter, no judge, 95 % Wilson interval. Run only on request.",
     "k": "Every limit the server ran with, read from the running server, and the box during each run.",
 }
+#: section h's method when its rows are the gate's records (tools/measure: one set, measured once)
+METHOD_H_GATE = ("The gate's lossless set (the card's two prompts, three held-out prose and two held-out code "
+                 "continuations, a question), greedy, 256 tokens, on a server with speculation and on a second "
+                 "one with it off (--drafter none): identical, or parting at a near tie (top-2 gap ≤ 0.125 nats). "
+                 "Needles: a passphrase in the middle of ~32k tokens of prose; the gate's longest prompt (~128k of "
+                 "the card's filler) with an access code in the middle.")
+
 RENDER = {"a": sec_a, "b": sec_b, "c": sec_c, "d": sec_d, "e": sec_e, "f": sec_f, "g": sec_g, "h": sec_h,
           "i": sec_i, "j": sec_j, "k": sec_k}
 
@@ -861,7 +868,9 @@ def body_of(pub: dict, prefix: str = "", nested: bool = False) -> list[str]:
         if sid == "b":
             srcs = sorted({r.get("source") for r in rows_of(pub, "a") if r.get("source")})
         src = (f'<p class="src">Rows from: {esc("; ".join(srcs))}</p>' if srcs and sid != "k" else "")
-        parts.append(f'<section id="{prefix}s-{sid}"><{h}>{esc(name)}</{h}><p class="method">{esc(METHODS[sid])}</p>'
+        method = METHOD_H_GATE if sid == "h" and any(r["key"].startswith("specplain/") for r in rows_of(pub, "h")) \
+            else METHODS[sid]
+        parts.append(f'<section id="{prefix}s-{sid}"><{h}>{esc(name)}</{h}><p class="method">{esc(method)}</p>'
                      + src + (body or f'<p class="muted">{esc(why or "not measured in this report")}</p>') + "</section>")
     return parts
 
