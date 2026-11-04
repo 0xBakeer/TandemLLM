@@ -270,7 +270,8 @@ def sec_c(data):
     rs = rows_of(data, "c")
     two = [r for r in rs if r["key"].startswith("2k/")]
     t32 = [r for r in rs if r["key"].startswith("32k/")]
-    if not two and not t32:
+    burst = [r for r in rs if r["key"].startswith("burst/")]
+    if not two and not t32 and not burst:
         return skips(rs), "no rows"
     ns = sorted({r["v"]["n"] for r in two if r.get("v")})
     pts, line, body = [], [], []
@@ -312,6 +313,12 @@ def sec_c(data):
         out += '<h3>~32k prompts: first token of the fastest and the slowest request</h3>'
         out += legend([("fastest first token", "s2", True), ("slowest first token", "s1", True)])
         out += bar_chart(groups, "seconds", aria="First token times at 32k prompts")
+    for r in burst:
+        v = r["v"]
+        out += ('<p class="big-line">' + (f'<strong>{num(v.get("ttft_median_s"), 2)} s</strong> median first token of '
+                f'{v.get("n")} cold ~{kfmt(v.get("depth") or 2048)} prompts arriving together, one token out '
+                f'({len(v.get("runs") or []) or (r.get("cond") or {}).get("rounds")} rounds)' if r.get("valid")
+                else f"{v.get('n')} x ~2k arriving together: invalid ({esc(r.get('why'))})") + "</p>")
     return out + invalids(rs) + skips(rs), ""
 
 
@@ -440,7 +447,8 @@ def sec_h(data):
     needles = [r for r in rs if r["key"].startswith("needle/")]
     if needles:
         out += '<p class="needles">' + " · ".join(
-            f"needle at {kfmt(r['cond']['target'])}: " + ("found" if r["v"].get("found") else "not found")
+            f"needle at {kfmt(r['cond']['target'])}" + (f" ({esc(r['cond']['shape'])})" if r["cond"].get("shape") else "")
+            + ": " + ("found" if r["v"].get("found") else "not found")
             if r.get("valid") else f"needle at {kfmt(r['cond']['target'])}: invalid" for r in needles) + "</p>"
     if cmp_:
         same = sum(1 for c in cmp_ if c["same"])
@@ -459,6 +467,13 @@ def sec_h(data):
         own = [r for r in rs if r["key"].split("/", 1)[0] in ("spec", "plain") and r.get("valid")]
         if own:
             out += f"<p>{len(own)} greedy texts recorded; no second run with speculation off to compare against.</p>"
+    sp = [r for r in rs if r["key"].startswith("specplain/")]
+    if sp:
+        same = sum(1 for r in sp if r.get("valid") and r["v"].get("same"))
+        out += (f'<p class="big-line"><strong>{same} of {len(sp)}</strong> greedy texts identical with speculation on '
+                f'and off ({esc((sp[0].get("cond") or {}).get("set") or "")})</p>')
+        out += table(["prompt", "speculative vs plain"],
+                     [[esc(r["key"].split("/", 1)[1]), esc(r["v"].get("why") or "")] for r in sp])
     return out + invalids(rs) + skips(rs), "" if out else "no rows"
 
 
@@ -556,7 +571,18 @@ def sec_k(data):
                           esc(r.get("variant")), esc(r.get("mode")), num(r.get("minutes")) + " min",
                           num(b.get("clock_mhz_median_load"), 0) + " MHz", num(b.get("power_w_median_load")) + " W",
                           num(b.get("temp_c_max"), 0) + " °C", num(b.get("mem_avail_gib_min")) + " GiB"])
-    return (table(["setting", "value"], rows, "kv")
+    src = data.get("sources") or []
+    src_html = ""
+    if src:
+        body = [[esc(x["row"]), esc(x["source"]) + ("" if x.get("valid") or x.get("skipped") else
+                                                    f' <span class="inv">invalid: {esc(x.get("why"))}</span>')
+                 + (f' <span class="muted">(skipped: {esc(x["skipped"])})</span>' if x.get("skipped") else "")
+                 + (f' <span class="muted">also {esc("; ".join(x["also"]))}</span>' if x.get("also") else "")]
+                for x in src]
+        src_html = "<h3>Where each row comes from</h3>" + table(["row", "record"], body)
+        if data.get("missing"):
+            src_html += f'<p class="muted">Not measured for this page: {esc(", ".join(data["missing"]))}.</p>'
+    return (table(["setting", "value"], rows, "kv") + src_html
             + "<h3>Runs</h3>"
             + table(["started", "sections", "variant", "mode", "duration", "GPU clock (median under load)",
                      "power (median under load)", "max temperature", "lowest free memory"], runs_body, "num")), ""
@@ -649,9 +675,11 @@ def findings(data) -> list[tuple[str, str]]:
               if r["key"].startswith("default/prefill/")}
         lead = (f"The card's prefill alone (one token out) reads {num(min(gp.values()), 0)} to {num(max(gp.values()), 0)} "
                 f"tok/s at {kfmt(min(gp))} to {kfmt(max(gp))}. " if gp else "")
-        out.append(("note", lead + f"A request for a 512-token answer gets its first token at {num(max(pf.values()), 0)} "
-                            f"tok/s of prompt at best and {num(pf[nl], 0)} at {kfmt(nl)}; "
-                            f"a {kfmt(nl)} prompt waits {num(med([r['v'].get('ttft_s') for r in L[nl]]), 0)} s for its first token."))
+        if any(v is not None for v in pf.values()):
+            out.append(("note", lead + f"A request for a 512-token answer gets its first token at "
+                                f"{num(max(v for v in pf.values() if v is not None), 0)} "
+                                f"tok/s of prompt at best and {num(pf[nl], 0)} at {kfmt(nl)}; "
+                                f"a {kfmt(nl)} prompt waits {num(med([r['v'].get('ttft_s') for r in L[nl]]), 0)} s for its first token."))
     c = rows_of(data, "c")
     two = [r for r in c if r["key"].startswith("2k/")]
     if two:
@@ -769,6 +797,7 @@ border-radius:8px;padding:8px 12px;justify-self:start}
 .tag.good{color:var(--good)}.tag.bad{color:var(--bad)}
 section{display:grid;gap:12px;min-width:0;border-top:1px solid var(--rule);padding-top:24px}
 .method{color:var(--ink2);font-size:14px;margin:0;max-width:78ch}
+.src{color:var(--ink2);font-size:12.5px;margin:4px 0 0;max-width:78ch}
 .chart{width:100%;height:auto;display:block;max-width:760px}
 .grid{stroke:var(--rule);stroke-width:1}
 .tick,.axis,.val,.lab,.inv-mark{font-family:var(--mono);font-size:13px;fill:var(--ink3)}
@@ -828,13 +857,17 @@ def body_of(pub: dict, prefix: str = "", nested: bool = False) -> list[str]:
         body, why = RENDER[sid](pub)
         if nested:
             body = body.replace("<h3>", "<h4>").replace("</h3>", "</h4>")
+        srcs = sorted({r.get("source") for r in rows_of(pub, "b" if sid == "b" else sid) if r.get("source")})
+        if sid == "b":
+            srcs = sorted({r.get("source") for r in rows_of(pub, "a") if r.get("source")})
+        src = (f'<p class="src">Rows from: {esc("; ".join(srcs))}</p>' if srcs and sid != "k" else "")
         parts.append(f'<section id="{prefix}s-{sid}"><{h}>{esc(name)}</{h}><p class="method">{esc(METHODS[sid])}</p>'
-                     + (body or f'<p class="muted">{esc(why or "not measured in this report")}</p>') + "</section>")
+                     + src + (body or f'<p class="muted">{esc(why or "not measured in this report")}</p>') + "</section>")
     return parts
 
 
 def footer(pub: dict) -> str:
-    return (f'<footer>Made with tools/release_report (tool {esc(pub.get("tool"))}) from data.json; every number on '
+    return (f'<footer>Made with tools/measure (tool {esc(pub.get("tool"))}) from its records; every number on '
             f'this page comes from one run on one box, two or three requests a cell. '
             f'<a href="https://github.com/0xBakeer/TandemLLM">TandemLLM</a></footer></div></body></html>')
 
