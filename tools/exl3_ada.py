@@ -631,14 +631,17 @@ def rot_in_silu(ygu: torch.Tensor, suh: torch.Tensor) -> torch.Tensor:
     return xh
 
 
-def rot_out(yp: torch.Tensor, svh: torch.Tensor, out_fp32: bool) -> torch.Tensor:
+def rot_out(yp: torch.Tensor, svh: torch.Tensor, out_fp32: bool,
+            out: torch.Tensor | None = None) -> torch.Tensor:
     """y = H(yp) / sqrt(128) * fp32(svh), bf16 or fp32 out, one launch for every row."""
     M, N = yp.shape
     if yp.stride(1) != 1 or yp.stride(0) != N:
         yp = yp.contiguous()
-    y = torch.empty(M, N, dtype=torch.float32 if out_fp32 else torch.bfloat16, device=yp.device)
-    _exl3_rot_out_kernel[(M, N // 128)](yp, svh, y, N, BF16=not out_fp32, num_warps=1)
-    return y
+    if out is None:
+        out = torch.empty(M, N, dtype=torch.float32 if out_fp32 else torch.bfloat16,
+                          device=yp.device)
+    _exl3_rot_out_kernel[(M, N // 128)](yp, svh, out, N, BF16=not out_fp32, num_warps=1)
+    return out
 
 
 # ---------------------------------------------------------------------- load-time probes

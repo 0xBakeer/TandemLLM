@@ -313,6 +313,8 @@ KNOBS: dict[str, tuple] = {
     'EXL3_TILES': (None, 'tools/exl3_linear.py'),
     'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
+    'EXL3_DSILU_SLAB': (None, 'tools/exl3_linear.py'),
+    'EXL3_FP32_MM': (None, 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
     'EXL3_SILU_FUSED': ('1', 'tools/exl3_linear.py'),
     'EXL3_MLP_BRIDGE': ('1', 'tools/exl3_linear.py'),
@@ -450,6 +452,7 @@ KNOBS: dict[str, tuple] = {
     'FN_GROUP_ROWS': ('64', 'tools/fn_prefill_kernels.py'),
     # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
     'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),
+    'LFM2_PREFILL_CHUNK': (None, 'engine/models/lfm2_moe/engine.py'),
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =
     # weights rounded to fp16 on the tensor cores
     'FN_PREFILL_MM': ('fp32', 'tools/fn_prefill_kernels.py'),
