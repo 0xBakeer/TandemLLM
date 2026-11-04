@@ -359,7 +359,7 @@ class OpsLauncher:
     def ops_env(arm: Arm) -> dict:
         """The environment for the tree's ops scripts: nothing of the caller's engine settings, and
         the arm's own run/setup.env named, so start and stop both resolve the arm's port. A caller's
-        QSE_SETUP_ENV pointed stop.sh at another server's settings, and so at its port."""
+        QSE_SETUP_ENV would point stop.sh at another server's settings, and so at its port."""
         env = {k: v for k, v in os.environ.items()
                if not (k.startswith(("QSE_", "QWEN38_")) or k in ("REPO", "PORT"))}
         env.update(HOLD_RESTART="1", QSE_STATUS_KEEP="1", START_REASON="a gate arm",

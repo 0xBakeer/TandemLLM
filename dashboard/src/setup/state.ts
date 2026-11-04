@@ -115,10 +115,9 @@ export type ParallelKey = 'slots' | 'window' | 'kv_pool' | 'floor_gb';
 // The active mode's page list, in one place: the reducer walks it, the counter reads it, and a
 // saved or routed step is normalised through it. Simple mode's pages are the model cards (the
 // tiles, page 1), the quant cards, and the one folded settings page (simple.ts's design); the
-// install job lives on the folded page too. Before this, each view branch carried its own
-// ternary over 'weights'/3, and a step that belonged to the other mode (a resumed
-// 'parallelism', a route-synced 'overview') rendered simple pages under a standard counter and
-// let Previous/Next walk out of the mode; the one list in one place closes that.
+// install job lives on the folded page too. A step that belongs to the other mode (a resumed
+// 'parallelism', a route-synced 'overview') is mapped onto this list, so the counter and
+// Previous/Next never leave the mode.
 
 const SIMPLE_FLOW: readonly SetupStepId[] = ['models', 'weights', 'review'];
 

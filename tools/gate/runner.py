@@ -1,16 +1,17 @@
 """`python -m tools.gate run`: base and head side by side on this box, one fresh server per arm.
 
     python -m tools.gate run [--suite auto|quick|quick+long|full] [--base origin/main] [--head HEAD]
-                             [--pack ID] [--hw auto] [--python PY] [--port 8100] [--pairs N]
-                             [--site FILE] [--lock FILE] [--out DIR] [--dry]
+                             [--pack ID] [--hw auto] [--python PY] [--port 8100] [--ports P,P]
+                             [--pairs N] [--site FILE] [--lock FILE] [--out DIR] [--dry]
 
 The order: the head's GPU tests (no server); then per pair the base's server and the head's, each
 running the suites; the head without speculation (lossless: spec vs plain) and, at quick+long and
 full, each side with the wide prefill chunk (long); last, the base's run of any GPU test the head
 failed. Each server is started fresh from a `git archive` of its commit, with its own config copy
-and state directory, on a free port from --port up (never below 8100), and stopped before the next
-starts; a server the gate did not start is never touched. The measuring code (these suites,
-tools/parallel_card.py, tools/soak.py) is this checkout's, the same instrument for both sides.
+and state directory, on the next free one of --ports, else a free port from --port up (never below
+8100), and stopped before the next starts; a server the gate did not start is never touched. The
+measuring code (these suites, tools/parallel_card.py, tools/soak.py) is this checkout's, the same
+instrument for both sides.
 
 `--site FILE` (YAML) names what this box adds beside a checkout: `serve_env` (its ops/serve.env;
 REPO is rewritten for each tree), `setup_env` (its run/setup.env, under the arm's own settings),

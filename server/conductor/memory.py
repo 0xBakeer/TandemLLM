@@ -53,9 +53,9 @@ journaled `read_only`). Every other value, and none, is the profile's switch. A 
 is visible as the `› remembered: ...` line and in the Notes screen (its writer and request), where
 it is archived or deleted.
 
-THE CALL FORM (2026-11-03). With the tools of a chat in view the model wrote its note as a
-`tandem_memory` tool call; no client offers that tool, so the call went to the client, which
-answered that the tool is not available. Where the block is taken, the call is taken as the same
+THE CALL FORM. With the tools of a chat in view the model may write its note as a
+`tandem_memory` tool call; no client offers that tool, so a client that got the call would
+answer that the tool is not available. Where the block is taken, the call is taken as the same
 block (server/memblock.py): written, hidden, never a call the client gets. The switches above
 apply to it as to the block; a client that offers its own `tandem_memory` tool gets its calls.
 

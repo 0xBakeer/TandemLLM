@@ -148,7 +148,7 @@ def leave_waiting(ctx: Ctx) -> tuple[bool, str]:
             "max_tokens": 4096, "stream": True, "temperature": 0}
     ends = end_ids(ctx.cl.tok)
     if ends:
-        body["logit_bias"] = {str(i): -100 for i in ends}      # the lanes stay busy until we leave
+        body["logit_bias"] = {str(i): -100 for i in ends}      # the lanes stay busy until the client leaves
     conns, stop = [], threading.Event()
 
     def hold(c):

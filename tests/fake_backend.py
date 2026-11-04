@@ -22,7 +22,7 @@ not ask gets no usage at all. Words in the last user message steer it:
                          when the request offers tools and its last message is not a tool result
                          (FAKE_CALLS_ALWAYS: after tool results too, for loop guards)
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
-    FAKE_WAIT <s>        send no headers for <s> seconds, as our engine while a request waits for
+    FAKE_WAIT <s>        send no headers for <s> seconds, as the engine while a request waits for
                          memory; a client that closes meanwhile gets nothing and counts in
                          `closed_early` (SRV-777)
     FAKE_SLOW            ten tokens a second
@@ -589,7 +589,7 @@ def make_handler(fake: Fake):
                     fake.streams -= 1
 
         def _wait_headers(self, seconds: float) -> bool:
-            """FAKE_WAIT: no headers for `seconds`, as our engine while a request waits for memory. A client that
+            """FAKE_WAIT: no headers for `seconds`, as the engine while a request waits for memory. A client that
             closes its socket meanwhile (it reads as end-of-file) is counted and gets nothing: False."""
             end = time.monotonic() + seconds
             while time.monotonic() < end:

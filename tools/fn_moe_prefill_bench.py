@@ -59,8 +59,8 @@ def main() -> None:
         got["x"] = x.clone()
         return real(x, li)
     eng._moe_pre = keep
-    from tools import fn_kernels as FK      # _moe_pre returns only the combined output now; the ids
-    real_router = FK.router                 # are the router's (captured here, 2026-10-30)
+    from tools import fn_kernels as FK      # _moe_pre returns only the combined output; the ids
+    real_router = FK.router                 # are the router's (captured here)
 
     def keep_router(w, ne, nk):
         ids, wts = real_router(w, ne, nk)

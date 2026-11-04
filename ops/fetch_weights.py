@@ -52,9 +52,9 @@ import zlib
 # HF_HUB_DISABLE_XET is read by huggingface_hub ONCE, when huggingface_hub.constants is first
 # imported -- not when the download runs. `assets()` calls `plan()`, and `plan()` calls
 # `hub_files()`, which imports HfApi before `fetch()` is ever reached; the command-line
-# path runs `plan()` first too. Setting it inside fetch() was therefore too late:
-# by then the hub had already read it as unset. It is set here, at import time,
-# before anything can import the hub.
+# path runs `plan()` first too. Set inside fetch(), it would come too late: the hub
+# would already have read it as unset. It is set here, at import time, before
+# anything can import the hub.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 # huggingface-hub is pinned to 1.30.0 (install.sh), which does not use hf_transfer at
 # all, so there is nothing to turn off.

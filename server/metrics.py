@@ -475,8 +475,8 @@ def _ngram_table_field(field: str):
 
 #: the engine's own work: the summary it prepares ahead of a request and the
 #: memory it writes after one. Both run generations on the engine, on the
-#: client's own context, and neither was in a metric — so an operator saw
-#: the engine "busy" with requests it had never sent.
+#: client's own context; these counters let an operator tell them from the
+#: requests a client sent.
 def _own_work_stats() -> dict:
     fn = _SOURCES.get("own_work")
     if fn is None:
@@ -584,9 +584,9 @@ REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
 # The n-gram table (ENG-239). Under the cold policy the table is read past
 # the page cache with O_DIRECT, through a hot-row cache of
 # QWEN38_FN_TABLE_CACHE_GB: a miss is a synchronous disk read on the
-# decode/prefill path, so the miss rate IS the engine's disk latency. It
-# was in the engine's report (cache_stats -> resident_files) and in no
-# metric, so a disk-bound decode looked like a slow model.
+# decode/prefill path, so the miss rate IS the engine's disk latency: these
+# counters tell a disk-bound decode from a slow model (the engine's report
+# has them too, cache_stats -> resident_files).
 REGISTRY.add(Counter("qse_ngram_table_cache_hits_total",
                      "n-gram table rows served from the hot-row cache",
                      collect=_ngram_table_field("hits")))
@@ -605,8 +605,8 @@ REGISTRY.add(Gauge("qse_ngram_table_file_bytes",
 
 # The engine's own work: the summary it prepares ahead of a client's request
 # and the memory it writes after one. Both are generations on the engine, over
-# the client's own context, and neither was in a metric: an operator saw the
-# engine busy with requests it had never sent, and the GPU at idle power.
+# the client's own context: these counters show the engine busy with work no
+# client sent.
 REGISTRY.add(Counter("qse_prepare_runs_total",
                      "summaries the engine prepared ahead of a request",
                      collect=_own_work_field("prepare", "prepared")))
@@ -1272,8 +1272,8 @@ def install(app) -> None:
     eng = state.get("engine")
     w = getattr(eng, "w", None)
     # The engine's own work: the summary it prepares ahead of a request and the
-    # memory it writes after one. Both are generations on the engine, and an
-    # operator could not see them at all.
+    # memory it writes after one. Both are generations on the engine that no
+    # client request accounts for.
     def own_work() -> dict:
         out: dict = {}
         prep = state.get("prepared")

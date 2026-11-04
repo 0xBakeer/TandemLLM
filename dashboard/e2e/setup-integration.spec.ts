@@ -12,8 +12,8 @@ import { open, setupMock } from './setup-helpers';
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
 
 // This file drives the ADVANCED flow — the folded pages, the security card on Review,
-// Wren's per-step fields — so a fresh context asks for it explicitly, exactly like the
-// guide's default for a new browser is the simple flow, so this file opts out.
+// Wren's per-step fields — and the guide's default for a new browser is the simple flow,
+// so a fresh context asks for advanced explicitly.
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
 });

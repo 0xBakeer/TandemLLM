@@ -71,7 +71,7 @@ def skips_for(ctx: Ctx, prefix: str, section: str) -> list[dict]:
 def revalidate(rows: list[dict]) -> list[dict]:
     """The proof rule applied again from each row's recorded proof (it is deterministic from the data):
     a concurrency row whose server count shows more requests running than it sent overlapped with
-    another request and is INVALID. Rows measured before the rule (2026-11-03) get it here."""
+    another request and is INVALID. Rows a run recorded without the rule get it here."""
     for r in rows:
         p = (r.get("cond") or {}).get("proof") or {}
         n = (r.get("v") or {}).get("n") or (r.get("v") or {}).get("chats")

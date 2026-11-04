@@ -1044,7 +1044,7 @@ def _sid(pid, default):
 
 def test_the_oom_death_names_itself():
     # a runner killed mid-fetch is reported as the oom-killer it almost certainly was;
-    # a death in any other step keeps the plain message (we do not guess without evidence)
+    # a death in any other step keeps the plain message (no guess without evidence)
     import tempfile
     tmp = tempfile.mkdtemp(prefix="setup-job-")
     jid = "a0b6d3fa00989455"
