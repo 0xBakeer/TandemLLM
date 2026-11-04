@@ -546,6 +546,11 @@ def load_tokenizer(path: str):
     return AutoTokenizer.from_pretrained(path)
 
 
+#: the --help line: one measuring method now (docs/measurement.md)
+DEPRECATED = ("Deprecated as an entry point: python -m tools.measure run --view card measures the card's rows "
+              "once into a record store, and python -m tools.measure render card writes this file's row from "
+              "them (docs/measurement.md). This tool keeps working.")
+
 #: the raw file's `levels_method` and the row's seed line, by `--fixed-prompts`
 LEVELS_FIXED = ("fixed prompts and seeds: request i carries the nonce 0000-<i> and the seed 1000 + i in every round; a "
                 "level's warm-up and measured rounds back to back")
@@ -554,7 +559,7 @@ SEED_FIXED = "levels: 1000 + request, the same prompts every round, rounds back 
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=DEPRECATED)
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--model", default="TandemLLM")
     ap.add_argument("--model-id", required=True)

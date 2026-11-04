@@ -93,6 +93,18 @@ A row measures the engine (SPD-249). Every request goes to `/v1/completions` wit
 
 The paper compares StairCut with the same engine in two other configurations, on the same weights and the same box: plain greedy decoding (speculation off), and one drafter at a fixed block width (8 or 16) with its released tree budgets ([speculative-decoding.md](speculative-decoding.md)). On the benchmark row with the store off that is 49.89 tok/s for StairCut, 47.13 for block 8, 44.80 for block 16 and 13.69 for plain greedy decoding.
 
+## One measuring method
+
+Release pages, weight cards and the quality gate measure the same things: decode at one request, prefill, requests at once, long prompts. `tools/measure` measures each of them once and keeps the result, so a number measured for one of them is never measured again for another.
+
+- One row list, [tools/measure/rows.yaml](../tools/measure/rows.yaml). A row has a stable id (`length.32k`, `conc.card.c8`, `prefill.64k`, ...), what it measures, its request shape (prompt and its length, tokens out, requests at once, runs or rounds), the views that use it, and the server it runs on. Two rows of a different shape are two rows: the card's 1/2/4/8 at once use 169-246-token prompts, the report's requests at once use ~2k-token prompts with their prefill in the wall time; `prefill.32k` is one token out, `length.32k` is 512.
+- One runner. `python -m tools.measure run --url URL --rows ... | --view report --out DIR` measures only the rows the record store at DIR does not hold for this server's key: the row, the build, the pack, the box and a hash of the server's limit knobs. `--force` measures a row again. Every request goes to `/v1/completions` with `X-Tandem: raw` and every answer's mode is checked; a row of N requests at once is invalid without the server's own count of N decoding together.
+- A record store. One JSON per run under `DIR/runs/`, and `DIR/index.json` from the key to the run file. `python -m tools.measure merge` imports records that exist already (a gate report and its raw results, a report's data.json and the card tool's raw files). An imported record keeps its source, the tool, the date and the file, and the page shows it beside its rows.
+- Three views, none of which measures anything. `render report` writes the HTML page ([benchmark-report.md](benchmark-report.md)), for one pack or several packs of one model on one page. `render card` writes a weight card's numbers in the shape `tools/parallel_card.py` writes them. `render gate --base DIR --head DIR` gives the gate's verdict table from two stores, with the gate's own rules; every gate run writes its arms' records to `OUT/records/base` and `OUT/records/head` ([quality-gate.md](quality-gate.md)). `compare --old A --new B` sets two builds' rows side by side with a noise band.
+- A plan before the GPU. `python -m tools.measure plan --view report --pack P --build B --out DIR` lists every row with its record and source, or the hold that will measure it. Rows that need their own fresh server are grouped by server, and the groups are packed into holds of at most 62 minutes. It refuses when a row would be measured twice: a row asked by id that has a record, a warm row whose earlier rows already have records, or code that measures a recorded row beside the one asked.
+
+`tools/parallel_card.py`, `python -m tools.release_report` and `python -m tools.gate run` keep working; their help says where the one method is.
+
 ## Traps
 
 Each of these cost a wrong number once.

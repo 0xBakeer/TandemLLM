@@ -11,6 +11,10 @@
 One command on the contributor's GPU measures the base (main) and the head (the branch) on the same
 box, one fresh server per arm, and writes gate-report.json and gate-report.md. The CI check refuses a
 pull request whose report is missing, stale or failing.
+
+Its measurements are tools/measure records too (OUT/records/base and OUT/records/head): python -m
+tools.measure render gate --base OUT/records/base --head OUT/records/head prints the same verdict
+table from them, and a release page imports them instead of measuring again (docs/measurement.md).
 """
 
 from __future__ import annotations

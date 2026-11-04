@@ -6,6 +6,8 @@ TandemLLM bare engine: raw /v1/completions, no conductor or chat layer.
 
 Every request goes to `/v1/completions` with `X-Tandem: raw`. The prompt is the model's chat template with thinking off, rendered on the client and checked id for id against the server's `/v1/tokenize`, as [tools/parallel_card.py](../tools/parallel_card.py) does. A response that does not come back with `X-Tandem: raw` makes its row invalid, and an invalid row shows its reason, never a number.
 
+The page is a view of [tools/measure](measurement.md#one-measuring-method)'s records: `python -m tools.measure plan` says which rows a release still needs, `run` measures only those, and `render report` writes the page, with every row's source (a gate run, an earlier report, a measuring run). The commands below still measure a whole report in one go.
+
 ## Run it
 
 Start your server as you normally do, wait until it is idle, then run the tool with the engine's Python (it needs the model's tokenizer, which `transformers` loads from the weights folder):

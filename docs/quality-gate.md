@@ -15,6 +15,8 @@ How it runs: the gate copies both commits with `git archive`. The head's GPU tes
 
 A box whose layout differs from a plain checkout (its own `ops/serve.env`, a `run/setup.env`, files linked beside the tree) names it in a site file: `serve_env`, `setup_env`, `local_env`, and `links` / `copies` maps of tree path to box path. Without one, the gate reads an install's `run/local.env`.
 
+Every gate run also writes its arms' measurements as [tools/measure](measurement.md#one-measuring-method) records, in `OUT/records/base` and `OUT/records/head`. `python -m tools.measure render gate --base OUT/records/base --head OUT/records/head` prints the verdict table from them with the same rules, and a release page imports the head's records instead of measuring them again.
+
 ## What a diff needs
 
 `tools/gate/map.yaml` maps each changed path to a level. Every file takes the highest level of the rules it matches, and the pull request takes the highest of its files. A path no rule names takes `quick`.

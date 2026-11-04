@@ -1,6 +1,10 @@
 """The benchmark report of a TandemLLM server (docs/benchmark-report.md): one self-contained HTML page
 of what the bare engine does on this box, for any model the server serves.
 
+Deprecated as an entry point: python -m tools.measure measures each row once into a record store and
+renders this page from it (`render report`), with every row's source (docs/measurement.md). These
+commands keep working.
+
     python -m tools.release_report run [--url http://127.0.0.1:8000] --out DIR [--quick] [--only S ...]
     python -m tools.release_report run --ref vX.Y.Z --pack ID --out DIR      launch mode: a fresh server
     python -m tools.release_report plan [--url URL] [--quick]                 what a run would do, and how long
