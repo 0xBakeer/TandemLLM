@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -25,6 +26,10 @@ from tools.measure.server import (Refused, bare_refusal, hardware_label, is_fake
                                   probe, tokenizer_for, wait_idle)
 
 REPO = Path(__file__).resolve().parent.parent.parent
+
+
+class Stopped(Exception):
+    pass
 
 
 def tool_commit() -> str | None:
@@ -69,10 +74,15 @@ def check_order(todo: list, rows: dict, groups: dict, a) -> None:
                                  "this run before it (--any-order to measure it all the same)")
 
 
+#: executors that measure their rows in one go (one probe, one warm-up); the others run row by row, so a
+#: run stopped from outside keeps every row it finished
+TOGETHER = ("card.", "gate.")
+
+
 def batches(todo: list) -> list[tuple[str, list]]:
     out: list = []
     for r in todo:
-        if out and out[-1][0] == r.exec:
+        if out and out[-1][0] == r.exec and r.exec.startswith(TOGETHER):
             out[-1][1].append(r)
         else:
             out.append((r.exec, [r]))
@@ -152,20 +162,32 @@ def measure(a, log=print) -> dict:
     timing: dict = {}
     group = sorted({r.server for r in todo if r.server}) or ["-"]
     log(f"[measure] measuring {len(todo)} rows on group {', '.join(group)}: " + ", ".join(r.id for r in todo))
+    stopped = None
+
+    def on_term(signum, _frame):
+        raise Stopped(f"signal {signum}")
+    old_term = signal.signal(signal.SIGTERM, on_term)
     with BoxSampler() as sampler:
-        for ex, rs in batches(todo):
-            ts = time.monotonic()
-            pc.wait_idle(base, 300)
-            res = execs.EXECS[ex](mx, rs)
-            for r in rs:
-                p = res[r.id]
-                bad = execs.proof_problem(r.id, r.n, p, proof_kind)
-                if bad:
-                    p.update(valid=False, why=bad)
-                got[r.id] = p
-                log(f"[measure] {r.id}: " + ("skipped: " + p["skipped"] if p.get("skipped") else
-                                            ("ok " if p["valid"] else "INVALID ") + str(p.get("why") or p.get("values"))[:200]))
-            timing[ex] = round((time.monotonic() - ts) / 60, 2)
+        try:
+            for ex, rs in batches(todo):
+                ts = time.monotonic()
+                pc.wait_idle(base, 300)
+                res = execs.EXECS[ex](mx, rs)
+                for r in rs:
+                    p = res[r.id]
+                    bad = execs.proof_problem(r.id, r.n, p, proof_kind)
+                    if bad:
+                        p.update(valid=False, why=bad)
+                    got[r.id] = p
+                    log(f"[measure] {r.id}: " + ("skipped: " + p["skipped"] if p.get("skipped") else
+                                                ("ok " if p["valid"] else "INVALID ")
+                                                + str(p.get("why") or p.get("values"))[:200]))
+                timing[ex] = round((time.monotonic() - ts) / 60, 2)
+        except Stopped as exc:          # stopped from outside (a hold's deadline): keep the rows measured
+            stopped = str(exc)
+            log(f"[measure] stopped ({stopped}) after {len(got)} of {len(todo)} rows: saving those")
+        finally:
+            signal.signal(signal.SIGTERM, old_term)
         h_end = cmod.health(base)
     if not set(cl.calls) <= {cmod.ENDPOINT, "/v1/tokenize"}:
         raise SystemExit(f"[measure] internal error: a call outside the raw path: {sorted(set(cl.calls))}")
@@ -192,14 +214,22 @@ def measure(a, log=print) -> dict:
            "prompts": {"set": mx.pj.get("version"), "sha256": mx.pj.get("_sha256"),
                        "filler_sha256": mx.pj.get("_filler_sha256")},
            "proof_kind": proof_kind, "mode": "url", "private": priv}
+    if stopped:
+        run["stopped"] = stopped
+        run["not_measured"] = [r.id for r in todo if r.id not in got]
     recs = {}
     for r in todo:
+        if r.id not in got:
+            continue
         p = got[r.id]
         recs[r.id] = {"row": r.id, **key, "knobs": storemod.limit_knobs(knobs), "version": h.get("version"),
                       "valid": p["valid"], "why": p.get("why"), "skipped": p.get("skipped"), "values": p["values"],
                       "rows": p["rows"], "raw": p["raw"],
                       "source": {"tool": f"tools/measure {VERSION}", "how": "measured", "date": started[:10],
                                  "path": f"runs/{run_id}.json", "commit": a.commit}}
+    if not recs:
+        log("[measure] no row was finished: nothing written")
+        return {"measured": 0, "invalid": 0, "stopped": stopped}
     path = st.add_run(run, recs, force=a.force)
     n_bad = sum(1 for x in recs.values() if not x["valid"] and not x.get("skipped"))
     log(f"[measure] {len(recs)} rows ({n_bad} invalid) into {path} in {run['minutes']} min")

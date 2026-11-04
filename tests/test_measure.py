@@ -236,6 +236,30 @@ def test_n_at_once_needs_the_servers_proof():
     assert proof_problem("conc.32k.c4", 4, p, "decoding") is None            # prefill rows: N running
 
 
+def test_a_stopped_run_keeps_the_rows_it_finished():
+    import signal
+    import subprocess
+    import time
+    e = FakeEngine(tok_s=300.0)
+    out = _tmp()
+    try:
+        p = subprocess.Popen([sys.executable, "-u", "-m", "tools.measure", "run", "--url", e.base, "--out", out,
+                              "--rows", "length.1k,length.4k,length.16k", "--hw", "fake"], cwd=ROOT,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(14.0)                          # 1k's three runs are done (~6 s each row), 16k is not
+        p.send_signal(signal.SIGTERM)
+        log = p.communicate(timeout=60)[0]
+        st = storemod.Store(out)
+        assert "stopped (signal 15)" in log, log[-800:]
+        (f,) = st.run_files()
+        run = json.loads(f.read_text())
+        assert run["run"]["stopped"] and "length.16k" in run["run"]["not_measured"], run["run"]
+        assert st.primary("length.1k", "9.9.9", "fake-pack")["valid"]
+        assert st.primary("length.16k", "9.9.9", "fake-pack") is None
+    finally:
+        e.stop()
+
+
 def test_a_server_that_is_not_raw_is_refused():
     e = FakeEngine(mode="chat")
     try:
