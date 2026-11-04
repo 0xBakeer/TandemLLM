@@ -12,9 +12,9 @@ N running at once: a request left waiting in the queue makes the row INVALID."""
 from __future__ import annotations
 
 from tools import parallel_card as pc
-from tools.release_report.client import together
+from tools.measure.client import together
 from tools.release_report.plan import ANSWER
-from tools.release_report.prompts import sized
+from tools.measure.prompts import sized
 from tools.release_report.sections import Ctx, check, row, skips_for
 
 TASK = "\n\nContinue the text above with a detailed essay of your own on the same subject."

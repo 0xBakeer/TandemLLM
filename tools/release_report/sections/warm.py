@@ -7,7 +7,7 @@ requests the server had served before it."""
 from __future__ import annotations
 
 from tools.release_report.plan import ANSWER
-from tools.release_report.prompts import sized
+from tools.measure.prompts import sized
 from tools.release_report.sections import Ctx, check, engine_of, row, skips_for
 from tools.release_report.sections.lengths import TASK
 

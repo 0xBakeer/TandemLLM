@@ -6,7 +6,7 @@ window after the first token."""
 from __future__ import annotations
 
 from tools.release_report.plan import LONG_ANSWER
-from tools.release_report.prompts import sized
+from tools.measure.prompts import sized
 from tools.release_report.sections import Ctx, check, engine_of, row, skips_for
 
 TASKS = {

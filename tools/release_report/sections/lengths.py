@@ -7,7 +7,7 @@ token. Per request the engine's own counts: drafting (draft tokens > 0), tokens 
 from __future__ import annotations
 
 from tools.release_report.plan import ANSWER, kfmt
-from tools.release_report.prompts import sized
+from tools.measure.prompts import sized
 from tools.release_report.sections import Ctx, check, engine_of, row, skips_for
 
 TASK = "\n\nSummarise the text above in five paragraphs."

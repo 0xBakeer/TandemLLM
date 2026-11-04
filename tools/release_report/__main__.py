@@ -37,7 +37,7 @@ def release_version(data: dict) -> str:
 
 def cmd_publish(argv) -> int:
     """The maintainer's upload of a checked page to the GitHub release (it measures nothing)."""
-    from tools.release_report import scrub
+    from tools.measure import scrub
     ap = argparse.ArgumentParser(prog="python -m tools.release_report publish",
                                  description="upload DIR/report.html to the GitHub release of --tag")
     ap.add_argument("dir")

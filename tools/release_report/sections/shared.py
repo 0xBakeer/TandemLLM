@@ -6,8 +6,8 @@ in a cache. Proof: all N running at once."""
 from __future__ import annotations
 
 from tools import parallel_card as pc
-from tools.release_report.client import together
-from tools.release_report.prompts import NONCE_LINE, nonce
+from tools.measure.client import together
+from tools.measure.prompts import NONCE_LINE, nonce
 from tools.release_report.sections import Ctx, check, row, skips_for
 
 QUESTIONS = ("Who are the people the text names first?", "List three places the text mentions.",

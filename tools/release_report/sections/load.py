@@ -14,8 +14,8 @@ import threading
 import time
 
 from tools import parallel_card as pc
-from tools.release_report.client import end_ids, tokens_between
-from tools.release_report.prompts import NONCE_LINE, nonce, sized
+from tools.measure.client import end_ids, tokens_between
+from tools.measure.prompts import NONCE_LINE, nonce, sized
 from tools.release_report.sections import Ctx, check, med, row, skips_for
 
 DECODE_TASK = "\n\nWrite the longest essay you can about the text above. Do not stop."

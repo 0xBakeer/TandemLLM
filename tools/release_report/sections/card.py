@@ -17,7 +17,7 @@ REPO_TOOL = "tools/parallel_card.py"
 
 
 def run_card(ctx: Ctx, tag: str, extra: list[str]) -> dict:
-    from tools.release_report.prompts import REPO
+    from tools.measure.prompts import REPO
     raw = ctx.out / "raw" / f"card-{tag}.json"
     env_file = ctx.out / "raw" / "card-env.txt"
     env_file.write_text("# the server's settings are read from /health; no setup file is passed\n")
