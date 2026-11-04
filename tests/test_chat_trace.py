@@ -216,12 +216,14 @@ def test_memory_calls_through_the_engine_filter():
     res = T.replay(_memory_trace(alone=True), memory=bridge)
     assert not T.memory_report(res, bridge) and bridge.continued == [2], bridge.continued
     assert len(bridge.stored) == 1 and len(res["requests"]) == 2
-    # a rule written in a tool turn is refused by the store as its block is (rule_from_tool):
-    # hidden all the same, and still no call reaches chatd
+    # a rule written in a tool turn is kept for the session (2026-11-04, rule_from_tool):
+    # hidden all the same, never a user rule, and still no call reaches chatd
     bridge = T.MemoryBridge(tempfile.mkdtemp(prefix="trace-notes-"))
     res = T.replay(_memory_trace(note=dict(NOTE, kind="rule")), memory=bridge)
-    assert not T.memory_report(res, bridge) and bridge.stored == []
-    assert [n["why"] for n in bridge.refused] == ["rule_from_tool"], bridge.refused
+    assert not T.memory_report(res, bridge) and bridge.refused == [], bridge.refused
+    assert [(n["request"], n["scope"], n["kind"], n["demoted"]) for n in bridge.stored] == [
+        (2, "session", "rule", "rule_from_tool")], bridge.stored
+    assert [n.scope for n in bridge.store.notes("owner")] == ["session"]
 
 
 def test_the_recorded_traces():

@@ -111,13 +111,13 @@ class MemoryBridge:
     """`--memory`: the engine's memory filter (server/memblock.py MemFilter, `calls` on) on each
     recorded step before chatd gets it; the notes go to a scratch note store as the engine's
     `Memory.take` writes them (server/conductor/notes.py): no project (chatd's prompt names no
-    working directory), `from_user` when the request ends with the user's message (a tool turn
-    writes no rule about the user), counted per request, never printed."""
+    working directory), `from_user` when the request ends with the user's message (a rule about
+    the user from a tool turn is kept for the session), counted per request, never printed."""
 
     def __init__(self, root: str):
         from server.conductor import notes as notes_mod
         self.store = notes_mod.NoteStore(root)
-        self.stored: list[dict] = []          # {request, op, scope, kind}
+        self.stored: list[dict] = []          # {request, op, scope, kind, demoted}
         self.refused: list[dict] = []         # {request, why}
         self.continued: list[int] = []        # requests whose answer was notes alone
 
@@ -136,7 +136,7 @@ class MemoryBridge:
                 self.refused.append({"request": request, "why": exc.why})
                 return exc.why
             self.stored.append({"request": request, "op": op["op"], "scope": res.get("scope"),
-                                "kind": res.get("kind")})
+                                "kind": res.get("kind"), "demoted": res.get("demoted")})
             return None
         raw = s["content"] + "".join("\n\n" + qwen_call(c["name"], c["arguments"])
                                      for c in s["calls"] if c["name"] == memblock.TOOL)
@@ -544,7 +544,7 @@ def memory_report(res: dict, bridge: MemoryBridge) -> list[str]:
     from server import memblock
     for n in bridge.stored:
         print(f"  memory: request {n['request']}: a note stored ({n['op']}, {n['scope']}, "
-              f"{n['kind']})")
+              f"{n['kind']}" + (f", {n['demoted']} -> session" if n.get("demoted") else "") + ")")
     for n in bridge.refused:
         print(f"  memory: request {n['request']}: a note refused ({n['why']}), hidden")
     for k in bridge.continued:

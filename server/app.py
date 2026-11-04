@@ -11502,6 +11502,11 @@ def _memory_row(plan, failed: list[str], shown=()) -> None:
     if ctx.get("written"):
         info["written"] = [{k: v for k, v in w.items() if k != "chars"}
                            for w in ctx["written"]]
+        moved = [w["demoted"] for w in ctx["written"] if w.get("demoted")]
+        if moved:
+            # a rule about the user from a tool turn: kept for this session only (notes.py)
+            print(f"[memory] {plan.row.get('request_id') or '-'}: {len(moved)} rule(s) kept at "
+                  f"session scope ({', '.join(f'{w} -> session' for w in moved)})", flush=True)
     if failed:
         info["failed"] = list(failed)
         hid = [w for w in failed if w not in shown]

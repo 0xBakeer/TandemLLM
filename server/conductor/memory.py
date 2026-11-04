@@ -39,8 +39,10 @@ block is parsed and written (server/conductor/notes.py) with the request's user,
 session, and its `from_user` (a tool turn cannot write a rule about the user). A refused block is
 hidden from the client like a written one (SRV-277): the reason goes to the journal and the log,
 never into the answer. A project-scoped add in a conversation without a working directory (an
-Open WebUI chat) is written at user scope (`rescoped: project`). A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
-kind, why, the redaction counts. Never a title or a body: they stay in the files.
+Open WebUI chat) is written at user scope (`rescoped: project`). A rule about the user from a tool
+turn is kept at session scope (`demoted: rule_from_tool`, 2026-11-04), never a user rule. A write
+is one journal row (`kind: memory_notes`, task `write`): op, id, scope, kind, why, the redaction
+counts. Never a title or a body: they stay in the files.
 
 A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (a design decision,
 2026-10-06: every client is the user `owner`), so a "remember ..." from any client goes into that user's
@@ -227,7 +229,7 @@ class Memory:
                   "chars": len(raw)}
         if res is not None:
             detail.update({k: res.get(k) for k in ("id", "scope", "kind", "revised", "redacted",
-                                                    "name", "n", "kept", "rescoped")
+                                                    "name", "n", "kept", "rescoped", "demoted")
                            if res.get(k)})
         ctx.setdefault("written", []).append(detail)
         if why is None:

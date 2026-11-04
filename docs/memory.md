@@ -47,6 +47,7 @@ The rules are code, not prompt text (`server/conductor/notes.py`):
 - A write over a cap is refused, never cut: title 120 characters, body 400 words, 20 notes a session, 500 live notes a user.
 - Every title and body passes the secret-pattern refusal of the transcripts; a body that is mostly a secret is refused.
 - A `rule` or `ruling` about the user needs the user's own message in the turn. A tool turn or a script cannot write one.
+- One written in a tool turn is kept at session scope instead, provisional, for that conversation only (`demoted: rule_from_tool` in the journal); without a session it is refused.
 - The model writes `provisional` notes. Ratify, pin and delete are the dashboard's. A model revision of a ratified note makes it provisional again, and so does the model's archive of one: the note stays, with the model's reason in its changelog, until the user archives it or ratifies it again on the Notes tab. The client sees no `forgot` line for it.
 - Before an `add` lands, the same scope is searched: the same normalised title, or one of BM25's top 5 whose word overlap is at or above `dedupe_threshold` (0.6), turns the add into a revision of that note.
 

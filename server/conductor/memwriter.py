@@ -294,7 +294,8 @@ class Writer:
                 res = self.memory.store.write(s["user"], op, writer="qwen-writer",
                                               project=s.get("project"), session=s.get("session"),
                                               request_id=None, from_user=False)
-                ops.append({k: res.get(k) for k in ("op", "id", "kind", "scope", "revised")
+                ops.append({k: res.get(k) for k in ("op", "id", "kind", "scope", "revised",
+                                                    "demoted")
                             if res.get(k) is not None})
             except memblock.BlockError as exc:
                 refused.append(exc.why)

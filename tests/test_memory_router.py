@@ -42,6 +42,10 @@ The test matrix:
      notes are its memory between chats and never to deny one; "remember ..." writes a note a
      new chat's index names; `memory: off` on purpose: the off note, once; absent: nothing
                                                         test_chat_tab_*
+     2026-11-04: a rule about the user the model writes in a tool turn (block or call form) is a
+     session note (`demoted: rule_from_tool` in the row), hidden, never a user note; a later
+     chat's index does not name it; the user's own turn writes the user rule as before
+                                                        test_chat_tab_tool_turn_rule_*
 
 Run: python tests/test_memory_router.py
 """
@@ -453,6 +457,48 @@ def test_chat_tab_remember_then_a_new_chat_finds_it():
     chat_ask("How should you answer me?", "chat-b2")
     text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
     assert "short answers" in text.split("How should you answer me?")[-1], "the new chat's index"
+
+
+def _tool_turn(trigger):
+    return [{"role": "user", "content": f"Check the planner build. {trigger}"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call_1", "type": "function", "function": {
+                    "name": "bash", "arguments": json.dumps({"command": "npm test"})}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "12 passing"}]
+
+
+def test_chat_tab_tool_turn_rule_is_a_session_note():
+    for trigger, stream in (("FAKE_MEMORY_CALL", True), ("FAKE_MEMORY", False)):
+        cond, seen = _chat_app()
+        sid = f"chat-scope-{stream}"
+        msgs = _tool_turn(trigger)
+        body = {"model": "TandemLLM", "stream": stream, "max_tokens": 2000, "tools": TOOLS,
+                "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+                "messages": [{"role": "system", "content": "You are a helpful assistant."},
+                             *msgs]}
+        out = _go(body, {**CHAT_APP, "x-session-id": sid})
+        _no_call_text(out)
+        assert BLOCK_OPEN not in out["content"] and out["calls"] == [], out["calls"]
+        ns = cond.notes.notes("owner")
+        assert [(n.title, n.scope, n.kind, n.status, n.session) for n in ns] == [
+            ("short answers", "session", "rule", "provisional", "c:" + sid)], ns
+        mem = (_row(cond, sid).get("extra") or {}).get("memory") or {}
+        w = mem["written"][0]
+        assert w["scope"] == "session" and w["demoted"] == "rule_from_tool" and w["why"] is None
+        assert "failed" not in mem, mem
+        # a new chat's index does not name it: it was never a user note
+        chat_ask("How should you answer me?", f"chat-scope-new-{stream}")
+        text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+        assert "short answers" not in text.split("How should you answer me?")[-1]
+
+
+def test_chat_tab_tool_turn_rule_user_turn_unchanged():
+    cond, _ = _chat_app()
+    chat_ask("Remember that I like short answers. FAKE_MEMORY_CALL", "chat-scope-user")
+    ns = cond.notes.notes("owner")
+    assert [(n.scope, n.kind) for n in ns] == [("user", "rule")], ns
+    w = ((_row(cond, "chat-scope-user").get("extra") or {}).get("memory") or {})["written"][0]
+    assert "demoted" not in w, w
 
 
 def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
