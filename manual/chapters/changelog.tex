@@ -48,9 +48,24 @@
 0.14.2 & 10-23 & with thinking off, reasoning written into the answer goes to its field; Ornith answers up to its card's 131,072 tokens and decodes plain at long context; \code{cache_prompt: false} as a cold read; a lookup corpus for each tokenizer; no conductor notes on a model without a place for them; \code{tandem-dash serve} without the engine \\
 0.15.0 & 10-27 & 8 lanes by default, every lane the full window; a lane short of memory gives way and goes on; one round runner with a packed draft and a joint verify pass, from CUDA graphs on the 27B; Flash-Next and Ornith in joint passes; a burst prefill; the 27B's faster GDN prefill; the card's sampling filters for a request that names none; a speed row on every weight card \\
 0.15.1 & 10-31 & Flash-Next's joint pass in fewer launches: every lane's attention, PLE and GDN prep at once, streamed expert rows, a dense pass from CUDA graphs; a burst's prompts in one forward; coupled drafts for seeded sampled requests, a learned corrector for the 3.05 pack, the lookup's backoff; the runner's host work and collector in the GPU wait; a fresh server's first raw request no longer waits behind a generation; no idle capture below its state's context class; weight cards measured on \code{/v1/completions} \\
+0.15.2 & 11-04 & a prefill admitted over the engine's peak charged only its new memory at the box's floor; idle graph captures pause at the peak; chatd's Stop ends a request that waits for memory, and the engine books it abandoned; a \code{tandem_memory} tool call taken as the memory block; the allocator's counters read without cyclic garbage; 7-bit EXL3 tensors on the dense kernels; the Setup Guide's simple mode; the quality gate, the benchmark report and one adapter a GPU \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.15.2, the memory wait}\label{sec:changelog-0152}
+
+0.15.2 fixes a long chat that waited 15 minutes for memory on a server that had run for an hour. A prefill the memory gate admits over the engine's peak takes the allocator's free default-pool blocks before any new memory, and MemAvailable already leaves those out, so the admission now charges it its workspace less those blocks (SRV-775). A lone chat of 31,053 rows was charged 3.9~GiB with 2.3~GiB of it free in the reserve and waited below its 10~GiB floor; its line now names the new part.
+
+The idle window captures no graphs while the reserve plus the smallest prefill's workspace is over the peak (SPD-273): each capture keeps a private pool that nothing returns, about 20~MB a graph. A request's own class still captures at its first use.
+
+chatd's Stop shuts a model call whose response has not started, so it ends a request that waits for memory within a second instead of after chatd's 15-minute read timeout, and the engine books that request abandoned with a \code{[req]} line (SRV-777).
+
+With a chat's tools in view the model can write its memory note as a \code{tandem_memory} tool call, which no client offers. The server takes the call as the block it means: stored or refused, hidden, never sent to the client, and an answer of notes alone goes on after a hidden result. A rule about the user written in a tool turn is kept for that conversation only, at session scope.
+
+The engine reads the allocator's counters off torch's nested dict, which leaves no reference cycle: with \code{QSE_RUNNER_GC=1} the collection at a round's end took 40 to 80~ms while the GPU waited (\#145). The native dense kernels take 7-bit EXL3 tensors (\#136), so the text of a pack with 7-bit tensors can change, and NemotronH's packed IQ2, Q8 and FP8 weights run a 33-row verify block on their row kernels (\#142). Every family's fingerprint moves once.
+
+A pull request that changes the engine carries a quality gate report (\code{python -m tools.gate run}), each release gets a benchmark report page (\code{python -m tools.release_report}), and every per-GPU choice goes through one adapter a GPU in \code{tools/gpu}.
 
 \section{0.15.1, Flash-Next's joint pass}\label{sec:changelog-0151}
 

@@ -2,11 +2,40 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.15.2, 2026-11-04
+
+0.15.2 fixes a long chat that waited 15 minutes for memory on a server that had run for an hour, a Stop that could not end that wait, and a memory note that reached the client as a tool call it did not have. The engine reads the allocator's counters without leaving work for the collector after every round, 7-bit EXL3 tensors run on the dense kernels, and the Setup Guide opens in a simple mode. A pull request that touches the engine now carries a quality gate report, every per-GPU choice goes through one adapter a GPU, and each release gets a benchmark report page. Every family's fingerprint moves once, so saved prompt-cache entries and spilled conversations from 0.15.1 are rebuilt once.
+
+### Memory notes (chat, beta)
+
+- The server takes a `tandem_memory` tool call as the memory block it means. With a chat's tools in view the model can write its note as a call (`<tool_call><function=tandem_memory>...`, or the JSON form), and no client offers that tool: the Chat tab answered that the tool is not available, and the turn ended without an answer. The call is now stored or refused as the `<tandem_memory>` block is, hidden, and never sent to the client; other calls in the same answer go out as usual. An answer of notes alone goes on after a hidden result, so the client gets the model's next words. A client that offers its own `tandem_memory` tool gets its calls ([docs/memory.md](docs/memory.md)).
+- A rule about the user written in a tool turn is kept for that conversation only: session scope, provisional, `demoted: rule_from_tool` in the journal and the engine log. The store refused it before, and in a chat with no working directory that was every such rule. Without a session it is still refused, and a user-wide rule still needs a user turn.
+- `tools/chat_trace.py --memory` replays a recorded chat through the engine's memory filter, and with `--store` a conversation id reads the chat from chatd's store.
+
+### Engine
+
+- The engine reads the allocator's counters off torch's nested dict (#145). `torch.cuda.memory_stats` and the readers built on it leave each call's tuples, about 4,000 with the graphs' pools, in a reference cycle. The server reads them every round, and with `QSE_RUNNER_GC=1`, on in the Flash-Next profiles, the collection at a round's end took 40 to 80 ms while the GPU waited. `/health`, `/metrics` and the memory policy report the same values.
+- Flash-Next's prefill MoE group GEMM takes 64 rows an item (#151); `QWEN38_FN_GROUP_ROWS=32` goes back to 32. Flash-Next's text is the same bit for bit. LFM2-MoE and Ornith stay on 32 rows, where 64 was not checked.
+
+### Server
+
+- A Hermes request, which sends no session id, is filed on the disk tier under the router's head key when a conductor plan is active, so a new Hermes session's head is saved on its first request, not after its second cold read (#150). Hermes' title call shares one side session and keeps no name.
+- With `QSE_PARALLEL_WINDOW_ROWS` set, the prefill window cap also counts a slot the round runner decodes, so a long prefill hands the GPU turn back to it (#156). The cap is off by default.
+- `/metrics` counts the n-gram table's hot-row cache (hits, misses, 4 KiB blocks read) and the engine's own work: summaries prepared ahead of a request and memory writer turns (#152, server/METRICS.md). A scrape calls `cache_stats()` once, where every family that read it took the decode path's locks again, and a scraper that goes away mid-page no longer logs a traceback (#147).
+- install.sh pins `zstandard`, the session spill's codec (#146). A fresh install spilled uncompressed, and every `/health` and `/metrics` call paid a failed import; the spill now remembers the answer.
 
 ### Setup Guide
 
 - A new browser opens the Setup Guide in a simple mode (#103): three pages with the model's own defaults, and one switch brings back all eight steps. Simple mode turns the response cache on and leaves the chat (beta) off.
+- A weight download uses plain HTTP instead of the hub's Xet backend, which wants about 2 GiB of buffers (#137). On a box that already ran an engine the kernel's out-of-memory killer ended the fetch. `HF_HUB_DISABLE_XET` set by the operator still wins, and a fetch that dies says the out-of-memory killer is the usual cause.
+- The estimate says that fewer lanes, or a shorter side window (`QSE_SIDE_MAX_LEN`), gives each lane its full window when the lanes outnumber what the memory guarantees (#153).
+
+### For contributors
+
+- The quality gate: `python -m tools.gate run` measures main and a branch side by side on one GPU (lossless text, decode, prefill, long prompts, the API shapes, the GPU tests the diff maps to) and writes `gate-report.md` for the pull request ([docs/quality-gate.md](docs/quality-gate.md)). The `gate` check refuses a pull request that changes the engine without a current, passing report. A maintainer re-runs it on a DGX Spark (`gate-verified`), or runs it for an author with no fitting GPU (`gate-maintainer`).
+- The benchmark report: `python -m tools.release_report` measures the bare engine on raw `/v1/completions` and writes one self-contained HTML page for any model and GPU ([docs/benchmark-report.md](docs/benchmark-report.md)). Each release gets the page for Flash-Next 3.05 on a DGX Spark as a release asset.
+- Every per-GPU choice goes through one adapter a GPU in `tools/gpu` (the arch flags, programmatic dependent launch, the MoE and dense launch shapes, the NVFP4 register-fed rows, BF16 autocast, the device key of price files). The GB10's answers are the ones the engine gave before; an Ada port answers in `tools/gpu/ada.py` and nowhere else ([tools/gpu/README.md](tools/gpu/README.md)).
+- docs/measurement.md lists four more traps for measuring several lanes at once (#154).
 
 ### Fixes
 
@@ -17,6 +46,11 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - NemotronH's packed IQ2, Q8 and FP8 weights multiply a 33-row verify block on their row kernels (#142). They sent it to dequantisation and cuBLAS, so the 0.15.1 entry that a 33-row verify block runs on the row kernels did not hold for GGUF and ModelOpt weights. Each row now matches its one-row call bit for bit. The Q8 kernel also guards its K loop for a K that is not a multiple of 256; no shipped model has such a K.
 - The native dense kernels take 7-bit EXL3 tensors (#136). Flash-Next's dense path refused a 7-bit projection at its launch check, and LFM2.5, NemotronH and Flint sent their 7-bit tensors of up to 32 rows to the library fallback. They now run on the dense kernel, so the text of a pack with 7-bit tensors, LFM2.5's 6.0 pack among them, can change. The 5.05 Flash-Next pack's full load and generation are not yet validated.
 - Flash-Next's MTP catch-up caps its own prefill chunk at 8,192 rows (#148). With `QWEN38_FN_PREFILL_CHUNK` at 16,384, its matmul failed with `CUDA error: invalid argument` and the request returned 500. The default chunk of 4,096 is unchanged.
+
+### Text and fingerprints
+
+- Flash-Next 3.05 writes the same text as 0.15.1: on a DGX Spark the quality gate's 8 prompts gave 0.15.1's text token for token, greedy as well as seeded, and the greedy texts with speculation off equal those with it on. The text of a pack with 7-bit tensors can change (#136).
+- Every family's fingerprint moves once (the GPU adapters, #136, #142, #145, #146, #148, #151 and SRV-775), so 0.15.1's prompt-cache files and spilled conversations are rebuilt once.
 
 ## 0.15.1, 2026-10-31
 
