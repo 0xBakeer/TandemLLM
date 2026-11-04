@@ -249,6 +249,7 @@ def test_a_stopped_run_keeps_the_rows_it_finished():
         time.sleep(14.0)                          # 1k's three runs are done (~6 s each row), 16k is not
         p.send_signal(signal.SIGTERM)
         log = p.communicate(timeout=60)[0]
+        assert p.returncode == 4, p.returncode                 # stopped: non-zero, its finished rows written
         st = storemod.Store(out)
         assert "stopped (signal 15)" in log, log[-800:]
         (f,) = st.run_files()

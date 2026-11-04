@@ -233,7 +233,7 @@ def measure(a, log=print) -> dict:
     path = st.add_run(run, recs, force=a.force)
     n_bad = sum(1 for x in recs.values() if not x["valid"] and not x.get("skipped"))
     log(f"[measure] {len(recs)} rows ({n_bad} invalid) into {path} in {run['minutes']} min")
-    return {"measured": len(recs), "invalid": n_bad, "path": str(path)}
+    return {"measured": len(recs), "invalid": n_bad, "path": str(path), "stopped": stopped}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -271,4 +271,6 @@ def main(argv=None) -> int:
     except Refused as exc:
         print(str(exc), file=sys.stderr)
         return 3
+    if r.get("stopped"):
+        return 4                       # stopped from outside: the rows it finished are written, the rest not
     return 1 if r.get("invalid") else 0
