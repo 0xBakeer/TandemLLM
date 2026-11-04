@@ -405,12 +405,10 @@ class Workspace:
         return out
 
     def grep(self, pattern: str, start: str = MOUNT, include: str | None = None,
-             ignore_case: bool = False, limit: int = 200,
-             skipped: list | None = None) -> list[str]:
+             ignore_case: bool = False, limit: int = 200) -> list[str]:
         """`file:line: text` of the lines that match, at most `limit`. `start` is a folder or one
         file: both are streamed to GREP_FILE_MAX with the bounds in the streaming pass below, so
-        no file is skipped for its size and `skipped` (the caller's list, kept for the tool's
-        call shape) stays empty."""
+        no file is skipped for its size."""
         try:
             rx = re.compile(pattern, re.I if ignore_case else 0)
         except re.error as exc:

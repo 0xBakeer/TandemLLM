@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,8 +27,8 @@ class _Ctx:
         pass
 
 
-def _ws() -> Workspace:
-    return Workspace(tempfile.mkdtemp(prefix="large-"))
+def _ws(root) -> Workspace:
+    return Workspace(str(root))
 
 
 def _big(ws: Workspace, name: str = "big.log", lines: int = 90_000) -> list[str]:
@@ -39,8 +38,8 @@ def _big(ws: Workspace, name: str = "big.log", lines: int = 90_000) -> list[str]
     return text
 
 
-def test_grep_searches_one_file_named_by_its_path():
-    ws = _ws()
+def test_grep_searches_one_file_named_by_its_path(tmp_path):
+    ws = _ws(tmp_path)
     ws.write("notes/todo.md", b"alpha\nbeta\nalpha two\n")
     out = T._grep(_Ctx(ws), {"pattern": "alpha", "path": "/workspace/notes/todo.md"}).content
     assert out == ("/workspace/notes/todo.md:1: alpha\n"
@@ -49,19 +48,19 @@ def test_grep_searches_one_file_named_by_its_path():
         "no matches"
 
 
-def test_grep_reads_a_large_file_named_by_its_path_whole():
-    ws = _ws()
+def test_grep_reads_a_large_file_named_by_its_path_whole(tmp_path):
+    ws = _ws(tmp_path)
     text = _big(ws)
     assert ws.stat("big.log").st_size > MAX_READ
     out = T._grep(_Ctx(ws), {"pattern": "row 089999 ", "path": "big.log"}).content
     assert out == f"/workspace/big.log:89999: {text[89_998]}", out[:200]
 
 
-def test_a_folder_grep_searches_the_large_file_it_used_to_skip():
+def test_a_folder_grep_searches_the_large_file_it_used_to_skip(tmp_path):
     # (this PR) the folder walk no longer leaves files over MAX_READ out: it streams them to
     # 16 MiB with the same bounds as a file named by its path, so the answer is the hit — the
     # earlier "no matches + [not searched: ...]" this test pinned was the lie being fixed.
-    ws = _ws()
+    ws = _ws(tmp_path)
     text = _big(ws)
     ws.write("small.txt", b"nothing here\n")
     out = T._grep(_Ctx(ws), {"pattern": "row 089999 "}).content
