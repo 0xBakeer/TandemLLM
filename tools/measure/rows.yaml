@@ -1,0 +1,245 @@
+# Every row the three views (report, card, gate) need, once (docs/measurement.md, tools/measure).
+#
+#   id        stable; `{x}` takes each value of `for`
+#   measures  what the row measures
+#   shape     the request shape: prompt source and length, tokens out, N at once, rounds or runs
+#   views     the views that use it
+#   yields    the record's fields
+#   exec      the code that measures it (tools/measure/execs.py)
+#   server    the server it runs on: rows of one group share one server start, in this file's order;
+#             a group named `fresh` in `state` needs that server started for it
+#   after     rows that must run before it on the same server (the warm rows)
+#   est       minutes on the reference box (one DGX Spark, Qwen3.8-Flash-Next), for the plan only
+#
+# Two rows are never one measurement: the card's levels (card-v1 prompts, 169-246 tokens) are not
+# conc.2k (~2k-token prompts, prefill in the wall time); prefill.L (one token out) is not length.L
+# (512 tokens out, decode included).
+
+groups:
+  card:       {state: fresh, variant: main, doc: "the card tool's parts on a fresh server"}
+  lengths:    {state: fresh, variant: main, doc: "one request at a time, shortest first, on a fresh server"}
+  fresh-long: {state: fresh, variant: main, doc: "the longest prompts first on a fresh server, then d and f"}
+  suite:      {state: fresh, variant: main, doc: "requests at once and latency under load, then the warm repeat"}
+  gate:       {state: fresh, variant: main, doc: "the gate's measurement suites, one server an arm"}
+  plain:      {state: fresh, variant: plain, doc: "the same build with speculation off"}
+  wide:       {state: fresh, variant: wide, doc: "the same build with the wide prefill chunk"}
+
+rows:
+  - id: decode.{w}.c1
+    for: {w: [code, prose]}
+    measures: decode tok/s of one request, the card's {w} workload
+    shape: {prompt: "card-v1 {w}", tokens_out: 512, at_once: 1, runs: 3, warmups: 1, stat: median, sampling: card}
+    views: [card, report]
+    yields: [decode_tok_s, prompt_tokens, runs]
+    exec: card.decode
+    server: card
+    est: 0.6
+
+  - id: prefill.{k}
+    for: {k: [2k, 8k, 32k, 64k]}
+    measures: prefill tok/s and the first token of one cold {k} prompt, one token out
+    shape: {prompt: "card-v1 filler, {k} tokens", tokens_out: 1, at_once: 1, runs: 3, stat: median}
+    views: [card, report, gate]
+    yields: [tok_s, ttft_s, prompt_tokens, runs]
+    exec: card.prefill
+    server: card
+    est: {2k: 0.2, 8k: 0.4, 32k: 1.6, 64k: 3.3}
+
+  - id: conc.card.c{n}
+    for: {n: [1, 2, 4, 8]}
+    measures: "{n} card prose requests released together, fixed prompts and seeds (--fixed-prompts)"
+    shape: {prompt: "card-v1 prose, 169-246 tokens", tokens_out: 512, at_once: "{n}", rounds: 3, warmups: 1, fixed: true}
+    views: [card, report, gate]
+    yields: [wall_tok_s, decode_tok_s, ttft_s, at_once, rounds]
+    exec: card.levels.fixed
+    server: card
+    est: {1: 0.7, 2: 1.0, 4: 1.4, 8: 1.9}
+
+  - id: conc.card.default.c{n}
+    for: {n: [1, 2, 4, 8]}
+    measures: "{n} card prose requests released together, a nonce and seed of their own (default arguments)"
+    shape: {prompt: "card-v1 prose, 169-246 tokens", tokens_out: 512, at_once: "{n}", rounds: 3, warmups: 1, fixed: false}
+    views: [card, report]
+    yields: [wall_tok_s, decode_tok_s, ttft_s, at_once, rounds]
+    exec: card.levels.default
+    server: card
+    est: {1: 0.8, 2: 1.1, 4: 1.5, 8: 2.0}
+
+  - id: decode.c1.short
+    measures: decode tok/s of one request, the card's prose prompt, 256 tokens out
+    shape: {prompt: "card-v1 prose", tokens_out: 256, at_once: 1, rounds: 3, warmups: 1, fixed: true}
+    views: [gate]
+    yields: [decode_tok_s, rounds]
+    exec: gate.decode
+    server: gate
+    est: 0.4
+
+  - id: decode.c1.1k
+    measures: decode tok/s of one request with a ~1k prompt, 256 tokens out
+    shape: {prompt: "card-v1 filler, 700 words", tokens_out: 256, at_once: 1, rounds: 3, warmups: 1, fixed: true}
+    views: [gate]
+    yields: [decode_tok_s, rounds]
+    exec: gate.decode
+    server: gate
+    est: 0.5
+
+  - id: burst.8x2k
+    measures: 8 cold ~2k prompts arriving together, the median first token
+    shape: {prompt: "card-v1 filler, 2k tokens", tokens_out: 1, at_once: 8, rounds: 3, warmups: 1}
+    views: [gate, report]
+    yields: [ttft_median_s, rounds]
+    exec: gate.burst
+    server: gate
+    est: 1.0
+
+  - id: conc.2k.c{n}
+    for: {n: [1, 2, 3, 4, 5, 6, 7, 8]}
+    measures: "{n} requests with ~2k prose prompts released together, prefill counted in the wall time"
+    shape: {prompt: "prose, 2,048 tokens each", tokens_out: 512, at_once: "{n}", rounds: 2, greedy: true}
+    views: [report]
+    yields: [agg_tok_s, decode_tok_s, wall_s, ttft_max_s]
+    exec: report.conc2k
+    server: suite
+    est: {1: 0.6, 2: 0.7, 3: 0.8, 4: 0.9, 5: 1.1, 6: 1.2, 7: 1.4, 8: 1.6}
+
+  - id: conc.32k.c{n}
+    for: {n: [1, 2, 3, 4, 5, 6, 7, 8]}
+    measures: "{n} requests with ~32k prose prompts released together: the first and last first token"
+    shape: {prompt: "prose, 32,768 tokens each", tokens_out: 16, at_once: "{n}", rounds: 1}
+    views: [report]
+    yields: [ttft_min_s, ttft_max_s, max_waiting]
+    exec: report.conc32k
+    server: suite
+    est: {1: 0.7, 2: 1.2, 3: 1.8, 4: 2.4, 5: 3.0, 6: 3.6, 7: 4.2, 8: 4.8}
+
+  - id: length.{k}
+    for: {k: [1k, 4k, 16k, 32k, 55k, 64k, 96k, 240k]}
+    measures: decode and the first token of one request with a {k} prose prompt, 512 tokens out
+    shape: {prompt: "prose, {k}", tokens_out: 512, at_once: 1, runs: "3 up to 16k, else 2", greedy: true}
+    views: [report]
+    yields: [decode_tok_s, ttft_s, prefill_tok_s, drafting, tokens_per_pass]
+    exec: report.lengths
+    server: lengths
+    est: {1k: 0.5, 4k: 0.7, 16k: 1.3, 32k: 1.6, 55k: 2.6, 64k: 3.0, 96k: 4.8, 240k: 15.4}
+
+  - id: needle.32k
+    measures: a passphrase in the middle of ~32k tokens of prose, found or not
+    shape: {prompt: "prose, 32,768 tokens", tokens_out: 24, at_once: 1, runs: 1, greedy: true}
+    views: [report]
+    yields: [found, answer]
+    exec: report.needle
+    server: lengths
+    est: 0.6
+
+  - id: length.{k}
+    for: {k: [128k, 192k]}
+    measures: "decode and the first token of one {k} prompt as the first requests of a fresh server (also the warm repeat's fresh side)"
+    shape: {prompt: "prose, {k}", tokens_out: 512, at_once: 1, runs: 1, greedy: true}
+    views: [report]
+    yields: [decode_tok_s, ttft_s, drafting, served_before]
+    exec: report.fresh_long
+    server: fresh-long
+    est: {128k: 3.3, 192k: 5.8}
+
+  - id: shared.{n}
+    for: {n: [5, 8]}
+    measures: "{n} chats arriving together on one new ~28k system prompt: first tokens and cached tokens"
+    shape: {prompt: "a new 28,672-token system prompt + a short question", tokens_out: 32, at_once: "{n}", rounds: 1}
+    views: [report]
+    yields: [ttft_first_s, ttft_last_s, cached_tokens]
+    exec: report.shared
+    server: fresh-long
+    est: {5: 2.4, 8: 3.9}
+
+  - id: longdecode.57k.{w}
+    for: {w: [summary, code, copy]}
+    measures: decode after a ~57k prompt, the {w} task
+    shape: {prompt: "prose, 57,344 tokens", tokens_out: 1024, at_once: 1, runs: 2, greedy: true}
+    views: [report]
+    yields: [decode_tok_s, peak_1s_tok_s, ttft_s, drafting]
+    exec: report.longdecode
+    server: fresh-long
+    est: 2.9
+
+  - id: load.64k
+    measures: a ~64k prompt arriving while two chats decode; the decoders' rate before and during its prefill
+    shape: {prompt: "2 x 2k decoding + 65,536 arriving", tokens_out: 16, at_once: 3, rounds: 1}
+    views: [report]
+    yields: [ttft_s, decoders_before_tok_s, decoders_during_tok_s]
+    exec: report.load
+    server: suite
+    est: 2.5
+
+  - id: return.96k
+    measures: a ~97k conversation returning after three other ~60k prompts (turns 1-3, prompt cache on)
+    shape: {prompt: "98,304 + 3 x 61,440", tokens_out: 64, at_once: 1, rounds: 1}
+    views: [report]
+    yields: [turn1_ttft_s, turn2_ttft_s, turn3_ttft_s, turn3_cached]
+    exec: report.return
+    server: suite
+    est: 5.2
+
+  - id: warm.{k}
+    for: {k: [128k, 192k]}
+    measures: one {k} prompt on a warm engine, after the requests at once and the load rows
+    shape: {prompt: "prose, {k}", tokens_out: 512, at_once: 1, runs: 1, greedy: true}
+    views: [report]
+    yields: [decode_tok_s, ttft_s, served_before]
+    exec: report.warm
+    server: suite
+    after: [conc.2k.*, conc.32k.*, load.64k, return.96k]
+    est: {128k: 3.3, 192k: 5.8}
+
+  - id: long.131k.needle
+    measures: "the longest prompt with a needle (131,072) on a fresh server: completes, answers, memory under the peak"
+    shape: {prompt: "card-v1 filler, 131,072 tokens, a needle in the middle", tokens_out: 24, at_once: 1, runs: 1}
+    views: [gate, report]
+    yields: [ok, needle, e2e_s, reserved_max_gb, peak_gb]
+    exec: gate.long
+    server: gate
+    est: 3.2
+
+  - id: long.wide
+    measures: the wide prefill chunk case with a needle (the pack's wide_chunk_env)
+    shape: {prompt: "card-v1 filler, the profile's wide_chunk_ctx", tokens_out: 24, at_once: 1, runs: 1}
+    views: [gate]
+    yields: [ok, needle, e2e_s, reserved_max_gb, peak_gb]
+    exec: gate.long_wide
+    server: wide
+    est: 0.6
+
+  - id: lossless.set
+    measures: 8 fixed prompts greedy and seeded, their texts (drafting on)
+    shape: {prompt: "card-v1 + held-out prose and code", tokens_out: 256, at_once: 1, modes: [greedy, seeded]}
+    views: [gate, report]
+    yields: [texts]
+    exec: gate.lossless
+    server: gate
+    est: 2.5
+
+  - id: lossless.plain
+    measures: the same 8 prompts greedy with speculation off, for spec vs plain
+    shape: {prompt: "card-v1 + held-out prose and code", tokens_out: 256, at_once: 1, modes: [greedy]}
+    views: [gate, report]
+    yields: [texts]
+    exec: gate.lossless_plain
+    server: plain
+    est: 1.3
+
+  - id: stability.30m
+    measures: "30 min of mixed traffic: failed requests, reserve under the peak, decode drift"
+    shape: {prompt: "tools/soak.py mix", at_once: "lanes - 1", minutes: 30}
+    views: [gate]
+    yields: [failed, server_errors, reserved_max_gb, drift_pct]
+    exec: gate.stability
+    server: gate
+    est: 31.0
+
+  - id: box
+    measures: GPU clock, power, temperature and MemAvailable during every run
+    shape: {every: run}
+    views: [report]
+    yields: [clock_mhz_median_load, power_w_median_load, temp_c_max, mem_avail_gib_min]
+    exec: every-run
+    server: null
+    est: 0
