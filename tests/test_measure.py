@@ -175,6 +175,18 @@ def test_the_three_views_render_from_records():
         assert rid in ids, (rid, sorted(ids))
         assert ids[rid]["verdict"] in ("PASS", "SKIPPED"), (rid, ids[rid])
     assert md.startswith("verdict PASS") and "| decode |" in md
+    # the gate's runner writes each arm's suites as records (tools/measure/gatearm.py): the same table
+    import types
+    from tools.measure import gatearm
+    gout = Path(_tmp())
+    for side, d in (("base", base), ("head", head)):
+        g = views.gate_raw(storemod.Store(d), "9.9.9", "fake-pack", side)
+        arm = types.SimpleNamespace(side=side, variant="main", key=side, port=8100)
+        knobs = st.primary("conc.card.c8", "9.9.9", "fake-pack")["_run"]["knobs"]
+        gatearm.record_arm(gout, arm, knobs, {s: v[side][0] for s, v in g.items()}, "fake", "fake-pack", "abc",
+                           log=lambda *x: None)
+    rows2, md2 = views.render_gate(str(gout / "records" / "base"), str(gout / "records" / "head"))
+    assert [r["id"] for r in rows2] == [r["id"] for r in rows] and md2.startswith("verdict PASS"), md2[:400]
     # report: a page from the measured records
     html = views.render_report(st, "9.9.9", ["fake-pack"], None, "Fake", os.path.join(head, "p.html"))
     assert 'id="s-g"' in html and "Rows from: measured" in html
