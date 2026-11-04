@@ -740,12 +740,12 @@ def findings(data) -> list[tuple[str, str]]:
 
 CSS = """
 :root{--bg:#f6f7f8;--surface:#ffffff;--ink:#14181d;--ink2:#4a535e;--ink3:#77818d;--rule:rgba(20,24,29,.09);
---s1:#2a78d6;--s2:#eb6834;--s3:#77818d;--good:#0b7a0b;--bad:#b42f2f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--s1:#2a78d6;--s2:#eb6834;--s3:#77818d;--s4:#1baf7a;--good:#0b7a0b;--bad:#b42f2f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15191e;--surface:#1c2127;--ink:#e9edf2;--ink2:#a9b3bf;
---ink3:#7d8794;--rule:rgba(233,237,242,.09);--s1:#3987e5;--s2:#d95926;--s3:#7d8794;--good:#3fb950;--bad:#e5534b;color-scheme:dark}}
+--ink3:#7d8794;--rule:rgba(233,237,242,.09);--s1:#3987e5;--s2:#d95926;--s3:#7d8794;--s4:#199e70;--good:#3fb950;--bad:#e5534b;color-scheme:dark}}
 :root[data-theme="dark"]{--bg:#15191e;--surface:#1c2127;--ink:#e9edf2;--ink2:#a9b3bf;--ink3:#7d8794;--rule:rgba(233,237,242,.09);
---s1:#3987e5;--s2:#d95926;--s3:#7d8794;--good:#3fb950;--bad:#e5534b;color-scheme:dark}
+--s1:#3987e5;--s2:#d95926;--s3:#7d8794;--s4:#199e70;--good:#3fb950;--bad:#e5534b;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans)}
 .wrap{max-width:1040px;margin:0 auto;padding-block:40px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));
@@ -773,10 +773,10 @@ section{display:grid;gap:12px;min-width:0;border-top:1px solid var(--rule);paddi
 .tick,.axis,.val,.lab,.inv-mark{font-family:var(--mono);font-size:13px;fill:var(--ink3)}
 .inv-mark{fill:var(--bad)}
 .lab{fill:var(--ink2)}.val{fill:var(--ink2)}
-.ln{fill:none;stroke-width:2}.ln.s1{stroke:var(--s1)}.ln.s2{stroke:var(--s2)}
-.pt{stroke:var(--surface);stroke-width:2}.pt.s1{fill:var(--s1)}.pt.s2{fill:var(--s2)}.pt.s3{fill:var(--s3)}
-.pt.hollow{fill:var(--surface);stroke-width:2}.pt.hollow.s1{stroke:var(--s1)}.pt.hollow.s2{stroke:var(--s2)}
-.bar.s1{fill:var(--s1)}.bar.s2{fill:var(--s2)}.bar.s3{fill:var(--s3)}
+.ln{fill:none;stroke-width:2}.ln.s1{stroke:var(--s1)}.ln.s2{stroke:var(--s2)}.ln.s4{stroke:var(--s4)}
+.pt{stroke:var(--surface);stroke-width:2}.pt.s1{fill:var(--s1)}.pt.s2{fill:var(--s2)}.pt.s3{fill:var(--s3)}.pt.s4{fill:var(--s4)}
+.pt.hollow{fill:var(--surface);stroke-width:2}.pt.hollow.s1{stroke:var(--s1)}.pt.hollow.s2{stroke:var(--s2)}.pt.hollow.s4{stroke:var(--s4)}
+.bar.s1{fill:var(--s1)}.bar.s2{fill:var(--s2)}.bar.s3{fill:var(--s3)}.bar.s4{fill:var(--s4)}
 .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:var(--ink2)}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .tw{overflow-x:auto;border:1px solid var(--rule);border-radius:10px;background:var(--surface)}
@@ -793,12 +793,54 @@ table.kv td:first-child{color:var(--ink2);white-space:nowrap;width:1%}
 .inv-list{color:var(--bad)}
 .needles,.big-line{margin:0}
 .muted{color:var(--ink3);margin:0}
+.packs{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:14px}.packs a{color:var(--s1)}
+.pack{display:grid;gap:32px;border-top:2px solid var(--ink3);padding-top:24px}
+.pack>header h2{font-size:24px}
+h4{font-size:14px;font-weight:600;margin:16px 0 4px}
 footer{color:var(--ink3);font-size:13px;border-top:1px solid var(--rule);padding-top:16px}
 @media (max-width:560px){.verdict li{grid-template-columns:1fr;gap:2px}.tile .fig{font-size:24px}}
 """
 
 
+def head_html(title: str) -> str:
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
+            f'content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{esc(title)}</title>'
+            f'<style>{CSS}</style></head><body><div class="wrap">')
+
+
+def body_of(pub: dict, prefix: str = "", nested: bool = False) -> list[str]:
+    """Tiles, the verdict and every section of one pack's (scrubbed) data. `nested`: the pack is one of
+    several on a page, so its headings sit a level lower and its ids carry `prefix`."""
+    parts = []
+    tl = tiles(pub)
+    if tl:
+        parts.append('<div class="tiles">' + "".join(
+            f'<div class="tile"><div class="fig">{f}<small>{esc(u)}</small></div><div class="cap">{esc(c)}</div></div>'
+            for f, u, c in tl) + "</div>")
+    h = "h3" if nested else "h2"
+    fd = findings(pub)
+    if fd:
+        parts.append(f'<section><{h}>Verdict</{h}><ul class="verdict">' + "".join(
+            f'<li><span class="tag {k}">{ {"good": "good", "bad": "watch", "note": "measured"}[k] }</span><span>{esc(t)}</span></li>'
+            for k, t in fd) + "</ul></section>")
+    for sid, (name, _) in SECTIONS.items():
+        body, why = RENDER[sid](pub)
+        if nested:
+            body = body.replace("<h3>", "<h4>").replace("</h3>", "</h4>")
+        parts.append(f'<section id="{prefix}s-{sid}"><{h}>{esc(name)}</{h}><p class="method">{esc(METHODS[sid])}</p>'
+                     + (body or f'<p class="muted">{esc(why or "not measured in this report")}</p>') + "</section>")
+    return parts
+
+
+def footer(pub: dict) -> str:
+    return (f'<footer>Made with tools/release_report (tool {esc(pub.get("tool"))}) from data.json; every number on '
+            f'this page comes from one run on one box, two or three requests a cell. '
+            f'<a href="https://github.com/0xBakeer/TandemLLM">TandemLLM</a></footer></div></body></html>')
+
+
 def page(data: dict) -> str:
+    if data.get("packs"):
+        return page_set(data)
     private = data.get("private") or {}
     pub = scrub.deep({k: v for k, v in data.items() if k != "private"}, private)
     revalidate(pub.get("rows") or [])
@@ -811,27 +853,92 @@ def page(data: dict) -> str:
     head = (f"{esc(pub.get('hardware') or 'one GPU')} · weights {esc(pub.get('weights'))}"
             + (f" ({esc(last.get('weights_repo'))})" if last.get("weights_repo") else "")
             + f" · measured {esc(' and '.join(dates) or '–')} · version {esc(pub.get('version'))}")
-    parts = [f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
-             f'content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{esc(title)}</title>'
-             f'<style>{CSS}</style></head><body><div class="wrap">']
+    parts = [head_html(title)]
     parts.append(f'<header><h1>{esc(title)}</h1><p class="meta">{head}</p><div class="bare">{esc(BARE)}</div></header>')
-    tl = tiles(pub)
-    if tl:
-        parts.append('<div class="tiles">' + "".join(
-            f'<div class="tile"><div class="fig">{f}<small>{esc(u)}</small></div><div class="cap">{esc(c)}</div></div>'
-            for f, u, c in tl) + "</div>")
-    fd = findings(pub)
-    if fd:
-        parts.append('<section><h2>Verdict</h2><ul class="verdict">' + "".join(
-            f'<li><span class="tag {k}">{ {"good": "good", "bad": "watch", "note": "measured"}[k] }</span><span>{esc(t)}</span></li>'
-            for k, t in fd) + "</ul></section>")
-    for sid, (name, _) in SECTIONS.items():
-        body, why = RENDER[sid](pub)
-        parts.append(f'<section id="s-{sid}"><h2>{esc(name)}</h2><p class="method">{esc(METHODS[sid])}</p>'
-                     + (body or f'<p class="muted">{esc(why or "not measured in this report")}</p>') + "</section>")
-    parts.append(f'<footer>Made with tools/release_report (tool {esc(pub.get("tool"))}) from data.json; every number on '
-                 f'this page comes from one run on one box, two or three requests a cell. '
-                 f'<a href="https://github.com/0xBakeer/TandemLLM">TandemLLM</a></footer></div></body></html>')
+    parts += body_of(pub)
+    parts.append(footer(pub))
+    out = "".join(parts)
+    bad = scrub.leaks(out, private)
+    if bad:
+        raise Leak("the page still names the box: " + "; ".join(bad[:8]))
+    return out
+
+
+#: a pack's series on the shared charts, in a fixed order (validated categorical slots 1, 2, 3)
+PACK_CLS = ("s1", "s2", "s4")
+
+
+def overview(packs: list[dict]) -> str:
+    """The packs side by side: their headline figures, one request's decode by prompt length, and the
+    card tool's levels (fixed prompts). Each pack keeps its colour on both charts."""
+    out = []
+    cols: list[str] = []
+    cells: list[dict] = []
+    for p in packs:
+        d = {c: f"{f} {u}".strip() for f, u, c in tiles(p)}
+        cells.append(d)
+        cols += [c for c in d if c not in cols]
+    out.append(table(["pack"] + cols, [[esc(p["label"])] + [esc(d.get(c, "–")) for c in cols]
+                                       for p, d in zip(packs, cells)], "num"))
+    leg = legend([(p["label"], PACK_CLS[i % len(PACK_CLS)], True) for i, p in enumerate(packs)])
+    lens = sorted({n for p in packs for n in by_length(p)})
+    if lens:
+        series = []
+        for i, p in enumerate(packs):
+            L = by_length(p)
+            pts = [(lens.index(n), med([r["v"].get("decode_tok_s") for r in rs]), True,
+                    f"{p['label']}, {kfmt(n)}: {num(med([r['v'].get('decode_tok_s') for r in rs]))} tok/s")
+                   for n, rs in L.items()]
+            series.append({"name": p["label"], "cls": PACK_CLS[i % len(PACK_CLS)], "pts": pts,
+                           "line": [(x[0], x[1]) for x in pts]})
+        out.append("<h3>One request: decode by prompt length</h3>" + leg
+                   + xy_chart([kfmt(n) for n in lens], series, "decode tok/s, one request (median)",
+                              aria="Decode by prompt length, every pack"))
+    lv = []
+    for p in packs:
+        lv.append({int(r["key"].split("/")[-1]): r["v"].get("wall_tok_s") for r in valid(rows_of(p, "g"))
+                   if r["key"].startswith("fixed/levels/")})
+    ns = sorted({n for d in lv for n in d})
+    if ns:
+        series = []
+        for i, (p, d) in enumerate(zip(packs, lv)):
+            pts = [(ns.index(n), v, True, f"{p['label']}, {n} at once: {num(v)} tok/s") for n, v in sorted(d.items())]
+            series.append({"name": p["label"], "cls": PACK_CLS[i % len(PACK_CLS)], "pts": pts,
+                           "line": [(x[0], x[1]) for x in pts]})
+        out.append("<h3>Requests at once: the card tool's levels, fixed prompts</h3>" + leg
+                   + xy_chart([str(n) for n in ns], series, "wall tok/s, the card tool's levels",
+                              aria="Card tool wall tokens per second by requests at once, every pack"))
+    return "".join(out)
+
+
+def page_set(data: dict) -> str:
+    """One page for several packs of one model (`combine`): an overview of the packs side by side, then
+    each pack's own tiles, verdict and sections, as a page of one pack shows them."""
+    private = data.get("private") or {}
+    pub = scrub.deep({k: v for k, v in data.items() if k != "private"}, private)
+    packs = pub.get("packs") or []
+    for p in packs:
+        revalidate(p.get("rows") or [])
+    ver = str(pub.get("version") or "").split("+")[0]
+    title = f"TandemLLM {ver} · {pub.get('model') or 'model'}"
+    dates = sorted({str(r.get("started", ""))[:10] for p in packs for r in p.get("runs") or [] if r.get("started")})
+    head = (f"{esc(pub.get('hardware') or 'one GPU')} · {len(packs)} weight packs · measured "
+            f"{esc(' and '.join(dates) or '–')} · version {esc(ver)}")
+    parts = [head_html(title)]
+    parts.append(f'<header><h1>{esc(title)}</h1><p class="meta">{head}</p><div class="bare">{esc(BARE)}</div>'
+                 '<nav class="packs">' + "".join(f'<a href="#p{i}">{esc(p["label"])}</a>' for i, p in enumerate(packs))
+                 + "</nav></header>")
+    parts.append('<section id="overview"><h2>The packs side by side</h2><p class="method">Each pack ran on its own '
+                 'freshly started server of the same build with the same settings; the sections below are each '
+                 'pack\'s own.</p>' + overview(packs) + "</section>")
+    for i, p in enumerate(packs):
+        runs = p.get("runs") or []
+        last = runs[-1] if runs else {}
+        meta = (f"weights {esc(p.get('weights'))}" + (f" ({esc(last.get('weights_repo'))})" if last.get("weights_repo") else "")
+                + f" · version {esc(p.get('version'))}")
+        parts.append(f'<div class="pack" id="p{i}"><header><h2>{esc(p["label"])}</h2><p class="meta">{meta}</p></header>'
+                     + "".join(body_of(p, prefix=f"p{i}-", nested=True)) + "</div>")
+    parts.append(footer(pub))
     out = "".join(parts)
     bad = scrub.leaks(out, private)
     if bad:

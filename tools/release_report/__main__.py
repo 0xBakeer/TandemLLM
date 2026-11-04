@@ -49,8 +49,11 @@ def cmd_publish(argv) -> int:
     a = ap.parse_args(argv)
     d = Path(a.dir)
     data = json.loads((d / "data.json").read_text())
-    html = (d / "report.html").read_text()
     ver = release_version(data)
+    page = d / "report.html"
+    if not page.exists():                         # a page written under its asset name
+        page = d / asset_name(data, ver)
+    html = page.read_text()
     if a.tag.lstrip("v") != ver:
         print(f"[report] the page is of {ver}, the tag is {a.tag}: refused", file=sys.stderr)
         return 2
@@ -60,7 +63,7 @@ def cmd_publish(argv) -> int:
         return 2
     tmp = Path(tempfile.mkdtemp(prefix="report-"))
     asset = tmp / (a.name or asset_name(data, ver))
-    shutil.copy(d / "report.html", asset)
+    shutil.copy(page, asset)
     cmd = ["gh", "release", "upload", a.tag, str(asset), "--clobber", "--repo", a.repo]
     print("[report] " + " ".join(cmd))
     if a.dry_run:
@@ -73,6 +76,46 @@ def asset_name(data: dict, ver: str) -> str:
     others on one release (Qwen3.8-Flash-Next -> qwen3.8-flash-next)."""
     model = re.sub(r"[^a-z0-9.]+", "-", str(data.get("model") or "model").lower()).strip("-.")
     return f"tandemllm-{ver}-report-{model}.html"
+
+
+def combine(datas: list[dict], labels: list[str], model: str | None = None) -> dict:
+    """Several packs' data.json of one release and one model as one data.json, for one page (render shows
+    an overview of the packs side by side, then each pack's sections). Each pack keeps its own rows, runs
+    and version string; the private terms are pooled for the scrub."""
+    vers = {release_version(d) for d in datas}
+    if len(vers) != 1:
+        raise SystemExit(f"[report] the packs are of different releases ({', '.join(sorted(vers))}): refused")
+    private: dict = {}
+    packs = []
+    for d, label in zip(datas, labels):
+        if d.get("packs"):
+            raise SystemExit("[report] combine takes one pack's data.json each")
+        for k, v in (d.get("private") or {}).items():
+            private[k] = sorted(set(private.get(k) or []) | set(v))
+        packs.append(dict({k: v for k, v in d.items() if k != "private"}, label=label))
+    first = datas[0]
+    return {"kind": "tandem-benchmark-report", "schema": first.get("schema"), "tool": first.get("tool"),
+            "version": vers.pop(), "model": model or first.get("model"), "hardware": first.get("hardware"),
+            "packs": packs, "private": private}
+
+
+def cmd_combine(argv) -> int:
+    ap = argparse.ArgumentParser(prog="python -m tools.release_report combine",
+                                 description="several packs' data.json (one release, one model) as one data.json")
+    ap.add_argument("data", nargs="+", help="each pack's data.json")
+    ap.add_argument("--out", required=True, help="the combined data.json")
+    ap.add_argument("--label", action="append", default=None,
+                    help="a pack's name on the page, once per data.json in order (default: its weights)")
+    ap.add_argument("--model", default=None, help="the model's name on the page (default: the first pack's)")
+    a = ap.parse_args(argv)
+    datas = [json.loads(Path(x).read_text()) for x in a.data]
+    labels = a.label or [str(d.get("weights")) for d in datas]
+    if len(labels) != len(datas):
+        ap.error("one --label per data.json")
+    out = combine(datas, labels, a.model)
+    Path(a.out).write_text(json.dumps(out, indent=1, default=str) + "\n")
+    print(f"[report] {a.out}: {len(datas)} packs of {out['model']} {out['version']}")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -92,7 +135,9 @@ def main(argv=None) -> int:
         return cmd_render(rest)
     if cmd == "publish":
         return cmd_publish(rest)
-    print(f"unknown command {cmd!r}: run, plan, render, publish", file=sys.stderr)
+    if cmd == "combine":
+        return cmd_combine(rest)
+    print(f"unknown command {cmd!r}: run, plan, render, combine, publish", file=sys.stderr)
     return 2
 
 

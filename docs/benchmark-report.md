@@ -64,6 +64,15 @@ The prompt text is `bench/heldout_prose.txt` by default, repeated to the length.
 
     python -m tools.release_report run --ref v0.15.1 --pack flashnext-3.05 --out ~/tandem-report
 
+## Several packs of one model
+
+Run each pack into its own folder, then put them on one page: an overview of the packs side by side (their headline figures, one request's decode by prompt length, the card tool's levels), then each pack's own sections.
+
+    python -m tools.release_report combine q4/data.json q6/data.json --label "EXL3 4.0" --label "EXL3 6.0" --model Qwen3.8-27B --out 27b/data.json
+    python -m tools.release_report render 27b/data.json
+
+`combine` refuses packs of different releases.
+
 ## Share the page
 
 The page is one HTML file of about 50 KB with its charts inline, and it loads nothing from the network. Paths, host names, user names and addresses are taken out of every string that comes from the run, and `render` refuses to write a page that still names your box. It is safe to attach to an issue or a pull request. The raw files under `--out/raw` are not scrubbed; keep them local.

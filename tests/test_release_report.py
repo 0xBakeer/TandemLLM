@@ -246,6 +246,34 @@ def test_the_release_asset_is_named_by_version_and_model():
     assert asset_name({}, "0.16.0") == "tandemllm-0.16.0-report-model.html"
 
 
+def test_packs_of_one_model_render_on_one_page(tmp_path):
+    from tools.release_report.__main__ import asset_name, cmd_publish, combine
+    a, b, c = fixture(), fixture(), fixture()
+    b.update(version="0.15.1+exl3-6.0", weights="exl3-6.0")
+    c.update(version="0.15.1+community/pack-x", weights="community/pack-x", private=dict(PRIVATE, hosts=["node9"]))
+    c["runs"][0]["knobs"]["env"]["QSE_NOTE"] = "built on node9"
+    data = combine([a, b, c], ["EXL3 4.0", "EXL3 6.0", "Pack X"], "Qwen3.8-27B")
+    assert data["version"] == "0.15.1" and len(data["packs"]) == 3 and "node9" in data["private"]["hosts"]
+    html = render.page(data)
+    assert "<title>TandemLLM 0.15.1 · Qwen3.8-27B</title>" in html and html.count(BARE) == 1
+    assert 'id="overview"' in html and html.count('class="pack"') == 3
+    for i in range(3):
+        for sid in SECTIONS:
+            assert f'id="p{i}-s-{sid}"' in html
+    for planted in ("alice", "boxy-node7", "node9", "/home/", "192.168."):
+        assert planted not in html, planted
+    assert "pt s4" in html                                   # the third pack has its own colour
+    assert asset_name(data, "0.15.1") == "tandemllm-0.15.1-report-qwen3.8-27b.html"
+    try:
+        combine([a, dict(b, version="0.15.2+exl3-6.0")], ["x", "y"])
+        raise AssertionError("two releases combined")
+    except SystemExit as exc:
+        assert "different releases" in str(exc)
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    (tmp_path / asset_name(data, "0.15.1")).write_text(html)          # a page under its asset name publishes
+    assert cmd_publish([str(tmp_path), "--tag", "v0.15.1", "--dry-run"]) == 0
+
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())

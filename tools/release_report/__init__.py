@@ -5,6 +5,7 @@ of what the bare engine does on this box, for any model the server serves.
     python -m tools.release_report run --ref vX.Y.Z --pack ID --out DIR      launch mode: a fresh server
     python -m tools.release_report plan [--url URL] [--quick]                 what a run would do, and how long
     python -m tools.release_report render DIR/data.json --out report.html
+    python -m tools.release_report combine A/data.json B/data.json --out DIR/data.json   packs of one model
     python -m tools.release_report publish DIR --tag vX.Y.Z                   the maintainer's upload
 
 TandemLLM bare engine: raw /v1/completions, no conductor or chat layer. Every request goes to
