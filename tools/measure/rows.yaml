@@ -9,6 +9,7 @@
 #   server    the server it runs on: rows of one group share one server start, in this file's order;
 #             a group named `fresh` in `state` needs that server started for it
 #   after     rows that must run before it on the same server (the warm rows)
+#   split_before (a group) where a group too long for one hold may start a second server
 #   est       minutes on the reference box (one DGX Spark, Qwen3.8-Flash-Next), for the plan only
 #
 # Two rows are never one measurement: the card's levels (card-v1 prompts, 169-246 tokens) are not
@@ -19,7 +20,8 @@ groups:
   card:       {state: fresh, variant: main, doc: "the card tool's parts on a fresh server"}
   lengths:    {state: fresh, variant: main, doc: "one request at a time, shortest first, on a fresh server"}
   fresh-long: {state: fresh, variant: main, doc: "the longest prompts first on a fresh server, then d and f"}
-  suite:      {state: fresh, variant: main, doc: "requests at once and latency under load, then the warm repeat"}
+  suite:      {state: fresh, variant: main, doc: "requests at once and latency under load, then the warm repeat",
+               split_before: [conc.32k.c1]}
   gate:       {state: fresh, variant: main, doc: "the gate's measurement suites, one server an arm"}
   plain:      {state: fresh, variant: plain, doc: "the same build with speculation off"}
   wide:       {state: fresh, variant: wide, doc: "the same build with the wide prefill chunk"}
@@ -187,7 +189,7 @@ rows:
     yields: [decode_tok_s, ttft_s, served_before]
     exec: report.warm
     server: suite
-    after: [conc.2k.*, conc.32k.*, load.64k, return.96k]
+    after: [conc.32k.*, load.64k, return.96k]
     est: {128k: 3.3, 192k: 5.8}
 
   - id: long.131k.needle

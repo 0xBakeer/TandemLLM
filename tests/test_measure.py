@@ -198,10 +198,10 @@ def test_the_plan_refuses_a_row_measured_twice():
     assert "length.1k" not in todo and "length.4k" in todo and len(todo) == len(set(todo))
     # a warm row whose earlier rows have records would measure them again: refused
     one = dict(st.primary("length.1k", "0.15.2", "pk", "gb10"))
-    one.update(row="conc.2k.c1", rows=[])
-    st.add_run({"id": "x"}, {"conc.2k.c1": {k: v for k, v in one.items() if not k.startswith("_")}})
+    one.update(row="conc.32k.c1", rows=[])
+    st.add_run({"id": "x"}, {"conc.32k.c1": {k: v for k, v in one.items() if not k.startswith("_")}})
     pl = planmod.make(st, ["pk"], "0.15.2", rowsmod.for_view(rows, "report"), "gb10", {}, explicit=False)
-    assert any("warm.128k: runs after conc.2k.c1" in x for x in pl["refusals"]), pl["refusals"]
+    assert any("warm.128k: runs after conc.32k.c1" in x for x in pl["refusals"]), pl["refusals"]
 
 
 def test_n_at_once_needs_the_servers_proof():

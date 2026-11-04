@@ -66,21 +66,34 @@ def make(st: storemod.Store, packs: list[str], build: str, want: list, box: str 
     items = []
     for (pack, g), rs in gl.items():
         sc = scale.get(pack, 1.0)
-        part, mins = [], 0.0
-        for r in rs:                          # a group over a hold: consecutive parts, each a server start
-            m = r.est * sc
-            if part and mins + m + SERVER_START_MIN > cap:
+        chunks = [rs]
+        if sum(r.est * sc for r in rs) + SERVER_START_MIN > cap:      # first at the group's own split points
+            cuts = (groups.get(g) or {}).get("split_before") or []
+            chunks = []
+            for r in rs:
+                if not chunks or r.id in cuts:
+                    chunks.append([])
+                chunks[-1].append(r)
+        for ch in chunks:
+            part, mins = [], 0.0
+            for r in ch:                      # still over a hold: consecutive parts, each a server start
+                m = r.est * sc
+                if part and mins + m + SERVER_START_MIN > cap:
+                    items.append((pack, g, part, round(mins + SERVER_START_MIN, 1)))
+                    part, mins = [], 0.0
+                part.append(r)
+                mins += m
+            if part:
                 items.append((pack, g, part, round(mins + SERVER_START_MIN, 1)))
-                part, mins = [], 0.0
-            part.append(r)
-            mins += m
-        if part:
-            items.append((pack, g, part, round(mins + SERVER_START_MIN, 1)))
     split = {(p, g) for p, g, _, _ in items if sum(1 for x in items if x[:2] == (p, g)) > 1}
-    for p, g in split:
-        if any(r.after for r in gl[(p, g)]):
-            refusals.append(f"{p} group {g} does not fit one hold and has warm rows that need the whole group "
-                            "on one server: shorten it or raise the estimate scale knowingly")
+    for p, g in split:                    # a warm row must share its part with the rows it follows
+        for it in [x for x in items if x[:2] == (p, g)]:
+            ids = [r.id for r in it[2]]
+            for r in it[2]:
+                need = [x.id for x in gl[(p, g)] if rowsmod.matches(x.id, r.after)]
+                if any(n not in ids for n in need):
+                    refusals.append(f"{p} {r.id}: the group {g} does not fit one hold and the rows it follows "
+                                    "land on another server")
     holds: list = []
     for it in sorted(items, key=lambda x: -x[3]):          # first fit, longest first
         for h in holds:
@@ -90,9 +103,13 @@ def make(st: storemod.Store, packs: list[str], build: str, want: list, box: str 
                 break
         else:
             holds.append({"items": [it], "minutes": it[3]})
-    for h in holds:                                       # within a hold: the plan's group order
-        order = list(groups)
-        h["items"].sort(key=lambda it: (packs.index(it[0]), order.index(it[1]) if it[1] in order else 99))
+    order = list(groups)
+
+    def rank(it):
+        return (order.index(it[1]) if it[1] in order else 99, packs.index(it[0]))
+    for h in holds:                                       # within a hold and across: the list's group order
+        h["items"].sort(key=rank)
+    holds.sort(key=lambda h: min(rank(it) for it in h["items"]))
     return {"lines": lines, "todo": todo, "holds": holds, "refusals": refusals, "groups": groups, "cap": cap}
 
 
