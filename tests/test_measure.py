@@ -148,7 +148,7 @@ def test_merge_keeps_the_source_and_the_page_shows_it():
 
 
 def test_the_three_views_render_from_records():
-    e = FakeEngine()
+    e = FakeEngine(tok_s=400.0)                 # 1.3 s answers: 8 at once overlap on a busy runner too
     base, head = _tmp(), _tmp()
     try:
         card = "decode.*.c1,prefill.2k,prefill.8k,prefill.32k,conc.card.c*"
