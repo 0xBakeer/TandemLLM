@@ -8,6 +8,7 @@ views; none of them measures anything itself.
     python -m tools.measure merge --out DIR --gate gate-report.json | --report data.json
     python -m tools.measure render report|card --out DIR [--pack P] [--html F]
     python -m tools.measure render gate --base DIR --head DIR
+    python -m tools.measure compare --out DIR --pack P --old 0.15.1 --new 0.15.2   two builds' rows
 
 A record is keyed by (row id, build, pack, box, knobs hash). `run` measures only the rows the store
 does not hold for the server's key (`--force` measures again), on the bare engine: raw

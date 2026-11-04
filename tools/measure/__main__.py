@@ -106,9 +106,12 @@ def main(argv=None) -> int:
     if cmd == "merge":
         from tools.measure import merge
         return merge.main(rest)
+    if cmd == "compare":
+        from tools.measure import compare
+        return compare.main(rest)
     cmds = {"rows": cmd_rows, "render": cmd_render, "index": cmd_index}
     if cmd not in cmds:
-        print(f"unknown command {cmd!r}: rows, plan, run, merge, render, index", file=sys.stderr)
+        print(f"unknown command {cmd!r}: rows, plan, run, merge, render, compare, index", file=sys.stderr)
         return 2
     return cmds[cmd](rest)
 
