@@ -28,11 +28,14 @@ REPO = Path(__file__).resolve().parent.parent.parent
 
 
 def tool_commit() -> str | None:
+    """The measuring code's commit: git, or a `git archive` tree's .tool-commit file."""
     try:
-        return subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short=8", "HEAD"], capture_output=True,
-                              text=True, timeout=10).stdout.strip() or None
+        got = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short=8", "HEAD"], capture_output=True,
+                             text=True, timeout=10).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return None
+        got = ""
+    f = REPO / ".tool-commit"
+    return got or (f.read_text().strip() if f.exists() else None)
 
 
 def server_key(h: dict, knobs: dict, prof, a) -> dict:
