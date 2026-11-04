@@ -20,17 +20,25 @@ from tools.gate.verdict import skipped, speed_row
 NAME = "prefill"
 
 
-def measure(ctx: Ctx) -> dict:
-    depths = ctx.profile.prefill_depths(ctx.level)
-    a = argparse.Namespace(prefill_depths=",".join(map(str, depths)), prefill_runs=ctx.profile.rounds)
+def depths(ctx: Ctx, which: list[int] | None = None) -> dict:
+    """Cold solo prompts at the profile's depths (or `which`), tools/parallel_card.py's prefill phase."""
+    a = argparse.Namespace(prefill_depths=",".join(map(str, which or ctx.profile.prefill_depths(ctx.level))),
+                           prefill_runs=ctx.profile.rounds)
     pc.wait_idle(ctx.base)
     pre = pc.run_prefill(ctx.cl, ctx.pj, a, lambda *x: ctx.p(*x))
-    out = {"depths": {d: {"runs": [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "prefill_tok_s",
-                                                            "cached_tokens", "planned_tokens")}
-                                   for r in v["runs"]]} for d, v in pre["depths"].items()},
-           "tokenize_offset": pre["tokenize_offset"]}
+    return {"depths": {d: {"runs": [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "prefill_tok_s",
+                                                             "cached_tokens", "planned_tokens", "x_tandem")}
+                                    for r in v["runs"]]} for d, v in pre["depths"].items()},
+            "tokenize_offset": pre["tokenize_offset"]}
+
+
+def burst(ctx: Ctx, offset: int | None = None) -> dict:
+    """N cold prompts of the burst's size released together, one token out each; `offset` is the
+    /v1/tokenize offset (measured here when not given)."""
+    if offset is None:
+        offset = pc.tokenize_offset(ctx.cl, ctx.pj)
     n, depth = ctx.profile.burst()
-    k, _ = pc.prefill_words(ctx.base, ctx.pj, depth, f"Burst {'0' * 32}.\n", pre["tokenize_offset"])
+    k, _ = pc.prefill_words(ctx.base, ctx.pj, depth, f"Burst {'0' * 32}.\n", offset)
     words = pc.filler_words(ctx.pj, depth)
     rounds = []
     for r in range(ctx.profile.warmups + ctx.profile.rounds):
@@ -43,11 +51,17 @@ def measure(ctx: Ctx) -> dict:
         rec = {"warm": r < ctx.profile.warmups, "ttft_median_s": statistics.median(ttfts) if ttfts else None,
                "errors": got["errors"], "proof": got["proof"], "n": n,
                "cached": sum(int(s.get("cached_tokens") or 0) for s in got["streams"]),
+               "x_tandem": sorted({str(s.get("x_tandem")) for s in got["streams"]}),
                "valid": not got["errors"] and len(ttfts) == n and got["proof"]["max_running"] >= n}
         rounds.append(rec)
         ctx.p(f"burst {n} x {depth}: TTFT median {rec['ttft_median_s']} s, running at once "
               f"{got['proof']['max_running']}, valid {rec['valid']}")
-    out["burst"] = {"n": n, "depth": depth, "rounds": rounds}
+    return {"n": n, "depth": depth, "rounds": rounds}
+
+
+def measure(ctx: Ctx) -> dict:
+    out = depths(ctx)
+    out["burst"] = burst(ctx, out["tokenize_offset"])
     return out
 
 

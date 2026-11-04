@@ -9,7 +9,7 @@ Needles: a passphrase in the middle of ~32k and ~128k tokens of prose; found or 
 
 from __future__ import annotations
 
-from tools.release_report.prompts import NONCE_LINE, nonce
+from tools.measure.prompts import NONCE_LINE, nonce
 from tools.release_report.sections import Ctx, check, row, skipped
 
 NEAR_TIE = 0.125
@@ -60,7 +60,8 @@ def needle(ctx: Ctx, tokens: int, word: str) -> dict:
     return rec
 
 
-def measure(ctx: Ctx) -> list[dict]:
+def texts(ctx: Ctx) -> list[dict]:
+    """The eight prompts' texts, each with its top-2 log probabilities run."""
     out = []
     v = ctx.variant
     for pid in PROMPTS:
@@ -81,19 +82,31 @@ def measure(ctx: Ctx) -> list[dict]:
     if getattr(ctx.args, "no_drafter", False):
         out.append(skipped("h", "compare", "the server runs no drafter: its texts are the plain ones, "
                                            "so there is no speculative text to compare"))
-    if v == "spec" or getattr(ctx.args, "no_drafter", False):
-        for n, word in zip(ctx.plan.needles, WORDS):
-            rec = needle(ctx, n, word)
-            bad = check([rec])
-            found = word in (rec.get("text") or "")
-            ctx.log(f"[h] needle {n}: found {found}, answer {(rec.get('text') or '')[:40]!r}"
-                    + (f" INVALID {bad}" if bad else ""))
-            out.append(row("h", f"needle/{n}", {"found": found, "answer": (rec.get("text") or "")[:80],
-                                                "prompt_tokens": (rec.get("usage") or {}).get("prompt_tokens")},
-                           {"target": n}, valid=bad is None, why=bad, ids=[rec.get("id")]))
-        for k, why in ctx.plan.skipped.items():
-            if k.startswith("h."):
-                out.append(skipped("h", k[2:], why))
+    return out
+
+
+def needles(ctx: Ctx) -> list[dict]:
+    """The planned needles, found or not."""
+    out = []
+    for n, word in zip(ctx.plan.needles, WORDS):
+        rec = needle(ctx, n, word)
+        bad = check([rec])
+        found = word in (rec.get("text") or "")
+        ctx.log(f"[h] needle {n}: found {found}, answer {(rec.get('text') or '')[:40]!r}"
+                + (f" INVALID {bad}" if bad else ""))
+        out.append(row("h", f"needle/{n}", {"found": found, "answer": (rec.get("text") or "")[:80],
+                                            "prompt_tokens": (rec.get("usage") or {}).get("prompt_tokens")},
+                       {"target": n}, valid=bad is None, why=bad, ids=[rec.get("id")]))
+    for k, why in ctx.plan.skipped.items():
+        if k.startswith("h."):
+            out.append(skipped("h", k[2:], why))
+    return out
+
+
+def measure(ctx: Ctx) -> list[dict]:
+    out = texts(ctx)
+    if ctx.variant == "spec" or getattr(ctx.args, "no_drafter", False):
+        out += needles(ctx)
     return out
 
 

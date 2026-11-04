@@ -45,6 +45,7 @@ class GateClient(pc.Client):
         t0 = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
+                mode = (r.headers.get("X-Tandem") or "").strip().lower()
                 out = json.loads(r.read())
         except urllib.error.HTTPError as exc:
             return {"error": f"HTTP {exc.code}: {exc.read()[:300].decode('utf-8', 'replace')}"}
@@ -54,7 +55,7 @@ class GateClient(pc.Client):
         text = c.get("text") or ""
         rec = {"text": text, "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
                "finish": c.get("finish_reason"), "usage": out.get("usage") or {},
-               "e2e_s": round(time.monotonic() - t0, 4)}
+               "e2e_s": round(time.monotonic() - t0, 4), "x_tandem": mode or None}
         lp = c.get("logprobs") or {}
         if lp.get("tokens") is not None:
             rec["pieces"] = list(lp["tokens"])

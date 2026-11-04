@@ -153,6 +153,7 @@ class Client:
         usage, finish, events = {}, None, 0
         digest = hashlib.sha256()
         with urllib.request.urlopen(req, timeout=3600) as r:
+            mode = (r.headers.get("X-Tandem") or "").strip().lower()      # "raw": the engine answered
             for raw in r:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
@@ -182,7 +183,7 @@ class Client:
                 "ttft_s": round(first - t0, 4) if first else None,
                 "decode_tok_s": round((comp - 1) / win, 3) if comp > 1 and win > 0 else None,
                 "e2e_s": round(end - t0, 4), "t_send": t0, "t_first": first, "t_last": last, "t_end": end,
-                "text_sha256": digest.hexdigest()[:16]}
+                "text_sha256": digest.hexdigest()[:16], "x_tandem": mode or None}
 
 
 def nonce(*parts) -> str:
@@ -333,12 +334,18 @@ def run_decode(cl: Client, pj: dict, a, log) -> dict:
     return out
 
 
-def run_prefill(cl: Client, pj: dict, a, log) -> dict:
-    # the offset between /v1/tokenize and the request's prompt_tokens, from one probe
+def tokenize_offset(cl: Client, pj: dict, probe_rec: bool = False):
+    """The offset between /v1/tokenize and a request's prompt_tokens, from one probe (with the probe's
+    record when `probe_rec`)."""
     probe = [{"role": "user", "content": f"Probe {nonce('probe')}. " + pj["_filler"][:2000]}]
     n_tok = count_tokens(cl.base, probe)
     pr = cl.stream(cl.render(probe), 1, 7)
     offset = (pr["prompt_tokens"] - n_tok) if (n_tok is not None and pr["prompt_tokens"]) else 0
+    return (offset, pr) if probe_rec else offset
+
+
+def run_prefill(cl: Client, pj: dict, a, log) -> dict:
+    offset, pr = tokenize_offset(cl, pj, probe_rec=True)
     out = {"tokenize_offset": offset, "probe": pr, "depths": {}}
     log(f"prefill: /v1/tokenize offset {offset}")
     for depth in [int(x) for x in a.prefill_depths.split(",") if x]:
