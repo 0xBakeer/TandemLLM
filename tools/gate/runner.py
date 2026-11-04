@@ -146,13 +146,20 @@ def run_arm(arm, launch, suites: list[str], plan: Plan, ctx_args: dict, raw: dic
         cl = client(arm.base, h.get("model") or ctx_args["served"], tok)
         ctx = Ctx(arm.side, arm.variant, arm.base, cl, h, k, plan.profile, plan.level, plan.pack,
                   ctx_args["out"], ctx_args["pj"], log)
+        mine: dict = {}
         for s in suites:
             name, _, part = s.partition(":")
             mod = module(name)
             fn = getattr(mod, f"measure_{part}" if part else "measure")
             t0 = time.monotonic()
-            raw.setdefault(name, {}).setdefault(arm.key, []).append(fn(ctx))
+            mine[name] = fn(ctx)
+            raw.setdefault(name, {}).setdefault(arm.key, []).append(mine[name])
             log(f"[gate] {arm.key}: {s} done in {time.monotonic() - t0:.0f} s")
+        # every measurement is a tools/measure record as well (docs/measurement.md)
+        from tools.measure import gatearm
+        gatearm.record_arm(ctx_args["out"], arm, knobs.get(arm.key) or k, {n: v for n, v in mine.items()
+                                                                          if n != "api"},
+                           plan.profile.id, plan.pack.get("id") or "pack", ctx_args.get("sha", {}).get(arm.side), log)
     finally:
         launch.stop(arm)
         log(f"[gate] {arm.key}: stopped")
@@ -232,7 +239,7 @@ def main(argv=None) -> int:
     knobs: dict = {}
     kern: dict = {"head": {}, "base": {}}
     k_none = None if pack["launcher"] == "ops" else "the fake engine has no GPU"
-    ctx_args = {"out": out, "pj": pj, "served": "TandemLLM",
+    ctx_args = {"out": out, "pj": pj, "served": "TandemLLM", "sha": {"base": base_sha, "head": head_sha},
                 "tokenizer": (lambda h: None) if pack["launcher"] == "fake" else server.load_tokenizer}
     taken: set = set()
 

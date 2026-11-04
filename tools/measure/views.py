@@ -46,6 +46,24 @@ def _page_run(run: dict, sections: list[str]) -> dict:
     return out
 
 
+def spec_vs_plain_rows(spec: dict | None, plain: dict) -> list[dict]:
+    """Section h's spec-vs-plain rows from two measured records (the gate's lossless set with drafting on,
+    and greedy with it off), compared by the gate's own rule (tools/gate/suites/lossless.py)."""
+    from tools.gate.suites.lossless import spec_vs_plain
+    if not spec or not isinstance(spec.get("raw"), dict) or not isinstance(plain.get("raw"), dict):
+        return []
+    s_raw = spec["raw"].get("servers", [spec["raw"]])[0]
+    p_raw = plain["raw"].get("servers", [plain["raw"]])[0]
+    out = []
+    for key, rec in p_raw.items():
+        v = spec_vs_plain(f"lossless.plain.{key.split('/')[0]}", key, s_raw.get(key) or {}, rec)
+        out.append({"section": "h", "key": f"specplain/{key.split('/')[0]}", "v": {"same": v["verdict"] == "PASS",
+                                                                                 "why": v["why"]},
+                    "cond": {"set": "the gate's lossless set (greedy)"}, "valid": v["verdict"] != "INVALID",
+                    "why": None})
+    return out
+
+
 def report_data(st: storemod.Store, build: str, pack: str, box: str | None = None) -> dict:
     rows, _ = rowsmod.load()
     want = rowsmod.for_view(rows, "report")
@@ -66,6 +84,8 @@ def report_data(st: storemod.Store, build: str, pack: str, box: str | None = Non
         sources.append({"row": r.id, "source": label, "valid": rec.get("valid"), "why": rec.get("why"),
                         "skipped": rec.get("skipped"), "also": [source_label(x) for x in also]})
         secs = set()
+        if r.id == "lossless.plain" and not rec.get("rows"):
+            rec = dict(rec, rows=spec_vs_plain_rows(st.primary("lossless.set", build, pack, box), rec))
         for x in rec.get("rows") or []:
             data_rows.append(dict(x, source=label, row=r.id))
             secs.add(x["section"])
@@ -216,6 +236,8 @@ def gate_servers(rec: dict) -> list[dict]:
     if isinstance(raw, dict) and "servers" in raw:
         return raw["servers"]
     rid = rec["row"]
+    if rid.startswith("prefill.") and rid not in rowsmod.load()[0]:
+        return [raw] if raw is not None else []
     if rid.startswith("conc.card.c"):
         return [{f"c{rid.split('.c')[-1]}": raw}]
     if rid.startswith("prefill."):
@@ -229,12 +251,17 @@ def gate_raw(st: storemod.Store, build: str, pack: str, side: str) -> dict:
     from tools.measure.merge import SUITE_OF, arm_of
     rows, _ = rowsmod.load()
     out: dict = {}
-    for r in rowsmod.for_view(rows, "gate"):
-        rec = st.primary(r.id, build, pack)
-        if rec is None:
+    gate_ids = [r.id for r in rowsmod.for_view(rows, "gate")]
+    stored = sorted({k.split("|")[0] for k in st.index() if k.split("|")[1] == build and k.split("|")[2] == pack})
+    for rid in gate_ids + [x for x in stored if x not in gate_ids and x.startswith(("prefill.", "conc.card.c"))
+                           and not x.startswith("conc.card.default")]:
+        recs = st.find(rid, build, pack)                # a side's second server is listed beside its first
+        if not recs:
             continue
-        suite = SUITE_OF.get(r.id) or ("prefill" if r.id.startswith("prefill.") else r.id.split(".")[0])
-        arm = arm_of(r.id, side)
+        rec = dict(recs[0], raw={"servers": [s for x in recs for s in gate_servers(x)]})
+        suite = SUITE_OF.get(rid) or ("prefill" if rid.startswith("prefill.") else
+                                      "decode" if rid.startswith("conc.card.") else rid.split(".")[0])
+        arm = arm_of(rid, side)
         lst = out.setdefault(suite, {}).setdefault(arm, [])
         for i, srv in enumerate(gate_servers(rec)):
             while len(lst) <= i:
