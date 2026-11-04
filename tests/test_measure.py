@@ -221,7 +221,7 @@ def test_n_at_once_needs_the_servers_proof():
     e = FakeEngine(at_once_cap=2)                      # /health never shows more than 2 together
     out = _tmp()
     try:
-        assert _run(e.base, out, "conc.2k.c2,conc.2k.c4") == 1
+        assert _run(e.base, out, "conc.2k.c2,conc.2k.c4") == 1         # an invalid row: exit 1
         st = storemod.Store(out)
         ok = st.primary("conc.2k.c2", "9.9.9", "fake-pack")
         bad = st.primary("conc.2k.c4", "9.9.9", "fake-pack")
@@ -261,8 +261,13 @@ def test_a_stopped_run_keeps_the_rows_it_finished():
 
 
 def test_a_server_that_is_not_raw_is_refused():
+    import subprocess
     e = FakeEngine(mode="chat")
     try:
+        # the command exits non-zero (3), so a hold script sees the refusal
+        r = subprocess.run([sys.executable, "-m", "tools.measure", "run", "--url", e.base, "--out", _tmp(), "--rows",
+                            "length.1k", "--hw", "fake"], cwd=ROOT, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 3 and "refused" in r.stderr, (r.returncode, r.stderr[-300:])
         try:
             runmod.measure(runmod.parser().parse_args(["--url", e.base, "--out", _tmp(), "--rows", "length.1k",
                                                        "--hw", "fake"]), log=lambda *x: None)
