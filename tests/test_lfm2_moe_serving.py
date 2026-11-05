@@ -28,6 +28,11 @@ from engine.models.lfm2_moe.ref import LfmState  # noqa: E402
 from engine.models.lfm2_moe.serving import Lfm2MoeServing  # noqa: E402
 from tests.test_lfm2_moe_ref import TINY  # noqa: E402
 
+_GPU_NO_INLINE = types.SimpleNamespace(
+    profile=lambda d=None: types.SimpleNamespace(inline=lambda kind: False))
+_GPU_INLINE = types.SimpleNamespace(
+    profile=lambda d=None: types.SimpleNamespace(inline=lambda kind: True))
+
 
 def _raises(fn, *needles):
     try:

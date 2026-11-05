@@ -102,7 +102,7 @@ def test_norm_rot_bits():
 
 
 if __name__ == "__main__":
-    if not _gpu.profile(torch.device("cuda").inline("exl3_linear")):
+    if not _gpu.profile(torch.device("cuda")).inline("exl3_linear"):
         sys.exit("skipped: the inline bit contract is the GB10 dispatch; this arch takes the non-inline paths")
         test_slab_rot_bits()
     test_mlp_bits()

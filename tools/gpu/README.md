@@ -41,6 +41,8 @@ its launch shape.
 | `arch_flags(kind)` | every inline extension's build (`INLINE`) | `-gencode=arch=compute_121a,code=sm_121a` | `NoInlineBuild` |
 | `inline(kind)` | modules that check before building | yes, every kind | no |
 | `pdl()` | `fn_kernels`, `fn_seq_kernels`, `exl3_linear`, the 27B's fragment kernels | yes | no |
+| `cluster()` | `fn_kernels.dense`, `fn_kernels.dense_rows`, `exl3_linear` | yes | from `sm_90` |
+| `e2m1()` | `nvfp4_linear`, `nvfp4_linear_v2` | yes | from `sm_120` |
 | `moe_launch()` | `fn_kernels` | `QWEN38_FN_MOE_ST`, `QWEN38_FN_MOE_WARPS` (3, 4) | `NoInlineBuild` |
 | `dense_split(N, Kin, kb, table)` | `fn_kernels.dense_split` | the table, else a cluster of up to 8 CTAs below 96 column blocks, 4 warps | `NoInlineBuild` |
 | `skinny_rows()` | `nvfp4_skinny.use_skinny`, the GGUF NVFP4 linear | 32 | 0 |

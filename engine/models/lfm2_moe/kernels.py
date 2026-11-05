@@ -438,6 +438,7 @@ def combine_add_rms(h: torch.Tensor, yd: torch.Tensor, ids: torch.Tensor, wts: t
             or w.shape[0] != N or not w.is_contiguous()):
         return None
     from tools import fn_kernels as FK
+    from tools import gpu as _gpu
     hn = torch.empty_like(h)
     nn = torch.empty_like(h)
     _combine_add_rms[(M,)](yd, ids.contiguous(), wts.contiguous(), h, hn, nn, w, eps, N=N, S=S,

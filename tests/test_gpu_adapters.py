@@ -85,9 +85,9 @@ def test_gb10_moe_launch_reads_its_knobs_with_mains_defaults():
             if v is not None:
                 os.environ[k] = v
     from engine.settings import KNOBS
-    assert KNOBS["FN_MOE_ST"] == ("3", "tools/gpu/gb10.py")
-    assert KNOBS["FN_MOE_WARPS"] == ("4", "tools/gpu/gb10.py")
-    return "(3, 4) by default, the knobs read live, owned by gb10.py"
+    assert KNOBS["FN_MOE_ST"] == (None, "tools/fn_kernels.py")
+    assert KNOBS["FN_MOE_WARPS"] == (None, "tools/fn_kernels.py")
+    return "(3, 4) by default, the knobs read live, the defaults in the adapter"
 
 
 def test_gb10_dense_split_is_mains():
@@ -131,11 +131,28 @@ def test_an_unknown_gpu_and_the_cpu_get_the_base():
     return "no inline build, no skinny rows, no PDL; bf16 from sm_80; the name as the device key"
 
 
-def test_ada_answers_like_the_base_on_main():
+def test_ada_builds_its_extensions_and_keeps_the_base_paths():
     p = gpu.profile_for(*ADA)
-    _base_like(p)
+    for kind in INLINE:
+        if kind in ("fn_kernels", "fn_prefill_kernels"):
+            assert p.arch_flags(kind) == ["-gencode=arch=compute_89,code=sm_89"], kind
+            assert p.inline(kind)
+        else:
+            try:
+                p.arch_flags(kind)
+                raise AssertionError(f"ada built {kind}")
+            except NoInlineBuild:
+                pass
+            assert not p.inline(kind)
+    assert p.moe_launch() == (4, 8)
+    # the emulated split's rule: the table verbatim, else the sm_89 rule's answer
+    assert p.dense_split(2048, 4096, 4, {(2048, 4096, 4): (2, 8)}) == (8, 8)  # the rule's S, the table's warps
+    assert p.dense_split(2048, 4096, 4, {}) == (8, 4)
+    assert p.dense_split(128, 512, 4, {}) == (1, 4)
+    assert not p.pdl() and not p.cluster() and not p.e2m1()
+    assert p.skinny_rows() == 0 and not p.unified_memory
     assert p.bf16() and p.device_key() == "nvidia-geforce-rtx-4090"
-    return "sm_89: the base's answers, bf16"
+    return "sm_89: fn_kernels/fn_prefill_kernels build, the emulated split, no PDL/cluster/e2m1"
 
 
 # ------------------------------------------------------------------ 4: once

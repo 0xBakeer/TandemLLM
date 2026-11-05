@@ -233,6 +233,11 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
     return _gpu.profile().dense_split(N, Kin, kb, DENSE_SPLIT)
 
 
+#: `dense` routes M in [DENSE_ROWS_MIN_M, 32] bf16-contiguous calls to `dense_rows` (the row-group
+#: kernel; same bits a row, amortized tile decode). Set to 33+ to keep the per-row kernel always.
+DENSE_ROWS_MIN_M = 4
+
+
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """x [M <= 32, Kin] bf16 @ EXL3Block^T -> [M, N] (bf16, or fp32 for an `out_fp32` block): the input
     rotation fused, K over a cluster, programmatic dependent launch; an M-row call's rows are its

@@ -204,7 +204,7 @@ def test_moe_group_bitwise():
     # ENG-241: at M>=4 `moe_experts` walks same-expert pairs through <=8-row CTAs whose tile
     # decode amortizes across the group. Every pair's yd equals the ungrouped path's bitwise,
     # whatever the routing -- including the real pack's shared-expert column (last slot = E).
-    if not _gpu.profile(torch.device(DEV).inline("fn_kernels")):
+    if not _gpu.profile(torch.device(DEV)).inline("fn_kernels"):
         return "skipped: the group kernels are a CUDA path"
     for kbs in ([25] * 8, [2, 25] * 4, [4] * 4):
         bank = _bank(kbs)
@@ -220,7 +220,7 @@ def test_moe_group_bitwise():
 def test_moe_group_companion_permutation():
     # a row's bits cannot depend on which rows share its CTA: hold row 0 fixed, permute its
     # companions, its pairs' yd must not change.
-    if not _gpu.profile(torch.device(DEV).inline("fn_kernels")):
+    if not _gpu.profile(torch.device(DEV)).inline("fn_kernels"):
         return "skipped: the group kernels are a CUDA path"
     bank = _bank([25] * 8)
     g = torch.Generator().manual_seed(13)
@@ -240,7 +240,7 @@ def test_moe_group_companion_permutation():
 def test_moe_group_boundary_runs():
     # runs of one expert around the MOE_GR=8 split: exactly 8, 9 (8+1), 16 (8+8), 17 (8+8+1);
     # plus every pair on one expert (the all-same adversarial case). All bitwise vs ungrouped.
-    if not _gpu.profile(torch.device(DEV).inline("fn_kernels")):
+    if not _gpu.profile(torch.device(DEV)).inline("fn_kernels"):
         return "skipped: the group kernels are a CUDA path"
     bank = _bank([25] * 8)
     g = torch.Generator().manual_seed(17)
