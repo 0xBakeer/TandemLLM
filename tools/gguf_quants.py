@@ -1936,8 +1936,7 @@ def _cap(tid: int, N: int, K: int) -> int:
 
 
 # (tid, N, K) -> (BN, num_warps, num_stages) on Ada: interleaved-A/B winners over the default
-# launch at M=1 that also held at M=33 (proto/sweep_s3.py + proto/ab_cfg.py). No entry -> the
-# class's built-in default.
+# launch at M=1 that also held at M=33. No entry -> the class's built-in default.
 _GEMM_CFG = {
     (10, 14336, 4096): (32, 4, 1),   # Q2_K
     (11, 14336, 4096): (32, 2, 2),   # Q3_K

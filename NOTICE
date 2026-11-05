@@ -32,9 +32,10 @@ Weight-format code in tools/ (the EXL3 and GGUF readers):
   Turboderp: the EXL3 bit extraction and mul1 codebook decode in tools/csrc/exl3_linear/exl3.cu
   (built by tools/exl3_linear.py, and in part by tools/fn_kernels.py and tools/fn_prefill_kernels.py)
   were ported from it; the license text is kept with the ported code in tools/csrc/exl3_linear/exl3.cu.
-- The IQ2_XXS grid and sign tables in tools/iq2_linear.py are the GGUF format's constants as
-  published in ggml (https://github.com/ggml-org/ggml), MIT License, Copyright (c) 2023-2024 The
-  ggml authors.
+- The IQ2_XXS grid and sign tables in tools/iq2_linear.py, the IQ lattice grids in
+  tools/gguf_grids.py and the block layouts and decode order in tools/gguf_quants.py are the GGUF
+  format's constants as published in ggml (https://github.com/ggml-org/ggml), MIT License,
+  Copyright (c) 2023-2024 The ggml authors.
 
 Drafter code in engine/drafters/ (the arithmetic was first adapted from these works, then
 rewritten in this repository with bit-identical outputs):
