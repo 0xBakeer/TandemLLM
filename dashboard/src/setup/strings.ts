@@ -146,6 +146,9 @@ export const S = {
   parallelCard: (one: number | null, n: number, top: number | null) =>
     n === 1 ? `${one == null ? '–' : one.toFixed(1)} tok/s alone` : `${one == null ? '–' : one.toFixed(1)} alone, ${top == null ? '–' : top.toFixed(1)} with ${n} at once`,
   weightsAtOnce: 'Parallel',
+  /** #101: the chats a card serves at once, and what a request over them does */
+  parallelSlots: (n: number) => `${n === 1 ? 'One chat' : `${n} chats`} at once: one more waits in the queue.`,
+  weightsSlots: 'Slots',
 
   // weights
   weightsKl: 'KL vs original',
