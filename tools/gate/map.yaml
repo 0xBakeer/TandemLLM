@@ -1,0 +1,197 @@
+# Which gate a pull request needs, from the paths it changes (docs/quality-gate.md).
+#
+# Levels, lowest first: none, quick, quick+long, full. Every changed file takes the highest level of
+# the rules it matches; the pull request takes the highest level of its files. A file that matches no
+# rule takes `default`. Globs: `*` stays inside one folder, `**` crosses folders, `{a,b}` is either.
+#
+# `kernels` maps changed paths to the GPU tests in tests/gpu/ that the kernels suite runs (every test
+# of every matching entry). tests/test_gate_map.py checks that every file named here exists and that
+# every tests/gpu/test_*.py is named by at least one entry.
+
+default: quick
+
+rules:
+  # text, pictures, the dashboard and the CPU-only parts: no GPU run
+  - level: none
+    paths:
+      - 'docs/**'
+      - 'manual/**'
+      - 'dashboard/**'
+      - '*.md'
+      - 'CITATION.cff'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.gitignore'
+      - '.github/**'
+      - 'models/*/community/**'
+      - 'models/community-*.json'
+      - 'models/*/measurements/**'
+      - 'models/*/*.md'
+      - 'chatd/**'
+      - 'proxy/**'
+      - 'plugins/**'
+      - 'packages/**'
+      - 'tests/test_*.py'
+      - 'tests/fixtures/**'
+      - 'tests/data/**'
+      - 'tests/*.py'
+      - 'ops/monitoring/**'
+      - 'ops/sandbox/**'
+      - 'ops/chatd.*'
+      - 'ops/Dockerfile.dash*'
+      - 'ops/dash.env.example'
+      - 'server/setup/**'
+      - 'server/setup_api.py'
+      - 'server/dashboard_api.py'
+      - 'server/conductor/**'
+      - 'server/laya_kit/**'
+      - 'server/static.py'
+      - 'server/METRICS.md'
+      - 'tools/gate/**'
+      # the gate's own instruments (CPU tests hold them) and the label list
+      - 'tools/row3.py'
+      - 'tools/rowlog.py'
+      - 'tools/parallel_card.py'
+      - 'tools/soak.py'
+      - 'tools/gh_labels.sh'
+
+  # the engine, the models and the kernels: the quick gate
+  - level: quick
+    paths:
+      - 'engine/**'
+      - 'models/*/model.yaml'
+      - 'models/*/*.json'
+      - 'ops/profiles/**'
+      - 'ops/*-tiles*.json'
+      - 'ops/*-splits.json'
+      - 'ops/fn-*.json'
+      - 'ops/fn-hot-vocab.npy'
+      - 'ops/stair-tables-*.json'
+      - 'ops/lookup-rho.json'
+      - 'tools/csrc/**'
+      - 'tools/*kernels*.py'
+      - 'tools/*_linear*.py'
+      - 'tools/nvfp4_*.py'
+      - 'tools/exl3_*.py'
+      - 'tools/head_*.py'
+      - 'tools/small_linear.py'
+      - 'tools/fp8_linear.py'
+      - 'tools/iq2_linear.py'
+      - 'tools/gpu/**'
+      - 'tests/gpu/**'
+      - 'bench/**'
+      - 'server/app.py'
+      - 'server/stream.py'
+      - 'server/compat.py'
+      - 'server/toolcall.py'
+      - 'server/toolformats/**'
+      - 'server/logprobs.py'
+      - 'server/tokenize_api.py'
+      - 'server/thinking.py'
+      - 'server/sampling_defaults.py'
+      - 'server/images.py'
+
+  # memory, the scheduler and the server's request path: quick and the whole long suite
+  - level: quick+long
+    paths:
+      - 'engine/cache.py'
+      - 'engine/kvpool.py'
+      - 'engine/spill.py'
+      - 'engine/disk_cache.py'
+      - 'engine/verify_graph.py'
+      - 'engine/models/graph_lru.py'
+      - 'engine/models/state.py'
+      - 'engine/models/*/serving.py'
+      - 'engine/models/*/joint_*.py'
+      - 'engine/models/qwen3_5/round/**'
+      - 'server/slots.py'
+      - 'server/parallel.py'
+      - 'server/preempt.py'
+      - 'server/prefill_burst.py'
+      - 'server/round_runner.py'
+      - 'server/queue_wait.py'
+      - 'server/memlimits.py'
+      - 'server/memsplit.py'
+      - 'server/rolemem.py'
+      - 'server/diskcache.py'
+      - 'server/cache_peek.py'
+      - 'server/endalign.py'
+      - 'server/tokcache.py'
+      - 'server/health_cache.py'
+      - 'ops/serve*.env'
+      - 'ops/start.sh'
+      - 'ops/stop.sh'
+      - 'ops/engines.sh'
+      - 'ops/supervisor.*'
+      - 'install.sh'
+
+  # a release: everything, the stability run included
+  - level: full
+    paths:
+      - 'VERSION'
+      - 'tools/release.sh'
+      - 'tools/release_box_gate.sh'
+      - 'tools/release_gate_setup.sh'
+      - 'ops/gate.sh'
+
+kernels:
+  - paths: ['tools/gpu/**']
+    tests:
+      - tests/gpu/test_gpu_profile_gpu.py
+      - tests/gpu/test_fn_kernels_gpu.py
+      - tests/gpu/test_fn_prefill_kernels_gpu.py
+      - tests/gpu/test_fn_seq_kernels_gpu.py
+      - tests/gpu/test_exl3_slab_gemm_gpu.py
+      - tests/gpu/test_exl3_silu_gpu.py
+      - tests/gpu/test_skinny_gpu.py
+  - paths: ['engine/models/flashnext/**', 'tools/fn_*kernels*.py', 'tools/csrc/fn_*/**']
+    tests:
+      - tests/gpu/test_fn_kernels_gpu.py
+      - tests/gpu/test_fn_prefill_kernels_gpu.py
+      - tests/gpu/test_fn_seq_kernels_gpu.py
+      - tests/gpu/test_fn_attn_multi_gpu.py
+      - tests/gpu/test_fn_gemv_nb_gpu.py
+      - tests/gpu/test_fn_mixer_mma_gpu.py
+      - tests/gpu/test_fn_joint_graph_gpu.py
+      - tests/gpu/test_fn_joint_prefill_gpu.py
+  - paths: ['engine/gdn.py', 'tools/gdn_*.py']
+    tests:
+      - tests/gpu/test_gdn_gpu.py
+      - tests/gpu/test_gdn_chunked_gpu.py
+      - tests/gpu/test_gdn_prep_gpu.py
+      - tests/gpu/test_gdn_wy_gpu.py
+  - paths: ['engine/linear.py', 'tools/exl3_*.py', 'tools/csrc/exl3_*/**', 'ops/*-tiles*.json']
+    tests:
+      - tests/gpu/test_exl3_mlp_bridge_gpu.py
+      - tests/gpu/test_exl3_rowgrid_gpu.py
+      - tests/gpu/test_exl3_silu_gpu.py
+      - tests/gpu/test_exl3_slab_gemm_gpu.py
+      - tests/gpu/test_dflash2_exl3_gpu.py
+  - paths: ['tools/nvfp4_*.py', 'tools/csrc/nvfp4_*/**', 'tools/head_*.py', 'tools/small_linear.py']
+    tests:
+      - tests/gpu/test_skinny_gpu.py
+      - tests/gpu/test_notes_head_grid_gpu.py
+      - tests/gpu/test_draft_fc_gpu.py
+  - paths: ['engine/models/lfm2_moe/**']
+    tests:
+      - tests/gpu/test_lfm2_moe_gpu.py
+      - tests/gpu/test_lfm2_moe_box_gpu.py
+  - paths: ['engine/models/nemotron_h/**']
+    tests:
+      - tests/gpu/test_nemotron_h_exl3_gpu.py
+  - paths: ['engine/models/qwen3_5/**', 'engine/drafters/**', 'engine/methods/**', 'engine/{spec,tree,router,lenrouter}.py']
+    tests:
+      - tests/gpu/test_attn_group_gpu.py
+      - tests/gpu/test_df2_kv_window_gpu.py
+      - tests/gpu/test_drafter_window_gpu.py
+      - tests/gpu/test_verify_class_edge_gpu.py
+      - tests/gpu/test_window_yield_gpu.py
+      - tests/gpu/test_gate_rows_gpu.py
+  - paths: ['engine/kvpool.py', 'engine/models/graph_lru.py', 'engine/verify_graph.py', 'server/slots.py', 'server/round_runner.py']
+    tests:
+      - tests/gpu/test_kvpool_identity_gpu.py
+      - tests/gpu/test_idle_capture_class_gpu.py
+      - tests/gpu/test_prefill_joint_gpu.py
+  - paths: ['server/rolemem.py', 'engine/models/qwen3_5_moe/**']
+    tests:
+      - tests/gpu/test_roles_dynamic_gpu.py

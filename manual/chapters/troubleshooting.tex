@@ -4,7 +4,7 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 
 \section{Installing}\label{sec:trouble-install}
 
-\paragraph{The installer stops: no tag, branch or commit 'v0.15.0'.} The repository it clones has no such tag. The installer clones the repository \code{--repo} names, the public one by default, at the tag \code{--ref} names, \code{v0.15.0} by default. To install from another repository, such as a fork, pass its address with \code{--repo}. The same missing tag makes \code{curl} answer 404 for the installer's own URL.
+\paragraph{The installer stops: no tag, branch or commit 'v0.15.2'.} The repository it clones has no such tag. The installer clones the repository \code{--repo} names, the public one by default, at the tag \code{--ref} names, \code{v0.15.2} by default. To install from another repository, such as a fork, pass its address with \code{--repo}. The same missing tag makes \code{curl} answer 404 for the installer's own URL.
 
 \paragraph{\texttt{install.sh -{}-setup} refuses: the directory already has a configured engine.} A box that switched to a profile counts as configured, and \code{--setup} would stop that engine. To update it, add \code{--force-setup}, then run \code{use-profile.sh} with the profile again; its files are already on disk.
 
@@ -47,6 +47,8 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 \paragraph{The model writes ``Laya unavailable''.} Its scripts could not reach the engine from where they run. Set \code{QWEN38_TANDEM_URL} to an address that machine reaches.
 
 \section{The Chat tab}\label{sec:trouble-chat}
+
+The Chat tab is in beta (\ref{ch:chat}).
 
 \paragraph{The Chat tab asks before every bash command.} The chat runs in Ask mode. The pill in the composer's options row names the mode; pick Auto there, and calls that stay inside the chat's sandbox run without a prompt from the next call on. The default for new chats is at the top of the Tools settings page. A chat from before 0.8.2 has no mode of its own and runs in the default (Section~\ref{sec:chat-modes}).
 

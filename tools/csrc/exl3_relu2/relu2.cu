@@ -333,7 +333,7 @@ void nh_relu2_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, to
     TORCH_CHECK(ids.dtype() == torch::kInt && order.dtype() == torch::kInt && order.numel() == P, "ids/order int32 [P]");
     TORCH_CHECK(g.dtype() == torch::kInt && g.size(0) >= P && g.size(1) == 2 + MOE_GR && ng.numel() == 1, "groups");
     moe_groups_kernel<<<1, 32, 0, st>>>((const int*)ids.data_ptr(), (const int*)order.data_ptr(), P, (int*)g.data_ptr(),
-                                        (int*)ng.data_ptr());
+                                        (int*)ng.data_ptr(), MOE_GR);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

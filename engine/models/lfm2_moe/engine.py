@@ -46,7 +46,7 @@ ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
 #: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
-DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
+DENSE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 
 
 #: whether SDPA's flash kernel takes the KV heads as they are on this device (None: not asked yet)
@@ -166,8 +166,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         if _is_exl3(w):
-            # fn_kernels.dense takes K 2..6 and 8; a K-7 tensor (a 6.0 pack's) takes the library's skinny
-            # kernel, whose split is the shape's too (row-invariant up to 32 rows, tools/exl3_linear.py)
+            # fn_kernels.dense takes K 2..8 and the half-integer rates; past ROWS_MAX rows the library's
+            # skinny kernel, whose split is the shape's too (row-invariant up to 32 rows, tools/exl3_linear.py)
             y = FK.dense(x2, w) if x2.shape[0] <= ROWS_MAX and w.kb in DENSE_K else exl3_matmul(x2, w)
             return y.view(*x.shape[:-1], w.N)
         if x2.shape[0] <= ROWS_MAX:
@@ -588,7 +588,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.routed_scaling_factor)
                 if li in self.banks:
                     from tools import fn_prefill_kernels as PK
-                    yd = PK.moe_grouped(n, ids, self.banks[li])
+                    yd = PK.moe_grouped(n, ids, self.banks[li], rows=32)   # 64 was checked on Flash-Next only
                 else:
                     yd = self._moe_bf16_chunk(n, ids, li)
                 m = FK.moe_combine(yd, ids, wts) if dev.type == "cuda" else K.combine_reference(yd, ids, wts)

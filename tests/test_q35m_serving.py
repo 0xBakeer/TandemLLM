@@ -63,6 +63,7 @@ def test_cost_and_state_have_no_flash_next_parts():
     assert cost.workspace_per_token == c.num_attention_heads * c.head_dim * 2 * 2
     assert cost.workspace_floor == int(2.75 * (1 << 30))
     assert cost.workspace_cap == cost.workspace_floor + cost.workspace_per_token * srv.max_len
+    assert cost.workspace_rows is None, "SRV-773: Flash-Next's model by forwarded rows is not this trunk's"
 
 
 if __name__ == "__main__":

@@ -179,6 +179,51 @@ KNOBS: dict[str, tuple] = {
     # questions, a client's title or tags task) takes an idle side slot first; off: slot 0 as a
     # guest with the stash, as before
     'SIDE_GUESTS': ('on', 'server/app.py'),
+    # SPD-249: the router skips its Qwen stage at once when the server's queue says the answer
+    # cannot come inside the stage's timeout (`qwen_busy`); off: it asks and waits out the timeout
+    'OWN_ETA': ('on', 'server/app.py'),
+    # SRV-763: the prefill rate that estimate reads: `solo`, the requests whose prefill had the GPU
+    # turn alone (a burst's shared prefills read 5x slower); `all`, every request's, as before
+    'OWN_RATE': ('solo', 'server/app.py'),
+    # SRV-763: the other slots it charges a turn each: `prefill`, a slot while it prefills (the
+    # chunk it is on), decodes, or holds a request that has not reached its prefill (its rows, up
+    # to a chunk); `busy`, every busy slot that does not decode a whole chunk, as before (a slot in
+    # its end's bookkeeping read 3.8 s a turn on an idle box)
+    'OWN_UNITS': ('prefill', 'server/app.py'),
+    # SRV-763: the rate of its burst term (the other requests in the router or waiting for a slot):
+    # `peek`, every request's, as before (a burst's prefills share the GPU); `solo`, OWN_RATE's
+    'OWN_BURST_RATE': ('peek', 'server/app.py'),
+    # SPD-249: TandemLLM's own raw questions (the router's) take an idle side slot: one short enough
+    # for the side lane instead of the lane when slot 0 is busy, a longer one without waiting
+    # SIDE_AFTER_OWN_S behind other own work; off: the lane and the wait, as before
+    'OWN_SIDE': ('on', 'server/app.py'),
+    # SPD-249: the conductor's stable notes (class note, memory card, memory index) at the end of the
+    # system message on a conversation's first turn, so chats share that head in the prefix cache;
+    # off: every note at the last message's end, as before
+    'NOTES_HEAD': ('off', 'server/conductor/router.py'),
+    # SRV-763: a turn whose class question the server could not answer in time asks nothing more;
+    # in a profile that names an undecided class (chat-app) a new session nobody classified takes
+    # it (lean when the server was busy), any other keeps its default class's whole policy;
+    # `class`: the default class's whole policy and the package question, as before
+    'FAIL_OPEN': ('general', 'server/conductor/router.py'),
+    # SRV-765: the head's order, `memory` (the memory card and the index, then the class's note) or
+    # `class` (the class's note first, as before)
+    'NOTES_HEAD_ORDER': ('memory', 'server/conductor/router.py'),
+    # SRV-765: the session's address for the memory routes in a tail note once a session
+    # (`note`), so the index is the same text in every chat; `index`: in the index, as before;
+    # `auto`: `note` only where the index goes in the notes head (NOTES_HEAD on), else `index`
+    'MEMORY_ROUTES': ('auto', 'server/conductor/memory.py'),
+    # VIS-119: a shadow decision's question to the served model on this server's own port (the
+    # library's package question in shadow) is asked after the turn, once the server has been idle
+    # SHADOW_ASK_IDLE_S seconds (`idle`); `inline`: before the queue, as before; `off`: never
+    'SHADOW_ASK': ('idle', 'server/conductor/deferred.py'),
+    'SHADOW_ASK_IDLE_S': ('5', 'server/conductor/deferred.py'),
+    # VIS-119: on a class whose package answer holds for the session's class, `pick`: a picked
+    # package only; `answer`: an answer of none holds too, for the candidates it was asked over.
+    # The library question is asked on every new user message (`message`) or once per class
+    # (`class`)
+    'PACKAGE_HOLD': ('pick', 'server/conductor/router.py'),
+    'LIBRARY_HOLD': ('message', 'server/conductor/libsearch.py'),
     # A request continues slot 0's conversation only when the part it shares reaches
     # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),
@@ -201,6 +246,13 @@ KNOBS: dict[str, tuple] = {
     'SIDE_HOME_WAIT_S': ('10', 'server/app.py'),
     'SIDE_RESIDENT_GB': ('0.5', 'server/app.py'),
     'SIDE_STASH_GB': ('1.0', 'server/app.py'),
+    # SPD-257: the end anchor's buffers are each resident prefix's own from the load (off: asked of the policy)
+    'END_RESERVE': ('on', 'server/app.py'),
+    # SPD-257: a side slot's guest chat becomes the slot's conversation at its end (off: its end is not kept)
+    'SIDE_GUEST_END': ('promote', 'server/app.py'),
+    'SIDE_GUEST_IDLE_S': ('300', 'server/app.py'),
+    # SPD-257: a new conversation takes the free side slot served longest ago (off: the lowest free one)
+    'SIDE_LRU': ('on', 'server/app.py'),
     # FX16: the end alignment's third pass (a block the client moved from an earlier message to
     # its last one is served where the model saw it), and the prompt length from which a turn
     # the end anchor did not serve says why in the log
@@ -355,10 +407,25 @@ KNOBS: dict[str, tuple] = {
     # Flash-Next kernels launched with programmatic dependent launch (overlap a launch with its
     # predecessor's tail; the bits do not change)
     'FN_PDL': ('1', 'tools/fn_kernels.py'),
-    # cp.async stages of a warp in the MoE kernels (2..4; the bits do not depend on it)
-    'FN_MOE_ST': ('3', 'tools/fn_kernels.py'),
-    # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
-    'FN_MOE_WARPS': ('4', 'tools/fn_kernels.py'),
+    # cp.async stages of a warp in the MoE kernels on the GB10 (2..4; the bits do not depend on it)
+    'FN_MOE_ST': ('3', 'tools/gpu/gb10.py'),
+    # warps a MoE CTA splits its K range over on the GB10 (4 or 8; sets the order of the partial sums)
+    'FN_MOE_WARPS': ('4', 'tools/gpu/gb10.py'),
+    # SPD-249: grid rows of the grouped MoE kernels (0: one a pair); a CTA then loops over every
+    # n-th group, each group's arithmetic unchanged (the bits do not depend on it)
+    'FN_MOE_GY': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped gate|up kernel's rows rotated once a pair by a staging kernel, not in
+    # each CTA of a group (the same arithmetic; the bits do not depend on it)
+    'FN_MOE_STAGE': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: a grouped MoE CTA's cap of pairs (1..8): less shared memory a CTA, more CTAs an SM
+    # (a row's bits are its own; the cap only moves rows between groups)
+    'FN_MOE_GR': ('8', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped MoE kernels with their rows staged once a pair and streamed beside the trellis tiles
+    # (no rows in shared memory: more CTAs an SM); a row's products and their order unchanged (the same bits)
+    'FN_MOE_AS': ('0', 'tools/fn_kernels.py'),
+    # SPD-249: the grouped MoE kernels' groups from one block's scans (P <= 1024) instead of one thread's walk (the
+    # same groups, order and slots)
+    'FN_MOE_GPAR': ('0', 'tools/fn_kernels.py'),
     # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
     # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
@@ -379,6 +446,8 @@ KNOBS: dict[str, tuple] = {
     # (tools/fn_prefill_kernels.py: experts grouped by expert, mixers and the router on the library
     # GEMM, attention over each row's visible keys); "ref" = the reference's batched forward
     'FN_PREFILL': ('kernels', 'engine/models/flashnext/engine.py'),
+    # rows an item of the prefill kernels' MoE group GEMM takes: 64 or 32 (any other value refuses)
+    'FN_GROUP_ROWS': ('64', 'tools/fn_prefill_kernels.py'),
     # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
     'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =

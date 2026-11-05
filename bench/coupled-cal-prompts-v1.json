@@ -1,0 +1,81 @@
+{
+ "version": "coupled-cal-v1",
+ "doc": "SPD-249: the held-out calibration prompts for Flash-Next's coupled MTP drafts (prompt i seeded 3000 + i for ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.coupled.json). None is a bench prompt (bench/card-prompts-v1.json, bench/heldout_prose.txt, tools/exl3_fastrun.py's requests): prose, chat and code, each a user turn through the chat template with thinking off. The text is versioned: any change to it is a new file with a new version.",
+ "prompts": [
+  {
+   "name": "prose-harbour",
+   "class": "prose",
+   "text": "Write an essay of about 800 words on how a coastal fishing village adapted when its harbour silted up over two generations. Follow the harbour master's family, and let the change come through the boats, the weather and the town's arguments about dredging. Use flowing paragraphs with no headings or lists."
+  },
+  {
+   "name": "prose-nurse",
+   "class": "prose",
+   "text": "Tell a short story of about 700 words about a night-shift nurse who finds an unsent letter in a hospital's lost-property box and decides to deliver it. Use dialogue sparingly and end on a quiet note."
+  },
+  {
+   "name": "prose-water",
+   "class": "prose",
+   "text": "Explain to a curious teenager, in about 600 words of plain prose, how a city's water reaches the tap: reservoirs, treatment, pumping, pressure, pipes and leaks. Do not use lists or headings."
+  },
+  {
+   "name": "prose-cooking",
+   "class": "prose",
+   "text": "Write a reflective piece of about 700 words on learning to cook from a grandparent who never wrote a recipe down, and on what was lost and kept when the dishes passed to the next generation."
+  },
+  {
+   "name": "prose-lighthouse",
+   "class": "prose",
+   "text": "Describe, in about 700 words of continuous prose, one day in the life of a lighthouse keeper on a rocky island in 1900, from the dawn checks of the lamp to the night watch in a storm."
+  },
+  {
+   "name": "chat-laptop",
+   "class": "chat",
+   "text": "My laptop fan runs loudly even when I'm only reading email. What could cause that, and what can I check myself before I take it to a repair shop?"
+  },
+  {
+   "name": "chat-lisbon",
+   "class": "chat",
+   "text": "I'm planning a three-day trip to Lisbon in March on a small budget. What should I see, which areas are good to stay in, and how should I get around the city?"
+  },
+  {
+   "name": "chat-ira",
+   "class": "chat",
+   "text": "Can you explain the difference between a Roth IRA and a traditional IRA, and how someone in their late twenties might decide between them?"
+  },
+  {
+   "name": "chat-coworker",
+   "class": "chat",
+   "text": "I keep putting off a difficult conversation with a coworker who presents my work as his own in meetings. How should I prepare for it and what should I say?"
+  },
+  {
+   "name": "chat-baking",
+   "class": "chat",
+   "text": "What is the difference between baking soda and baking powder, and can I use one in place of the other in a cake recipe? Explain the chemistry briefly."
+  },
+  {
+   "name": "code-lru",
+   "class": "code",
+   "text": "Write a Python class LRUCache with get and put that both run in O(1), using a dict and a doubly linked list rather than OrderedDict. Include type hints, docstrings, and a unittest module with at least six tests."
+  },
+  {
+   "name": "code-csv",
+   "class": "code",
+   "text": "Write a Python command-line tool that reads a CSV file of transactions with the columns date, amount and category, and prints the monthly total per category as a table. Use argparse and the csv module, skip malformed rows with a warning on stderr, and add a main guard."
+  },
+  {
+   "name": "code-dijkstra",
+   "class": "code",
+   "text": "Implement Dijkstra's shortest path algorithm in Python using heapq, for a graph given as a dict of adjacency lists with edge weights. Return the distances and the path to a given target, raise ValueError for negative weights, and add pytest tests."
+  },
+  {
+   "name": "code-debounce",
+   "class": "code",
+   "text": "Write a JavaScript function debounce(fn, wait, options) that supports a leading-edge option and a cancel method, with JSDoc comments, and show how to use it on a search input that calls a fetch request."
+  },
+  {
+   "name": "code-sql",
+   "class": "code",
+   "text": "Write a PostgreSQL schema for a small lending library with tables for books, members and loans, with keys and constraints, then three queries: overdue loans with the member's name, the ten most borrowed books this year, and members who have never borrowed a book."
+  }
+ ]
+}

@@ -1,5 +1,5 @@
 """NemotronH on the board: the reference forward with its weight reads on the kernels, a row step that
-serves a decode token and a verify block of up to 32 rows with the same per-row arithmetic, and the
+serves a decode token and a verify block of up to 33 rows with the same per-row arithmetic, and the
 step as a CUDA graph.
 
 `NemotronHRef` (ref.py) is the model, checked against `transformers`. This class keeps its structure:
@@ -48,12 +48,15 @@ from engine.models.nemotron_h.ref import NemotronHRef, NhState, softplus
 
 #: rows a prompt chunk takes (the caches' anchor grid)
 PREFILL_CHUNK = 4096
-#: rows up to which a projection runs on the row-invariant kernels (their limit, the verify width)
+#: rows of a joint pass, and of one tools/fn_kernels.dense or dense_rows call
 ROWS_MAX = 32
-#: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
+#: SPD-255: rows of a verify block (the anchor and ROWS_MAX drafted rows; the row kernels' K.ANC). Every
+#: projection and the head of a call of up to this many rows run on the row-invariant kernels
+BLOCK_ROWS = ROWS_MAX + 1
+#: rows a captured step, verify block or commit may write past the length (a block is at most BLOCK_ROWS)
 CAPTURE_ROWS = 64
 #: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
-DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
+DENSE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 
 
 #: SPD-125: the EXL3 projections of decode steps and verify blocks on tools/fn_kernels.dense_rows (each trellis
@@ -63,17 +66,31 @@ DENSE_ROWS = os.environ.get("QSE_NH_DENSE_ROWS", "on") != "off"
 
 
 def _exl3_mm(x2: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
-    """An EXL3 projection (ENG-E12): tools/fn_kernels.dense_rows up to 32 rows (`dense`'s bytes, row-invariant,
-    DENSE_ROWS), the library's GEMM above that or at a rate dense does not take; on the CPU the torch reference a
-    row at a time (row-invariant as the kernels are: a verify block's rows are the decode step's)."""
+    """An EXL3 projection (ENG-E12): tools/fn_kernels.dense_rows up to BLOCK_ROWS rows (`dense`'s bytes,
+    row-invariant, DENSE_ROWS), the library's GEMM above that or at a rate dense does not take; on the CPU the
+    torch reference a row at a time (row-invariant as the kernels are: a verify block's rows are the decode
+    step's)."""
     from tools import fn_kernels as FK
     from tools.exl3_linear import exl3_matmul
     if not x2.is_cuda:
         y = torch.cat([exl3_matmul(x2[i:i + 1], w) for i in range(x2.shape[0])])
         return y if out is None else out.copy_(y)
-    if x2.shape[0] <= ROWS_MAX and w.kb in DENSE_K:
-        return (FK.dense_rows if DENSE_ROWS else FK.dense)(x2, w, out=out)
+    if x2.shape[0] <= BLOCK_ROWS and w.kb in DENSE_K:
+        return _in_row_calls(FK.dense_rows if DENSE_ROWS else FK.dense, x2, w, out)
     return exl3_matmul(x2, w, out=out)
+
+
+def _in_row_calls(fn, x2: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
+    """SPD-255: `fn` (dense or dense_rows, ROWS_MAX rows a call) over up to BLOCK_ROWS rows, in calls of
+    ROWS_MAX rows: each row's bytes are its one-row call's whatever call it is in."""
+    M = x2.shape[0]
+    if M <= ROWS_MAX:
+        return fn(x2, w, out=out)
+    if out is None:
+        out = torch.empty(M, w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x2.device)
+    for a in range(0, M, ROWS_MAX):
+        fn(x2[a:a + ROWS_MAX], w, out=out[a:a + ROWS_MAX])
+    return out
 
 
 def _is_exl3(w) -> bool:
@@ -180,7 +197,7 @@ class NemotronHEngine(NemotronHRef):
         if not torch.is_tensor(w):
             # a packed weight (tools/iq2_linear: IQ2Linear, NVFP4Linear): its own row-invariant kernel at any row count
             return w.matmul(x2, out=out).view(*x.shape[:-1], w.shape[0])
-        if x2.shape[0] <= ROWS_MAX:
+        if x2.shape[0] <= BLOCK_ROWS:
             return K.linear_rows(x2, w, out=out).view(*x.shape[:-1], w.shape[0])
         y = F.linear(x2, w)
         return y if out is None else out.copy_(y)
@@ -205,13 +222,13 @@ class NemotronHEngine(NemotronHRef):
             return _exl3_mm(n, w, out=out)          # an fp32 head block (load.py: out_fp32)
         if not torch.is_tensor(w):
             return w.matmul(n, out=out, f32=True)
-        if n.shape[0] <= ROWS_MAX:
+        if n.shape[0] <= BLOCK_ROWS:
             return K.linear_rows(n, w, out=out, f32=True)
         y = F.linear(n, w).float()
         return y if out is None else out.copy_(y)
 
     def moe_rows(self, n: torch.Tensor, li) -> torch.Tensor:
-        """The MoE block of M <= 32 rows: the router, every (row, slot) pair through its expert, the
+        """The MoE block of M <= BLOCK_ROWS rows: the router, every (row, slot) pair through its expert, the
         ordered combine, the latent pair, the shared expert."""
         c = self.cfg
         if isinstance(li, tuple):                    # the MTP head's block ("mtp", j)
@@ -302,7 +319,7 @@ class NemotronHEngine(NemotronHRef):
         power-of-two bucket of a slot (`tag`) instead of one a row count: a set is M x 32 MiB at class
         2,048 (a 1,048,576-token window), and the 33 verify widths held up to 17 GiB. Each call writes
         the partials it reads, so calls of one slot share them one after another."""
-        rows = min(1 << (M - 1).bit_length(), ROWS_MAX + 1)
+        rows = min(1 << (M - 1).bit_length(), BLOCK_ROWS)
         return self._attn.setdefault((tag, ns, rows), {"rows": rows})
 
     @staticmethod
@@ -329,8 +346,8 @@ class NemotronHEngine(NemotronHRef):
         """Host work of a verify block: `tokens` in DFS pre-order with `parents` (-1 for the first
         row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path."""
         M = len(tokens)
-        if M > ROWS_MAX + 1:
-            raise ValueError(f"a verify block of {M} rows: the row kernels take {ROWS_MAX + 1} at most")
+        if M > BLOCK_ROWS:
+            raise ValueError(f"a verify block of {M} rows: the row kernels take {BLOCK_ROWS} at most")
         rb = self._rows_buffers(M, key)
         rb["copied"].synchronize()
         h, L = rb["h"], st.length

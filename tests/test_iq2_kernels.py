@@ -194,6 +194,59 @@ def test_q8_gemm_near_the_twin_and_row_invariant():
     return f"rel err {err:.1e}; rows 1..32 bit for bit; a 40-row chunk rel {errc:.1e}"
 
 
+_HALF = np.frombuffer(np.float16(0.5).tobytes(), np.uint8)
+
+
+def test_iq2_and_q8_row_invariance_1_to_33():
+    """Every call width M = 1..33 (decode's 1 to the verify block) gives each row bitwise identical
+    to that row computed alone in its own allocation — a view into a shared batch buffer can hide an
+    over-read, so the solo calls clone. bf16 and fp32 out, an N that is not a tile multiple, and the
+    Q8 kernel's K tail."""
+    if not KERNELS:
+        return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
+    rng = np.random.default_rng(1)
+    for cls, ts, qk, shapes in ((Q.IQ2Linear, 66, 256, [(35, 512)]),
+                                (Q.Q8Linear, 34, 32, [(35, 512), (35, 96)])):
+        for N, K in shapes:
+            b = rng.integers(0, 256, (N * (K // qk), ts), dtype=np.uint8)
+            b[:, 0:2] = _HALF
+            lin = cls(b.reshape(-1), N, K, device=DEV)
+            x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
+            for f32 in (False, True):
+                solo = torch.cat([lin.matmul(x[r:r + 1].clone(), f32=f32) for r in range(33)])
+                for M in range(1, 34):
+                    got = lin.matmul(x[:M], f32=f32)
+                    assert torch.equal(got, solo[:M]), (cls.__name__, N, K, M, f32)
+
+
+def test_q8_k_tail_and_row_invariance():
+    """Q8Linear with K / 32 not a multiple of the kernel's SB=8 step (K=96): each boundary-width
+    call matches the fp32 twin, every row is bitwise its own-allocation solo call at bf16 and fp32,
+    and a caller's `out` buffer is honoured. The aligned K=256 control takes the same checks."""
+    if not KERNELS:
+        return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
+    rng = np.random.default_rng(1)
+    for N, K in ((35, 96), (35, 256)):
+        b = rng.integers(0, 256, (N * (K // 32), 34), dtype=np.uint8)
+        b[:, 0:2] = _HALF
+        lin = Q.Q8Linear(b.reshape(-1), N, K, device=DEV)
+        w32 = lin.dequant().to(DEV)
+        for f32 in (False, True):
+            for M in (1, 2, 9, 16, 17, 32, 33):
+                x = torch.randn(M, K, device=DEV, dtype=torch.bfloat16)
+                out = torch.empty(M, N, dtype=torch.float32 if f32 else torch.bfloat16, device=DEV)
+                got = lin.matmul(x, out=out, f32=f32)
+                assert got.data_ptr() == out.data_ptr()
+                ref = torch.nn.functional.linear(x.float(), w32)
+                rel = ((got.float() - ref).norm() / (ref.norm() + 1e-9)).item()
+                assert rel < 0.01, (N, K, M, f32, rel)
+            x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
+            solo = torch.cat([lin.matmul(x[r:r + 1].clone(), f32=f32) for r in range(33)])
+            for M in range(1, 34):
+                got = lin.matmul(x[:M], f32=f32)
+                assert torch.equal(got, solo[:M]), (N, K, M, f32)
+
+
 def test_expert_bank_near_the_twin_and_pair_invariant():
     if not KERNELS:
         return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"

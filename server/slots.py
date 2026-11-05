@@ -82,20 +82,35 @@ class Admission:
     and records the reservation until `release(key)`. A reservation counts in full until it is
     released, also the part that has already been allocated (and so already left MemAvailable):
     the check is conservative by up to one request's worst case, never optimistic. `growth()` is
-    what the long-lived caches may still take (their budgets minus what they hold). Without
-    /proc/meminfo (a Mac, a test without `meminfo`) every request is admitted and says so."""
+    what the long-lived caches may still take (their budgets minus what they hold). The engine's
+    room to its peak (`room`) caps the cache growth, the workspaces in flight and this request's
+    together; a prefill the memory gate admitted over the peak counts its workspace past that cap,
+    in full less the allocator's free default-pool blocks it takes first (`spare`). A prefill's
+    workspace leaves the reservation when it has run (`prefilled`), its KV part stays until the
+    release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
+    request is admitted and says so."""
 
     def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None,
-                 committed=None):
+                 spare=None, committed=None):
         self.floor = int(floor_bytes)
         self.meminfo = meminfo
         self.growth = growth or (lambda: 0)
         # SRV-250: the most the engine may still take under its memory policy (its room to
-        # `--mem-peak-gib`), None when unknown. Every prefill, a side slot's too, passes the
-        # policy's gate, which keeps the reservation plus that prefill's workspace under the
-        # peak, so what the caches, the requests in flight and this one may take together is at
-        # most this room
+        # `--mem-peak-gib`), None when unknown. SRV-775: every prefill, a side slot's too, passes the
+        # policy's gate on the live reserve, which keeps the reserve plus that prefill's workspace
+        # under the peak, so what the caches may still grow, the prefills in flight and this one take
+        # together is at most this room (`check`). A prefill the gate refused and that runs alone over
+        # the peak (`over_peak`) counts its workspace past the room, in full less the free blocks it
+        # takes first (`spare`): the box's floor alone bounds it (on 2026-11-02 4,096 rows on a 133k
+        # context mapped 8.4 GiB of new reserve with 5.5 free; the full count of every prefill in
+        # flight kept 8 short prompts waiting 12 s)
         self.room = room
+        # SRV-775: () -> bytes, the free default-pool blocks a workspace takes before any new memory
+        # from the box (engine/cache.py `Budget.workspace_spare`); None: no credit. MemAvailable already
+        # leaves the engine's whole reserve out, those blocks too, so an over-peak admit counts its
+        # workspace past them only (2026-11-02: a lone 31k-row chat was charged 3.9 GiB, 2.3 of it free
+        # blocks of the reserve, found 9.7 GiB < 10 and waited 15 minutes)
+        self.spare = spare
         # SRV-307: (owner) -> bytes the KV pool has committed for that slot. A request's KV part
         # is the pages it may still commit; what its slot committed since it was admitted has
         # already left MemAvailable and is credited, so it is never counted twice
@@ -107,7 +122,7 @@ class Admission:
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
         self.last_refused: dict | None = None   # 0.8.2: the last check that said no (`check`'s d)
         self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
-                      "timeouts": 0}
+                      "timeouts": 0, "alone": 0, "lone_checked": 0, "peak_waits": 0}
 
     def _kv_left(self, key) -> int:
         kv = self.kv.get(key)
@@ -134,31 +149,49 @@ class Admission:
             kv = sum(self._kv_left(k) for k in keys)
         return ws, kv
 
-    def check(self, need: int, count: bool = True, kv: int = 0) -> tuple[bool, dict]:
+    def ws_in_flight(self) -> int:
+        """SRV-775: the workspaces of the admitted requests whose prefill has not run yet (`prefilled`)."""
+        return self._held()[0]
+
+    def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False) -> tuple[bool, dict]:
+        """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
+        it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
+        the allocator's free default-pool blocks it takes before any new memory (`spare`)."""
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
+        spare = 0
+        if over_peak and self.spare is not None:
+            try:
+                spare = max(0, min(int(self.spare()), need_ws))
+            except Exception:                                      # noqa: BLE001
+                spare = 0                  # no reading: the whole workspace is new memory
+        new_ws = need_ws - spare
         d = {"floor": self.floor, "grow_left": grow, "reserved": held_ws + held_kv,
-             "need": int(need), "kv": int(kv), "kv_reserved": held_kv}
+             "need": int(need), "kv": int(kv), "kv_reserved": held_kv, "in_flight_ws": held_ws,
+             **({"over_peak": True, "spare": spare, "new_ws": new_ws} if over_peak else {})}
         if not mi or "MemAvailable" not in mi or self.floor <= 0:
             d.update(avail=None, after=None, ok=True)
             return True, d
         avail = int(mi["MemAvailable"])
-        take = grow + held_ws + need_ws
         room = None
         if self.room is not None:
             try:
                 room = max(0, int(self.room()))
             except Exception:                                      # noqa: BLE001
                 room = None
-        if room is not None and room < take:
-            take = room
+        # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's:
+        # the gate bounds every prefill it admits under the peak to the room. One it admitted over
+        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first
+        under = grow + held_ws + (0 if over_peak else need_ws)
+        take = min(room, under) if room is not None else under
+        take += new_ws if over_peak else 0
         # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
         # its room, always counted
         take += held_kv + int(kv)
         after = avail - take
-        d.update(avail=avail, after=after, ok=after >= self.floor, room=room)
+        d.update(avail=avail, after=after, ok=after >= self.floor, room=room, under=under)
         if not d["ok"]:
             self.last_refused = d
         if count:
@@ -167,11 +200,15 @@ class Admission:
             self.stats["min_after"] = after if m is None else min(m, after)
         return d["ok"], d
 
-    def reserve(self, key, need: int, kv: int = 0, owner=None) -> tuple[bool, dict]:
-        """Check and record in one step, so two requests cannot both take the last bytes. A
-        request with nothing else in flight is admitted without the check: alone, it is the
-        single-sequence server's request, which the engine's own memory policy (engine/cache.py
-        `Budget`) and the KV pool's gate (engine/kvpool.py) admit as they always did.
+    def reserve(self, key, need: int, kv: int = 0, owner=None, over_peak: bool = False) -> tuple[bool, dict]:
+        """Check and record in one step, so two requests cannot both take the last bytes. SRV-775: a
+        request with nothing else in flight is checked as well (`alone` and `lone_checked` count it):
+        the engine's memory policy keeps it under the declared peak, not the box above its floor
+        (2026-11-02: a lone side-slot turn of 3,714 rows on a 131k end took the engine's reserve to
+        84.8 GiB over its 75.8 GiB peak and MemAvailable to 5.0 GiB, checked by nothing). Under the
+        room as any request, unless the gate admitted it over the peak (`over_peak`): then its
+        workspace counts in full less the free default-pool blocks it takes first (`spare`), and the
+        floor is what bounds it.
 
         `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit."""
         with self._admit:
@@ -183,16 +220,11 @@ class Admission:
                     base = int(self.committed(owner))
                 except Exception:                                  # noqa: BLE001
                     base = 0
+            ok, d = self.check(need, kv=kv, over_peak=over_peak)
             if alone:
-                with self.lock:
-                    self.held[key] = int(need)
-                    self.kv[key] = (int(kv), owner, base)
-                    self.waiting.pop(key, None)
-                self.stats["admitted"] += 1
-                self.stats["alone"] = self.stats.get("alone", 0) + 1
-                return True, {"alone": True, "need": int(need), "kv": int(kv), "ok": True,
-                              "avail": None}
-            ok, d = self.check(need, kv=kv)
+                self.stats["alone"] += 1
+                self.stats["lone_checked"] += 1
+                d["alone"] = True
             if ok:
                 with self.lock:
                     self.held[key] = int(need)
@@ -200,6 +232,13 @@ class Admission:
                     self.waiting.pop(key, None)
                 self.stats["admitted"] += 1
         return ok, d
+
+    def prefilled(self, key) -> None:
+        """SRV-775: `key`'s prefill has run: its workspace leaves the reservation, its KV part stays until
+        `release`."""
+        with self.lock:
+            if key in self.held:
+                self.held[key] = self.kv.get(key, (0,))[0]
 
     def wait(self, key) -> int:
         """SRV-305: `key` waits for memory; returns its place in line (1 = next)."""
@@ -227,18 +266,31 @@ class Admission:
 
     @staticmethod
     def describe(d: dict) -> str:
-        if d.get("alone"):
-            return "admitted alone (nothing else in flight; the engine's memory policy decides)"
-        if d.get("avail") is None:
-            return "no /proc/meminfo: not checked"
         g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731
-        room = d.get("room")
-        capped = room is not None and room < d["grow_left"] + d["reserved"] + d["need"]
-        return (f"MemAvailable {g(d['avail'])} GiB - "
-                + (f"the engine's room to its peak {g(room)} (cache growth {g(d['grow_left'])}, "
-                   f"in flight {g(d['reserved'])}, this request {g(d['need'])})" if capped else
-                   f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - "
-                   f"this request {g(d['need'])}")
+        if d.get("peak_wait"):
+            # SRV-775: the memory gate refused it while another prefill runs; it waits for that one
+            return (f"the engine's peak: reserved {g(d.get('reserved') or 0)} + this request's workspace "
+                    f"{g(d.get('ws') or 0)} > peak {g(d.get('peak') or 0)} ({g(d.get('over') or 0)} GiB over "
+                    f"after shedding)")
+        alone = "alone: " if d.get("alone") else ""
+        if d.get("avail") is None:
+            return f"{alone}no /proc/meminfo: not checked"
+        room, under, over = d.get("room"), d.get("under"), bool(d.get("over_peak"))
+        capped = room is not None and under is not None and room < under
+        need_ws = d["need"] - (d.get("kv") or 0)
+        spare = int(d.get("spare") or 0)
+        # SRV-775: an over-peak admit's workspace is new memory past the allocator's free default-pool blocks
+        free = f" ({g(spare)} of its {g(need_ws)} in the allocator's free blocks)" if spare else ""
+        # SRV-775: the room caps the growth and the workspaces under the peak; an over-peak admit's is out of it
+        mid = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
+               f"workspaces in flight {g(d.get('in_flight_ws') or 0)}"
+               + ("" if over else f", this request's {g(need_ws)}") + ")"
+               + (f" - this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
+                  if over else "")
+               if capped else
+               f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
+               f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
+        return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
                 + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})"
                 + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"
                    if d.get("kv") or d.get("kv_reserved") else ""))
@@ -250,6 +302,7 @@ class Admission:
         ws, kv = self._held()
         return {"floor_gib": round(self.floor / GiB, 2), "in_flight": len(held),
                 "reserved_gib": round(sum(held.values()) / GiB, 3),
+                "ws_in_flight_gib": round(ws / GiB, 3),     # SRV-775: the workspaces not yet prefilled
                 "kv_to_commit_gib": round(kv / GiB, 3), "waiting_memory": waiting, **self.stats}
 
 
@@ -337,6 +390,19 @@ class Turn:
             self.stats["waits"] += 1
             self._wait_for_turn(who)
 
+    def try_acquire(self, who) -> bool:
+        """`acquire` when it would not wait (the turn free, nobody waiting or owed it): True, the turn held. Else
+        False and nothing taken: the caller does what must not wait through another holder, then `acquire`s."""
+        with self._cv:
+            if self._owner is None and not self._waiting and self._grant is None:
+                if who not in self._v:
+                    self._v[who] = self._floor(but=who)
+                self._owner = who
+                self._mark = self.clock()
+                self.stats["acquires"] += 1
+                return True
+            return False
+
     def release(self, who) -> None:
         if self.settle is not None and self._waiting:
             self.settle()
@@ -382,7 +448,7 @@ class Turn:
 class Slot:
     """One sequence. `values` holds a side slot's own values of the `OVERLAY` keys; slot 0 has
     none (it is `STATE`). `phase` is "decode" while its request is in the block loop (the barrier
-    waits only for those slots), else ""."""
+    waits only for those slots), "prefill" while its prompt prefills (SRV-763), else ""."""
 
     def __init__(self, index: int, max_len: int, values: dict | None = None, lock=None):
         self.index = int(index)
@@ -392,6 +458,12 @@ class Slot:
         self.owner = None
         self.served = 0
         self.phase = ""
+        # SRV-763: the rows its prefill has left while `phase` is "prefill" (server/app.py
+        # `_prefill_mark`), else None
+        self.prefill_left: int | None = None
+        # SRV-763: the prompt rows of the request granted the slot while its prefill has not
+        # started (server/app.py `_pending_mark`), else None
+        self.pending_rows: int | None = None
         self.t_start = None
         # FX10 (SRV-213): `gen` counts the grants; `carry` is the end of the last request this
         # side slot served (server/app.py `_side_keep_end`), usable while `gen` is unchanged: no
@@ -405,6 +477,7 @@ class Slot:
 
     def report(self) -> dict:
         eng = (self.values or {}).get("engine")
+        st = getattr(eng, "stats", None)
         return {"index": self.index, "max_len": self.max_len, "busy": self.busy,
                 "owner": self.owner, "served": self.served, "phase": self.phase,
                 "kv_length": getattr(getattr(eng, "kv", None), "length", None),
@@ -412,7 +485,9 @@ class Slot:
                 "carry": (int(self.carry["at"]) if self.carry is not None
                           and self.carry.get("gen") == self.gen else None),
                 # a side slot's own verify graphs (`--side-graphs`); None for slot 0 (always on)
-                "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
+                "graphs": (None if eng is None else not getattr(eng, "graphs_off", False)),
+                # SPD-271: the idle captures that failed on this slot's engine (recorded, not retried at that state)
+                "capture_failed": st.get("idle_capture_failed") if isinstance(st, dict) else None}
 
 
 def depth_cut(tree, max_depth: int | None):
@@ -767,6 +842,9 @@ class Pool:
         # load, `_build_side_slots`); None when all of them were
         self.requested = len(self.slots)
         self.limit_reason: str | None = None
+        # SPD-257: `take_side` among free slots of one window: the one whose resident conversation was
+        # served longest ago first (its prefix's `t_used`; never used first), not the lowest index
+        self.lru = False
 
     @property
     def n(self) -> int:
@@ -784,13 +862,8 @@ class Pool:
         turn carries into slot 0; the caller then serves it on slot 0 with the stash when slot 0
         is free, else takes the slot after all."""
         now = time.monotonic()
-        for s in sorted(self.side(), key=lambda s: s.max_len):
-            c = s.carry
-            # FX16: a record backed by the slot's resident prefix outlives a guest (the stash
-            # puts the rows back), so its freshness is its age alone
-            if (keep_carry_s > 0 and c is not None
-                    and (c.get("gen") == s.gen or c.get("resident"))
-                    and now - float(c.get("t") or 0.0) < keep_carry_s):
+        for s in sorted(self.side(), key=self._order):
+            if self._carry_fresh(s, keep_carry_s, now):
                 continue
             if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
                 s.gen += 1
@@ -801,6 +874,31 @@ class Pool:
                     self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
                 return s
         return None
+
+    def _order(self, s: Slot):
+        """`take_side`'s order: the smallest window, then (SPD-257, `lru`) the conversation served longest
+        ago. A new chat that lands on the lowest free slot replaced, or became a guest of, whatever
+        conversation that slot held, however recent; the stable sort keeps the index order on a tie."""
+        if not self.lru:
+            return (s.max_len, 0.0)
+        res = (s.values or {}).get("resident")
+        return (s.max_len, float(getattr(res, "t_used", 0.0) or 0.0))
+
+    @staticmethod
+    def _carry_fresh(s: Slot, keep_carry_s: float, now: float) -> bool:
+        """FX10: the slot's last end is younger than `keep_carry_s`, kept for its conversation's next
+        turn. FX16: a record backed by the slot's resident prefix outlives a guest (the stash puts the
+        rows back), so its freshness is its age alone."""
+        c = s.carry
+        return bool(keep_carry_s > 0 and c is not None
+                    and (c.get("gen") == s.gen or c.get("resident"))
+                    and now - float(c.get("t") or 0.0) < keep_carry_s)
+
+    def side_free(self, need: int, keep_carry_s: float = 0.0) -> bool:
+        """SPD-249: whether `take_side(need, keep_carry_s=...)` would find a slot now (nothing taken)."""
+        now = time.monotonic()
+        return any(need <= s.max_len and not s.busy and not self._carry_fresh(s, keep_carry_s, now)
+                   for s in self.side())
 
     def take_slot(self, index: int, need: int, owner=None) -> Slot | None:
         """FX16: one named side slot, without waiting: the slot whose resident rows the request's
@@ -855,6 +953,7 @@ class Pool:
         slot.owner = None
         slot.served += 1
         slot.phase = ""
+        slot.pending_rows = None
         slot.t_start = None
         slot.lock.release()
 

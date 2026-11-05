@@ -134,6 +134,34 @@ def test_mix_up_within_a_bf16_step_of_the_cuda_core_kernel():
             f"M3 {t[0, 3]:.0f}->{t[1, 3]:.0f}, M24 {t[0, 24]:.0f}->{t[1, 24]:.0f}")
 
 
+
+def test_gemv_mix_equals_gemv_then_mix_up():
+    """SPD-249: the down|inject GEMV writing the mix_up's A in its launch (`gemv_mix`, then `mix_up_a`) leaves the
+    GEMV's d and the mixer's x of `gemv` then `mix_up`, bit for bit, on both paths and at M = 1..40 and 70 (two
+    64-row launches)."""
+    g = torch.Generator(device=DEV).manual_seed(29)
+    wd = Int8Rows.of((torch.randn(R + HC, HC * H, generator=g, device=DEV) * 0.02).half(), 128)
+    wu = Int8Rows.of((torch.randn(HC * H, R, generator=g, device=DEV) * 0.05).half(), 64)
+    n = torch.randn(70, HC * H, generator=g, device=DEV).to(torch.bfloat16)
+    for on in (1, 0):
+        _set(on)
+        try:
+            for M in list(range(1, 41)) + [70]:
+                d0 = K.gemv(n[:M], wd)
+                x0 = K.mix_up(d0, n[:M], wu, HC)
+                d1, a1 = K.gemv_mix(n[:M], wd, R, HC)
+                x1 = K.mix_up_a(a1, n[:M], wu, HC)
+                assert torch.equal(d0, d1) and torch.equal(x0, x1), (on, M)
+        finally:
+            _restore()
+    _set(1)
+    try:
+        t0 = _us(lambda: K.mix_up(K.gemv(n[:24], wd), n[:24], wu, HC))
+        t1 = _us(lambda: K.mix_up_a(K.gemv_mix(n[:24], wd, R, HC)[1], n[:24], wu, HC))
+    finally:
+        _restore()
+    return f"d and x equal at M = 1..40, 70 (both paths); a mixer at M24 {t0:.0f} -> {t1:.0f} us"
+
 if __name__ == "__main__":
     passed = failed = 0
     for name, fn in sorted(globals().items()):

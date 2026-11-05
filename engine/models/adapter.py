@@ -12,6 +12,7 @@ adapter module (`engine/models/qwen3_5/adapter.py` for the 27B, whose `engine/mo
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,10 @@ class CostModel:
     workspace_floor: int | None = None
     workspace_per_token: int | None = None
     workspace_cap: int | None = None   # where the workspace stops growing; None: it does not
+    # SRV-773: the workspace of forwarding `rows` rows onto `n_ctx` served rows; None: the line through
+    # `workspace_per_token`. SRV-775: it may take `line` (False: by the rows alone, a cold prompt without the line's
+    # floor: the admission's count of a prefill in flight)
+    workspace_rows: Callable[..., int] | None = None
 
     def snapshot_cost(self) -> dict:
         """The dashboard's `cache.snapshot_cost` row (contract 1.3 keys)."""

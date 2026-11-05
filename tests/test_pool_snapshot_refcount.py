@@ -18,6 +18,15 @@ pools on every `Budget.memory()`, which every `/metrics` collector reaches throu
   4  the watch: a count under half its high is logged once per interval with its fall rate and
      the time to 0; a steady count is not; 3.12+ starts nothing   test_the_refwatch
   5  `/health`'s memory part carries the counts      test_health_memory_has_the_counts
+  6  SPD-257: the memory policy's walk of the allocator (`cache.TorchPools`, after each capture) and
+     `/v1/cache/memory?pools=1` (`server.app._allocator_pools`) keep every reference over N walks (with
+     `torch.cuda.memory_snapshot()`, which hands the call `(0, 0, True)`: -N on `True`, -2N on 0)
+                                                  test_the_memory_snapshot_call_leaks_too
+                                                  test_the_policys_walk_keeps_the_references
+                                                  test_the_pools_route_keeps_the_references
+  7  no call in engine/ or server/ hands the snapshot a tuple: `torch.cuda.memory_snapshot()`,
+     a pool's `.snapshot()` and `_cuda_memorySnapshot` with anything but `None` are refused
+                                                  test_no_snapshot_call_that_drops_references
 
 CPU only: a CUDA build of torch answers `_cuda_memorySnapshot` without a device (empty segments);
 run with CUDA_VISIBLE_DEVICES= on the box. Run: python tests/test_pool_snapshot_refcount.py
@@ -25,12 +34,14 @@ run with CUDA_VISIBLE_DEVICES= on the box. Run: python tests/test_pool_snapshot_
 
 from __future__ import annotations
 
+import ast
 import gc
 import os
 import sys
 import types
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 import torch  # noqa: E402
 
@@ -193,6 +204,114 @@ def test_health_memory_has_the_counts():
     out = app._memory()
     assert set(out["python_refs"]) == {name for name, _ in refwatch.WATCH}, out
     assert out["python_refs"]["True"] > 0 and out["python_refs"]["None"] > 0
+    if os.path.exists("/proc/self/status"):           # SPD-257: the address space, beside the resident set
+        assert out["vm_size_gb"] >= out["rss_gb"] > 0, out
+
+
+def test_the_memory_snapshot_call_leaks_too():
+    """`torch.cuda.memory_snapshot()` hands the call `(0, 0, True)`: on torch 2.13.0 every call takes one
+    reference off `True` and two off the int 0 (passes, saying so, on a torch that no longer leaks)."""
+    if not _has_snapshot():
+        print("    (torch without CUDA: no _cuda_memorySnapshot, skipped)")
+        return
+    d = _delta(torch.cuda.memory_snapshot)
+    if d["True"] == 0:
+        print(f"    (this torch {torch.__version__} keeps the references: fixed upstream)")
+    else:
+        assert d["True"] == -N and d["0"] == -2 * N, d
+
+
+def test_the_policys_walk_keeps_the_references():
+    """SPD-257: `cache.TorchPools` walks the allocator after each graph capture (`capture_lock.GEN`); over N walks no
+    reference goes (failed before the fix on torch 2.13.0: -N on `True`, -2N on 0)."""
+    if not _has_snapshot():
+        print("    (torch without CUDA: no _cuda_memorySnapshot, skipped)")
+        return
+    from engine import cache, capture_lock
+    gen = capture_lock.GEN
+    # the count past the watched ints (0, 7): its own steps move no reference of theirs
+    gen["captures"] = max(gen["captures"], 1000)
+
+    def captured_then_read():
+        gen["captures"] += 1
+        return tp()
+    keep = torch.cuda.memory_stats
+    torch.cuda.memory_stats = lambda *a, **k: {"reserved_bytes.all.current": 64 << 30,
+                                               "allocated_bytes.all.current": 60 << 30}
+    try:
+        tp = cache.TorchPools()
+        tp()
+        d = _delta(captured_then_read)
+        assert tp.walks == N + 1, tp.walks
+    finally:
+        torch.cuda.memory_stats = keep
+    assert all(v == 0 for v in d.values()), f"the policy's walk dropped references: {d}"
+    return f"{tp.walks} walks, every count kept"
+
+
+def test_the_pools_route_keeps_the_references():
+    """SPD-257: `/v1/cache/memory?pools=1` walks the allocator once more (`_allocator_pools`): no reference goes."""
+    if not _has_snapshot():
+        print("    (torch without CUDA: no _cuda_memorySnapshot, skipped)")
+        return
+    from server import app
+    assert set(app._allocator_pools()) >= {"default", "graphs"}
+    d = _delta(app._allocator_pools, n=500)
+    assert all(v == 0 for v in d.values()), f"_allocator_pools dropped references: {d}"
+
+
+def _leaky_snapshot_calls(path: str) -> list:
+    """The calls in one file that hand torch's snapshot a tuple (see the module's head)."""
+    tree = ast.parse(open(path).read(), path)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        attr = node.func.attr
+        recv = ast.unparse(node.func.value)
+        if attr == "memory_snapshot":
+            out.append((node.lineno, f"{recv}.memory_snapshot(...)"))
+        elif attr == "snapshot" and ("pool" in recv.lower() or "MemPool" in recv):
+            out.append((node.lineno, f"{recv}.snapshot(...)"))
+        elif attr == "_cuda_memorySnapshot" and not (
+                len(node.args) == 1 and not node.keywords and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value is None):
+            out.append((node.lineno, f"{recv}._cuda_memorySnapshot({ast.unparse(node.args[0]) if node.args else ''})"))
+    return out
+
+
+def test_no_snapshot_call_that_drops_references():
+    """SPD-257: the engine and the server read the allocator's segments only through the call that is handed
+    `None` (`engine.decision.device._all_segments`, `engine.cache.allocator_segments`). The check itself is
+    checked on the calls it must refuse."""
+    bad = ("import torch\n"
+           "a = torch.cuda.memory_snapshot()\n"
+           "b = self.pool.snapshot()\n"
+           "c = torch.cuda.MemPool().snapshot()\n"
+           "d = torch._C._cuda_memorySnapshot((0, 0, True))\n"
+           "e = torch._C._cuda_memorySnapshot(pool.id)\n"
+           "f = torch._C._cuda_memorySnapshot(None)\n"
+           "g = store.snapshot()\n")
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(bad)
+    try:
+        assert [ln for ln, _ in _leaky_snapshot_calls(f.name)] == [2, 3, 4, 5, 6], _leaky_snapshot_calls(f.name)
+    finally:
+        os.remove(f.name)
+    found, seen = [], 0
+    for top in ("engine", "server"):
+        for dirpath, _, files in os.walk(os.path.join(ROOT, top)):
+            for name in files:
+                if not name.endswith(".py") or name.startswith("._"):   # a copy's macOS resource forks
+                    continue
+                path = os.path.join(dirpath, name)
+                seen += 1
+                found += [f"{os.path.relpath(path, ROOT)}:{ln}: {what}" for ln, what in _leaky_snapshot_calls(path)]
+    assert seen > 100, f"only {seen} files under engine/ and server/"
+    assert not found, "snapshot calls that drop references (use engine.cache.allocator_segments):\n" + \
+        "\n".join(found)
+    return f"{seen} files, no such call"
 
 
 if __name__ == "__main__":

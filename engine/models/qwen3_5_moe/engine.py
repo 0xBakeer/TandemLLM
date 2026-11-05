@@ -38,6 +38,9 @@ from engine.models.qwen3_5_moe.ref import Qwen35MoeRef
 
 class Qwen35MoeEngine(FlashNextEngine):
 
+    #: the 32-row group GEMM: 64 was checked bit for bit on Flash-Next only
+    moe_group_rows = 32
+
     #: the tapped layers (`set_taps`) and the ring's rows
     taps: tuple = ()
     ring_rows = 0

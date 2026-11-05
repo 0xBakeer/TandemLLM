@@ -27,6 +27,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 
 _PF = nb.source(__file__, "prefetch.cu")
 _PF_CPP = nb.source(__file__, "prefetch.cpp")
@@ -38,7 +39,7 @@ def _prefetch_mod():
     if _MOD is None:
         _MOD = nb.load("qwen38_l2_prefetch", cpp_sources=[_PF_CPP],
                        cuda_sources=[_PF], functions=["prefetch"],
-                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
+                       extra_cuda_cflags=["-O3", *_gpu.arch_flags("l2_prefetch")])
     return _MOD
 
 

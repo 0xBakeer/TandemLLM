@@ -50,6 +50,7 @@ import time
 
 from server import argloop, thinking
 from server.conductor import incontext, inject, libsearch, modelfit, outcomes, schema, signals, transcripts
+from server.conductor import deferred as deferred_mod
 from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
@@ -84,6 +85,17 @@ def _marks(tok):
         except Exception:                                          # noqa: BLE001
             _MARKS[key] = None
     return _MARKS[key]
+#: SPD-249: `on`: on a conversation's first turn the stable notes (the class's note, the memory card,
+#: the memory index) go at the end of the system message (one the conductor adds when the client sent
+#: none), each block as it is and in its order, so chats share that head and the prefix cache serves
+#: it (`Plan.head_end`, engine/cache.py `Grid`); the varying notes stay at the last message's end.
+#: `off`: every note at the last message's end, as before
+NOTES_HEAD = (_S.get("NOTES_HEAD") or "off").strip().lower()
+#: SRV-765: the order of the head's notes. `memory` (the default): the memory card and the index
+#: first, then the class's note, so chats of one user share the memory part of the head whatever
+#: class each lands on (the class's note differs by class); `class`: the class's note first, as
+#: before
+NOTES_HEAD_ORDER = (_S.get("NOTES_HEAD_ORDER") or "memory").strip().lower()
 #: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
 #: `off`: the packages chosen as before, whatever the tools
@@ -99,6 +111,25 @@ GEN_HEADS_MAX = 256
 GEN_PER_HEAD = 8
 #: `off`: every request with the same head is one session, as before (the A/B)
 SESSION_GENERATIONS = (_S.get("SESSION_GENERATIONS") or "on").strip().lower()
+#: SRV-763: `general`: a turn whose class question the box could not answer in time (every stage
+#: failed, one of them by `LOAD_ERRORS`) asks nothing more (no package or library question); a
+#: session keeps its class and its level. A profile that names an `undecided_class` (chat-app)
+#: gives a new session that class lean: at most the profile's default effort, the class's general
+#: packages and core alone, on its tool turns too; a new session whose answers all stayed below the
+#: bar takes it with its whole policy, unless the top answer's class builds (the default class, as
+#: before). Either guess holds back no later answer (`Session.guess`). A profile without one keeps
+#: its default class's whole policy and stickiness. `class`: the default class's whole policy and
+#: the package question, as before
+FAIL_OPEN = (_S.get("FAIL_OPEN") or "general").strip().lower()
+#: SRV-763: the stage errors that say the server was busy, not that a classifier is missing: the
+#: reasons, after its kind, of the stage that asks the server's own port (every stage but the decider)
+LOAD_ERRORS = frozenset({"busy", "timeout", "http_429", "http_503"})
+#: VIS-119: on a class whose package answer holds for the session's class (`package_sticky:
+#: class`), `pick` (the default, FX15): only a picked package holds and a none is asked again on
+#: the next message (it may fit a package); `answer`: a none holds as well while the follow-up's
+#: candidates are among the ones the none was asked over. A turn with no answer (busy, below the
+#: bar) holds nothing. `answer` waits for a follow-up label set that shows no lost picks
+PACKAGE_HOLD = (_S.get("PACKAGE_HOLD") or "pick").strip().lower()
 
 COMPOSITE = "TandemLLM"
 
@@ -203,20 +234,23 @@ class Injection:
     """One note in a session: where it sits in the client's prompt and what it is."""
 
     __slots__ = ("pos", "hash", "ids", "text", "parts", "kinds", "key", "turn", "at", "row",
-                 "shas", "anchor")
+                 "shas", "anchor", "head", "subkeys")
 
-    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None, anchor=None):
+    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None, anchor=None,
+                 head=False, subkeys=()):
         self.pos, self.hash, self.ids, self.text = pos, hsh, ids, text
         self.parts, self.kinds, self.key, self.turn, self.row = parts, kinds, key, turn, row
         self.shas = shas          # each part's text hash, in `parts`' order (`Plan._fresh_block`)
         self.anchor = anchor      # FX17: `inject.message_anchor`, the note's place by its message
+        self.head = bool(head)    # SPD-249: in the prompt's head (`NOTES_HEAD`)
+        self.subkeys = tuple(subkeys)   # SPD-249: the notes a head system message carries
         self.at = time.time()
 
     def moved_to(self, pos: int, hsh: str) -> "Injection":
         """FX17: the same note at a new insertion point (the client changed the prompt before
         its message without touching the message's end)."""
         n = Injection(pos, hsh, self.ids, self.text, self.parts, self.kinds, self.key, self.turn,
-                      self.row, self.shas, self.anchor)
+                      self.row, self.shas, self.anchor, self.head, self.subkeys)
         n.at = self.at
         return n
 
@@ -224,11 +258,15 @@ class Injection:
 class Session:
     __slots__ = ("key", "cls", "conf", "source", "since", "turns", "user_hash", "last_row",
                  "notes", "history", "package_pick", "lock", "compacted", "size_tier",
-                 "prompt_first", "prompt_last", "evidence", "acts", "cwd")
+                 "prompt_first", "prompt_last", "evidence", "acts", "cwd", "guess")
 
     def __init__(self, key):
         self.key = key
         self.cls = self.conf = self.source = self.user_hash = self.last_row = None
+        # SRV-763: why the session's class is a guess (`FAIL_OPEN`): `busy`, the server could not
+        # answer in time; `below`, the profile's undecided class for answers below the bar; None
+        # once an answer or a rule decided it
+        self.guess: str | None = None
         self.compacted = False             # a compaction request came; the next class says so
         self.size_tier = None              # the largest size tier this task reached (SRV-157)
         self.prompt_first = self.prompt_last = None   # prompt tokens: first and latest turn
@@ -241,6 +279,18 @@ class Session:
         self.evidence: outcomes.Evidence | None = None   # J1: the snapshots' state
         self.acts: collections.deque = collections.deque(maxlen=64)  # J1: the notes' times
         self.cwd: tuple | None = None      # FX5: (path, note key) of the last working-directory note
+
+
+def _class_holds(held, cands) -> bool:
+    """FX15 + VIS-119: whether the session's held package answer for the class answers a
+    follow-up in it: a pick still among the candidates; under `PACKAGE_HOLD=answer` a none asked
+    over candidates that include every one of this turn's (a follow-up offered a package the none
+    was not asked over asks again)."""
+    if not held:
+        return False
+    if held[0] is not None:
+        return held[0] in cands
+    return PACKAGE_HOLD == "answer" and len(held) > 2 and set(cands) <= held[2]
 
 
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
@@ -377,6 +427,23 @@ class Plan:
         self.tool_names: list[str] = []
         # SRV-621: the profile's `prompt` is `client` (nothing of the plan goes in)
         self.prompt_client = False
+        # SPD-249 (`NOTES_HEAD`): the conversation's first turn (its one user message is the last
+        # message), where stable notes may go at the head; the served row where the head's notes
+        # end (the prefill's grid mark) and the served ids up to it
+        self.fresh = False
+        self.head_end: int | None = None
+        self.head_ids: list[int] | None = None
+        # SRV-763 (`FAIL_OPEN`): the box could not answer this turn's class question in time, or
+        # the session runs on that fallback (`lean`): the turn asks no other question
+        self.fail_open = False
+        self.lean = False
+        # SRV-765: the session's token on its addresses (server/session_tokens.py); a head note that
+        # carries it is that session's alone, named in the row's `extra.head_session`
+        self.session_token: str | None = None
+        # VIS-119: how long the class's package answer holds (`schema.package_sticky`), and the
+        # shadow questions asked after the turn (server/conductor/deferred.py), each a job
+        self.sticky = "message"
+        self.deferred: list[dict] = []
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -454,14 +521,23 @@ class Plan:
             at = None
         elif at is None and planned:
             self.row["extra"].setdefault("errors", []).append("no_insertion_point")
+        head = None
+        if (at is not None and NOTES_HEAD == "on" and self.fresh and not self.compaction
+                and self.side is None):
+            head = inject.head_point(ids, tok, im_end)
+            if head is not None and head[0] > at:
+                head = None
         if at is not None:
             with sess.lock:
                 live, hashes = self._live(ids, at, marks=marks, im_end=im_end)
+                if head is not None and head[0] not in hashes:
+                    hashes.update(inject.hashes_at(ids, [head[0]]))
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
-                keys = {n.key for n in live}
+                keys = {n.key for n in live} | {k for n in live for k in n.subkeys}
                 block = self.block
                 if block is not None and block["key"] not in keys:
                     block = self._fresh_block(block, live)
+                class_add = None
                 if block is not None and block["key"] not in keys:
                     text = cfg["injection"]["wrapper"].replace("{text}", block["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
@@ -469,11 +545,15 @@ class Plan:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                     else:
-                        adds.append((Injection(at, hashes[at], nids, text, block["parts"],
+                        hp = head[0] if head is not None else at
+                        class_add = (Injection(hp, hashes[hp], nids, text, block["parts"],
                                                block["kinds"], block["key"], sess.turns,
                                                self.row["id"], shas=block.get("shas"),
-                                               anchor=inject.message_anchor(ids, at, marks)),
-                                     block["reason"]))
+                                               anchor=(None if head is not None
+                                                       else inject.message_anchor(ids, at, marks)),
+                                               head=head is not None),
+                                     block["reason"])
+                        adds.append(class_add)
                 # J1: the outcome's note and the cards, after the class's block; a card goes in
                 # only while no live note carries the same card (the first turn, after a
                 # compaction), an outcome's note once
@@ -488,17 +568,35 @@ class Plan:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                         continue
-                    adds.append((Injection(at, hashes[at], nids, text, x["parts"], x["kinds"],
+                    on_head = head is not None and bool(x.get("head"))
+                    hp = head[0] if on_head else at
+                    adds.append((Injection(hp, hashes[hp], nids, text, x["parts"], x["kinds"],
                                            x["key"], sess.turns, self.row["id"],
-                                           anchor=inject.message_anchor(ids, at, marks)),
+                                           anchor=(None if on_head
+                                                   else inject.message_anchor(ids, at, marks)),
+                                           head=on_head),
                                  x["reason"]))
                     parts |= {(p["kind"], p["name"]) for p in x["parts"]}
+                if class_add is not None and class_add[0].head:
+                    adds = self._head_order(adds, class_add)
+                if head is not None and self.session_token:
+                    bound = sorted({p.get("kind") for n, _ in adds
+                                    if n.head and self.session_token in n.text
+                                    for p in n.parts or ()})
+                    if bound:
+                        self.row["extra"]["head_session"] = bound
+                if head is not None and head[1] is not None:
+                    adds = self._head_message(adds, head, hashes)
                 notes = live + [n for n, _ in adds]
                 sess.notes = notes
             self._probe_at = (at, notes)
         if not notes and tail_ids is None:
             return prompt, in_think
         out, starts = inject.splice(ids, [(n.pos, n.ids) for n in notes])
+        ends = [starts[i] + len(n.ids) for i, n in enumerate(notes) if n.head]
+        if ends:
+            self.head_end = max(ends)
+            self.head_ids = out[:self.head_end]
         self.spans = [(starts[i], starts[i] + len(n.ids), sorted(n.kinds),
                        [p["name"] for p in (n.parts or []) if p.get("kind") == "package"])
                       for i, n in enumerate(notes)]
@@ -520,6 +618,38 @@ class Plan:
         self.changed = True
         self.row["changed"] = 1
         return torch.tensor(out, dtype=prompt.dtype, device=prompt.device), in_think
+
+    @staticmethod
+    def _head_order(adds: list, class_add: tuple) -> list:
+        """SRV-765 (`NOTES_HEAD_ORDER`): `memory` moves the class's head note after the other head
+        notes (the memory card and the index, the same for every chat of the user), so two chats of
+        different classes still share those; `class` keeps it first. The tail notes keep their
+        order."""
+        if NOTES_HEAD_ORDER == "class":
+            return adds
+        rest = [a for a in adds if a is not class_add]
+        k = max((i + 1 for i, (n, _) in enumerate(rest) if n.head), default=0)
+        return rest[:k] + [class_add] + rest[k:]
+
+    @staticmethod
+    def _head_message(adds: list, head: tuple, hashes: dict) -> list:
+        """SPD-249: the head's notes in a system message of their own (the client sent none): one
+        note of the opener, each head note's ids in order and the closer, its parts, kinds and
+        keys the notes'; the other notes as they were. Replayed whole, as any note is."""
+        on = [(n, r) for n, r in adds if n.head]
+        if not on:
+            return adds
+        pos, (opener, closer) = head[0], head[1]
+        ids = list(opener) + [t for n, _ in on for t in n.ids] + list(closer)
+        first = on[0][0]
+        joined = Injection(pos, hashes[pos], ids, "".join(n.text for n, _ in on),
+                           [p for n, _ in on for p in (n.parts or [])],
+                           set().union(*(n.kinds for n, _ in on)),
+                           "head:" + "+".join(n.key for n, _ in on), first.turn, first.row,
+                           shas=[h for n, _ in on for h in (n.shas or [None] * len(n.parts or []))],
+                           head=True, subkeys=[n.key for n, _ in on])
+        rest = [(n, r) for n, r in adds if not n.head]
+        return [(joined, "; ".join(r for _, r in on) + " (head)")] + rest
 
     def _fresh_block(self, block: dict, live: list) -> dict | None:
         """The class's note without the parts a live note of the session already holds with the
@@ -696,6 +826,15 @@ class Router:
         self.cache_scope = lambda: None
         # 2026-10-05: the memory notes (server/conductor/memory.py Memory), set by the conductor
         self.memory = None
+        # SPD-249: the server's estimate of when a raw question to its own port is answered,
+        # `own_eta(texts, max_new)` -> ms from now (None: no basis, inf: not before the slot's
+        # turn ends). Set by the server; None asks as before
+        self.own_eta = None
+        # VIS-119: the seconds the server has been idle (nothing running, queued or in the
+        # router), None while it is busy; set by the server. The shadow questions asked after the
+        # turn wait for it (server/conductor/deferred.py)
+        self.own_idle = None
+        self.deferred = deferred_mod.Deferred(signal=lambda: self.own_idle)
 
     # ---------------------------------------------------------------- classifiers
     def _make(self, kind: str, role: dict, timeout_ms: int):
@@ -710,7 +849,8 @@ class Router:
         if not endpoint:
             return None
         a = (decider_for(endpoint, role.get("model") or "auto", timeout_ms) if kind == "decider"
-             else Qwen(endpoint, role.get("model") or self.raw_model(), timeout_ms))
+             else Qwen(endpoint, role.get("model") or self.raw_model(), timeout_ms,
+                       local=role.get("endpoint") == "self"))
         if a is None:
             return None
         self._adapters[key] = a
@@ -772,18 +912,27 @@ class Router:
             if a is None:
                 stages.append(Answer(st["kind"], error=f"{st['kind']}_{why}").as_dict())
                 continue
+            eta = None
             if st["kind"] == "decider":
                 room = a.state_chars() if hasattr(a, "state_chars") else chars
                 ans = a.choice(signals.digest(text, min(chars, room), line),
                                question or clf["question"], options)
             else:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
-                ans = a.choice(signals.digest(text, chars, line),
-                               _qwen_prompt(router, question, qid, about, listing), options,
-                               max_chars=chars)
+                state = signals.digest(text, chars, line)
+                prompt = _qwen_prompt(router, question, qid, about, listing)
+                eta = self._stage_eta(a, prompt, state[:chars])
+                busy = self._stage_busy(a, st, eta)
+                if busy is not None:
+                    stages.append(busy)
+                    continue
+                ans = a.choice(state, prompt, options, max_chars=chars)
             if st["kind"] == "qwen" and question is None:
                 ans = _code_guard(ans, text, options)    # SRV-189
             d = ans.as_dict()
+            if eta is not None and eta != float("inf"):
+                # SRV-763: the estimate beside the measured `ms`, for its check (the served model's stage)
+                d["eta_ms"] = round(eta, 1)
             if getattr(ans, "guard", None):
                 d["guard"] = ans.guard
             need = accept if accept is not None else float(st["accept"])
@@ -798,6 +947,52 @@ class Router:
             if accepted is not None:
                 break
         return accepted, stages
+
+    def _stage_eta(self, a, prompt: str, state: str) -> float | None:
+        """SPD-249: the server's estimate (ms) of when the Qwen stage's question is answered, for
+        the server's own port, whose queue `own_eta` sees; None without one."""
+        if self.own_eta is None or not getattr(a, "local", False):
+            return None
+        try:
+            return self.own_eta((prompt, state), int(getattr(a, "max_tokens", 24)))
+        except Exception:                                          # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _stage_busy(a, st: dict, eta: float | None) -> dict | None:
+        """SPD-249: the Qwen stage's row when its answer cannot come inside the stage's timeout
+        (`qwen_busy`), else None and the stage is asked: questions queued behind slot 0 ran out
+        their 8 s timeout one after the other in a burst of chats; skipping at once is the same
+        fall-through without the wait. Never asked here, so never a call (`decisions.stats`)."""
+        limit = float(st.get("timeout_ms") or getattr(a, "timeout_ms", 0) or 0)
+        if eta is None or limit <= 0 or eta <= limit:
+            return None
+        d = Answer(st["kind"], error=f"{st['kind']}_busy").as_dict()
+        d.update(eta_ms=round(eta, 1) if eta != float("inf") else None, timeout_ms=limit,
+                 skipped=True)
+        return d
+
+    def own_port_first(self, router: dict, roles: dict, qid: str | None = None) -> bool:
+        """VIS-119: whether the first stage a cascade would ask is the Qwen stage on this server's
+        own port (a decider asked before it answers in tens of milliseconds and stays where it
+        is; a backend the proxy relays to is not this server's queue). The stages are skipped and
+        resolved as `_cascade` skips and resolves them; building an adapter asks nothing."""
+        served = modelfit.FIT["served_classifier"]
+        for st in router["classifier"]["stages"]:
+            if not st.get("enabled", True) and (served or st["kind"] != "decider"):
+                continue
+            if st["kind"] != "decider" and not served:
+                continue                    # the served model's stage, left out by the fit
+            # the proxy's override as `_cascade` meets it: False skips the stage, None (what it
+            # answers for this server's own requests, the Chat tab's among them) leaves the
+            # configured adapter, an adapter answers instead (a backend's: not this server's queue)
+            a, _ = self._stage_adapter(st, roles, qid)
+            if a is None:
+                continue
+            if st["kind"] == "decider":
+                return False
+            return bool(getattr(a, "local", False))      # the test `_stage_eta` makes
+        return False
 
     # ---------------------------------------------------------------- sessions
     def replayed_for(self, key: str, ids: list[int], tok) -> list[int]:
@@ -956,6 +1151,7 @@ class Router:
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
         sh = signals.shape(body, tuple(packages["packages"]), client_kind=client_kind)
+        plan.fresh = bool(getattr(sh, "fresh", False))          # SPD-249: `NOTES_HEAD`
         plan.tool_caps, plan.tool_names = signals.tool_caps(body)
         side = schema.side_requests(router)
         side_cap = (caps or {}).get("side")
@@ -979,9 +1175,10 @@ class Router:
         plan.session = sess
         if not dry and self.session_tokens is not None:
             # `{tandem_url}` in this session's notes: its own address, `.../s/<token>`
+            plan.session_token = self.session_tokens.token_for(sess.key)
             self.library.at(session_tokens_mod.with_token(
                 packages_mod.request_url(headers) or packages_mod.URL_DEFAULT,
-                self.session_tokens.token_for(sess.key)))
+                plan.session_token))
         # a compaction under `prompt: client` is served as sent, as on the raw path
         plan.compaction = sh.compaction and not plan.prompt_client
         if not dry:
@@ -1255,12 +1452,44 @@ class Router:
             below = self._below_build(stages, router, sess, classes)
             if below is not None:
                 return below
-            return (sess.cls if sess.cls in classes else default), None, "fallback", (
-                "fail_open" if stages and all(s.get("error") for s in stages) else "no_answer")
+            failed = bool(stages) and all(s.get("error") for s in stages)
+            # SRV-763: to answers below the bar a session whose class is a guess is new: the
+            # default class here, then `_conclude`'s undecided class unless the top class builds
+            keep = sess.cls in classes and (failed or not self._guessed(sess))
+            return (sess.cls if keep else default), None, "fallback", (
+                "fail_open" if failed else "no_answer")
         if sess.cls in classes and sess.cls != ans.label and \
-                ans.confidence < float(router["stickiness"]["switch"]):
+                ans.confidence < float(router["stickiness"]["switch"]) and \
+                not self._guessed(sess):
+            # SRV-763: the undecided class was no answer; the first one replaces it
             return sess.cls, sess.conf, "sticky", "below_switch"
         return ans.label, ans.confidence, ans.stage, None
+
+    @staticmethod
+    def _guessed(sess) -> bool:
+        """SRV-763: the session's class is the profile's undecided class, which no answer decided
+        (`Session.guess`): it counts as a new session's. A session without the field has no guess."""
+        return FAIL_OPEN == "general" and bool(getattr(sess, "guess", None))
+
+    @staticmethod
+    def _load_failed(stages) -> bool:
+        """SRV-763: every stage failed and one because the server was busy (`LOAD_ERRORS`)."""
+        return bool(stages) and all(s.get("error") for s in stages) and \
+            any(s.get("stage") != "decider" and s["error"] in {f"{s.get('stage')}_{e}" for e in LOAD_ERRORS}
+                for s in stages)
+
+    @staticmethod
+    def _top_builds(stages, classes) -> str | None:
+        """SRV-763: the class the last answered stage put first when that class builds (its policy
+        names `BUILD_MARK`, as for `_below_build`), else None."""
+        st = next((s for s in reversed(stages) if s.get("probs") and not s.get("error")), None)
+        if st is None:
+            return None
+        top = max(st["probs"].items(), key=lambda kv: kv[1])[0]
+        if top not in classes or \
+                BUILD_MARK not in ((classes[top].get("policy") or {}).get("packages") or []):
+            return None
+        return top
 
     @staticmethod
     def _below_build(stages, router, sess, classes):
@@ -1273,7 +1502,9 @@ class Router:
         file until the argument loop guard stopped it. The class's reading line still says what
         was built when a second build class is close (`_reading`)."""
         rule = (router["classifier"].get("below_accept") or {})
-        if rule.get("mode", "default") != "build" or sess.cls in classes:
+        # SRV-763: a session whose class is the undecided class's guess has no classified message
+        if rule.get("mode", "default") != "build" or \
+                (sess.cls in classes and not Router._guessed(sess)):
             return None
         st = next((s for s in reversed(stages) if s.get("probs") and not s.get("error")), None)
         if st is None:
@@ -1299,6 +1530,31 @@ class Router:
         row = plan.row
         row["classifier_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
         row["stages"] = stages
+        load = FAIL_OPEN == "general" and kept == "fail_open" and self._load_failed(stages)
+        took, renew = None, False
+        if load or (FAIL_OPEN == "general" and kept == "no_answer"):
+            # SRV-763: nobody decided the message's class, because the server could not answer in
+            # time (a burst of chats: 92 of 113 Chat-tab turns fell back to code_edit at xhigh with
+            # its coding packages) or every answer stayed below its bar. A busy turn asks nothing
+            # more. A new session (or one whose class is still a guess) of a profile that names an
+            # undecided class takes it, and its class is a guess; any other profile keeps its
+            # default class's whole policy and stickiness (opencode, hermes, overnight)
+            plan.fail_open = load
+            with sess.lock:
+                new = sess.cls not in classes or self._guessed(sess)
+            und = prof.get("undecided_class")
+            if new and und in classes:
+                renew = True
+                top = None if load else self._top_builds(stages, classes)
+                if top is not None:
+                    # below the bar and its top class builds (a second build class close behind,
+                    # `_below_build`'s margin): the default class and its files-care, as before
+                    row["extra"]["undecided_builds"] = {"top": top, "kept": cls}
+                else:
+                    took = "busy" if load else "below"
+                    if und != cls:
+                        row["extra"]["undecided_class"] = {"from": cls, "to": und, "why": took}
+                        cls = und
         model_cls, model_conf, model_source = cls, conf, source
         if dec["classify"] == "shadow":
             # journal the class; the policy runs as the profile's default class
@@ -1316,13 +1572,31 @@ class Router:
             follow = dec["classify"] != "off" and model_source != "structural"
             # FX6: the reading line goes in on the turn a class starts, not on every later one
             plan.class_new = model_cls != sess.cls
+            old_cls, was_guess = sess.cls, sess.guess
             if follow and model_cls != sess.cls:
                 sess.history.append({"at": time.time(), "from": sess.cls, "to": model_cls,
                                      "confidence": model_conf, "source": model_source})
             if follow:
                 sess.cls, sess.conf, sess.source = model_cls, model_conf, model_source
+                # SRV-763: a new session's undecided class is a guess until an answer decides. A
+                # later message the box was not too busy for drops the busy guess's lean: the
+                # class's whole policy and the package question (`below`)
+                if model_source == "fallback":
+                    if renew or old_cls not in classes:
+                        sess.guess = took
+                    elif was_guess and not load:
+                        sess.guess = "below"
+                elif model_source != "sticky":
+                    sess.guess = None
             if sh.user_hash is not None:
                 sess.user_hash = sh.user_hash
+            plan.lean = (FAIL_OPEN == "general" and conf is None and sess.guess == "busy"
+                         and source in ("fallback", "sticky"))
+            now_guess = sess.guess
+        if was_guess and follow and now_guess is None and model_cls != old_cls:
+            row["extra"]["guess_replaced"] = {"was": old_cls, "guess": was_guess}
+        if plan.lean:
+            plan.fail_open = True
 
         # ---- the policy
         base = classes[cls]["policy"]
@@ -1335,6 +1609,7 @@ class Router:
                   "package_sticky": ov.get("package_sticky") or base.get("package_sticky"),
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
+        plan.sticky = schema.package_sticky(router, policy)        # VIS-119: the library's too
         if modelfit.FIT["fallback"] == "lean" and conf is None and source in ("fallback", "sticky"):
             # ENG-E10: nobody decided the class (no answer at the accept bar, or a tool turn of
             # such a session): the profile's default effort, so a short chat does not think at a
@@ -1345,6 +1620,17 @@ class Router:
             # its user message, so the note a run started with stays the same across its steps
             policy.update(effort=prof["thinking"]["default"], effort_by_size=None)
             row["extra"]["model_fit_lean"] = True
+        if plan.lean:
+            # SRV-763: the busy fallback thinks at most at the profile's default level; its general
+            # packages and core alone go in (`_block`), so its note stays the same on its tool turns
+            cap = prof["thinking"].get("default")
+            if cap in EFFORT_ORDER and policy["effort"] in EFFORT_ORDER and \
+                    EFFORT_ORDER.index(policy["effort"]) > EFFORT_ORDER.index(cap):
+                policy["effort"] = cap
+            policy["effort_by_size"] = None
+            row["extra"]["fail_open"] = {"lean": True, "effort": policy["effort"]}
+        elif plan.fail_open:
+            row["extra"]["fail_open"] = {"lean": False}
         if modelfit.FIT != modelfit.DEFAULTS:
             row["extra"]["model_fit"] = modelfit.summary()
         self._size(plan, router, prof, sh, sess, policy, row)
@@ -1633,7 +1919,9 @@ class Router:
                 row["extra"]["package_core"] = [g for g in general if g in core]
         if dec["packages"] != "off" and cands:
             chosen, how = None, None
-            if len(cands) == 1:
+            if plan.lean:
+                how = "fail_open"         # SRV-763: the busy fallback's general packages alone
+            elif len(cands) == 1:
                 chosen, how = cands[0], "only_candidate"
             else:
                 pk = (cls, sh.user_hash)
@@ -1642,12 +1930,19 @@ class Router:
                 # question picked for that class; the class question decides a new kind of
                 # request (`plan.class_new`), the package question is not asked again for it
                 held = sess.package_pick.get(("class", cls))
-                if hit is None and held is not None and held[0] in cands and \
+                if hit is None and _class_holds(held, cands) and \
                         not getattr(plan, "class_new", True) and \
                         schema.package_sticky(router, policy) == "class":
-                    hit = (held[0], "sticky")
+                    hit = (held[0], "sticky" if held[0] is not None else "sticky_none")
                 if hit is not None:
                     chosen, how = hit
+                elif plan.fail_open:
+                    # SRV-763: the class question could not be answered in time; a second question
+                    # waits as long. No package for this message, on its tool turns too
+                    how = "fail_open"
+                    if len(sess.package_pick) > 32:
+                        sess.package_pick.clear()
+                    sess.package_pick[pk] = (None, how)
                 else:
                     opts = {p: packages["packages"][p]["description"] for p in cands
                             if p in packages["packages"]}
@@ -1667,6 +1962,9 @@ class Router:
                     sess.package_pick[pk] = (chosen, how)
                     if chosen:
                         sess.package_pick[("class", cls)] = (chosen, how)
+                    elif ans is not None and PACKAGE_HOLD == "answer":
+                        # VIS-119: the none with the candidates it was asked over
+                        sess.package_pick[("class", cls)] = (None, how, frozenset(cands))
                     else:
                         sess.package_pick.pop(("class", cls), None)
             row["extra"]["package_choice"] = {"candidates": cands, "chosen": chosen, "how": how}

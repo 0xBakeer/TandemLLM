@@ -49,8 +49,32 @@ from engine.models import REGISTRY  # noqa: E402
 #: SPD-211's draft window fix (engine/drafters/dflash2.py, engine/kvpool.py): v2 and every adapter's fp4 move;
 #: SPD-215 the resident prefix's prompt end (engine/cache.py): v2 again
 #: ENG-411: the kernel source strings leave engine/native_tree.py and the tools/ kernels (csrc/ files): v2 again
-GOLDEN_V2 = ("faf028096854cce746c42f570e94f7e04a62775902d5d3b1f75640582c427b5a",
-             "fe2e7ba3ee4fc933eff399243aa4d7d506e142be73fd4910d6611dff950c396f")
+#: SPD-249: the prefill's marked grid (engine/cache.py `Grid`, off unless a prompt has a head mark) and the
+#: store keeping a head's snapshot last, and engine/capture_lock.py's guard for CUDA work off the engine's
+#: thread, and the gate's store shed in chunks: v2's second value again (the first skips engine/cache.py)
+#: #105: engine/drafters/ngram.py skips a lookup corpus of another tokenizer instead of refusing it: v2 again
+#: SPD-249: the gate's store shed asks the heads before the next level when only heads are left or the chunks before
+#: them were too small to tell (engine/cache.py): v2's second value again
+#: SPD-257: each resident prefix's reserved end anchor, the policy's read of the allocator's pools and the graph
+#: captures on plain segments (engine/cache.py, engine/capture_lock.py, engine/disk_cache.py): v2's second value again
+#: SRV-773/SRV-775: the memory gate's charge by forwarded rows, the prefills in flight by thread and the resident
+#: prefix's resume estimate (engine/cache.py): v2's second value again
+#: SRV-775: the admission's count of a prefill in flight by its rows (`Budget.workspace_rows(line=False)`,
+#: engine/cache.py): v2's second value again
+#: SRV-775: a side slot's gate runs the peak stage only and `ws_now` is the largest prefill in flight
+#: (engine/cache.py): v2's second value again
+#: SRV-775: a side slot's gate far under the peak admits without the policy's lock (engine/cache.py): v2's second
+#: value again
+#: SRV-775: the policy's free default-pool bytes a prefill admitted over the peak takes first
+#: (`Budget.workspace_spare`, engine/cache.py): v2's second value again
+#: SRV-775: that credit only on a live pools reading (engine/cache.py): v2's second value again
+#: the allocator's counters read off torch's nested dict, which leaves no cyclic garbage (`cache.cuda_stats`,
+#: engine/cache.py): v2's second value again
+#: the spill codec's import answer remembered (engine/spill.py): v2's second value again
+#: the GPU adapters (tools/gpu) count with the kernels that ask them, a tools/ package read whole
+#: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
+GOLDEN_V2 = ("b81a0af84a1f94c15fb8c5a1f6ab57bd781949d1e3738ab20e8a240b9c598592",
+             "e2ebfbd00670a3ee79eb2837bfae45eefb4178c54ac54dbdcfa34533d41da1a4")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -89,12 +113,46 @@ GOLDEN_FP4 = {
     # no row changes); Flash-Next and Ornith
     # ENG-411: the kernel sources move into csrc/ files beside their modules and count in the fingerprint (the
     # compiled text unchanged); every adapter
-    "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "25b36ced9a41d1873adba9d63f487c0a46932fb69c93ca48856c07a663c3cdc0",
-    "nemotron_h": "5a36031e5acb49888a9b0760bea12c46d6b10f7bc19052df91c014f717539c7e",
-    "lfm2_moe": "2f5201ec99d275dfae9efe00796a250a51525ce2e451f502ec5dc02f35a463c6",
-    "qwen3_5_moe": "84fd123427d375e901915fbc274c29b52dd743641a8408926f4b7005c14105eb",
-    "flint": "be4aa2e667130b9b9454c8cccc97f1807466b8b029d521b3b857df5009d6c011",
+    # SPD-249: Flash-Next's launch class checked on the host, no class below the state's in an idle capture (no row
+    # changes); Flash-Next and Ornith
+    # SPD-249: the expert-union count (off by default), the mixer GEMV writing the mix_up's A,
+    # the joint pass's GDN pre in one launch and the deferred GDN write-back, the grouped MoE grid rows, staged rows
+    # and group cap (all off, the bits the same); Flash-Next, Ornith and the adapters that read its kernel sources
+    # SPD-249: FN_DRAFT_FREEZE (off), the drafters' adaptive state kept at its start for A/B arms; Flash-Next, Ornith
+    # SPD-249: FN_ATTN_MULTI and FN_PLE_MULTI (off), a joint pass's attention and PLE for every lane at once;
+    # the grouped MoE's pre-lever kernels at the lever defaults; Flash-Next's kernels and the adapters that read them
+    # SPD-249: FN_JOINT_GRAPH (off), a dense joint pass from CUDA graphs; the pad rows' expert id -1 skipped by the
+    # grouped kernels and ranked by slot in the combine (no real row changes); Flash-Next and the adapters that read
+    # its kernel sources
+    # SPD-249: the round runner's CPU ms in /health and QSE_RUNNER_HOST_BLOCKS (off); the adapters that read the runner
+    # SPD-249: FN_PLE_PREFETCH (the round runner hands a lane's tree to the family before its verify) and the grouped
+    # expert kernels with their rows streamed and their groups from one block's scans (all off, the bits the same);
+    # every adapter but qwen3_5
+    # SPD-255: NemotronH's 33-row verify block on the row kernels (engine/models/nemotron_h/engine.py): nemotron_h
+    # SPD-249: comments only (engine/settings.py, the round runner, Flash-Next's engine and serving, the fn_kernels
+    # sources); every adapter but qwen3_5
+    # SPD-249: an eager joint pass after one that raised starts on clean entry tables, a joint graph is kept by its
+    # lanes' KV strides too, /health copies the kept keys (engine/models/flashnext/engine.py): Flash-Next and Ornith
+    # SPD-249: Flash-Next's coupled MTP drafts for seeded sampled requests, their one-lane head, the cut calibration
+    # file and the corrector (all off by default; Flash-Next and Ornith, which reads Flash-Next's engine and knobs);
+    # the joint prefill and the MTP lanes' lookup backoff (off), the round runner's host counters, busy work and
+    # collector control (off; engine/methods/busy.py, mtp_drafter.py, staircut.py, the runner): every adapter but
+    # qwen3_5 and nemotron_h
+    # the MTP catch-up's own prefill chunk cap (engine/models/flashnext/engine.py): qwen3_5_moe, qwen4_exp
+    # #142: IQ2, Q8 and FP8 weights keep a 33-row verify block on their row kernels (tools/iq2_linear.py,
+    # tools/nvfp4_relu2.py): nemotron_h (flint reads nvfp4_relu2.py and may move)
+    # #136: the dense kernels take 7-bit EXL3 tensors (tools/csrc/fn_kernels/kernels.cu, the LFM2.5, NemotronH and
+    # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
+    # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): qwen4_exp, flint; lfm2_moe and
+    # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
+    # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
+    # their files count; the GB10's answers are the ones before (no row changes): every adapter
+    "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
+    "qwen4_exp": "d20a881a5888f9ed52de3b8e0c35647d39b31a7aa59de0eb15b5e2fe9d80bd98",
+    "nemotron_h": "058fd3514b2db6a759f17975df527251694710e0b1e7ef82d43f7821f7964fba",
+    "lfm2_moe": "fd1fa1113f5c10ceea8fc13e3f282cc98480014c51c0419033cd2fb4453822f2",
+    "qwen3_5_moe": "b8dfa7ca1146adafdc5c68aeb88ed4aad7c4c796482d4d37109593e861fa7807",
+    "flint": "d007cece66261ef2f53d01057c056a53cbf6424e3c8692366debfd1299ac04b7",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
@@ -269,7 +327,10 @@ BASELINE = {
     "server/setup/wren.py": 17,
     # the 27B's own config and drafters (engine/*.py is its package by history, ENG-221)
     "engine/config.py": 2, "engine/drafters/dflash2.py": 1, "engine/drafters/dspark.py": 1,
-    # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new)
+    # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new). The FN_* knobs of the
+    # shared kernel libraries (tools/fn_kernels.py, tools/fn_prefill_kernels.py: FN_MOE_*, FN_GEMV_*, FN_PDL, ...)
+    # live in this table by their library, which Flash-Next and Ornith both read; their owner is that library, never a
+    # model package (test_family_knobs_live_in_their_package holds both)
     "engine/methods/manifest.py": 13, "engine/settings.py": 16,
     # the default --served-model name, the API's own since 0.1 (clients address it)
     "server/app.py": 1,
@@ -405,6 +466,10 @@ def test_family_knobs_live_in_their_package():
     shared = _knob_table(os.path.join(ROOT, "engine", "settings.py"))
     fam = {k for k, v in shared.items() if len(v) > 1 and str(v[1]).startswith("engine/models/")}
     assert fam == LEGACY_FAMILY_KNOBS, f"a family knob in engine/settings.py: {sorted(fam - LEGACY_FAMILY_KNOBS)}"
+    # a model-prefixed knob in the shared table that is not legacy belongs to a shared kernel library under tools/
+    lib = {k: str(v[1]) for k, v in shared.items() if k.startswith(("FN_", "Q35M_")) and k not in LEGACY_FAMILY_KNOBS}
+    bad = {k: o for k, o in lib.items() if not (o.startswith("tools/") and o.endswith(".py"))}
+    assert not bad, f"a model's knob in engine/settings.py whose owner is no tools/ library: {bad}"
     for path in glob.glob(os.path.join(ROOT, "engine", "models", "*", "knobs.py")):
         pkg = os.path.relpath(os.path.dirname(path), ROOT) + "/"
         for k, v in _knob_table(path).items():
@@ -415,7 +480,7 @@ def test_family_knobs_live_in_their_package():
             own = os.path.join(ROOT, "engine", a.package or "", "knobs.py")
             if a.package and os.path.isfile(own):
                 assert os.path.relpath(own, ROOT) in a.manifest_of().modules, f"{name}: knobs.py not in its manifest"
-    return f"{len(LEGACY_FAMILY_KNOBS)} legacy family knobs in the shared table, none new"
+    return f"{len(LEGACY_FAMILY_KNOBS)} legacy family knobs in the shared table, none new; {len(lib)} library knobs"
 
 
 if __name__ == "__main__":

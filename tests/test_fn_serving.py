@@ -36,6 +36,7 @@ from engine.tree import DraftTree  # noqa: E402
 class _Cfg:
     attention_layers = (3,)
     num_key_value_heads, head_dim, indexer_head_dim, has_indexer = 2, 8, 4, True
+    indexer_compress_ratio = 4
     ple_layers = {1: 0}
     eos_token_id, hc_count, hidden_size = 3, 1, 3
 
@@ -54,6 +55,12 @@ class _FN:
         self.commits: list = []
         self._pending: dict = {}          # id(state) -> state with parked GDN rows (SPD-229: each its own)
         self.flushes = 0
+        self._joint: dict = {}            # id(state) -> its block of the last joint pass
+        self._cnt = torch.zeros(1, dtype=torch.int32)
+
+    def _pend_of(self, st):
+        """The parked rows' buffers and count (a capture's state save reads the count, SPD-261)."""
+        return {}, self._cnt
 
     def parked(self, st):
         return id(st) in self._pending
@@ -423,7 +430,9 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
 
     fn.stage_rows = lambda toks, parents, st: staged.append(("rows", list(parents)))
     fn.stage_commit = lambda st, path: staged.append(("commit", list(path)))
-    head = types.SimpleNamespace(depth=1, graphs={(1, 0): 1, (2, 0): 1})
+    head = types.SimpleNamespace(depth=1, graphs={(1, 0): 1, (2, 0): 1},
+                                 st=types.SimpleNamespace(length=0, pool_n={}))     # SPD-271: its length
+    head.reset = lambda: setattr(head.st, "length", 0)                              # SPD-271: with the trunk's
     head.capture_class = lambda n, cls: head.graphs.__setitem__((n, cls), 1)
     s = FlashNextServing(fn, 64)
     s.heads["mtp"] = head
@@ -434,11 +443,11 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     s.st.length = 500
     assert s._top(False) == [2, 3]                                       # width 5: 0.1 % of the rounds
     assert s.capture_cost(50) == 0.0                                      # class 0 has them
-    assert s.capture_cost(500) == 8 * S.CAPTURE_MS                       # 2 widths, 4 commits, 2 feeds
+    assert s.capture_cost(500) == 4 * S.CAPTURE_MS                       # 2 widths, 2 feeds (commits uncharged)
     real, S.VerifyGraph, S.CommitGraph = (S.VerifyGraph, S.CommitGraph), VG, CG
     sync, torch.cuda.synchronize = torch.cuda.synchronize, lambda: None
     try:
-        n = sum(1 for _ in s.idle_captures())
+        n = sum(1 for _ in s.idle_captures(ahead=False))                 # the warm-up's call: commits too
     finally:
         S.VerifyGraph, S.CommitGraph = real
         torch.cuda.synchronize = sync
@@ -530,6 +539,14 @@ def test_a_side_slot_shares_the_weights_and_has_its_own_state():
     assert (d0.head.key, d2.head.key) == (0, 1)                    # its own draft buffers
     assert d2.cut is not d0.cut and d2.cut.prices.table == d0.cut.prices.table and d2.cut.spec == {}
     assert d2.ngram is not None and d2.ngram.corpus is ng0.corpus
+    assert not d2.freeze
+    d0.freeze = True                               # SPD-249 (FN_DRAFT_FREEZE): a side slot's drafter frozen too
+    MTPTreeDrafter.capture_all = lambda self: None
+    try:
+        _, d3 = s0.side_slot(32, d0)
+    finally:
+        MTPTreeDrafter.capture_all = real
+    assert d3.freeze and d3.cut.frozen
     per_token, const = s0.side_slot_bytes(32, paged=False)
     assert per_token > s0.cost().view_bytes_per_token and const > s0.cost().section_bytes
     assert s0.side_slot_bytes(32, paged=True)[0] == 0
@@ -709,7 +726,8 @@ def _ahead_serving(max_len: int = 32_768):
         def capture(self):
             made.append(("c",) + self.key)
 
-    head = types.SimpleNamespace(depth=3, graphs={})
+    head = types.SimpleNamespace(depth=3, graphs={}, st=types.SimpleNamespace(length=0, pool_n={}))
+    head.reset = lambda: (setattr(head.st, "length", 0), setattr(head.st, "pool_n", {}))
     head.capture_class = lambda n, cls: (made.append(("m", n, cls)), head.graphs.__setitem__((n, cls), 1))
     s = FlashNextServing(fn, max_len)
     s.heads["mtp"] = head
@@ -745,17 +763,206 @@ def test_idle_captures_take_the_classes_ahead_and_the_owed_ones():
     n = _drain(s, stubs, s.idle_captures(wants=lambda n: asked.append(n) or True))
     assert n > 0 and {m[-1] for m in made[-n:]} == {1024, 2048} and asked == [4784, 2051], (made[-n:], asked)
     assert s.capture_cost(4784) == 0.0 and s.capture_cost(4129) == 0.0 and s._owed == {}, s._owed
-    assert s.last_owed == "2048:v0c0m0" and s.st.length == 0
+    assert s.last_owed.startswith("2048:v0c") and s.last_owed.endswith("m0") and s.st.length == 0, s.last_owed
     # a side question leaves the state short; a turn at 9,000 tokens found class 4096 without graphs
     s.st.length = 300
     assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
     n = _drain(s, stubs, s.idle_captures())
     assert {m[-1] for m in made[-n:]} == {4096} and s.capture_cost(9000) == 0.0 and s.st.length == 300, made[-n:]
     assert s.idle_captures() is None
-    # a state at 4,784 tokens: its own class has them, the next (4,096 from 8,192) is taken ahead
+    # a state at 4,784 tokens: its own class has its verify and draft graphs (its commits come at first use),
+    # the next (4,096 from 8,192) is taken ahead
     s.st.length = 4784
     assert s._capture_lengths(True) == [4784, 8192] and s.idle_captures() is None     # 4096 captured above
     return "classes 1,024 and 2,048 ahead of an empty state, 4,096 owed from a short one; none unwanted"
+
+
+def test_an_idle_window_takes_no_class_below_the_states_own():
+    """SPD-249: a 2,013-token turn starts in class 0 (dense), finds width 9 without graphs and is owed; it decodes
+    past 2,048. The idle window captured class 0's width 9 on the 2,268-token state: its rows past the dense budget
+    are sparse (`_stage_qsa`) while a class-0 launch selects no blocks, so `attn_rows` read K/V at whatever `sel`
+    held (an illegal memory access, 2026-10-30). The window now takes no class below the state's own (the class of
+    its length + CAPTURE_ROWS); the owed entry stays for a shorter state, which takes it."""
+    from engine.models.flashnext import serving as S
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0's prior shapes
+    assert _drain(s, stubs, s.idle_captures()) > 0 and s.idle_captures() is None
+    made.clear()
+    s.uses[9] = 500                                                          # the turn's rounds used width 9
+    s.st.length = 2013
+    assert s.capture_cost(2013) > 0 and s._owed == {0: 2013}, s._owed         # class 0 lacks it: owed
+    s.st.length = 2268                                                       # the turn decoded past 2,048
+    _drain(s, stubs, s.idle_captures())
+    assert not [m for m in made if m[-1] < _qsa_class(2268 + S.CAPTURE_ROWS)], made
+    assert s._owed.get(0) == 2013, s._owed                                   # kept for a shorter state
+    made.clear()
+    s.st.length = 300                                                        # a short state: class 0 is its own
+    _drain(s, stubs, s.idle_captures())
+    assert ("v", 9, 0) in made and 0 not in s._owed, (made, s._owed)
+    return "no class-0 capture on a 2,268-token state; the owed width taken once a state is short again"
+
+
+def _observed_head(length: int = 85_010):
+    """SPD-271: an MTP head at `length` rows (the observed state a KV reclaim left on slot 1)."""
+    head = types.SimpleNamespace(st=types.SimpleNamespace(length=length, pool_n={1: 1}), depth=3, graphs={})
+    head.reset = lambda: (setattr(head.st, "length", 0), setattr(head.st, "pool_n", {}))
+    return head
+
+
+def test_spd271_a_kv_reset_resets_the_heads_with_the_trunk():
+    """SPD-271: a KV reclaim (`eng.kv.length = 0`, server/app.py `_kv_reclaim_side`) restarted the trunk only; the MTP
+    head kept its 85,010 rows (class 32768) and every idle look planned a class below it (ClassError, 2026-11-02).
+    A restart resets every head and forgets the failed captures: through `kv.length = 0` and through `reset()`
+    (a guest's cold prefill)."""
+    for how in ("kv.length = 0", "reset()"):
+        s = FlashNextServing(_FN(), 64)
+        head = _observed_head()
+        s.heads["mtp"] = head
+        s._capture_failed = {16384: (0, (85_010,))}
+        s.st.length = 5
+        if how == "reset()":
+            s.reset()
+        else:
+            s.kv.length = 0
+        assert s.st.length == 0 and head.st.length == 0 and head.st.pool_n == {}, (how, head.st)
+        assert s._capture_failed == {}, (how, s._capture_failed)
+    return "the head's length and pooled keys with the trunk's, the failed captures forgotten; both ways"
+
+
+def test_spd271_an_idle_window_plans_no_class_below_a_heads_position():
+    """SPD-271: the trunk at 0 and the head at 85,010 (the observed state): the classes ahead of the trunk (1,024 and
+    2,048) are below the head's (32,768 at 85,010 + 2 x depth), whose chain the class check refuses, so nothing is
+    planned; once the head is reset with the trunk the classes ahead of an empty state are taken as before."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0
+    made.clear()
+    head = s.heads["mtp"]
+    head.st.length = 85_010
+    floor = _qsa_class(85_010 + 2 * head.depth)
+    assert floor == 32_768 and s.idle_captures() is None, floor
+    assert not [m for m in made if m[-1] < floor], made
+    head.reset()
+    n = _drain(s, stubs, s.idle_captures())
+    assert n > 0 and {m[-1] for m in made} == {1024, 2048} and s.st.length == 0, made
+    return "nothing below class 32,768 under a head at 85,010; after its reset 1,024 and 2,048 ahead"
+
+
+def test_spd271_a_failed_idle_capture_is_recorded_once_and_retried_after_the_state_changes():
+    """SPD-271: an idle capture that raises (here a verify graph of class 1,024, the observed failure was the head's chain)
+    is recorded for its class at the engine's state, counted once and raised as `IdleCaptureFailed`; the class's owed
+    entry stays. The next looks skip that class while the state is the same (the class after it is taken) and plan
+    it again once the state changed, when its owed entry goes with the capture."""
+    from engine.models.flashnext import engine as E
+    s, made, (S, VG, CG) = _ahead_serving()
+    _drain(s, (S, VG, CG), s.idle_captures(ahead=False))                     # the warm-up: class 0
+    made.clear()
+    bad = {"on": True}
+
+    class BadVG(VG):
+        def capture(self):
+            if bad["on"] and self.key[1] == 1024:
+                raise E.ClassError("verify: class 1024 below 32768, the class of position 85010")
+            super().capture()
+    stubs = (S, BadVG, CG)
+    after, S._after_failed_capture = S._after_failed_capture, lambda: None   # no CUDA stream on the host
+    try:
+        assert s.capture_cost(2100) > 0 and s._owed.get(1024) == 2100, s._owed
+        try:
+            _drain(s, stubs, s.idle_captures())
+            raise AssertionError("the failed capture was not raised")
+        except S.IdleCaptureFailed as exc:
+            assert exc.cls == 1024 and isinstance(exc.exc, E.ClassError) and "class 1024" in str(exc), exc
+        assert s._capture_failed == {1024: s._state_key()} and s.stats["idle_capture_failed"] == 1, s._capture_failed
+        assert s._owed.get(1024) == 2100, s._owed
+        made.clear()
+        n = _drain(s, stubs, s.idle_captures())                              # same state: 1,024 skipped
+        assert n > 0 and {m[-1] for m in made} == {2048} and s.stats["idle_capture_failed"] == 1, made
+        assert s._owed.get(1024) == 2100, s._owed
+        bad["on"] = False
+        s.st.length = 300                                                    # the state changed
+        made.clear()
+        n = _drain(s, stubs, s.idle_captures())
+        assert n > 0 and 1024 in {m[-1] for m in made} and 1024 not in s._owed, (made, s._owed)
+        assert s.idle_captures() is None and s.stats["idle_capture_failed"] == 1
+    finally:
+        S._after_failed_capture = after
+    return "recorded once, skipped at the same state (2,048 taken), planned and captured after the state changed"
+
+
+def test_a_launch_below_its_rows_class_is_refused_on_the_host():
+    """SPD-249, the guard behind the idle window's floor: any attention launch (an eager step or block, a capture's
+    warm-up, a verify graph's replay, an MTP chain) whose class is below the class of its last row's position
+    raises `ClassError` on the host before a kernel runs; the class of the position or any above passes."""
+    from engine.models.flashnext import engine as E
+    eng = object.__new__(E.FlashNextEngine)
+    eng.cfg = types.SimpleNamespace(has_indexer=True, indexer_compress_ratio=4)
+    eng.class_check(2050, 0, "t")                                            # the last dense position
+    eng.class_check(2268, 1024, "t") or eng.class_check(2268, 4096, "t")     # its own class, one above
+    for last, cls in ((2051, 0), (2268, 0), (4096, 1024), (9000, 2048)):
+        try:
+            eng.class_check(last, cls, "t")
+        except E.ClassError as exc:
+            assert f"class {cls} below" in str(exc), exc
+        else:
+            raise AssertionError(f"class {cls} at {last} passed")
+    rb = {"last": 2268}
+    eng._rows_buffers = lambda M, key=None: rb
+    replayed = []
+    vg = object.__new__(E.VerifyGraph)
+    vg.eng, vg.st, vg.M, vg.cls, vg.rec = eng, types.SimpleNamespace(length=2260), 9, 0, {}
+    vg.graph = types.SimpleNamespace(replay=lambda: replayed.append(1))
+    try:
+        vg.replay()
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("a class-0 verify graph replayed at 2,268")
+    vg.cls = 1024
+    vg.replay()
+    try:
+        eng.rows_step(types.SimpleNamespace(length=2260), 9, cls=0)
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("rows_step ran class 0 at 2,268")
+    nodev = types.SimpleNamespace(length=2260)
+    try:
+        eng.mtp_chain_dev(nodev, 4, 5, 0)
+    except E.ClassError:
+        pass
+    else:
+        raise AssertionError("an MTP chain of class 0 ran at 2,268")
+    assert replayed == [1], replayed
+    return "below its rows' class: refused (step, block, warm-up, replay, MTP chain); its own class or above: run"
+
+
+def test_an_idle_window_takes_no_commit_graphs():
+    """SPD-249: the commit graphs an idle window captured (24 shapes a class, each lane) slowed every later
+    joint round of the process (Flash-Next 3.05, 8 lanes of 189-token prompts after one idle window). The idle
+    window (`ahead`) takes verify and draft graphs only, for the state's own class, the classes ahead and the
+    owed ones; a turn is not charged for commit graphs, which a commit captures at first use; the warm-up's
+    call (without `ahead`) still takes class 0's."""
+    s, made, stubs = _ahead_serving()
+    assert _drain(s, stubs, s.idle_captures(ahead=False)) > 0                 # the warm-up: class 0, all kinds
+    assert {m[0] for m in made} == {"v", "c", "m"} and {m[-1] for m in made} == {0}, made
+    made.clear()
+    n = _drain(s, stubs, s.idle_captures())                                  # an empty state: 1,024 and 2,048 ahead
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {1024, 2048}, made
+    assert s.idle_captures() is None                                         # nothing left for the idle window
+    assert any(m[0] == "c" for m in s._missing(2048)) and s.capture_cost(4784) == 0.0, s._missing(2048)
+    made.clear()
+    s.st.length = 300                                                        # a side question; a turn at 9,000
+    assert s.capture_cost(9000) > 0 and s._owed == {4096: 9000}, s._owed
+    n = _drain(s, stubs, s.idle_captures())
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {4096}, made
+    assert s.capture_cost(9000) == 0.0 and s._owed == {}, s._owed
+    made.clear()
+    s.st.length = 9000                                                       # the state in class 4,096: its own
+    n = _drain(s, stubs, s.idle_captures())                                  # 8,192 ahead of it
+    assert n > 0 and {m[0] for m in made} == {"v", "m"} and {m[-1] for m in made} == {8192}, made
+    assert s.idle_captures() is None and {m[0] for m in s._missing(4096)} == {"c"}, s._missing(4096)
+    assert s.st.length == 9000
+    return "idle: verify and draft graphs only (own, ahead, owed), no charge for commits; the warm-up takes class 0's"
 
 
 def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
@@ -779,7 +986,7 @@ def test_a_conductor_sized_greedy_turn_drafts_once_the_idle_window_ran():
         return d.req["turn"], d.req["turn_in"], tree
 
     t, ti, tree = turn()
-    assert t is False and tree is None and ti["extra_ms"] > 5000, ti  # the bug: graphs owed, a plain turn
+    assert t is False and tree is None and ti["extra_ms"] > 3000, ti  # the bug: graphs owed, a plain turn
     _drain(s, stubs, s.idle_captures())                               # one idle window (state at 0)
     t, ti, tree = turn()
     assert t is True and ti["extra_ms"] == 0.0 and tree is not None and tree.n_draft > 0, (t, ti, tree)
@@ -801,7 +1008,7 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
     eng.settle = lambda st: None
     eng.stage_commit = lambda st, path: (3, len(path), False, 0)
     eng._commit_bufs = lambda key: {"stack": torch.zeros(len(key), 3)}
-    eng._rows_buffers = lambda M, key: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
+    eng._rows_buffers = lambda M, key=None: {"d": {"tok": torch.zeros(M, dtype=torch.long)}}
     eng.stage_mtp = lambda st_m, nexts, depth: 0
     eng.mtp_chain_dev = lambda st_m, n, depth, cls: eng._mtp_begin(n, ("mtp", "mtp", 0, n), cls)
     read = []
@@ -834,7 +1041,7 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
         E.CommitGraph = CG
         # 1. the block's verify graph replays: the records are its intermediates
         vg = object.__new__(E.VerifyGraph)
-        vg.eng, vg.graph = eng, _Graph()
+        vg.eng, vg.graph, vg.st, vg.M, vg.cls = eng, _Graph(), st, 3, 0
         vg.rec = {0: (1, 2, 3, 4), 1: (1, 2, 3, 4), "stack": torch.zeros(3, 3)}
         vg.replay()
         # 2. the next draft's MTP chain graph, captured inline (no graph for its feed at this class)
@@ -847,6 +1054,171 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
         E.CommitGraph = real_cg
     assert read == ["tuple", "tuple"] and eng.rec is vg.rec and st.length == 2, (read, eng.rec)
     return "verify replay, an inline MTP capture, an inline commit capture: the commit reads both layers' records"
+
+
+class _Look:
+    """A lookup whose match the test sets (`cont`: its continuation, None: nothing matches); counts its calls."""
+
+    alpha, min_order = 1.0, 3
+
+    def __init__(self):
+        self.cont, self.calls = None, 0
+
+    def candidates(self, ctx, depth):
+        self.calls += 1
+        return (3, [(list(self.cont), 9.0)]) if self.cont else (0, [])
+
+    def reset(self):
+        pass
+
+    def prime(self, tokens):
+        pass
+
+    def observe(self, tokens):
+        pass
+
+
+def _backoff_rounds(d, ng, n, lanes, path=lambda tree: tree.tokens[:2]):
+    """n rounds of `d` at `lanes` lanes, each synced with `path(tree)` (the anchor and what the walk took): the rounds
+    (1-based) whose lookup ran."""
+    ctx = list(range(40, 60))
+    d.reset()
+    d.sync(ctx, _rows(0, len(ctx)), 0)
+    looked = []
+    for r in range(1, n + 1):
+        d.lanes = lanes
+        c0 = ng.calls
+        tree = d.propose_tree(ctx, 16)
+        tree.check()
+        if ng.calls > c0:
+            looked.append(r)
+        toks = path(tree)
+        d.sync(toks, _rows(len(ctx) - 1, len(toks)), len(ctx) - 1)
+        d.observe(toks[1:])
+        ctx = ctx + toks[1:]
+    return looked
+
+
+def test_spd249_the_lookup_backs_off_on_shared_rounds_while_it_misses():
+    """SPD-249: at 8 lanes a lookup that finds nothing is skipped 1, 2, 4 .. up to `mtp_look_backoff` rounds; a
+    lone round always looks; with the knob 0 every round looks. The tree is the head's own either way."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = _Look()
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False), ng)
+    assert d.mtp_look_backoff == 0
+    assert _backoff_rounds(d, ng, 12, 8) == list(range(1, 13))                  # off: every round
+    d.mtp_look_backoff = 4
+    looked = _backoff_rounds(d, ng, 26, 8)
+    assert looked == [1, 3, 6, 11, 16, 21, 26], looked                      # skips 1, 2, 4, 4, 4 ..
+    assert d.stats["look_skips"] == 26 - len(looked) and "look_skips=" in d.report()
+    assert _backoff_rounds(d, ng, 10, 1) == list(range(1, 11))                   # a lone round always looks
+    return f"misses at 8 lanes: looked at rounds {looked}; lone rounds and knob 0: every round"
+
+
+def test_spd249_a_taken_lookup_row_starts_the_backoff_over():
+    """A lookup row the walk accepted is a hit (the next shared round looks again), and so is a spine row the
+    lookup agreed with (its continuation the head's own chain: the merged cut's shared rows, whose q the agreement
+    raised); a lookup whose rows the walk did not take is a miss."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = _Look()
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False), ng)
+    d.mtp_look_backoff = 8
+    ng.cont = [77, 78, 79]                                                   # off the head's chain (10, 11, 12)
+
+    def take_look(tree):
+        i = tree.tokens.index(77, 1)
+        assert tree.parents[i] == 0, (tree.tokens, tree.parents)
+        return [tree.tokens[0], 77]
+    assert _backoff_rounds(d, ng, 6, 8, take_look) == [1, 2, 3, 4, 5, 6]          # taken: every round looks
+    assert d._ml_streak == 0
+    looked = _backoff_rounds(d, ng, 7, 8, lambda tree: [tree.tokens[0], 10])      # the walk took the head's token
+    assert looked == [1, 3, 6], looked
+    ng.cont = [10, 11, 12]                                                   # the head's own chain: shared rows
+    tree = None
+
+    def take_shared(t):
+        nonlocal tree
+        tree = t
+        return [t.tokens[0], 10, 11]
+    looked = _backoff_rounds(d, ng, 7, 8, take_shared)
+    kinds = [k[0] for k in d.cut.last[1][1:]]
+    assert tree.tokens[1:4] == [10, 11, 12] and kinds == ["both"] * 3, (tree.tokens, kinds)
+    assert looked == list(range(1, 8)), looked                              # the agreement taken: a hit
+    ng.cont = [10, 11, 77]                                                   # agrees two deep, then its own row
+    looked = _backoff_rounds(d, ng, 7, 8, lambda t: [t.tokens[0], 10, 11, 12])
+    assert looked == list(range(1, 8)), looked
+    ng.cont = [10, 11, 12]
+    looked = _backoff_rounds(d, ng, 7, 8, lambda t: [t.tokens[0], 99])           # the walk took none of its rows
+    assert looked == [1, 3, 6], looked
+    return ("a taken lookup row or a taken spine row it agreed with: every round looks; rows the walk did not take: "
+            "back off")
+
+
+def test_spd249_a_side_slot_takes_the_lookup_backoff():
+    fn = _FN()
+    s0 = FlashNextServing(fn, 64)
+    d0 = MTPTreeDrafter(s0, s0.add_mtp_head(3), StairCut(PriceModel(), siblings=False),
+                        types.SimpleNamespace(corpus=object()))
+    d0.mtp_look_backoff = 16
+    real = MTPTreeDrafter.capture_all
+    MTPTreeDrafter.capture_all = lambda self: None
+    try:
+        _, d2 = s0.side_slot(32, d0)
+    finally:
+        MTPTreeDrafter.capture_all = real
+    assert d2.mtp_look_backoff == 16
+    return "a side slot's drafter backs off as slot 0's"
+
+
+def test_spd249_the_joint_pass_calls_the_busy_hook_between_its_issue_and_its_wait():
+    """SPD-249: `forward_tree_multi` calls `busy.busy()` after `verify_multi` queued the pass and before
+    the stream wait; without a hook nothing happens."""
+    from engine.methods import busy
+    fn = _FN()
+    order = []
+
+    def verify_multi(jobs):
+        order.append("issue")
+        return [(torch.zeros(len(t), 4), torch.arange(len(t)), torch.zeros(len(t), 3)) for t, p, st in jobs]
+    fn.verify_multi = verify_multi
+    a, b = FlashNextServing(fn, 64), FlashNextServing(fn, 64)
+    a.st.length, b.st.length = 5, 9
+    real = torch.cuda.current_stream
+    torch.cuda.current_stream = lambda: types.SimpleNamespace(synchronize=lambda: order.append("wait"))
+    try:
+        FlashNextServing.forward_tree_multi([(a, torch.tensor([7, 8]), [-1, 0], 5), (b, torch.tensor([1]), [-1], 9)])
+        assert order == ["issue", "wait"], order
+        busy.HOOK = lambda: order.append("hook")
+        order.clear()
+        FlashNextServing.forward_tree_multi([(a, torch.tensor([7, 8]), [-1, 0], 5), (b, torch.tensor([1]), [-1], 9)])
+    finally:
+        torch.cuda.current_stream = real
+        busy.HOOK = None
+    assert order == ["issue", "hook", "wait"], order
+    return "issue, the hook, the wait; no hook: issue, wait"
+
+def test_spd249_draft_freeze_needs_a_price_file():
+    """SPD-249: FN_DRAFT_FREEZE freezes the MTP drafters only over a price file (the prices a frozen cut keeps); a pack
+    with none on this device keeps learning its prices and says so; with the knob off nothing is frozen."""
+    from engine.models.flashnext import serving as S
+    key, old = "QWEN38_FN_DRAFT_FREEZE", os.environ.get("QWEN38_FN_DRAFT_FREEZE")
+    priced, lines = PriceModel({"0": {"chain": {"1": 20.0}}}, 2.0), []
+    try:
+        os.environ[key] = "1"
+        assert S.draft_freeze(priced, lines.append) is True and "frozen" in lines[-1]
+        assert S.draft_freeze(PriceModel(), lines.append) is False and "no price file" in lines[-1]
+        os.environ[key] = "0"
+        n = len(lines)
+        assert S.draft_freeze(priced, lines.append) is False and len(lines) == n
+        del os.environ[key]
+        assert S.draft_freeze(priced, lines.append) is False and len(lines) == n
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+    return "frozen over a price file; learning without one; off by default"
+
 
 if __name__ == "__main__":
     fails = 0

@@ -184,7 +184,7 @@
    "model": "qwen3.8-flash-next",
    "id": "turboderp-flashnext-5.05",
    "path": "models/qwen3.8-flash-next/community/turboderp-flashnext-5.05.json",
-   "sha256": "9bdc51c96fcdccf221ee6749011c0c7f94e5b2db32f21cb8e452409e467ca2f1",
+   "sha256": "9ad4d88deba1c3c290c68149c59aa0e852400daf32b806e52b2d7644b4503c47",
    "entry": {
     "schema": 1,
     "id": "turboderp-flashnext-5.05",
@@ -219,7 +219,7 @@
     "drafters": "in-pack",
     "license": "qwen-community-1.0",
     "license_url": "https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/blob/7cef615f7fd3681295b68848018876dfabc336c7/LICENSE",
-    "description": "turboderp's EXL3 quantisation of Qwen3.8-Flash-Next at 5.05 bits a weight, the branch 5.05bpw_h6_ng6: the weights, the vision tower, the multi-token-prediction draft layer and the n-gram table. It does not load on TandemLLM yet: its experts are coded at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8 (ENG-223).",
+    "description": "turboderp's EXL3 quantisation of Qwen3.8-Flash-Next at 5.05 bits a weight, the branch 5.05bpw_h6_ng6: the weights, the vision tower, the multi-token-prediction draft layer and the n-gram table. Its earlier blocker was the 7-bit dense projections. The dense dispatch now covers K 2..8; the MoE kernels already supported 7-bit experts. Full-pack load and generation are still unverified.",
     "tags": [
      "quantisation",
      "mixture-of-experts",

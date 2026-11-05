@@ -626,7 +626,16 @@ def read_job(jid: str) -> dict | None:
     starting = job["state"] == "queued" and time.time() - job.get("created_at", 0) < 30
     if job["state"] in ("queued", "running") and not starting and not _alive(
             job.get("pid"), job.get("pid_start"), job.get("boot_id")):
-        job.update(state="failed", message="interrupted: the job's process is gone",
+        message = "interrupted: the job's process is gone"
+        # a death during the fetch has one usual suspect worth naming: the fetch buffers
+        # add up, and on a box that already carries an engine the kernel's oom-killer is
+        # what removes the job. "process is gone" alone sends people hunting through dmesg.
+        # It is the LIKELY cause, not the only one: _alive() is also false after a reboot
+        # or a manual kill, so the message says "most often" and names the next step.
+        if any(s["state"] == "running" and s["id"] == "fetch" for s in job.get("steps") or []):
+            message += (" during the download -- most often the out-of-memory killer "
+                        "(check dmesg): free memory and retry")
+        job.update(state="failed", message=message,
                    ended_at=job.get("ended_at") or time.time())
     return job
 
@@ -832,7 +841,7 @@ def spawn(jid: str) -> int:
     env = {k: v for k, v in os.environ.items()
            if k in ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "HF_TOKEN", "HF_HOME",
                     "HF_HUB_CACHE", "HF_TOKEN_PATH", "QSE_OPS_DIR", "BOX_LOCK", "TZ",
-                    "CUDA_HOME", "MEM_NEED_GB")}
+                    "CUDA_HOME", "MEM_NEED_GB", "HF_HUB_DISABLE_XET")}
     with open(os.path.join(d, "runner.out"), "ab") as out:
         p = subprocess.Popen([sys.executable, "-m", "server.setup.apply", "run", d], cwd=ROOT,
                              env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
@@ -930,7 +939,7 @@ class Runner:
 
     def env(self, **extra) -> dict:
         keep = ("PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
-                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB")
+                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB", "HF_HUB_DISABLE_XET")
         e = {k: v for k, v in os.environ.items() if k in keep}
         e.update({k: str(v) for k, v in extra.items()})
         return e

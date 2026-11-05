@@ -176,6 +176,75 @@ def test_verify_widths_share_attention_partials():
     return f"widths 8, 5, 3, 4, 6 from {len([k for k in eng._attn if k[0] is None and k[1] == ns])} sets"
 
 
+def test_a_33_row_block_is_the_decode_steps():
+    """SPD-255: a verify block may have 33 rows (the anchor and 32 drafted, `BLOCK_ROWS`); its projections and
+    the head run on the row kernels as a 32-row block's do, so every row is the decode step's bits. lin() and
+    head() sent a 33-row call to F.linear before, whose rows are not the one-row call's."""
+    if SKIP:
+        return SKIP
+    from engine.models.nemotron_h import engine as E
+    M = E.BLOCK_ROWS
+    assert M == 33 and K.ANC >= M
+    g = torch.Generator().manual_seed(7)
+    for name in ("tiny", "puzzle"):
+        cfg, eng, ref = tiny(name)
+        x = torch.randn(M, cfg.hidden_size, generator=g).to(torch.bfloat16).to(DEV)
+        m = eng.pre(cfg.mamba_layers[0]) + "mixer."
+        w = eng.W[m + "in_proj.weight"]
+        rows = eng.lin(x, w)
+        assert all(torch.equal(rows[i], eng.lin(x[i:i + 1], w)[0]) for i in range(M)), (name, "lin")
+        lg = eng.head(x)
+        assert all(torch.equal(lg[i], eng.head(x[i:i + 1])[0]) for i in range(M)), (name, "head")
+        st = eng.new_state(256)
+        eng.prefill(PROMPT, st)
+        L, s0 = st.length, _snap(st)
+        toks = [(7 + 13 * i) % 250 + 1 for i in range(M)]
+        want = _decode(eng, st, toks)
+        st.length = L
+        _put(st, s0)
+        eng.stage_rows(toks, chain(M), st)
+        got = eng.rows_step(st, M)
+        bad = [i for i in range(M) if not torch.equal(got[i], want[i])]
+        assert not bad, (name, "rows unlike the decode step's", bad)
+        try:
+            eng.stage_rows(toks + [5], chain(M + 1), st)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a 34-row block was staged")
+    return f"{M} rows: lin, head and the block each the one-row bits"
+
+
+def test_an_exl3_block_of_33_rows_runs_in_calls_of_32():
+    """SPD-255: the EXL3 row kernels (tools/fn_kernels dense, dense_rows) take 32 rows a call; a 33-row block
+    runs as 32 + 1 rows into one output, each row its one-row call's bytes, never on the library's GEMM."""
+    from engine.models.nemotron_h import engine as E
+
+    class W:
+        N, out_fp32 = 24, False
+        t = torch.randn(24, 16)
+
+    calls = []
+
+    def fn(x, w, out=None):
+        assert x.shape[0] <= E.ROWS_MAX, x.shape
+        calls.append(x.shape[0])
+        y = torch.stack([(w.t @ r.float()).to(torch.bfloat16) for r in x])
+        return y if out is None else out.copy_(y)
+
+    x = torch.randn(E.BLOCK_ROWS, 16).to(torch.bfloat16)
+    y = E._in_row_calls(fn, x, W)
+    assert calls == [32, 1] and y.shape == (33, 24) and y.dtype == torch.bfloat16
+    assert all(torch.equal(y[i], fn(x[i:i + 1], W)[0]) for i in range(33))
+    out = torch.empty(33, 24, dtype=torch.bfloat16)
+    calls.clear()
+    assert E._in_row_calls(fn, x, W, out=out) is out and calls == [32, 1] and torch.equal(out, y)
+    calls.clear()
+    E._in_row_calls(fn, x[:32], W)
+    assert calls == [32]
+    return "33 rows: 32 + 1, the one-row bytes"
+
+
 def test_commit_a_moved_path_and_a_rollback():
     if SKIP:
         return SKIP

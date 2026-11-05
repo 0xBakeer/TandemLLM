@@ -477,6 +477,23 @@ def report(label: str, runs: list[dict]) -> dict:
     return summary
 
 
+def resolve(b: dict, o: dict, up: bool) -> dict:
+    """One statistic of two sides, each an `across` summary (median, min, max, spread_pct): the
+    delta, the noise, and RESOLVED / not resolved with its direction (`tools/gate` uses it too)."""
+    delta = 100.0 * (o["median"] - b["median"]) / b["median"]
+    noise = max(b["spread_pct"], o["spread_pct"])
+    # The ranges are disjoint when every row of one configuration beat every row of the
+    # other. With three rows a side that is the strongest thing this row can say, and it
+    # is the claim phase 9 believed it had after one row each.
+    disjoint = o["min"] > b["max"] or o["max"] < b["min"]
+    resolved = abs(delta) > noise and disjoint
+    better = (delta > 0) == up
+    return {"base": b["median"], "other": o["median"], "delta": delta, "noise": noise,
+            "disjoint": disjoint, "resolved": resolved, "worse": resolved and not better,
+            "verdict": ("RESOLVED " + ("better" if better else "WORSE")) if resolved
+            else "not resolved"}
+
+
 def verdicts(base: dict, other: dict) -> list[dict]:
     """Per statistic: the medians, the delta, the noise, and RESOLVED / not resolved with its
     direction. A statistic either report lacks (an old report has no tok_blk) reads n/a."""
@@ -486,19 +503,7 @@ def verdicts(base: dict, other: dict) -> list[dict]:
         if not b or not o:
             out.append({"stat": k, "verdict": "n/a"})
             continue
-        delta = 100.0 * (o["median"] - b["median"]) / b["median"]
-        noise = max(b["spread_pct"], o["spread_pct"])
-        # The ranges are disjoint when every row of one configuration beat every row of the
-        # other. With three rows a side that is the strongest thing this row can say, and it
-        # is the claim phase 9 believed it had after one row each.
-        disjoint = o["min"] > b["max"] or o["max"] < b["min"]
-        resolved = abs(delta) > noise and disjoint
-        better = (delta > 0) == up
-        out.append({"stat": k, "base": b["median"], "other": o["median"], "delta": delta,
-                    "noise": noise, "disjoint": disjoint, "resolved": resolved,
-                    "worse": resolved and not better,
-                    "verdict": ("RESOLVED " + ("better" if better else "WORSE")) if resolved
-                    else "not resolved"})
+        out.append({"stat": k, **resolve(b, o, up)})
     return out
 
 

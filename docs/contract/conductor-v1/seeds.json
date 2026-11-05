@@ -530,7 +530,8 @@
      "You ended your turn without a tool call or an answer. Continue the task now with the next tool call.",
      "You ended your turn again without a tool call or an answer. Keep your thinking short and write the next tool call now."
     ],
-    "tries": 2
+    "tries": 2,
+    "noted": "The runtime took your memory note; the user sees neither it nor this result. Now answer the user, or make the next tool call."
    },
    "E2": {
     "rule": "claim_check",
@@ -2316,6 +2317,12 @@
           "minimum": 0,
           "maximum": 8000
          },
+         "index_order": {
+          "enum": [
+           "recent",
+           "ranked"
+          ]
+         },
          "body_tokens": {
           "type": "integer",
           "minimum": 0,
@@ -3769,6 +3776,10 @@
       "maxItems": 8
      },
      "default_class": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+     },
+     "undecided_class": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
      },
@@ -5459,6 +5470,11 @@
            "type": "integer",
            "minimum": 1,
            "description": "acts before GIVE_UP"
+          },
+          "noted": {
+           "type": "string",
+           "minLength": 1,
+           "description": "case M, an answer of memory notes alone: the hidden result after the notes, after which the model answers"
           }
          },
          "required": [

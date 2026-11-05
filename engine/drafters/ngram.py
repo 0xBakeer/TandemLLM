@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 from engine.tree import DraftTree, TreeBuilder
@@ -208,7 +209,8 @@ class CorpusSuffixStore:
     @classmethod
     def load(cls, path: str, tokenizer_sha: str | None = None) -> "CorpusSuffixStore | None":
         """Open a store built by tools/build_corpus.py, or return None if there is none. With
-        `tokenizer_sha`, a store recorded for another tokenizer is refused."""
+        `tokenizer_sha`, a store recorded for another tokenizer is skipped with a log line, not
+        read: a profile switch to another model must still start (#105)."""
         if not path or not os.path.isdir(path):
             return None
         meta_path = os.path.join(path, "meta.json")
@@ -218,7 +220,12 @@ class CorpusSuffixStore:
         with open(meta_path) as f:
             meta = json.load(f)
         from engine.tokfp import check_store
-        check_store(meta, tokenizer_sha, path)
+        try:
+            check_store(meta, tokenizer_sha, path)
+        except ValueError as exc:
+            print(f"[store] {exc}; the store is skipped and the lookup reads the conversation only",
+                  file=sys.stderr, flush=True)
+            return None
         tokens = np.load(os.path.join(path, "tokens.npy"), mmap_mode="r")
         sa = np.load(os.path.join(path, "sa.npy"), mmap_mode="r")
         return cls(tokens, sa, max_order=meta.get("max_order", 8), meta=meta)

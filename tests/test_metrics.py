@@ -443,6 +443,50 @@ def test_a_cache_that_is_off_reports_nothing():
     assert "qse_cache_bytes" not in text and "qse_cache_hits_total" not in text
 
 
+def test_the_ngram_table_cache_counters_are_scrapeable():
+    """ENG-239's hot-row cache: a miss is an O_DIRECT disk read on the
+    decode path, so the miss rate is the engine's disk latency. It was in
+    the engine's report and in no metric."""
+    _fresh()
+    M.bind(cache_stats=lambda: {"resident_files": [
+        {"name": "ngram_table", "policy": "cold", "file_bytes": 32_640_156_672,
+         "resident_bytes": 3_321_856, "cache_bytes": 2_336_967_360, "direct": True,
+         "hits": 127_123, "misses": 62_475, "blocks_read": 62_475}]})
+    fam = parse(M.render())
+    assert _sample(fam, "qse_ngram_table_cache_hits_total") == 127_123
+    assert _sample(fam, "qse_ngram_table_cache_misses_total") == 62_475
+    assert _sample(fam, "qse_ngram_table_blocks_read_total") == 62_475
+    assert _sample(fam, "qse_ngram_table_cache_bytes") == 2_336_967_360
+    assert _sample(fam, "qse_ngram_table_file_bytes") == 32_640_156_672
+    # a family without a PLE table has no table: nothing is reported
+    M.bind(cache_stats=lambda: {"resident_files": []})
+    text = M.render()
+    assert "qse_ngram_table_cache_hits_total" not in text
+
+
+def test_the_engines_own_work_is_counted():
+    """The summary the engine prepares ahead of a request and the memory it
+    writes after one are generations on the engine, over the client's own
+    context. Neither was in a metric: the engine was 'busy' with requests
+    nobody had sent."""
+    _fresh()
+    M.bind(own_work=lambda: {
+        "prepare": {"prepared": 7, "served": 5, "yielded": 2, "too_long": 1},
+        "memory": {"runs": 9, "written": 31, "refused": 2, "gate_no": 0,
+                   "stopped": 0, "skipped": 3}})
+    fam = parse(M.render())
+    assert _sample(fam, "qse_prepare_runs_total") == 7
+    assert _sample(fam, "qse_prepare_served_total") == 5
+    assert _sample(fam, "qse_prepare_yielded_total") == 2
+    assert _sample(fam, "qse_prepare_too_long_total") == 1
+    assert _sample(fam, "qse_memory_writer_runs_total") == 9
+    assert _sample(fam, "qse_memory_writer_notes_total") == 31
+    # an engine without the features reports nothing
+    M.bind(own_work=lambda: {})
+    text = M.render()
+    assert "qse_prepare_runs_total" not in text and "qse_memory_writer_runs_total" not in text
+
+
 # --- the wiring ---------------------------------------------------------------------------------
 
 class _FakeHandler:
@@ -711,6 +755,48 @@ def test_the_full_0_2_0_page_parses_and_labels_stay_small():
                 if k != "le":
                     values.setdefault(k, set()).add(v)
     assert all(len(v) <= 16 for v in values.values()), {k: len(v) for k, v in values.items()}
+
+
+def test_one_cache_stats_call_a_scrape_and_none_kept_after():
+    _fresh()
+    calls = []
+
+    def cache_stats():
+        calls.append(1)
+        return {"resident_files": [{"name": "ngram_table", "hot_rows": 4}],
+                "suffix_store": {"entries": 1}, "state_store": None}
+    M.bind(cache_stats=cache_stats)
+    M._TABLE_STATS = (None, 0.0, {})
+    M.render()
+    assert len(calls) == 1, calls                  # every family, the n-gram table's too, shares one
+    M._TABLE_STATS = (None, 0.0, {})
+    M.render()
+    assert len(calls) == 2, calls                  # a second page asks again
+    assert getattr(M._REQ, "cache_stats", None) is None and not getattr(M._REQ, "in_scrape", False)
+    M._scrape_stats()
+    M._scrape_stats()
+    assert len(calls) == 4, calls                  # outside a page nothing is kept
+
+
+def test_serve_returns_when_the_scraper_is_gone():
+    _fresh()
+
+    class Gone:
+        def write(self, b):
+            raise BrokenPipeError
+
+    class H:
+        wfile = Gone()
+
+        def send_response(self, code):
+            pass
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
+    M.serve(H())                                   # no traceback for a scraper that left
 
 
 def _main():

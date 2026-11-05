@@ -40,6 +40,7 @@ import math
 import mmap
 import os
 import struct
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -173,8 +174,11 @@ class NGramHash:
             if hist[i] == self.eos:
                 seg = i + 1
         shifted = [hist[t - s] if t - seg >= s else self.eos for s in range(self.ngram_size)]
-        mult = self.mult.tolist()
-        sizes, offs = self.sizes.tolist(), self.offsets.tolist()
+        lists = self.__dict__.get("_lists")
+        if lists is None:
+            # SPD-249: the multipliers, sizes and offsets as Python integers once (the same values every call)
+            lists = self._lists = (self.mult.tolist(), self.sizes.tolist(), self.offsets.tolist())
+        mult, sizes, offs = lists
 
         def wrap(v: int) -> int:
             v &= _MASK64
@@ -293,6 +297,9 @@ class DirectRows:
         self.vals = np.zeros((self.sets, self.WAYS, self.words), dtype=np.int16)
         self.ref = np.zeros((self.sets, self.WAYS), dtype=bool)
         self.stats = {"hits": 0, "misses": 0, "blocks_read": 0}
+        # SPD-249: the cache is read from the round runner's thread and the PLE reader thread (a prefetch,
+        # `FlashNextEngine.ple_prefetch`): one `rows_of` at a time
+        self._mu = threading.Lock()
         self._buf = None
         self._pool = ThreadPoolExecutor(self.THREADS)
 
@@ -312,6 +319,10 @@ class DirectRows:
 
     def rows_of(self, ids: np.ndarray) -> np.ndarray:
         """ids (unique or not, int64) -> packed rows int16 [n, words]."""
+        with self._mu:
+            return self._rows_of(ids)
+
+    def _rows_of(self, ids: np.ndarray) -> np.ndarray:
         ids = np.asarray(ids, dtype=np.int64).reshape(-1)
         uniq, inv = np.unique(ids, return_inverse=True)
         sets = self._set_of(uniq)

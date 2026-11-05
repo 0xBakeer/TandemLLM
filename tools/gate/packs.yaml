@@ -1,0 +1,52 @@
+# The weight packs a gate run can serve (python -m tools.gate run --pack ID). A hardware profile names
+# its reference pack (tools/gate/hw/); a run on another pack says so in the report.
+#
+#   launcher       ops: the arm's tree starts its server with ops/start.sh on the profile below;
+#                  fake: server/app.py --fake-engine (no model, no GPU: the gate's own tests)
+#   profile        ops/profiles/<profile>.env
+#   plain_env      the arm environment that turns speculation off (lossless: spec vs plain)
+#   wide_chunk_env the arm environment of the wide prefill chunk case (long suite)
+#   hold_word      a word added to the api suite's long requests (the fake's FAKE_LONG: a long answer)
+#   burst_word     a word added to the prefill burst's prompts (the fake's FAKE_SLOW_PREFILL: its burst
+#                  requests overlap for seconds, so the N-at-once proof holds on a slow runner)
+#   proof          what proves N requests decoded at once: `decoding` (the default: the slots in the
+#                  server's decode set, /health parallel.decoding) or `running` (the fake engine, whose
+#                  writer has no decode phase: the requests running at once)
+
+fake:
+  launcher: fake
+  family: fake
+  proof: running
+  hold_word: ' FAKE_LONG'
+  burst_word: ' FAKE_SLOW_PREFILL'
+
+flashnext-3.05:
+  launcher: ops
+  profile: flashnext-3.05
+  family: flashnext
+  plain_env: {QSE_ENGINE_FLAGS: '--model ${QSE_WEIGHTS_DIR} --drafter none'}
+  wide_chunk_env: {QWEN38_FN_PREFILL_CHUNK: '16384'}
+
+lfm25-exl3-4.0:
+  launcher: ops
+  profile: lfm25-exl3-4.0
+  family: lfm2_moe
+  plain_env: {QSE_ENGINE_FLAGS: '--model ${QSE_WEIGHTS_DIR} --drafter none'}
+
+lfm25-exl3-2.5:
+  launcher: ops
+  profile: lfm25-exl3-2.5
+  family: lfm2_moe
+  plain_env: {QSE_ENGINE_FLAGS: '--model ${QSE_WEIGHTS_DIR} --drafter none'}
+
+nemotron-bolt-exl3-4.0:
+  launcher: ops
+  profile: nemotron-bolt-exl3-4.0
+  family: nemotron_h
+  plain_env: {QSE_ENGINE_FLAGS: '--model ${QSE_WEIGHTS_DIR} --drafter none'}
+
+flint-exl3-4.0:
+  launcher: ops
+  profile: flint-exl3-4.0
+  family: flint
+  plain_env: {QSE_ENGINE_FLAGS: '--model ${QSE_WEIGHTS_DIR} --drafter none'}

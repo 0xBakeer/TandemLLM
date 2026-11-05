@@ -52,6 +52,18 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  checklist-builder (schedule) and social-post (post) on a stored
                                  packages document, for each package it has without one, unless
                                  a stored version gave that package one (someone took it out)
+    2026-10-31-chat-app-undecided-class  SRV-763: the chat-app profile's `undecided_class`
+                                 "chat" (a new chat whose class nobody decided, the server busy or
+                                 every answer below the bar, is a plain chat, not code_edit at
+                                 xhigh with the coding packages), when the stored document has
+                                 none, no stored version had one (someone took it out) and the
+                                 stored router has the class. A build without the key fails the
+                                 migrated version's check, serves the one before it and says so
+                                 at every start: on a rollback, restore chat-app's version before
+                                 the migration (or the store's backup); deploying the fix again
+                                 then needs the migrated version restored (a stored version had
+                                 the key, so the migration reads its absence as a removal), or,
+                                 after a backup restore, this id out of migrations.json
 """
 
 from __future__ import annotations
@@ -233,6 +245,23 @@ def _deliverable(doc: dict, past: list):
 
 _deliverable.history = True
 
+def _undecided_class(cls: str):
+    """SRV-763: the profile's `undecided_class` when the stored document has none, no stored version had
+    one and the stored router has the class (`store`: the run passes the store)."""
+    def change(doc: dict, past: list, store=None):
+        if not isinstance(doc, dict) or "undecided_class" in doc or \
+                True in _ever(past, lambda d: "undecided_class" in d):
+            return None
+        if store is not None:
+            _, router = store.get("router")
+            if cls not in {c.get("id") for c in router.get("classes") or ()}:
+                return None
+        return dict(doc, undecided_class=cls), [f"undecided_class={cls}"]
+    change.history = True
+    change.store = True
+    return change
+
+
 # SRV-534: FX6's core on the coding classes of a router stored without it
 _coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
 
@@ -269,6 +298,7 @@ MIGRATIONS = [
     ("2026-10-19-chat-c5", "profiles", "chat", _c5("shadow")),
     ("2026-10-19-tools-c5", "profiles", "tools", _c5("act")),
     ("2026-10-20-packages-deliverable", "packages", None, _deliverable),
+    ("2026-10-31-chat-app-undecided-class", "profiles", "chat-app", _undecided_class("chat")),
 ]
 
 
@@ -320,8 +350,10 @@ def run(store, journal=None, migrations=None) -> list[dict]:
         try:
             if store._pointer(store._dir(kind, name)) is not None:
                 v, doc = store.get(kind, name)
-                new = (change(doc, _past(store, kind, name, v)) if getattr(change, "history", False)
-                       else change(doc))
+                args = (doc, _past(store, kind, name, v)) if getattr(change, "history", False) \
+                    else (doc,)
+                new = change(*args, store=store) if getattr(change, "store", False) \
+                    else change(*args)
                 if isinstance(new, tuple):
                     new, rec["changes"] = new
                 if new is None:

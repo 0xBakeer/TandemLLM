@@ -29,11 +29,23 @@ The test matrix:
      the note and name it), and the stats count it as a body (they read body_notes 0 before)
                                                         test_fresh_session_recall
 
+ 11  the call form (2026-11-03): the note written as a `tandem_memory` tool call is the block,
+     streamed and not, in Qwen's form and the JSON form: stored, hidden, never a call the client
+     gets, finish `stop`; another call beside it passes whole; a call that is the whole answer
+     continues after a hidden result (E1 case M), so the client gets the answer and not
+     an empty turn; memory absent, `X-Tandem-Memory: off`, a client with its own `tandem_memory`
+     tool: the call goes out as before; `read`: hidden, nothing stored
+                                                        test_call_form_*
+
  10  SRV-471 (QA SRV-472): the Chat tab (client `chat-app`, the shipped profile): the turn's row
      and its usage frame carry the memory part (mode on, the index's notes); the card says the
      notes are its memory between chats and never to deny one; "remember ..." writes a note a
      new chat's index names; `memory: off` on purpose: the off note, once; absent: nothing
                                                         test_chat_tab_*
+     2026-11-04: a rule about the user the model writes in a tool turn (block or call form) is a
+     session note (`demoted: rule_from_tool` in the row), hidden, never a user note; a later
+     chat's index does not name it; the user's own turn writes the user rule as before
+                                                        test_chat_tab_tool_turn_rule_*
 
 Run: python tests/test_memory_router.py
 """
@@ -48,7 +60,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from test_ui_states import OPENCODE_UA, TOOLS, _go, lines, serve  # noqa: E402
+from test_ui_states import M, OPENCODE_UA, TOOLS, _go, lines, serve  # noqa: E402
 
 from server import app  # noqa: E402
 
@@ -123,6 +135,109 @@ def test_non_streamed_write():
     out = ask("Please keep it short. FAKE_MEMORY", stream=False)
     assert BLOCK_OPEN not in out["content"] and out["content"].strip()
     assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+# ------------------------------------------------------------- the call form (2026-11-03)
+def _finish(out):
+    if out["raw"].lstrip().startswith("{"):
+        return json.loads(out["raw"])["choices"][0]["finish_reason"]
+    got = None
+    for ln in out["raw"].splitlines():
+        if ln.startswith("data: {"):
+            for ch in json.loads(ln[6:]).get("choices") or []:
+                got = ch.get("finish_reason") or got
+    return got
+
+
+def _names(out):
+    return [(c.get("function") or {}).get("name") for c in out["calls"]
+            if (c.get("function") or {}).get("name")]
+
+
+def _no_call_text(out):
+    assert "<tool_call>" not in out["content"] and "tandem_memory" not in out["content"], \
+        out["content"]
+    assert "tandem_memory" not in out["reasoning"].split("</think>")[-1]
+
+
+def test_call_form_streamed_write():
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL")
+    _no_call_text(out)
+    assert out["content"].strip() and out["calls"] == [] and _finish(out) == "stop", out["calls"]
+    ns = cond.notes.notes("owner")
+    assert [n.title for n in ns] == ["short answers"] and ns[0].writer == "qwen-inline"
+    assert ns[0].scope == "user" and ns[0].kind == "rule" and ns[0].status == "provisional"
+    assert ns[0].body.startswith("The user wants answers of at most five sentences.")
+    assert "why: the user asked for it" in ns[0].body, ns[0].body
+    assert "remembered: short answers" in lines(out["reasoning"]) + lines(out["content"]), out
+
+
+def test_call_form_non_streamed_and_json():
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", stream=False)
+    _no_call_text(out)
+    assert out["content"].strip() and out["calls"] == [] and _finish(out) == "stop"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL_JSON", sid="ses_mem_json")
+    _no_call_text(out)
+    assert out["calls"] == [] and _finish(out) == "stop"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+def test_call_form_before_a_call():
+    cond, _ = setup()
+    call = json.dumps({"name": "bash", "arguments": {"command": "ls -la"}})
+    for stream in (True, False):
+        out = ask("Keep it short. FAKE_MEMORY_CALL FAKE_CALL_JSON " + call, stream=stream,
+                  sid=f"ses_mem_before_{stream}")
+        _no_call_text(out)
+        assert _names(out) == ["bash"], out["calls"]
+        args = "".join((c.get("function") or {}).get("arguments") or "" for c in out["calls"])
+        assert json.loads(args) == {"command": "ls -la"}, out["calls"]
+        assert _finish(out) == "tool_calls"
+    assert [n.title for n in cond.notes.notes("owner")] == ["short answers"]
+
+
+def test_call_form_alone_continues_the_turn():
+    from server import fake_engine
+    words = set(fake_engine.WORDS)
+    for stream in (True, False):
+        cond, _ = setup()
+        out = ask("Please keep it short. FAKE_MEMORY_CALL_ONLY", stream=stream,
+                  sid=f"ses_mem_alone_{stream}")
+        _no_call_text(out)
+        assert out["calls"] == [] and _finish(out) == "stop", (out["calls"], _finish(out))
+        answer = " ".join(ln for ln in out["content"].split("\n") if not ln.startswith(M))
+        assert answer.strip(), "the client got an empty turn: " + repr(out["content"])
+        assert set(answer.lower().replace(".", " ").split()) <= words, answer
+        assert [n.title for n in cond.notes.notes("owner")] == ["short answers"], stream
+        acts = [r for r in app.STATE["monitor"].journal.actions()
+                if r.get("task") == "E1" and r.get("decision") == "CONTINUE_HIDDEN"]
+        assert acts and "case=M" in acts[-1]["reason"], acts
+
+
+def test_call_form_follows_the_switches():
+    # memory absent: the call goes to the client as it did, nothing is written
+    cond, _ = setup(memory=None)
+    out = ask("Please keep it short. FAKE_MEMORY_CALL")
+    assert len(out["calls"]) >= 1 and cond.notes.notes("owner") == [], out["calls"]
+    cond, _ = setup()
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_off",
+              headers={"X-Tandem-Memory": "off"})
+    assert len(out["calls"]) >= 1 and cond.notes.notes("owner") == [], out["calls"]
+    # read: the reads only; the call is hidden and dropped as a block is
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_read",
+              headers={"X-Tandem-Memory": "read"})
+    _no_call_text(out)
+    assert out["calls"] == [] and cond.notes.notes("owner") == []
+    # a client that offers its own `tandem_memory` tool gets its call
+    props = {k: {"type": "string"} for k in ("op", "scope", "kind", "title", "why", "body")}
+    own = TOOLS + [{"type": "function", "function": {"name": "tandem_memory", "parameters": {
+        "type": "object", "properties": props}}}]
+    out = ask("Please keep it short. FAKE_MEMORY_CALL", sid="ses_call_own", tools=own)
+    assert _names(out)[:1] == ["tandem_memory"] and cond.notes.notes("owner") == [], out["calls"]
 
 
 def _tail_notes(text):
@@ -344,6 +459,48 @@ def test_chat_tab_remember_then_a_new_chat_finds_it():
     assert "short answers" in text.split("How should you answer me?")[-1], "the new chat's index"
 
 
+def _tool_turn(trigger):
+    return [{"role": "user", "content": f"Check the planner build. {trigger}"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call_1", "type": "function", "function": {
+                    "name": "bash", "arguments": json.dumps({"command": "npm test"})}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "12 passing"}]
+
+
+def test_chat_tab_tool_turn_rule_is_a_session_note():
+    for trigger, stream in (("FAKE_MEMORY_CALL", True), ("FAKE_MEMORY", False)):
+        cond, seen = _chat_app()
+        sid = f"chat-scope-{stream}"
+        msgs = _tool_turn(trigger)
+        body = {"model": "TandemLLM", "stream": stream, "max_tokens": 2000, "tools": TOOLS,
+                "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+                "messages": [{"role": "system", "content": "You are a helpful assistant."},
+                             *msgs]}
+        out = _go(body, {**CHAT_APP, "x-session-id": sid})
+        _no_call_text(out)
+        assert BLOCK_OPEN not in out["content"] and out["calls"] == [], out["calls"]
+        ns = cond.notes.notes("owner")
+        assert [(n.title, n.scope, n.kind, n.status, n.session) for n in ns] == [
+            ("short answers", "session", "rule", "provisional", "c:" + sid)], ns
+        mem = (_row(cond, sid).get("extra") or {}).get("memory") or {}
+        w = mem["written"][0]
+        assert w["scope"] == "session" and w["demoted"] == "rule_from_tool" and w["why"] is None
+        assert "failed" not in mem, mem
+        # a new chat's index does not name it: it was never a user note
+        chat_ask("How should you answer me?", f"chat-scope-new-{stream}")
+        text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+        assert "short answers" not in text.split("How should you answer me?")[-1]
+
+
+def test_chat_tab_tool_turn_rule_user_turn_unchanged():
+    cond, _ = _chat_app()
+    chat_ask("Remember that I like short answers. FAKE_MEMORY_CALL", "chat-scope-user")
+    ns = cond.notes.notes("owner")
+    assert [(n.scope, n.kind) for n in ns] == [("user", "rule")], ns
+    w = ((_row(cond, "chat-scope-user").get("extra") or {}).get("memory") or {})["written"][0]
+    assert "demoted" not in w, w
+
+
 def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
     from server.conductor import memory as memory_mod
     cond, seen = _chat_app(memory="off")
@@ -365,6 +522,182 @@ def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
     assert (_row(cond, "chat-d1").get("extra") or {}).get("memory") is None
     assert out["usage"]["tandem"]["harness"]["memory"]["why"] == "unset"
 
+
+
+# ------------------------------------------------------------------ SPD-249: the ranked index
+
+def _index_store(n_user=40):
+    """A note store with `n_user` user notes about other things (written first, so the oldest come
+    last in the index's own order) and one project note about the summer scene's checker gate, which
+    is written first of all: in the index's own order it is the last line."""
+    import tempfile
+    import time as _t
+    from server.conductor.notes import NoteStore
+    st = NoteStore(tempfile.mkdtemp(prefix="mem-"), settings=lambda: {"dedupe_threshold": 0.95})
+    clock = [1_790_000_000.0]
+    st.clock = lambda: clock[0]
+    proj = "/home/user/pagoda"
+
+    def add(title, body, scope="user", pinned=False):
+        clock[0] += 60
+        got = st.write("owner", {"op": "add", "scope": scope, "kind": "reference", "title": title,
+                                 "body": body}, writer="human", project=proj, session="c:s1",
+                       request_id="r", from_user=True)
+        if pinned:
+            n = st.get("owner", got["id"])
+            n.pinned = True
+        return got["id"]
+    gate = add("the summer scene checker gate", "Gate (a) wants the summer scene within 1.0 of "
+               "night 1.", scope="project")
+    words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike "
+             "november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee "
+             "zulu amber basil cedar dune ember fjord grove heron iris jade kelp lotus moss nectar").split()
+    others = [add(f"{words[i]} preference number {i}", f"The user likes {words[i]} things.")
+              for i in range(n_user)]
+    _t.sleep(0)
+    return st, proj, gate, others
+
+
+def _cfg(**kw):
+    from server.conductor import schema
+    return dict(schema.notes(None), **kw)
+
+
+def _lines(text):
+    """The index lines (`notes.line_of`), not the pinned rules above them."""
+    return [ln for ln in text.splitlines() if ln.startswith("- [") and " · " in ln]
+
+
+def test_spd249_the_index_default_is_unchanged():
+    """The shipped default stays the index as it was: 1,500 tokens, the scopes in turn, newest first; a
+    message changes nothing in it."""
+    from server.conductor import memory as M
+    from server.conductor import schema
+    assert schema.NOTES["index_tokens"] == 1500 and schema.NOTES["index_order"] == "recent"
+    st, proj, gate, others = _index_store()
+    cfg = _cfg()
+    a = M.index_text(st, "owner", proj, "c:s1", cfg, None, None)
+    b = M.index_text(st, "owner", proj, "c:s1", cfg, None, None, query="summer scene checker gate")
+    assert a == b
+    want = [ln for _, lines in st.index_lines("owner", proj, "c:s1") for ln in lines
+            if ln.startswith("- [")]
+    got = _lines(a[0])
+    assert got == want and a[1] == [ln[3:15] for ln in got] and a[1][-1] == gate, \
+        "the scopes in turn: the project note after the 40 user lines"
+
+
+def test_spd249_the_ranked_index_keeps_the_notes_the_message_is_about():
+    """`index_order: ranked`, 400 tokens: the cap holds, the note the message is about comes first even
+    as the oldest note of another scope, a pinned note before it, the rest said once; without a message the
+    rank is the index's own order."""
+    from server.conductor import memory as M
+    st, proj, gate, others = _index_store()
+    cfg = _cfg(index_order="ranked", index_tokens=400)
+    text, ids = M.index_text(st, "owner", proj, "c:s1", cfg, None, None,
+                             query="How is the summer scene checked by the gate?")
+    lines = _lines(text)
+    assert sum(M._tokens(ln) for ln in lines) <= 400, [M._tokens(ln) for ln in lines]
+    assert 3 <= len(lines) < 41 and gate in ids, (len(lines), ids)
+    assert "This project:\n- [" + gate in text, text
+    assert f"... {41 - len(lines)} more notes; search them" in text, text[-200:]
+    # a recent-order index of the same size never reaches it
+    recent = M.index_text(st, "owner", proj, "c:s1", _cfg(index_tokens=400), None, None)
+    assert gate not in recent[1] and len(_lines(recent[0])) == len(lines)
+    # no message: the index's own order, cut at the cap
+    plain = M.index_text(st, "owner", proj, "c:s1", cfg, None, None, query=None)
+    assert plain[1] == recent[1], (plain[1], recent[1])
+    # a pinned note ranks first: a cap of two lines keeps it and the note the message is about
+    from server.conductor import notes as N
+    pin = others[0]                                   # the oldest user note: last in its scope
+    st.get("owner", pin).pinned = True
+    two = sum(M._tokens(N.line_of(st.get("owner", x))) for x in (pin, gate))
+    text, ids = M.index_text(st, "owner", proj, "c:s1", _cfg(index_order="ranked", index_tokens=two),
+                             None, None, query="summer scene gate")
+    assert _lines(text) == [N.line_of(st.get("owner", x)) for x in (pin, gate)], text
+    st.get("owner", pin).pinned = False
+    # a cap no line fits: the head and the count, as the recent index says it
+    text, ids = M.index_text(st, "owner", proj, "c:s1", _cfg(index_order="ranked", index_tokens=5),
+                             None, None, query="summer")
+    assert ids == [] and "... 41 more notes; search them" in text, text[-120:]
+
+
+def test_spd249_the_ranked_index_through_the_router():
+    """The settings document's `memory.notes`: ranked, 400 tokens; a first turn's prompt carries the
+    note its message is about, fewer index lines than before, and the setting validates."""
+    from server.conductor import schema
+    from server.conductor.store import ConfigError
+    cond, seen = setup()
+    st, proj, gate, _ = _index_store()
+    for n in st.notes("owner"):
+        cond.notes.write("owner", {"op": "add", "scope": n.scope, "kind": n.kind, "title": n.title,
+                                   "body": n.body}, writer="human", project=proj, session="c:s1",
+                         request_id="r", from_user=True)
+    v, doc = cond.store.get("settings")
+    doc = json.loads(json.dumps(doc))
+    doc.setdefault("memory", {})["notes"] = {"index_order": "ranked", "index_tokens": 400}
+    cond.store.put("settings", None, doc, note="test", base=v, author="test")
+    assert schema.notes(cond.store.peek("settings")[1])["index_order"] == "ranked"
+    ask("How is the summer scene checked by the gate?", sid="ses_rank")
+    p = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "the summer scene checker gate" in p and "more notes; search them" in p, p[-2000:]
+    bad = json.loads(json.dumps(doc))
+    bad["memory"]["notes"]["index_order"] = "random"
+    v, _ = cond.store.get("settings")
+    try:
+        cond.store.put("settings", None, bad, note="test", base=v, author="test")
+        raise AssertionError("an unknown index order is refused")
+    except ConfigError:
+        pass
+
+
+# ------------------------------------------------------------------ SPD-249: notes at the head
+
+def _head_ask(q, sid, ranked=False):
+    """`ask` with QWEN38_NOTES_HEAD on: the served prompt's text and the generation's grid mark."""
+    from server.conductor import router as R
+    cond, seen = setup()
+    cond.notes.write("owner", {"op": "add", "scope": "project", "kind": "gotcha",
+                               "title": "the summer scene checker gate",
+                               "body": "Gate (a) wants the summer scene within 1.0 of night 1."},
+                     writer="human", project="/home/user/pagoda")
+    if ranked:
+        v, doc = cond.store.get("settings")
+        doc = json.loads(json.dumps(doc))
+        doc.setdefault("memory", {})["notes"] = {"index_order": "ranked"}
+        cond.store.put("settings", None, doc, note="test", base=v, author="test")
+    marks, real = [], app.generate_stream
+
+    def rec(prompt, *a, **k):
+        marks.append(k.get("grid_mark"))
+        return real(prompt, *a, **k)
+    was, R.NOTES_HEAD = R.NOTES_HEAD, "on"
+    app.generate_stream = rec
+    try:
+        ask(q, sid=sid)
+    finally:
+        R.NOTES_HEAD, app.generate_stream = was, real
+    return app.STATE["tok"].decode(seen[-1], skip_special_tokens=False), marks[-1]
+
+
+def test_spd249_the_card_and_the_index_go_to_the_head_and_the_bodies_stay_at_the_tail():
+    q = "How is the summer scene checked by the gate?"
+    p, mark = _head_ask(q, "ses_head1")
+    user = p.index("<|im_start|>user")
+    head, tail = p[:user], p[user:]
+    assert "<tandem_memory op=" in head and "Read one in full" in head, head[-600:]
+    assert "within 1.0 of night 1" in tail and tail.index(q) < tail.index("within 1.0 of night 1")
+    assert head.index("<tandem_memory op=") < head.index("Read one in full"), "card, then index"
+    assert mark is not None and mark > 0, "the handler hands the head's end to the prefill"
+
+
+def test_spd249_a_ranked_index_is_no_head_note():
+    """`index_order: ranked` depends on the message: the index then goes to the tail with the bodies;
+    the card stays at the head."""
+    q = "How is the summer scene checked by the gate?"
+    p, _ = _head_ask(q, "ses_head2", ranked=True)
+    user = p.index("<|im_start|>user")
+    assert "<tandem_memory op=" in p[:user] and "Read one in full" not in p[:user], p[:user][-400:]
+    assert "Read one in full" in p[user:]
 
 if __name__ == "__main__":
     passed = 0

@@ -24,8 +24,19 @@ chatd builds for that conversation is built again by the code of this tree:
              (a fold point, a compaction, a screenshot that became a line), estimated from their
              characters and image sizes as chatd's context guard counts them
 
-    python tools/chat_trace.py <trace.json> [--cap N] [--bodies out.jsonl] [--store DIR]
-        [--max-images N] [--reread]
+    memory   with `--memory`, the engine's memory filter between the fake engine and chatd
+             (server/memblock.py, the filter a chat answer goes through under an active plan with
+             memory on): a recorded `tandem_memory` call is put back into the model's text in
+             Qwen's call form, and the filter takes it as a note (stored in a scratch note store)
+             instead of a call chatd runs; an answer of notes alone is continued with the next
+             recorded step, as the engine continues it. Printed: the notes stored, by request,
+             and every `tandem_memory` call that still reached chatd (a failure)
+
+    python tools/chat_trace.py <trace.json | conversation id> [--cap N] [--bodies out.jsonl]
+        [--store DIR] [--max-images N] [--reread] [--memory]
+
+A conversation id with `--store` reads the conversation from that chat data folder (read only),
+its current branch as `GET /v1/chat-app/conversations/<id>` gives it, so no copy of it is made.
 
 The recorded tool images (render_page's screenshots) come back with their results, as chatd
 renders them for a model that reads images (SRV-676): with `--store` (a chat data folder:
@@ -55,10 +66,90 @@ RECORDED = ("web_fetch", "web_search", "render_page", "present", "library_search
 APPROVED = "Carry out the approved plan."
 
 
-def load(path: str) -> dict:
+def load(path: str, store: str | None = None) -> dict:
+    if store and not os.path.exists(path):
+        return load_store(store, path)
     with open(path) as fh:
         d = json.load(fh)
     return d.get("conv") if isinstance(d.get("conv"), dict) else d
+
+
+def load_store(store: str, cid: str) -> dict:
+    """The conversation `cid` of a chat data folder (its chat.sqlite3, opened read only): the
+    settings and the messages of its current branch, oldest first, with their parts."""
+    import sqlite3
+    db = sqlite3.connect("file:" + os.path.join(store, "chat.sqlite3") + "?mode=ro", uri=True)
+    try:
+        row = db.execute("SELECT settings, head_id FROM conversations WHERE id = ?",
+                         (cid,)).fetchone()
+        if row is None:
+            raise ValueError(f"no conversation {cid} in {store}")
+        by = {r[0]: r for r in db.execute(
+            "SELECT id, parent_id, role, status, parts, stats FROM messages "
+            "WHERE conversation_id = ?", (cid,))}
+    finally:
+        db.close()
+    branch, at = [], row[1]
+    while at in by:
+        branch.append(by[at])
+        at = by[at][1]
+    return {"settings": json.loads(row[0] or "{}"),
+            "messages": [{"id": m[0], "role": m[2], "status": m[3],
+                          "parts": json.loads(m[4] or "[]"),
+                          "stats": json.loads(m[5]) if m[5] else None}
+                         for m in reversed(branch)]}
+
+
+def qwen_call(name: str, args: dict) -> str:
+    """A call as Qwen writes it (the XML form the engine reads)."""
+    params = "".join(f"<parameter={k}>\n{v if isinstance(v, str) else json.dumps(v)}\n"
+                     f"</parameter>\n" for k, v in (args or {}).items())
+    return f"<tool_call>\n<function={name}>\n{params}</function>\n</tool_call>"
+
+
+class MemoryBridge:
+    """`--memory`: the engine's memory filter (server/memblock.py MemFilter, `calls` on) on each
+    recorded step before chatd gets it; the notes go to a scratch note store as the engine's
+    `Memory.take` writes them (server/conductor/notes.py): no project (chatd's prompt names no
+    working directory), `from_user` when the request ends with the user's message (a rule about
+    the user from a tool turn is kept for the session), counted per request, never printed."""
+
+    def __init__(self, root: str):
+        from server.conductor import notes as notes_mod
+        self.store = notes_mod.NoteStore(root)
+        self.stored: list[dict] = []          # {request, op, scope, kind, demoted}
+        self.refused: list[dict] = []         # {request, why}
+        self.continued: list[int] = []        # requests whose answer was notes alone
+
+    def step(self, s: dict, request: int, queue: list, from_user: bool = False) -> dict:
+        from server import memblock
+        from server.conductor import notes as notes_mod
+        if not any(c["name"] == memblock.TOOL for c in s["calls"]):
+            return s
+
+        def take(block: str) -> str | None:
+            try:
+                op = memblock.parse(block)
+                res = self.store.write("owner", op, writer="qwen-inline", project=None,
+                                       session="c:trace", request_id=None, from_user=from_user)
+            except (memblock.BlockError, notes_mod.Refused) as exc:
+                self.refused.append({"request": request, "why": exc.why})
+                return exc.why
+            self.stored.append({"request": request, "op": op["op"], "scope": res.get("scope"),
+                                "kind": res.get("kind"), "demoted": res.get("demoted")})
+            return None
+        raw = s["content"] + "".join("\n\n" + qwen_call(c["name"], c["arguments"])
+                                     for c in s["calls"] if c["name"] == memblock.TOOL)
+        f = memblock.MemFilter(take, calls=True)
+        text = f.feed(raw) + f.finish()
+        out = dict(s, content=text, calls=[c for c in s["calls"] if c["name"] != memblock.TOOL])
+        if not text.strip() and not out["calls"] and queue:
+            # E1 case M: the engine continues an answer of notes alone after a hidden result
+            self.continued.append(request)
+            nxt = self.step(queue.pop(0), request, queue, from_user)
+            out = dict(nxt, content=text + nxt["content"],
+                       reasoning=(s.get("reasoning") or "") + (nxt.get("reasoning") or ""))
+        return out
 
 
 def turns(conv: dict) -> list[dict]:
@@ -145,7 +236,7 @@ def image_reader(store: str | None):
 def replay(conv: dict, cap: int | None = None, window: int | None = None,
            store: str | None = None, max_images: int | None = None,
            vision: bool | None = None, fork: tuple[int, int] | None = None, live=None,
-           patch: str | None = None) -> dict:
+           patch: str | None = None, memory: "MemoryBridge | None" = None) -> dict:
     """The conversation through a chatd of this tree. Returns {"requests", "snapshot", "calls",
     "statuses"}: the bodies chatd sent (in order), the final snapshot, the calls as chatd ran them
     and the chat's status after each turn. The recorded tool images come back with their results
@@ -157,7 +248,8 @@ def replay(conv: dict, cap: int | None = None, window: int | None = None,
     "reasoning", "calls"}) or None to end the run; the replay ends after that turn. In the fork
     the recorded tools have no record left: they answer that they did not run, as bash does for
     a command the record does not hold. `patch`: the text that replaces the result of the last
-    recorded call before the fork (the result as a fix would return it)."""
+    recorded call before the fork (the result as a fix would return it). `memory`: the
+    engine's memory filter on every recorded step (`MemoryBridge`)."""
     from chatd import tools as tools_mod
     from chatd.tools import Result
     from test_chatd_agent import chat_with_sandbox, requests, small_window
@@ -265,10 +357,12 @@ def replay(conv: dict, cap: int | None = None, window: int | None = None,
             keep["max_steps"] = cap
         c.ok("PATCH", f"/conversations/{cid}/settings", keep)
         turn_of = {"n": 0}
+        n_req = {"n": 0}
 
         def script(body, headers):
             if headers.get("x-session-id", headers.get("X-Session-Id", "")).endswith("-task"):
                 return None
+            n_req["n"] += 1
             k = _users(body) - 1
             if k < 0 or k >= len(steps_by_turn):
                 return {"content": "done"}
@@ -281,6 +375,9 @@ def replay(conv: dict, cap: int | None = None, window: int | None = None,
             if not q:
                 return {"content": "done"}
             s = q.pop(0)
+            if memory is not None:
+                last = (body.get("messages") or [{}])[-1]
+                s = memory.step(s, n_req["n"], q, from_user=last.get("role") == "user")
             out = {"content": s["content"]}
             if s["reasoning"]:
                 out["reasoning"] = s["reasoning"]
@@ -441,6 +538,26 @@ def monitor_notes(snap: dict) -> list[tuple[int, int, str]]:
     return out
 
 
+def memory_report(res: dict, bridge: MemoryBridge) -> list[str]:
+    """`--memory`: the notes the filter stored and refused, by request, printed without their
+    text; the failures: a `tandem_memory` call chatd still ran (or answered as not available)."""
+    from server import memblock
+    for n in bridge.stored:
+        print(f"  memory: request {n['request']}: a note stored ({n['op']}, {n['scope']}, "
+              f"{n['kind']}" + (f", {n['demoted']} -> session" if n.get("demoted") else "") + ")")
+    for n in bridge.refused:
+        print(f"  memory: request {n['request']}: a note refused ({n['why']}), hidden")
+    for k in bridge.continued:
+        print(f"  memory: request {k}: notes alone, continued with the next recorded step")
+    print(f"memory: {len(bridge.stored)} note(s) stored, {len(bridge.refused)} refused")
+    bad = []
+    for p in res["calls"]:
+        out = (p.get("output") or {}).get("content") or ""
+        if p.get("name") == memblock.TOOL or f"{memblock.TOOL!r} is not available" in out:
+            bad.append(f"call {p['id']}: a {memblock.TOOL} call reached chatd ({p.get('status')})")
+    return bad
+
+
 def render_left_out(a: dict, b: dict) -> bool:
     """The message became the line of a left-out screenshot."""
     from chatd import render
@@ -457,9 +574,16 @@ def main(argv=None) -> int:
     ap.add_argument("--max-images", type=int, default=None)
     ap.add_argument("--reread", action="store_true", help="the requests that do not only append")
     ap.add_argument("--ratio", type=float, default=None, help="tokens a character (--reread)")
+    ap.add_argument("--memory", action="store_true",
+                    help="the engine's memory filter between the fake engine and chatd")
     a = ap.parse_args(argv)
-    conv = load(a.trace)
-    res = replay(conv, cap=a.cap, window=a.window, store=a.store, max_images=a.max_images)
+    conv = load(a.trace, a.store)
+    bridge = None
+    if a.memory:
+        import tempfile
+        bridge = MemoryBridge(tempfile.mkdtemp(prefix="trace-notes-"))
+    res = replay(conv, cap=a.cap, window=a.window, store=a.store, max_images=a.max_images,
+                 memory=bridge)
     if a.bodies:
         with open(a.bodies, "w") as fh:
             for b in res["requests"]:
@@ -479,6 +603,8 @@ def main(argv=None) -> int:
         print(f"reread: {len(rows)} of {len(res['requests'])} requests part from the one before, "
               f"~{sum(r['tokens'] for r in rows):,} tokens in all "
               f"({sum(1 for r in rows if r['why'] == 'image')} at a screenshot)")
+    if bridge is not None:
+        bad += memory_report(res, bridge)
     for line in bad:
         print("FAIL", line)
     print("ok" if not bad else f"{len(bad)} failure(s)")

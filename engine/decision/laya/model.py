@@ -101,9 +101,10 @@ class LayaModel(DecisionModel):
         device = where.device if where is not None else torch.device("cpu")
         amp = None
         if device.type == "cuda":
-            # the SDK: the config's amp dtype (bf16 or fp16), fp16 below compute capability 8
+            # the SDK: the config's amp dtype (bf16 or fp16), fp16 where the GPU has no bf16 (tools/gpu)
+            from tools import gpu as _gpu
             amp = torch.bfloat16 if self.cfg.get("amp_dtype", "fp16") == "bf16" else torch.float16
-            if torch.cuda.get_device_capability(device)[0] < 8:
+            if not _gpu.profile(device).bf16():
                 amp = torch.float16
             with where.gpu():
                 net.to(device)

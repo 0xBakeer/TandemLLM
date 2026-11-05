@@ -47,7 +47,7 @@ The FP8 profile needs about 27.5 GiB of weights on the device instead of 16.4. T
 
 The watchdog restarts only what it is sure about. A healthy server is left alone, and so is a draining one, because killing a graceful stop halfway is worse than a slow stop. A loading engine is left alone for up to 900 s. Only a server that fails three checks in a row is restarted, so one slow check during a long verify does not bounce a working server. A server whose `/health` answers 500 with `status: failed` (SRV-671: its CUDA context failed, after a device-side assert every CUDA call of the process fails) is restarted after two checks, with no loading grace, and the status page's reason says why while it stops and loads again.
 
-chatd, the Chat tab's service, is its own process ([chat.md](chat.md)): `ops/start.sh` starts it once the engine answers, `ops/stop.sh` and the watchdog's restart leave it running, `tandem stop` stops it. When the engine answers and chatd does not, the watchdog starts chatd, at most 3 times an hour (one line each in `logs/watchdog.log`), and never restarts the engine for it.
+chatd, the Chat tab's service (beta), is its own process ([chat.md](chat.md)): `ops/start.sh` starts it once the engine answers, `ops/stop.sh` and the watchdog's restart leave it running, `tandem stop` stops it. When the engine answers and chatd does not, the watchdog starts chatd, at most 3 times an hour (one line each in `logs/watchdog.log`), and never restarts the engine for it.
 
 At boot, two cron lines bring the service up:
 
@@ -184,6 +184,16 @@ Every release runs these on the box before its tag, and ships only when all pass
     bash tools/release.sh X.Y.Z --notes notes.md --box <ssh host> --box-py <python on the box>
 
 `preflight` checks the tree (clean, on `main`, a fast-forward of origin's), every version line, the changelog sections, the commits since the previous tag (no co-author or session trailers) and the weight packs a profile added or changed (an anonymous download at the pinned revision). `gate` copies a `git archive` of HEAD to the box and runs `tools/release_box_gate.sh` there: the CPU suite through `tests/script_suite.py`, `tools/release_gate_setup.sh`, and `tools/client_smoke.py` on the conductor and the raw path against `--smoke-base`, whose `/health` must already name the version (deploy the candidate first; `--skip suite,setup,smoke` leaves parts out; `RELEASE_SMOKE_KEY` is the API key). `tag`, `push` and `release` make the annotated tag, push `main` and the tag, and publish the GitHub release with the notes; CI's manual workflow attaches the PDF. `milestone` closes the GitHub milestone `vX.Y.Z` and creates the next patch's, `vX.Y.(Z+1)`, when it is missing. `verify` reads what was published: the tag, `main`, the release and its PDF, `README.md`, `install.sh` and `VERSION` at the tag, and anonymous downloads. `--dry-run` runs all but `tag`, `push`, `release` and the milestone changes, whose commands it prints; `--only verify` checks a published release at any time.
+
+
+After the tag, the release gets its benchmark report ([benchmark-report.md](benchmark-report.md)). GitHub has no GPU, so it is made on the reference DGX Spark: a fresh server of the tag, the full suite in parts, then the page.
+
+    python -m tools.release_report run --ref vX.Y.Z --pack flashnext-3.05 --out <dir> --prose wikitext2
+    python -m tools.release_report render <dir>/data.json
+
+Check the page by eye: the verdict, every invalid row and its reason, any number far from the last release's. Then `publish` uploads it to the release as `tandemllm-X.Y.Z-report-<model>.html` (`gh release upload --clobber`). It measures nothing, and it refuses a page of another version or one that still names the box:
+
+    python -m tools.release_report publish <dir> --tag vX.Y.Z
 
 ## Deploying a new version
 

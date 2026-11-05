@@ -2,7 +2,8 @@
 # chatd, the Chat tab's service (python -m chatd, chatd/__init__.py):
 #
 #   bash ops/chatd.sh start [--front 0.0.0.0:4180]   start it in the background (QSE_CHAT_URL)
-#   bash ops/chatd.sh stop                          SIGTERM: open runs end `interrupted` (Continue)
+#   bash ops/chatd.sh stop [--this-tree]            SIGTERM: open runs end `interrupted` (Continue);
+#                                                   --this-tree: only a chatd this checkout started
 #   bash ops/chatd.sh restart                       stop, then start
 #   bash ops/chatd.sh status                        pid, interpreter, data, URL and GET /health
 #
@@ -158,11 +159,17 @@ start() {
 }
 
 stop() {
-    local pid
+    local pid tree
     pid="$(pid_of)"
     if ! is_chatd "$pid"; then
         [ -f "$PIDF" ] && echo "[chatd] not running (a stale pid file, removed)" || echo "[chatd] not running"
         rm -f "$PIDF"; return 0
+    fi
+    # OPS-260: start.sh in engine mode stops the chat's chatd, but never another tree's (a test tree
+    # on the same box shares the data folder's pid file); start runs it from this checkout
+    tree="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    if [ "${1:-}" = "--this-tree" ] && [ -n "$tree" ] && [ "$tree" != "$(cd "$HERE" && pwd -P)" ]; then
+        echo "[chatd] pid $pid is another tree's chatd ($tree): left running"; return 0
     fi
     kill -TERM "$pid"
     for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
@@ -173,7 +180,7 @@ stop() {
 
 case "$cmd" in
     start) start "$@" ;;
-    stop) stop ;;
+    stop) stop "$@" ;;
     restart) stop; start "$@" ;;
     status)
         if alive; then show; exit 0; fi
@@ -182,5 +189,5 @@ case "$cmd" in
         if is_chatd_health "$h"; then echo "[chatd] a chatd of another tree answers on $URL: $h"; fi
         exit 1
         ;;
-    *) echo "usage: $0 start [--front HOST:PORT] | stop | restart | status"; exit 2 ;;
+    *) echo "usage: $0 start [--front HOST:PORT] | stop [--this-tree] | restart | status"; exit 2 ;;
 esac

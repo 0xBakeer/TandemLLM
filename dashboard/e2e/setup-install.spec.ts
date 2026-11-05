@@ -1,10 +1,17 @@
 // QA VIS-150, VIS-152, VIS-154, VIS-156 (VIS-149, VIS-151, VIS-153, VIS-155): the review's
 // downloads and the install page of a finished job against the mock, desktop and 390 px. @mock
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, noHorizontalOverflow } from './helpers';
 import { open, setupMock, setSlots } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 const MODEL = 'qwen3.8-27b';
 

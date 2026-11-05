@@ -2,7 +2,8 @@
 
     Engine.stream(body, headers)   POST /v1/chat/completions with `stream: true`; a `Call` reads its
                                    SSE lines and can be closed from another thread (Stop: the engine
-                                   sees the socket close and books the request `abandoned`)
+                                   sees the socket close and books the request `abandoned`); before
+                                   its headers the connection is `opened`'s to shut (`shut`)
     Engine.models()                GET /v1/models: the list and each model's `tandem` card, when
                                    the server sends one (SRV-347); a server without cards still lists
     Engine.facts()                 GET /v1/dashboard/system (else /health): weights, max_len, drafter,
@@ -91,16 +92,22 @@ class Call:
     def close(self) -> None:
         """From any thread: shut the socket, so a blocked read returns at once."""
         self.closed = True
-        sock = self.conn.sock
-        try:
-            if sock is not None:
-                sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self.conn.close()
-        except OSError:
-            pass
+        shut(self.conn)
+
+
+def shut(conn: http.client.HTTPConnection) -> None:
+    """From any thread: shut a connection's socket and close it, so a read blocked on it returns at once
+    (`Call.close`; SRV-777: Stop on a call whose response has not started, `Engine.stream`'s `opened`)."""
+    sock = conn.sock
+    try:
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        conn.close()
+    except OSError:
+        pass
 
 
 class Engine:
@@ -163,9 +170,12 @@ class Engine:
             return 0
         return int(obj.get("released_bytes") or 0)
 
-    def stream(self, body: bytes, headers: dict) -> Call:
+    def stream(self, body: bytes, headers: dict, opened=None) -> Call:
         """Open a streamed completion. EngineError for a refusal (retryable for 429 and 5xx and a
-        connection that fails, not for a 4xx)."""
+        connection that fails, not for a 4xx). `opened(conn)`: called once the request is sent, before
+        the wait for the response's headers. SRV-777: an engine sends none while a request waits for
+        memory or in its line, so the caller keeps the connection to shut it on Stop (`shut`); the engine
+        sees the close and ends the request."""
         conn = self._conn(CONNECT_TIMEOUT_S)
         try:
             h = self._headers(headers)
@@ -174,7 +184,16 @@ class Engine:
             conn.request("POST", self.prefix + "/v1/chat/completions", body=body, headers=h)
             if conn.sock is not None:
                 conn.sock.settimeout(READ_TIMEOUT_S)
-            resp = conn.getresponse()
+            if opened is not None:
+                opened(conn)
+            try:
+                resp = conn.getresponse()
+            except AttributeError:
+                # SRV-777: a `shut` from another thread between getresponse's state check and its read of
+                # `conn.sock` leaves it None to read from: the connection was shut, not a fault
+                if conn.sock is not None:
+                    raise
+                raise EngineError(0, "the engine did not answer (the connection was shut)", True) from None
         except (OSError, http.client.HTTPException) as exc:
             conn.close()
             raise EngineError(0, f"the engine did not answer ({type(exc).__name__})", True) from None
