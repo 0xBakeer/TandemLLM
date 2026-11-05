@@ -261,6 +261,8 @@ class LiveRegistry:
         self._last_prefill: tuple[float, float] | None = None   # (perf at first token, tok/s)
         self._prev: tuple[float, int, bool] | None = None   # (perf, tokens, something decoding)
         self._last_sample_p: float | None = None
+        self._was_fast = False
+        self._sched_fast = False        # this tick was timed by the fast cadence (_run)
         self.samples_taken = 0
         # the event every open stream writes: (seq, bytes), made once a tick
         self.seq = 0
@@ -445,7 +447,9 @@ class LiveRegistry:
             if busy is not None:
                 busy.gate(min(0.25, self.cadence()))
             self.tick()
-            self._stop.wait(self.cadence())
+            c = self.cadence()
+            self._sched_fast = c < self.interval
+            self._stop.wait(c)
 
     def event(self) -> tuple[int, bytes] | None:
         """The newest tick's `(seq, bytes)`: what every open stream writes."""
@@ -475,10 +479,13 @@ class LiveRegistry:
             live = list(self._live.values())
             fast = self._fast_now()
             # one history sample a second: every tick at 1 Hz, every fourth at 4 Hz, and no
-            # extra one on the tick where the cadence drops back. The spacing alone decides: a
-            # short request that opens and ends between two ticks leaves both slow, 0.25 s apart
+            # extra one on the tick where the cadence drops back, nor on a tick the fast cadence
+            # timed (a request that opened and ended between two ticks leaves both slow)
+            sched_fast, self._sched_fast = self._sched_fast, False
             due = (self._last_sample_p is None
-                   or now_p - self._last_sample_p >= 0.9 * self.interval)
+                   or now_p - self._last_sample_p >= 0.9 * self.interval
+                   or not (fast or self._was_fast or sched_fast))
+            self._was_fast = fast
             self._decode_marks(live, now_p)
             if self.activity:
                 bs = self.blocks_fn()

@@ -499,6 +499,22 @@ def _busy(c, reg, rid="busy"):
     return rec, src
 
 
+def test_a_tick_the_fast_cadence_timed_takes_no_second_sample():
+    """A request that opens and ends between two ticks: the second tick was timed at 4 Hz (_run set
+    _sched_fast) but finds the cadence slow again; it takes no sample 0.25 s after the last one."""
+    c = Clock()
+    reg = _reg(c, hz=4)
+    reg.tick()
+    n0 = len(reg.snapshot()["history"])
+    c.tick(0.25)
+    reg._sched_fast = True
+    reg.tick()
+    assert len(reg.snapshot()["history"]) == n0, [h["t"] for h in reg.snapshot()["history"]]
+    c.tick(1.0)
+    reg.tick()
+    assert len(reg.snapshot()["history"]) == n0 + 1
+
+
 def test_four_hertz_while_busy_with_a_stream_one_hertz_otherwise():
     c = Clock()
     reg = _reg(c, hz=4)
