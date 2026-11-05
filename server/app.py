@@ -298,6 +298,37 @@ class ClientGone(ConnectionResetError):
 
     A ConnectionResetError, so every path that already treats a reset reader as an abandoned
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
+
+
+class _GoneOnTimeout:
+    """A connection's writer. Handler.timeout bounds a write too, and a write that times out is a
+    reader that stopped reading: ClientGone, so it ends as an abandoned request, and the
+    connection closes. Every later write fails at once instead of waiting out another timeout."""
+
+    def __init__(self, raw, handler):
+        self._raw, self._handler, self._gone = raw, handler, False
+
+    def _call(self, op, *args):
+        if self._gone:
+            raise ClientGone("the client stopped reading the answer")
+        try:
+            return op(*args)
+        except TimeoutError:
+            self._gone = True
+            self._handler.close_connection = True
+            raise ClientGone("the client stopped reading the answer") from None
+
+    def write(self, data):
+        return self._call(self._raw.write, data)
+
+    def flush(self):
+        if not self._gone:           # the stdlib flushes after the handler: nothing to send
+            self._call(self._raw.flush)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 INFLIGHT = {"waiting": 0, "running": 0, "lane": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
 #: SPD-249: `/health`'s full body, its parts timed and reused for QSE_HEALTH_TTL_MS (server/health_cache.py)
@@ -7619,13 +7650,22 @@ class Handler(BaseHTTPRequestHandler):
 
     _body_done = False               # the request in hand has had its body read to the end
 
+    def setup(self):
+        super().setup()
+        self.wfile = _GoneOnTimeout(self.wfile, self)   # a write that times out: ClientGone
+
     def handle_one_request(self):
         self.connection.settimeout(self.timeout)   # a chat forward
         # (chat_forward._relay) lifts the timeout to None while it streams and nothing
         # put it back: a stalled body on the next request of that keep-alive connection
         # was waited on forever. Re-arm here, as proxy/app.py does.
         self._body_done = False
-        BaseHTTPRequestHandler.handle_one_request(self)
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except ClientGone:
+            # a write timed out outside a handler that knows the reader left (the stdlib's
+            # own error answers): closed, as the stdlib closes on a TimeoutError
+            self.close_connection = True
         # 2026-10-17: a chunked body the handler never read stayed on the wire and the next
         # request on the keep-alive connection was parsed from the middle of it (the size line
         # as a request line). A body the framing did not let us finish closes the connection
