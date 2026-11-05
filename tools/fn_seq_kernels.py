@@ -341,9 +341,10 @@ def qsa_select(sc, tail, sel):
     """The visible positions of each row from its block scores: the TOPK best blocks (ties to the
     lower block: a stable sort), in ascending order, 4 positions each, then the row's tail positions
     (tail int32 [M, 3], the positions past the last complete block; `actl` holds how many are real)
-    -> written into sel int32 [M, >= 4 TOPK + 3]. Fixed shapes, no host sync. One kernel a call up to
-    8,192 blocks (32k of context), torch sorts past it (and on the CPU); the same selection."""
-    if sc.is_cuda and sc.shape[1] <= 8192:
+    -> written into sel int32 [M, >= 4 TOPK + 3]. Fixed shapes, no host sync. One kernel a call: a bitonic
+    sort up to 8,192 blocks (32k of context), a radix select past it (25x the torch sort at 64k); torch on
+    the CPU. The same selection; QWEN38_FN_QSA_TORCH_BIG=1 keeps the torch sort past 8,192 blocks."""
+    if sc.is_cuda and (sc.shape[1] <= 8192 or _S.get("FN_QSA_TORCH_BIG") != "1"):
         _module().seq_qsa_topk(sc, tail, sel, TOPK)
         return sel
     return qsa_select_torch(sc, tail, sel)

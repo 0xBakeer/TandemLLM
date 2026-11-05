@@ -506,6 +506,83 @@ __global__ void __launch_bounds__(1024) qsa_topk_kernel(const float* __restrict_
     if (threadIdx.x < 3) out[4 * TOPK + threadIdx.x] = TAIL[t * 3 + threadIdx.x];
 }
 
+// The same selection past 8,192 blocks (contexts > 32k), where the row no longer fits shared memory: a 4-pass
+// 8-bit radix select on the same key finds the TOPK-th smallest key T; the kept set is every key < T plus the
+// lowest blocks whose key == T (a stable sort's tie order), so it is the bitonic path's set exactly. Then the
+// same ascending sort of the kept blocks. Any NB >= TOPK; TOPK a power of two.
+__global__ void __launch_bounds__(1024) qsa_topk_big_kernel(const float* __restrict__ SC, int NB,
+        const int* __restrict__ TAIL, int* __restrict__ SEL, int nsel, int TOPK) {
+    extern __shared__ unsigned blk[];                  // [TOPK]
+    __shared__ unsigned hist[256];
+    __shared__ unsigned s_prefix, s_mask, s_need, s_cnt;
+    __shared__ unsigned wsum[32];
+    const int t = blockIdx.x, tid = threadIdx.x;
+    const float* row = SC + (size_t)t * NB;
+    if (tid == 0) { s_prefix = 0; s_mask = 0; s_need = TOPK; s_cnt = 0; }
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (int i = tid; i < 256; i += blockDim.x) hist[i] = 0;
+        __syncthreads();
+        const unsigned prefix = s_prefix, mask = s_mask;
+        for (int i = tid; i < NB; i += blockDim.x) {
+            const unsigned k = ~ord_f(row[i]);
+            if ((k & mask) == prefix) atomicAdd(&hist[(k >> shift) & 255u], 1u);
+        }
+        __syncthreads();
+        if (tid < 32) {                                // warp 0: find the bin holding the need-th key
+            unsigned h[8], s = 0;
+            for (int j = 0; j < 8; ++j) { h[j] = hist[tid * 8 + j]; s += h[j]; }
+            unsigned inc = s;
+            for (int o = 1; o < 32; o <<= 1) { const unsigned v = __shfl_up_sync(0xffffffffu, inc, o); if (tid >= o) inc += v; }
+            const unsigned before = inc - s, need = s_need;
+            if (before < need && need <= inc) {
+                unsigned c = before; int b = 0;
+                for (int j = 0; j < 8; ++j) { if (c + h[j] >= need) { b = j; break; } c += h[j]; }
+                s_need = need - c;
+                s_prefix = prefix | ((unsigned)(tid * 8 + b) << shift);
+                s_mask = mask | (255u << shift);
+            }
+        }
+        __syncthreads();
+    }
+    const unsigned T = s_prefix, need = s_need;        // keep every key < T and the first `need` keys == T
+    const int per = (NB + blockDim.x - 1) / blockDim.x, i0 = tid * per, i1 = min(i0 + per, NB);
+    unsigned eq = 0;
+    for (int i = i0; i < i1; ++i) {
+        const unsigned k = ~ord_f(row[i]);
+        if (k < T) blk[atomicAdd(&s_cnt, 1u)] = (unsigned)i;
+        else if (k == T) ++eq;
+    }
+    const int lane = tid & 31, warp = tid >> 5;        // exclusive scan of eq in thread (= index) order
+    unsigned inc = eq;
+    for (int o = 1; o < 32; o <<= 1) { const unsigned v = __shfl_up_sync(0xffffffffu, inc, o); if (lane >= o) inc += v; }
+    if (lane == 31) wsum[warp] = inc;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned w = lane < (int)(blockDim.x >> 5) ? wsum[lane] : 0u, wi = w;
+        for (int o = 1; o < 32; o <<= 1) { const unsigned v = __shfl_up_sync(0xffffffffu, wi, o); if (lane >= o) wi += v; }
+        wsum[lane] = wi - w;
+    }
+    __syncthreads();
+    unsigned rank = wsum[warp] + inc - eq;
+    for (int i = i0; i < i1 && rank < need; ++i)
+        if (~ord_f(row[i]) == T) { blk[atomicAdd(&s_cnt, 1u)] = (unsigned)i; ++rank; }
+    __syncthreads();
+    for (int k = 2; k <= TOPK; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = tid; i < TOPK; i += blockDim.x) {
+                const int ixj = i ^ j;
+                if (ixj > i) {
+                    const unsigned a = blk[i], b = blk[ixj];
+                    if (((i & k) == 0) == (a > b)) { blk[i] = b; blk[ixj] = a; }
+                }
+            }
+            __syncthreads();
+        }
+    }
+    int* out = SEL + (size_t)t * nsel;
+    for (int i = tid; i < 4 * TOPK; i += blockDim.x) out[i] = (int)blk[i >> 2] * 4 + (i & 3);
+    if (tid < 3) out[4 * TOPK + tid] = TAIL[t * 3 + tid];
+}
 }  // namespace
 
 static int g_pdl = 1;
@@ -662,11 +739,24 @@ void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64
     const at::cuda::OptionalCUDAGuard guard(sc.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int M = sc.size(0), NB = sc.size(1);
-    TORCH_CHECK(sc.dtype() == torch::kFloat && sc.is_contiguous() && NB <= 8192 && (NB & (NB - 1)) == 0 && NB >= topk,
-                "scores fp32 [M, NB], NB a power of two <= 8192");
+    TORCH_CHECK(sc.dtype() == torch::kFloat && sc.is_contiguous() && NB >= topk && (topk & (topk - 1)) == 0,
+                "scores fp32 [M, NB >= topk], topk a power of two");
     TORCH_CHECK(tail.dtype() == torch::kInt && tail.is_contiguous() && sel.dtype() == torch::kInt && sel.is_contiguous()
                 && sel.size(1) >= 4 * topk + 3, "tail int32 [M, 3], sel int32 [M, >= 4 topk + 3]");
-    const size_t smem = (size_t)NB * 8 + (size_t)topk * 4;
+    const bool big = NB > 8192 || (NB & (NB - 1)) != 0;
+    const size_t smem = big ? (size_t)topk * 4 : (size_t)NB * 8 + (size_t)topk * 4;
+    if (big) {
+        cudaLaunchConfig_t cfg = {};
+        cfg.gridDim = dim3(M); cfg.blockDim = dim3(1024); cfg.dynamicSmemBytes = smem; cfg.stream = st;
+        cudaLaunchAttribute at[1];
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+        cfg.attrs = at; cfg.numAttrs = 1;
+        cudaError_t e = cudaLaunchKernelEx(&cfg, qsa_topk_big_kernel, (const float*)sc.data_ptr(), NB,
+                                           (const int*)tail.data_ptr(), (int*)sel.data_ptr(), (int)sel.size(1), (int)topk);
+        TORCH_CHECK(e == cudaSuccess, "qsa_topk_big launch: ", cudaGetErrorString(e));
+        return;
+    }
     cudaFuncSetAttribute(qsa_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
     cudaLaunchConfig_t cfg = {};
     cfg.gridDim = dim3(M); cfg.blockDim = dim3(1024); cfg.dynamicSmemBytes = smem; cfg.stream = st;
