@@ -31,7 +31,7 @@ import './install';
 import './installed';
 import { changeText } from './job-view';
 import './measure-table';
-import { cardLine } from './parallel-table';
+import { cardLine, slotsLine } from './parallel-table';
 import './parallel-table';
 import './memory-bar';
 import './reset';
@@ -867,6 +867,7 @@ export class QseSetup extends LightElement {
               <span><span class="wcard-k">${S.weightsMemory}</span> ${p.weights_gib.toFixed(1)} GiB</span>
               <span><span class="wcard-k">${S.weightsDisk}</span> ${here ? S.onDisk : S.toDownload(p.disk_gb)}</span>
               ${cardLine(m, p.id) ? html`<span data-parallel-line><span class="wcard-k">${S.weightsAtOnce}</span> ${cardLine(m, p.id)}</span>` : nothing}
+              ${slotsLine(m) ? html`<span data-slots-line><span class="wcard-k">${S.weightsSlots}</span> ${slotsLine(m)}</span>` : nothing}
             </span>
             ${this.renderSource(p)}
             ${p.note && !this.simple ? html`<span class="wcard-note">${p.note}</span>` : nothing}
