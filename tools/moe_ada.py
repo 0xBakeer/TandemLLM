@@ -183,7 +183,7 @@ def _moe_trellis_split(XH, IDS, TR, KBt, PINV, YPP,
 def _moe_gtrellis(XH, ORDER, STARTS, COUNTS, TR, KBt, PINV, YP,
                   K, KT, NT, NBS, XSTR, XJSTR, YSTR, YJSTR,
                   J: tl.constexpr, TJ: tl.constexpr, BM: tl.constexpr,
-                  K_INV, K_BIAS):
+                  ACC16: tl.constexpr, K_INV, K_BIAS):
     """Grouped trellis GEMM for prefill: grid (J*NBS, ceil(P/BM), E). Program (nb, mb, e)
     decodes the [16k, 128n] trellis slice of projection (e, tj) once per kt and tl.dots it with
     the BM pairs of expert e that block mb covers (order/starts/counts group pairs by expert).
@@ -221,7 +221,7 @@ def _moe_gtrellis(XH, ORDER, STARTS, COUNTS, TR, KBt, PINV, YP,
 
     t8 = tl.arange(0, 8)
     xo = tl.arange(0, 16)
-    acc = tl.zeros([BM, 128], dtype=tl.float32)
+    acc = tl.zeros([BM, 128], dtype=tl.float16 if ACC16 else tl.float32)
     for kt in range(KT):
         base = (kt * NT + nb * 8) * W2v
         w0 = tl.load(T + base + t8[:, None] * W2v + w0i[None, :])
@@ -241,7 +241,10 @@ def _moe_gtrellis(XH, ORDER, STARTS, COUNTS, TR, KBt, PINV, YP,
         w2d = tl.reshape(tl.permute(tl.reshape(val, (8, 16, 16)), (1, 0, 2)), (16, 128))
         xh = tl.load(XH + prow[:, None] * XSTR + j * XJSTR + kt * 16 + xo[None, :],
                      mask=pmask[:, None], other=0)
-        acc += tl.dot(xh, w2d)
+        if ACC16:
+            acc = tl.dot(xh, w2d, acc=acc, out_dtype=tl.float16)
+        else:
+            acc += tl.dot(xh, w2d)
     n_off = nb * 128 + tl.arange(0, 128)
     tl.store(YP + prow[:, None] * YSTR + j * YJSTR + n_off[None, :],
              acc, mask=pmask[:, None])
@@ -356,6 +359,13 @@ def _pinv(device) -> torch.Tensor:
     return _PINV[key]
 
 
+def _acc16() -> bool:
+    """fp16 accumulation inside `_moe_gtrellis`' MMA (QWEN38_FN_MOE_FP16ACC): ~2x tensor-core
+    throughput on sm_89, at reduced accumulation precision. Off by default."""
+    from engine.settings import SETTINGS as _S
+    return _S.get("FN_MOE_FP16ACC") == "1"
+
+
 _OK: dict = {}          # device -> verdict, recorded by `probe` at MoEBank load
 
 
@@ -440,11 +450,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     return yd
 
 
-def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
+def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank, acc16: bool | None = None) -> torch.Tensor:
     """`fn_prefill_kernels.moe_grouped` for archs without the sm_121a grouped GEMM: every pair's
     rotations run batched (`_moe_rot_in`, `_moe_rot_out_down`), each used expert's gate/up and
     down trellises decode once to fp16 slabs and the pairs assigned to it take the library GEMM
-    (fp32 products, as `moe_grouped`). Output yd [M*S, H] fp32 in pair order."""
+    (fp32 products, as `moe_grouped`). Output yd [M*S, H] fp32 in pair order.
+
+    `acc16` overrides the launch's fp16-accumulation knob (`FN_MOE_FP16ACC`): the load probe
+    passes False, so it validates the kernel's structure -- the grid, the decode, the
+    rotations -- while the opt-in width change serves only after the verdict allowed it."""
     from tools import exl3_ada  # noqa: F401  (decode kept for the reference path)
     M, S = ids.shape
     P = M * S
@@ -452,6 +466,7 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
     H, I = bank.H, bank.I
     flat = ids.reshape(-1).to(torch.int32).contiguous()
     pinv = _pinv(dev)
+    acc16 = _acc16() if acc16 is None else acc16
     BM = 64     # measured on sm_89: 64 pairs share each decode, ~8% faster than 32 at 2k rows
 
     # every pair's rotated input, batched (same kernel as the decode path)
@@ -474,7 +489,7 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
     _moe_gtrellis[(2 * (I // 128), mbs, bank.n)](
         xh, order, starts, counts, bank.tr, bank.kb, pinv, ygu_p,
         H, H // 16, I // 16, I // 128, 2 * H, H, 2 * I, I, J=2, TJ=-1, BM=BM,
-        K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
+        ACC16=acc16, K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
     del xh
 
     # silu(g)*u + the down input rotation, batched (the decode path's fused kernel)
@@ -486,7 +501,7 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
     _moe_gtrellis[(H // 128, mbs, bank.n)](
         xd, order, starts, counts, bank.tr, bank.kb, pinv, yd_p,
         I, I // 16, H // 16, H // 128, I, 0, H, 0, J=1, TJ=2, BM=BM,
-        K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
+        ACC16=acc16, K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
     del xd
 
     yd = torch.empty(P, H, dtype=torch.float32, device=dev)
@@ -668,7 +683,7 @@ def probe(device) -> None:
             and torch.allclose(PK.moe_grouped_reference(x4, ids4, bank),
                                moe_experts(x4, ids4, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
-                               moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2)
+                               moe_grouped_ada(x8, ids8, bank, acc16=False), atol=4e-2, rtol=4e-2)
             and got is not None and torch.allclose(ref, got, atol=1e-2, rtol=1e-2))
     except Exception as e:
         _OK[dk] = False
