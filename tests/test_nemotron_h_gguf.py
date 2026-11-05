@@ -177,6 +177,161 @@ def test_gguf_reads_and_serves_near_its_twin():
     return f"self-check {res['rows']} rows bit for bit; vs the bf16 twin rel {rel:.3f}"
 
 
+def write_gguf_quantized(path: str, quant: dict):
+    """`write_gguf` with GGUFWriter.add_tensor wrapped: a name in `quant` is stored packed
+    instead -- "q4" (gguf-py's own Q4_0 quantize), "q8"/"iq2" (the file's raw fixtures), or
+    "omit" to drop the tensor entirely."""
+    import gguf
+    from gguf import quants
+    from unittest import mock
+    T = gguf.GGMLQuantizationType
+    orig = gguf.GGUFWriter.add_tensor
+
+    def wrap(self, name, arr, *a, **kw):
+        spec = quant.get(name)
+        if spec is None:
+            return orig(self, name, arr, *a, **kw)
+        if spec == "omit":
+            return None
+        n, k = arr.shape[0], arr.shape[1]
+        if spec == "q4":
+            raw, qt = quants.quantize(np.asarray(arr, np.float32), T.Q4_0), T.Q4_0
+        elif spec == "q8":
+            raw, qt = random_q8(n, k, 5).reshape(n, -1), T.Q8_0
+        elif spec == "nvfp4":
+            raw, qt = random_nvfp4_small(n, k, 5).reshape(n, -1), T.NVFP4
+        else:
+            raw, qt = random_iq2(n, k, seed=5).reshape(n, -1), T.IQ2_XXS
+        return orig(self, name, raw, raw_dtype=qt)
+
+    with mock.patch.object(gguf.GGUFWriter, "add_tensor", wrap):
+        return write_gguf(path)
+
+
+def test_a_quantized_embedding_or_router_loads_dense():
+    """The packed dispatch is role-gated: a token_embd.weight or ffn_gate_inp.weight stored as
+    Q4_0 / Q8_0 / IQ2_XXS loads as a plain bf16 tensor (the `_dense` twins' values) -- the packed
+    linear answers matmul() only, and the embedding's index_select and the router's float()/strides
+    would fail on it. The same types on the projections still pack."""
+    try:
+        import gguf  # noqa: F401
+        gguf.GGMLQuantizationType.NVFP4
+    except Exception:  # noqa: BLE001
+        return "skipped: gguf-py missing"
+    from engine.models.nemotron_h.gguf_load import load_gguf
+    from tools import gguf_quants as GQ
+
+    cfg0 = config_from_dict(RAW, "tiny")
+    att = cfg0.attention_layers[0]
+    deq = {"q4": lambda raw, n, k: GQ.dequant(2, raw, (n, k)),
+           "q8": lambda raw, n, k: Q.dequant_q8_0(raw, n, k),
+           "iq2": lambda raw, n, k: GQ.dequant(16, raw, (n, k)),
+           "nvfp4": lambda raw, n, k: GQ.dequant(40, raw, (n, k))}
+    cls = {"q4": GQ.Q40Linear, "q8": Q.Q8Linear, "iq2": Q.IQ2Linear, "nvfp4": Q.NVFP4Linear}
+    for spec in ("q4", "q8", "iq2", "nvfp4"):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "q.gguf")
+            write_gguf_quantized(p, {"token_embd.weight": spec, "blk.1.ffn_gate_inp.weight": spec,
+                                     f"blk.{att}.attn_q.weight": spec})
+            c3, W, experts, timing, g = load_gguf(p, device="cpu", log=None)
+            for canon, stored in (("embeddings.weight", "token_embd.weight"),
+                                  ("layers.1.mixer.gate.weight", "blk.1.ffn_gate_inp.weight")):
+                wgt = W[canon]
+                assert torch.is_tensor(wgt) and wgt.dtype == torch.bfloat16, (spec, canon, type(wgt))
+                shape = g.tensors[stored].shape
+                want = deq[spec](np.array(g.raw(stored)), *shape)
+                assert torch.equal(wgt, want.to(torch.bfloat16)), (spec, canon)
+            W["embeddings.weight"].index_select(0, torch.tensor([1]))
+            gate = W["layers.1.mixer.gate.weight"]
+            gate.float()
+            gate.stride(0)
+            qp = W[f"layers.{att}.mixer.q_proj.weight"]
+            assert isinstance(qp, cls[spec]), (spec, type(qp))
+
+
+def test_a_quantized_tied_embedding_aliases_the_head():
+    """output.weight omitted + a packed token_embd.weight: the tie aliases the head to the dense
+    embedding tensor (never a packed linear), and the tiny engine still self-checks when the GPU
+    is there."""
+    try:
+        import gguf  # noqa: F401
+        gguf.GGMLQuantizationType.NVFP4
+    except Exception:  # noqa: BLE001
+        return "skipped: gguf-py missing"
+    from engine.models.nemotron_h.gguf_load import load_gguf
+
+    cfg0 = config_from_dict(RAW, "tiny")
+    att = cfg0.attention_layers[0]
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.gguf")
+        write_gguf_quantized(p, {"output.weight": "omit", "token_embd.weight": "q4",
+                                 "blk.1.ffn_gate_inp.weight": "q4", f"blk.{att}.attn_q.weight": "q4"})
+        c3, W, experts, timing, g = load_gguf(p, device="cpu", log=None)
+        assert c3.tie_word_embeddings
+        assert W["lm_head.weight"] is W["embeddings.weight"] and torch.is_tensor(W["lm_head.weight"])
+        if not KERNELS:
+            return "tied alias ok; engine skipped: no Triton/GPU"
+        from engine.models.nemotron_h.engine import NemotronHEngine
+        c4, W4, ex4, _, _ = load_gguf(p, device=DEV, log=None)
+        eng = NemotronHEngine(c4, W4, ex4, device=DEV, max_len=256)
+        res = eng.self_check(PROMPT, steps=8, log=None)
+        assert res["ok"], res
+        return f"tied alias ok; self-check {res['rows']} rows"
+
+
+def test_nvfp4_experts_load_dense_with_their_tensor_scale():
+    """NVFP4 expert stacks (not an IQ2_XXS pair) load as BF16 `ExpertsRelu2` through `_dense`, each
+    stack with its tensor scale (`<name>.scale`) applied; a scale that is not one F32 value is
+    refused at load instead of being dropped."""
+    try:
+        import gguf
+        gguf.GGMLQuantizationType.NVFP4
+    except Exception:  # noqa: BLE001
+        return "skipped: gguf-py missing or without NVFP4"
+    from unittest import mock
+    from engine.models.nemotron_h.gguf_load import load_gguf
+    from engine.models.nemotron_h.load import ExpertsRelu2
+    from tools import gguf_quants as GQ
+    T = gguf.GGMLQuantizationType
+    orig = gguf.GGUFWriter.add_tensor
+    scales = {"up": 0.03, "down": 0.5}
+
+    def write(path: str, bad: bool):
+        def wrap(self, name, arr, *a, **kw):
+            kind = next((k for k in scales if name.endswith(f"ffn_{k}_exps.weight")), None)
+            if kind is None:
+                return orig(self, name, arr, *a, **kw)
+            E, R, C = arr.shape[0], arr.shape[1], arr.shape[2] // 66 * 256   # the IQ2_XXS fixture's values a row
+            raw = random_nvfp4_small(E * R, C, seed=7 if kind == "up" else 8).reshape(E, R, -1)
+            orig(self, name, raw, raw_dtype=T.NVFP4)
+            sc = np.full(2 if bad and kind == "down" else 1, scales[kind], dtype=np.float32)
+            return orig(self, name[:-len(".weight")] + ".scale", sc)
+        with mock.patch.object(gguf.GGUFWriter, "add_tensor", wrap):
+            write_gguf(path)
+
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "e.gguf")
+        write(p, bad=False)
+        c3, W, experts, timing, g = load_gguf(p, device="cpu", log=None)
+        assert g.types()["NVFP4"] == 3 + 2 * len(c3.moe_layers), g.types()
+        for li in c3.moe_layers:
+            ex = experts[li]
+            assert isinstance(ex, ExpertsRelu2), type(ex)
+            for kind, got in (("up", ex.up), ("down", ex.down)):
+                stored = f"blk.{li}.ffn_{kind}_exps.weight"
+                x = GQ.dequant(40, np.array(g.raw(stored)), g.tensors[stored].shape).reshape(got.shape)
+                assert torch.equal(got, (x * float(np.float32(scales[kind]))).to(torch.bfloat16)), (li, kind)
+                assert not torch.equal(got, x.to(torch.bfloat16)), (li, kind, "the scale was dropped")
+        write(p, bad=True)
+        try:
+            load_gguf(p, device="cpu", log=None)
+        except ValueError as e:
+            assert "ffn_down_exps.scale" in str(e) and "tensor scale" in str(e), e
+        else:
+            raise AssertionError("a two-value tensor scale loaded")
+    return f"{len(c3.moe_layers)} NVFP4 expert pairs scaled at load; a two-value scale refused"
+
+
 def header_gguf(path: str, dims: tuple, ty: int = 0, alignment: int | None = None, data: int = 64) -> None:
     """A GGUF of one tensor written by hand (no gguf-py): the header, the table and `data` bytes."""
     import struct
