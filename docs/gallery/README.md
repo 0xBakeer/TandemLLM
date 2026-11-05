@@ -4,6 +4,8 @@ The dashboard at 1440×900 and on a 390×844 phone, dark theme. `dashboard/e2e/r
 
 ## Chat
 
+The Chat tab is in beta.
+
 ![The Chat tab: a web page the model wrote in its sandbox, open in the preview pane, with the context panel](chat-preview.webp)
 
 The model writes `site/index.html` in its sandbox, the preview pane renders it, and the context panel shows what fills the window.

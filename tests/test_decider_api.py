@@ -177,9 +177,11 @@ def test_6_off_is_the_release():
     _wait(OFF, SRV_OFF)
     st, _, raw = _call(OFF, "GET", "/v1/models", raw=True)
     out = json.loads(raw)
-    assert st == 200 and set(out) == {"object", "data"}, out
-    assert raw == json.dumps({"object": "list", "data": out["data"]}, ensure_ascii=False).encode(), \
-        "the release's body: the same dict, serialised the same way"
+    # OPS-260: beside `data`, the mode and what is loaded; no decision model with Laya off
+    assert st == 200 and set(out) == {"object", "data", "mode", "loaded"}, out
+    assert out["mode"] == "chat" and out["loaded"]["decision_models"] == [], out
+    assert raw == json.dumps({"object": "list", "data": out["data"], "mode": out["mode"], "loaded": out["loaded"]},
+                             ensure_ascii=False).encode(), "the release's body: the same dict, serialised the same way"
     assert [m["id"] for m in out["data"]] == ["TandemLLM"]
     for method, path in (("POST", "/v1/systemone"), ("POST", "/v1/predict"), ("GET", "/readyz")):
         st, _, body = _call(OFF, method, path, {"state": "x", "questions": CHOICE}

@@ -68,8 +68,9 @@ def answer(cond, handler, method: str, body: dict | None) -> tuple[str, int, obj
         except notes_mod.Refused as exc:
             raise Refused(422, exc.why, str(exc)) from None
         return "api_write", 200, {k: res.get(k) for k in ("op", "id", "title", "scope", "kind",
-                                                           "revised") if k in res}, \
-            {"op": res.get("op"), "id": res.get("id"), "revised": bool(res.get("revised"))}
+                                                           "revised", "demoted") if k in res}, \
+            {"op": res.get("op"), "id": res.get("id"), "revised": bool(res.get("revised")),
+             **({"demoted": res["demoted"]} if res.get("demoted") else {})}
     if path == PREFIX:
         groups = store.index_lines(ctx["user"], ctx["project"], ctx["session"])
         return "api_index", 200, {"object": "memory", "scopes": [

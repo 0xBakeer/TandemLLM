@@ -11,12 +11,19 @@
 //             request runs
 //   @apply    PW_TARGET (a profile) through Finish, every step's state on the way, back on that profile
 // Nothing here runs against the mock, and only @apply and level 1 change anything.
+// The guide opens in SIMPLE mode for a fresh browser; this file drives the ADVANCED
+// wizard, so every context asks for the advanced flow by name before it starts.
+
 import { expect, test, type Page } from '@playwright/test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { noHorizontalOverflow } from './helpers';
 
 test.skip(process.env.PW_LIVE !== '1', 'the live tier: PW_LIVE=1 on the box');
+
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('tandem.setup.simple', '0'));
+});
 
 // the model the box serves (PW_MODEL; the 27B when unset)
 const MODEL = process.env.PW_MODEL ?? 'qwen3.8-27b';

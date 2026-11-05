@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import torch
 
+from engine import capture_lock
+
 #: graphs kept, a safe bound and not a measurement: 4 slots at one class are 11 sets (any 2, 3 or 4 of them)
 JOINT_GRAPHS_MAX = 32
 
 
 def _reserved() -> int:
-    return torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+    from engine.cache import cuda_stats
+    return cuda_stats("reserved_bytes.all.current")[0] if torch.cuda.is_available() else 0
 
 
 class GraphLRU:
@@ -58,6 +61,7 @@ class GraphLRU:
             if gr is not None:
                 gr.reset()
                 old.graph = None
+                capture_lock.graphs_reset()        # SPD-257: its pool gave its blocks back
             self.evicted += 1
         return g
 

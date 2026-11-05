@@ -404,7 +404,7 @@ class Ring:
                 off = os.fstat(fd).st_size
                 for p in pts:
                     if p["event"] is not None:
-                        with capture_lock.LOCK:        # not inside a graph capture
+                        with capture_lock.GUARD:       # not inside a graph capture
                             p["event"].synchronize()
                     data.append(self.host[p["slot"], :R].numpy().tobytes())
                     lines.append(json.dumps(dict(

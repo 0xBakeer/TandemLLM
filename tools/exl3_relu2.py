@@ -32,6 +32,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 from tools import fn_kernels as FK  # noqa: E402
 
@@ -65,7 +66,7 @@ def _module():
         _MOD = nb.load(f"exl3_relu2_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["nh_relu2_up", "nh_relu2_down", "nh_relu2_groups", "nh_relu2_up_group",
                                   "nh_relu2_down_group"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_relu2")],
                        verbose=False)
     return _MOD
 

@@ -165,10 +165,11 @@ def test_the_parallel_view_shows_the_slots():
 
 
 def test_admission_holds_a_request_until_the_bytes_are_there():
-    # 15 GiB floor, MemAvailable 15 GiB + 1 MiB: a second request's worst case cannot fit beside
-    # the first one's reservation, so it waits for it (a lone request is always admitted)
+    # 15 GiB floor, MemAvailable 16.65 GiB: one request's worst case (the 1.15 GiB workspace floor)
+    # fits, a lone request checked too (SRV-775); a second one's cannot fit beside the first one's
+    # reservation, so it waits for it
     port, proc = _server(("--parallel", "2", "--side-max-len", "8192"),
-                         env={"FAKE_MEMAVAILABLE_GIB": str(15 + 1 / 1024)})
+                         env={"FAKE_MEMAVAILABLE_GIB": str(15 + 1.65)})
     try:
         spans, _ = _together(port, TEXTS[:2])
         assert _overlap(spans) == 1, "the second request waited for the first one's bytes"
@@ -366,6 +367,34 @@ def test_a_lane_the_pool_refuses_gives_way_and_goes_on():
         assert rc["on"] and rc["gave_way"] == 1 and rc["resumed"] == 1 and rc["gave_up"] == 0, rc
     finally:
         _stop(proc)
+
+
+def test_srv773_a_homeless_long_prompt_prefers_a_free_side_slot_over_a_kept_end():
+    """SRV-773 (R6b): live 2026-11-02 (8 slots of 262,144), g6's homeless 85,549-token turn took slot 0 (its first
+    free slot), sent g8's 62,865-token conversation, whose end slot 0 kept for its next turn, to the NVMe, and was
+    refused there. A prompt longer than slot 0's guests beside a resident with a kept end now prefers a free side
+    slot, with no wait for a busy one; without a kept end the choice is as before. In process, on the routing
+    alone (`_par_side_need` with tests/test_par_continue.py's stand-ins)."""
+    from server import app as A
+    from test_par_continue import FakeResident, _need, _restore, _session, _setup
+
+    head = list(range(4_798))                      # the 8 sessions' shared head
+    rows = _session(1, head, 62_865 - 4_798)       # g8's conversation on slot 0
+    res = FakeResident(rows)
+    res.end, res.guest_max = {"at": 62_865}, 8_192
+    pool, saved = _setup(res, side_len=262_144)
+    try:
+        ids = _session(2, head, 85_549 - 4_798)    # g6's turn: the head shared, nothing else
+        need, why = _need(ids)
+        assert need is not None and "wait" not in why, why
+        assert why.get("prefer_side") == 62_865 and why.get("prefer_side_end") == 62_865, why
+        assert "prefer_side_wait" not in why and "prefer_side_end=62865" in A._par_nums(why), why
+        res.end = None                             # no kept end: slot 0 first, as before
+        need, why = _need(ids)
+        assert need is not None and "prefer_side" not in why and "prefer_side_end" not in why, why
+    finally:
+        _restore(saved)
+    return "85,549 tokens beside a kept 62,865-token end: a free side slot first; no end: as before"
 
 
 if __name__ == "__main__":

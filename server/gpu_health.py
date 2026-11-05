@@ -71,7 +71,7 @@ def probe(device=None) -> str | None:
     """None when the context answers (or a capture holds the lock: no answer now), else the
     error's first line."""
     from engine import capture_lock
-    if not capture_lock.LOCK.acquire(blocking=False):
+    if not capture_lock.GUARD.acquire(blocking=False):
         return None
     try:
         import torch
@@ -79,7 +79,7 @@ def probe(device=None) -> str | None:
     except Exception as exc:                                       # noqa: BLE001
         return first_line(str(exc)) or type(exc).__name__
     finally:
-        capture_lock.LOCK.release()
+        capture_lock.GUARD.release()
     return None
 
 

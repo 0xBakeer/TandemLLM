@@ -6,7 +6,9 @@ import type { SetupModel } from '../src/api/types';
 import { availability, dependentsOf, normaliseComponents, toggleComponent } from '../src/setup/deps';
 import { estimate } from '../src/setup/estimate';
 import { howToFix, overSentence, stepIssues, tokenBlocked } from '../src/setup/checks';
-import { capChat, clearSaved, defaults, emptyState, readSaved, restoreSelection, setupReducer, STORAGE_KEY, toSaved, windowMax, writeSaved, type SetupAction, type WizardState } from '../src/setup/state';
+import { estimateLoose } from '../src/setup/estimate';
+import { simpleDefaultsActions } from '../src/setup/simple';
+import { capChat, clearSaved, defaults, emptyState, readSaved, restoreSelection, setupReducer, stepPos, STORAGE_KEY, toSaved, windowMax, writeSaved, type SetupAction, type WizardState } from '../src/setup/state';
 
 const M = model as unknown as SetupModel;
 const FN = flashNext as unknown as SetupModel;
@@ -52,6 +54,21 @@ describe('defaults', () => {
 });
 
 describe('setupReducer', () => {
+  it('the install job belongs to its model — a different model opens clean, the same one resumes', () => {
+    // Back-navigation to #/setup/<other>/install must not replay the first model's job
+    // (and its Apply-and-restart) inside the other wizard: the job waits on its own model.
+    let s = setupReducer(emptyState(), { type: 'open', model: M }, M);
+    s = setupReducer(s, { type: 'job', id: 'job-a' }, M);
+    expect(s.job).toBe('job-a');
+    expect(s.job_model).toBe(M.id);
+    s = setupReducer(s, { type: 'open', model: FN }, FN);
+    // the job belongs to its model: it waits there, it does not follow the browser
+    expect(s.job).toBe('job-a');
+    expect(s.job_model).toBe(M.id);
+    s = setupReducer(s, { type: 'job', id: 'job-b' }, FN);
+    s = setupReducer(s, { type: 'open', model: FN }, FN);
+    expect(s.job).toBe('job-b'); // same model, mid-install: a reload must still resume it
+  });
   it('opens a model on the overview and walks Next and Previous', () => {
     let s = run([{ type: 'open', model: M }]);
     expect(s.step).toBe('overview');
@@ -157,18 +174,87 @@ describe('setupReducer', () => {
   });
 });
 
+describe('simple mode: resume, mode switch, counters', () => {
+  const runSimple = (actions: SetupAction[], st: WizardState = emptyState()) =>
+    actions.reduce((s, a) => setupReducer(s, a, M, true), st);
+
+  it('a model card click after an abandonment starts over at the quant cards, not the abandoned page', () => {
+    // the wizard must not keep the saved 'review' (or leak a route-synced 'overview') and
+    // strand a returning visitor away from the quant cards they came for
+    let s = runSimple([{ type: 'open', model: M }, { type: 'next' }]);
+    expect(s.step).toBe('review');                                   // page 3, then the abandonment
+    s = runSimple([{ type: 'tiles' }], s);
+    expect(s.step).toBe('models');
+    s = runSimple([{ type: 'go', step: 'overview' }], s);            // the card click's route sync
+    expect(s.step).toBe('weights');                                  // page 2 — the start, not page 3
+  });
+
+  it('opens on the quant cards and walks the three pages, never leaving the mode', () => {
+    let s = runSimple([{ type: 'open', model: M }]);
+    expect(s.step).toBe('weights');
+    s = runSimple([{ type: 'next' }], s);
+    expect(s.step).toBe('review');
+    s = runSimple([{ type: 'next' }], s);                             // review is the last page: Finish owns it
+    expect(s.step).toBe('review');
+    s = runSimple([{ type: 'previous' }, { type: 'previous' }, { type: 'previous' }], s);
+    expect(s.step).toBe('models');                                    // page 2 is walkable in both directions
+  });
+
+  it('a step saved under the standard wizard is re-derived when simple mode opens the model', () => {
+    let s = run([{ type: 'open', model: M }, { type: 'go', step: 'parallelism' }]);
+    s = setupReducer(s, { type: 'open', model: M }, M, true);
+    expect(s.step).toBe('review');                                    // the fold that owns parallelism
+    s = setupReducer(s, { type: 'go', step: 'components' }, M, true);
+    expect(s.step).toBe('review');
+  });
+
+  it('the mode switch re-derives the step through the entered mode', () => {
+    let s = run([{ type: 'open', model: M }, { type: 'go', step: 'parallelism' }]);
+    s = setupReducer(s, { type: 'mode', simple: true }, M, false);
+    expect(s.step).toBe('review');                                    // folded away
+    s = setupReducer(s, { type: 'mode', simple: false }, M, true);
+    expect(s.step).toBe('review');                                    // a page of both modes
+    let t = run([{ type: 'open', model: M, step: 'weights' }]);
+    t = setupReducer(t, { type: 'mode', simple: true }, M, false);
+    expect(t.step).toBe('weights');
+    let u = run([{ type: 'open', model: M }, { type: 'go', step: 'overview' }]);
+    u = setupReducer(u, { type: 'mode', simple: true }, M, false);
+    expect(u.step).toBe('weights');                                   // the intro's twin is the quant cards
+  });
+
+  it('the counter counts the active mode\'s pages, never the other mode\'s', () => {
+    expect(stepPos('weights', true)).toEqual({ n: 2, of: 3 });
+    expect(stepPos('review', true)).toEqual({ n: 3, of: 3 });
+    expect(stepPos('models', true)).toEqual({ n: 1, of: 3 });
+    expect(stepPos('install', true)).toEqual({ n: 3, of: 3 });        // the job sits on the folded page
+    expect(stepPos('parallelism', true)).toEqual({ n: 3, of: 3 });    // a standard-mode step still counts under the simple pages
+    expect(stepPos('weights', false)).toEqual({ n: 3, of: 8 });
+    expect(stepPos('parallelism', false)).toEqual({ n: 5, of: 8 });
+  });
+});
+
 describe('dependencies', () => {
   const sel = defaults(M).components;
-  it('turning the conductor off turns the narrator, Laya and the shadow reader off with a reason', () => {
-    // the narrator switched on first: off by default since 0.11.3 (SRV-534)
-    const r = toggleComponent(M, { ...sel, narrator: true }, 'conductor', false);
+  it('turning the chat off turns the narrator, Laya and the shadow reader off with a reason', () => {
+    // OPS-260: the chat (beta) and its small models are off by default; switched on first
+    expect(sel).toMatchObject({ conductor: false, narrator: false, laya: false, shadow: false });
+    const r = toggleComponent(M, { ...sel, conductor: true, narrator: true, laya: true, shadow: true }, 'conductor', false);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.components).toMatchObject({ conductor: false, narrator: false, laya: false, shadow: false });
     expect(r.cascaded.map((c) => c.id).sort()).toEqual(['laya', 'narrator', 'shadow']);
-    expect(r.notice).toMatch(/need the conductor, so they are off too/);
+    expect(r.notice).toMatch(/need the chat \(beta\), so they are off too/);
     const av = availability(M, r.components);
-    expect(av.narrator).toMatchObject({ disabled: true, reason: 'Needs the conductor' });
+    expect(av.narrator).toMatchObject({ disabled: true, reason: 'Needs the chat (beta)' });
+  });
+  it('turning the chat on brings the small models it ships with (OPS-260: with_parent)', () => {
+    const r = toggleComponent(M, sel, 'conductor', true);
+    expect(r.ok && r.components).toMatchObject({ conductor: true, laya: true, shadow: true, narrator: false });
+    const f = toggleComponent(FN, defaults(FN).components, 'conductor', true);
+    expect(f.ok && f.components).toMatchObject({ conductor: true, laya: true, shadow: false, narrator: false });
+    // each can still be switched off on its own
+    const g = r.ok ? toggleComponent(M, r.components, 'laya', false) : r;
+    expect(g.ok && g.components).toMatchObject({ conductor: true, laya: false, shadow: true });
   });
   it('a dependent cannot be switched on while its dependency is off', () => {
     const off = { ...sel, disk_tier: false, nvme_spill: false };
@@ -279,5 +365,65 @@ describe('the memory check on Review', () => {
     expect(tokenBlocked(P, { ...sel, profile: 'exl3-6.0' }, dev)).toBe(false);
     expect(tokenBlocked(P, { ...sel, profile: 'nvfp4' }, dev)).toBe(false);
     expect(tokenBlocked(M, sel, dev)).toBe(false);
+  });
+});
+
+describe('the simple answers', () => {
+  const FLASH = flashNext as unknown as SetupModel;
+  const sel = () => ({ ...defaults(FLASH), slots: 1, kv_pool: false });
+  const capped = (max: number): SetupModel => {
+    const c = JSON.parse(JSON.stringify(FLASH));
+    c.parallelism.slots = { min: 1, max, default: Math.min(max, c.parallelism.slots.default) };
+    return c as SetupModel;
+  };
+  const valueOf = (acts: SetupAction[], key: string) => {
+    const a = acts.find((x) => x.type === 'parallel' && x.key === key) as { value?: unknown } | undefined;
+    return a?.value;
+  };
+  it('asks for no more chats than the card measured', () => {
+    for (const max of [1, 2, 3]) {
+      const n = valueOf(simpleDefaultsActions(capped(max), sel()), 'slots') as number | undefined;
+      expect(n ?? 1).toBeLessThanOrEqual(max);
+    }
+  });
+  const pooledCard = (kvb: number): SetupModel => {
+    // a four-chat card of the Flash-Next shape whose KV costs kvb bytes a token: the
+    // plain reservation commits every chat's WHOLE window at load, the pool commits the
+    // typical fill as chats grow -- at 44,000 the plain reservation cannot stretch past one
+    // chat of the 262,144 window, at 16,000 it carries all four and the pool earns nothing
+    const c = JSON.parse(JSON.stringify(FLASH));
+    c.parallelism.slots = { min: 1, max: 4, default: 4 };
+    c.parallelism.kv_bytes_per_token = kvb;
+    for (const pr of c.profiles) delete pr.kv_bytes_per_token;   // the card, not a profile, prices it
+    return c as SetupModel;
+  };
+  it('turns the pool on when it buys chats the plain reservation cannot carry', () => {
+    const buy = pooledCard(44_000);
+    const acts = simpleDefaultsActions(buy, sel());
+    const n = valueOf(acts, 'slots') as number;
+    expect(n).toBe(4);
+    expect(valueOf(acts, 'kv_pool')).toBe(true);
+    // the witness that it buys: at that very chat count the plain reservation does not fit
+    const w = windowMax(buy, sel().profile);
+    expect(estimateLoose(buy, { ...sel(), window: w, kv_pool: false, slots: n })?.fits).toBe(false);
+  });
+  it('asks for nothing the reducer refuses (Laya needs the chat, which is off by default)', () => {
+    for (const card of [FLASH, M]) {
+      const start = run([{ type: 'open', model: card, seed: defaults(card) }]);
+      let s = start;
+      for (const a of simpleDefaultsActions(card, start.selection!)) {
+        s = setupReducer(s, a, card);
+        expect(s.notice ?? '', JSON.stringify(a)).not.toMatch(/[Nn]eeds? the chat/);
+        if (a.type === 'component') expect(s.selection!.components?.[a.id], a.id).toBe(a.on);
+        if (a.type === 'parallel') expect((s.selection as unknown as Record<string, unknown>)[a.key], a.key).toBe(a.value);
+      }
+      expect(simpleDefaultsActions(card, start.selection!).some((a) => a.type === 'component' && a.id === 'laya')).toBe(false);
+    }
+  });
+  it('leaves the pool as the box left it when the plain reservation already carries the chats', () => {
+    const free = pooledCard(16_000);
+    const acts = simpleDefaultsActions(free, sel());
+    expect(valueOf(acts, 'kv_pool')).toBeUndefined();   // no gain, no switch: as the box left it
+    expect(valueOf(acts, 'slots')).toBe(4);             // and the four chats came without it
   });
 });

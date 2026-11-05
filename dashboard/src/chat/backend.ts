@@ -199,8 +199,9 @@ export interface PreviewReport {
  *  setup_mode     503 `setup_mode`: the box is in the Setup Guide
  *  not_an_engine  200 that is not JSON: a static server or a proxy's index.html
  *  server_error   any other status (a proxy's 502 page included)
- *  offline        the fetch failed: no server reached */
-export type ChatDownCause = 'chatd_down' | 'chatd_refused' | 'no_chat_routes' | 'setup_mode' | 'not_an_engine' | 'server_error' | 'offline';
+ *  offline        the fetch failed: no server reached
+ *  chat_off       /health says `mode: "engine"` (OPS-260): the box serves the engine alone; no chat route is asked */
+export type ChatDownCause = 'chatd_down' | 'chatd_refused' | 'no_chat_routes' | 'setup_mode' | 'not_an_engine' | 'server_error' | 'offline' | 'chat_off';
 export interface ChatDown {
   cause: ChatDownCause;
   /** the HTTP status, null when nothing answered */
@@ -232,8 +233,11 @@ export function isChatDown(e: unknown): boolean {
   return !!x && x.status === 502 && classifyProbe(502, true, x.body)?.cause === 'chatd_down';
 }
 
-/** GET /v1/chat-app/capabilities: null when the chat API answers, else why not. */
+/** GET /v1/chat-app/capabilities: null when the chat API answers, else why not. OPS-260: /health first;
+ *  on an engine-only box (`mode: "engine"`) the chat is off and no chat route is asked. */
 export async function probeChat(): Promise<ChatDown | null> {
+  // no JSON, or nothing answered: the chat probe below says which
+  if ((await fetch(apiBase() + '/health', { cache: 'no-store' }).then((r) => r.json()).catch(() => 0))?.mode === 'engine') return { cause: 'chat_off', status: null, message: '' };
   let res: Response;
   try {
     res = await fetch(apiBase() + '/v1/chat-app/capabilities', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });

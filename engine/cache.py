@@ -66,6 +66,7 @@ repository, and nothing it holds reaches a log line.
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import os
 import struct
@@ -344,21 +345,71 @@ GIB = 1 << 30
 WORKSPACE_FLOOR = int(1.15 * GIB)
 WORKSPACE_PER_TOKEN = int(4.87 * GIB / 173_855)
 
+#: SPD-257: a request's time in the memory policy and the guest stash, by part, on the request's own thread, for the
+#: server's [req] line (`req_ms_fields`): `gate` (`Budget.gate`), `settle` (`ResidentPrefix.settle_guest`),
+#: `remember` (the server's keep of the turn's end) and `done`, the `Budget.done` the engine ran last before the
+#: request's first gate. A request's own `done` runs after its [req] line, with the engine held, so it is the next
+#: request's `done` part. A thread no request started (`req_ms_start`) counts nothing.
+_REQ = threading.local()
+REQ_PARTS = ("gate", "done", "remember", "settle")
+
+
+def req_ms_start() -> dict:
+    """A request starts on the calling thread: its parts count from 0, in the dict returned (the request's
+    record keeps it for its [req] line)."""
+    _REQ.ms = {}
+    return _REQ.ms
+
+
+def req_ms_add(part: str, ms: float) -> None:
+    d = getattr(_REQ, "ms", None)
+    if d is not None:
+        d[part] = d.get(part, 0.0) + float(ms)
+
+
+def req_ms_fields(d: dict | None) -> str:
+    """The [req] line's ` gate_ms=.. done_ms=.. remember_ms=.. settle_ms=..` from a request's parts (0.0 for a part
+    it did not take), or "" for a request with none (`req_ms_start` never ran for it)."""
+    if d is None:
+        return ""
+    return "".join(f" {k}_ms={d.get(k, 0.0):.1f}" for k in REQ_PARTS)
+
 
 class MemoryRefused(RuntimeError):
     """A prefill that would take the engine over its declared peak, with every cache already
     given back. The server answers it with a 503 and a Retry-After instead of running into the
     driver's out-of-memory wedge."""
 
-    def __init__(self, need: int, peak: int, n: int):
+    def __init__(self, need: int, peak: int, n: int, rows: int | None = None):
         self.need, self.peak, self.n = int(need), int(peak), int(n)
-        super().__init__(f"a {n}-token prefill needs {need / GIB:.1f} GiB with every cache "
+        self.rows = None if rows is None else int(rows)    # SRV-773: the rows it forwards (None: not said)
+        what = (f"a {self.rows}-row continuation on a {n}-token context" if self.rows is not None and self.rows < n
+                else f"a {n}-token prefill")
+        super().__init__(f"{what} needs {need / GIB:.1f} GiB with every cache "
                          f"given back; the engine's peak is {peak / GIB:.1f} GiB")
 
 
-def _torch_memory() -> tuple[int, int]:
+def cuda_stats(*names: str) -> tuple[int, ...]:
+    """The caching allocator's counters by dotted name ("allocated_bytes.all.current"), 0 for one it lacks,
+    read off torch's nested dict. `torch.cuda.memory_stats` (and `memory_allocated`, `memory_reserved`,
+    `max_memory_allocated`, which call it) flattens that dict through a closure that refers to itself: each
+    call leaves its (key, value) tuples, ~4K with the graphs' pools, in a reference cycle that only the cycle
+    collector frees. Read every round, that was 50-80K objects a round for the young collection at a round's
+    end (QSE_RUNNER_GC: 40-80 ms a collection, decode 46 -> 23 t/s in 25 minutes); the nested dict is
+    freed by its reference count."""
     import torch as _t
-    return int(_t.cuda.memory_allocated()), int(_t.cuda.memory_reserved())
+    st = _t.cuda.memory_stats_as_nested_dict()
+    out = []
+    for name in names:
+        v = st
+        for part in name.split("."):
+            v = v.get(part, 0) if isinstance(v, dict) else 0
+        out.append(int(v) if isinstance(v, int) else 0)
+    return tuple(out)
+
+
+def _torch_memory() -> tuple[int, int]:
+    return cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
 
 
 def _torch_empty() -> None:
@@ -371,7 +422,128 @@ def _torch_peak(reset: bool = False) -> int:
     if reset:
         _t.cuda.reset_peak_memory_stats()
         return 0
-    return int(_t.cuda.max_memory_allocated())
+    return cuda_stats("allocated_bytes.all.peak")[0]
+
+
+
+def allocator_segments() -> list:
+    """SPD-257: every segment of the caching allocator, from the snapshot call that is handed no tuple.
+    torch 2.13.0's `torch._C._cuda_memorySnapshot` takes one reference too few on every item of the tuple
+    it is handed: `torch.cuda.memory_snapshot()` hands it `(0, 0, True)` (one reference off `True` and two
+    off the int 0 a call, measured on the box's CPU: 2,000 calls, -2,000 and -4,000), `MemPool.snapshot()`
+    its pool's id. Both are interpreter singletons on Python 3.11, and the engine died of that drain once
+    ("Fatal Python error: bool_dealloc", 2026-10-05, engine/decision/device.py). The policy walks after
+    each graph capture; with `None` the call takes no reference (tests/test_pool_snapshot_refcount.py)."""
+    import torch as _t
+    return _t._C._cuda_memorySnapshot(None)["segments"]
+
+
+def allocator_pools(segments, blocks: bool = False) -> dict:
+    """SPD-257: the allocator's segments by pool, from `allocator_segments()` (a list of segments,
+    each with `segment_pool_id`, `total_size`, `allocated_size`, `is_expandable`, `stream` and its `blocks`).
+    The default pool, id `(0, 0)`, holds a cache's buffers and a prefill's workspace. The private pools
+    are the CUDA graphs', id `(k, 0)` (`graph_pool_handle()`, or a capture's own pool when a graph is
+    captured without `pool=`; their free blocks are the scratch the graphs' replays write), and the
+    `torch.cuda.MemPool`s, id `(0, k)`: a decision model's or a generative role's own pool, which the
+    policy's figures leave out up to the role's claim (`Budget.exclude`, server/memlimits.role_exclude) and
+    whose excess the `roles` level gives back. Only a pool's owners reuse its free blocks. For the default
+    pool also the free bytes in segments that still hold a live block (without expandable segments `empty`
+    cannot give those back). `blocks`: the report on demand (GET /v1/cache/memory?pools=1, the load line)
+    also names the default pool's largest free block on each stream, in its large-pool segments
+    (`largest_free`) and its small-pool ones (`largest_free_small`), a reading for an operator; the policy
+    uses neither, and its walk (`TorchPools`) skips the blocks."""
+    out = {"default": {"segments": 0, "reserved": 0, "allocated": 0, "expandable": 0, "free_beside_live": 0},
+           "graphs": {"segments": 0, "reserved": 0, "allocated": 0, "expandable": 0, "pools": 0},
+           "mempools": {"segments": 0, "reserved": 0, "allocated": 0, "expandable": 0, "pools": 0}}
+    if blocks:
+        out["default"].update(largest_free={}, largest_free_small={})
+    ids: dict = {"graphs": set(), "mempools": set()}
+    for seg in segments:
+        pid = tuple(seg.get("segment_pool_id") or (0, 0))
+        kind = "default" if pid == (0, 0) else ("graphs" if pid[0] != 0 else "mempools")
+        d = out[kind]
+        if kind != "default":
+            ids[kind].add(pid)
+        total, used = int(seg.get("total_size") or 0), int(seg.get("allocated_size") or 0)
+        d["segments"] += 1
+        d["reserved"] += total
+        d["allocated"] += used
+        d["expandable"] += 1 if seg.get("is_expandable") else 0
+        if pid == (0, 0):
+            if blocks:
+                st = int(seg.get("stream") or 0)
+                big = max((int(b.get("size") or 0) for b in seg.get("blocks") or ()
+                           if b.get("state") == "inactive"), default=0)
+                by = d["largest_free_small" if seg.get("segment_type") == "small" else "largest_free"]
+                if big > by.get(st, 0):
+                    by[st] = big
+            if used and not seg.get("is_expandable"):
+                d["free_beside_live"] += total - used
+    for kind in ("graphs", "mempools"):
+        out[kind]["pools"] = len(ids[kind])
+    for d in out.values():
+        d["free"] = d["reserved"] - d["allocated"]
+    return out
+
+
+class TorchPools:
+    """SPD-257 (`Budget.pools_probe`): the graphs' pools as the last walk of the allocator read them, and the
+    default pool's free bytes now. A walk takes 10 to 46 ms with 500 to 1,400 segments and holds the interpreter
+    lock the round runner needs. The graphs' pools change when a graph is captured or reset, so a walk is
+    taken again only after one (`capture_lock.GEN`: a capture's outermost hold of `LOCK`, a graph owner's
+    `give_back`, an eviction or a flush, `capture_lock.graphs_reset`). Two resets move nothing: Flash-Next's
+    joint graph set evicted right after the capture that replaced it, on the same thread, so that thread's
+    next reading comes after both (the family's files are its stored rows' fingerprint, MODULES in
+    engine/models/flashnext/serving.py), and a slot's graphs collected at its teardown. A walk another thread
+    takes between such a reset and the next capture holds the freed blocks as the graphs' still: the default
+    pool's free bytes below are then over by them, a few MiB a graph. The default pool's free bytes come from the
+    allocator's counters at every call: what is reserved less what is allocated less the graphs' free bytes.
+    That figure (`default_free` here) still holds the roles' own pools' free bytes (`MemPool`), which change
+    between walks; the policy leaves those out by its own reading (`Budget._foreign`), and its figure is
+    `Budget.default_free` (the report's `default_free`). The roles' figures here, like `unreleasable`, are the
+    walk's. One caller reads at a time (`_lk`): an HTTP reader and the gate never pair a walk with the other's
+    capture count."""
+
+    def __init__(self):
+        self.gen: int | None = None        # `capture_lock.GEN["captures"]` at the walk
+        self.walk: dict | None = None
+        self.walk_t: float | None = None   # when (time.monotonic)
+        self.walks = 0
+        self.walk_ms = 0.0
+        self.last: dict | None = None      # the last answer, for a report that must not walk
+        self._lk = threading.Lock()
+
+    def _read(self) -> tuple[int, int, int]:
+        res, alloc = cuda_stats("reserved_bytes.all.current", "allocated_bytes.all.current")
+        gen = int(capture_lock.GEN["captures"])        # before the walk: a capture during it walks again
+        if self.walk is None or gen != self.gen:
+            t0 = time.perf_counter()
+            self.walk = allocator_pools(allocator_segments())
+            self.walk_ms = round((time.perf_counter() - t0) * 1e3, 2)
+            self.walks += 1
+            self.gen, self.walk_t = gen, time.monotonic()
+        return res, alloc, gen
+
+    def __call__(self) -> dict:
+        with self._lk:
+            return self._answer()
+
+    def _answer(self) -> dict:
+        res, alloc, gen = self._read()
+        g, d, mp = self.walk["graphs"], self.walk["default"], self.walk["mempools"]
+        self.last = {"default_free": max(0, res - alloc - g["free"]), "graphs_reserved": g["reserved"],
+                     "graphs_free": g["free"], "graphs_pools": g["pools"],
+                     # the roles' own pools (`MemPool`, id (0, k)): out of the graphs' scratch, which the ceiling
+                     # leaves out, since the policy's figures already leave them out up to each role's claim
+                     "mempools_reserved": mp["reserved"], "mempools_free": mp["free"], "mempools_pools": mp["pools"],
+                     "segments": d["segments"] + g["segments"] + mp["segments"],
+                     "expandable": d["expandable"] + g["expandable"] + mp["expandable"],
+                     # what neither a shed nor `empty` gives back: the graphs' scratch, and free bytes beside a
+                     # live block in a segment that cannot shrink
+                     "unreleasable": g["free"] + d["free_beside_live"],
+                     "walks": self.walks, "captures": gen, "walk_ms": self.walk_ms,
+                     "walk_age_s": round(time.monotonic() - self.walk_t, 2), "ts": round(time.time(), 3)}
+        return self.last
 
 
 class Budget:
@@ -399,6 +571,18 @@ class Budget:
     request, and without it the end anchor's rows are gone too; the parked session saves a
     re-read of a whole other session; the pinned head saved 253 s in a day.
 
+    THE RESERVE NOTHING SHEDS (SPD-257). The CUDA graphs' private pools and a fragmented default pool
+    keep reserved bytes no cache holds: on 2026-10-31 the engine held 62.3 GiB allocated and 77.3 GiB
+    reserved after `empty`. A prefill whose workspace fits in the default pool's free blocks takes nothing
+    new from the box, so the peak stage stops shedding once that holds (the stale rule), and the graphs'
+    pools never count as such room: their free blocks only their graphs reuse (`pools_probe`, a walk of
+    the allocator's segments). Each resident prefix's end anchor is outside the levels for good
+    (`ResidentPrefix.reserve_end`). The allocator's expandable segments (PYTORCH_CUDA_ALLOC_CONF, from a
+    weight profile's QSE_ENGINE_ALLOC_CONF: ops/profiles/_flashnext.env) let `empty` hand back the free pages
+    of a segment that still holds a live block. The pools are read only under that setting
+    (`capture_lock.alloc_expandable`); without it `pools_probe` is None and the ceiling, the idle `empty`, an
+    admission and the stale rule are the ones before.
+
     WHY IT CANNOT CHANGE A TOKEN. Every limit here decides only where a prefill starts: a store
     entry, a resident anchor, the pin, the park, or token 0, each checked against the prompt's
     own tokens before any state is restored. Giving a cache back is the cold path the engine ran
@@ -417,7 +601,7 @@ class Budget:
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
                  ws_floor: int = WORKSPACE_FLOOR, ws_per_token: int = WORKSPACE_PER_TOKEN,
-                 ws_cap: int | None = None, on_event=None):
+                 ws_cap: int | None = None, ws_rows=None, on_event=None):
         self.ceiling = int(ceiling_bytes)
         self.peak = int(peak_bytes)
         self.slack = int(slack_bytes)
@@ -435,19 +619,42 @@ class Budget:
         self.ws_floor = int(ws_floor)
         self.ws_per_token = int(ws_per_token)
         self.ws_cap = int(ws_cap) if ws_cap is not None else None
+        # SRV-773: (n, rows) -> the workspace of forwarding `rows` rows onto `n` served rows (the adapter's
+        # `CostModel.workspace_rows`); None: the line, whatever the rows. SRV-775: a model that takes `line` also
+        # gives the count by the rows alone (`workspace_rows(line=False)`)
+        self._ws_rows = ws_rows
+        try:
+            self._ws_rows_line = ws_rows is not None and "line" in inspect.signature(ws_rows).parameters
+        except (TypeError, ValueError):
+            self._ws_rows_line = False
+        self._mark_rows: int | None = None  # the rows the prefill since `mark` forwards; None: not said
         self.on_event = on_event
         self.shedders: dict = {}
-        self.ws_now = 0                    # the running prefill's workspace, until it is done
+        # SPD-249: levels that can give back part of themselves, `fn(safe, need) -> {"freed", ...}`
+        self.partial: dict = {}
+        # SRV-775: thread -> the workspace of its prefill, from its gate until it has run (`ws_now`: the largest)
+        self._ws_live: dict = {}
+        self._ws_lock = threading.Lock()
         self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
                       "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
                       "shed": {lv: 0 for lv in self.LEVELS},
                       "shed_bytes": {lv: 0 for lv in self.LEVELS},
                       "observed": None, "last_gate": None, "prefill_peak": 0,
-                      "last_prefill_peak": None, "stale_admits": 0}
+                      "last_prefill_peak": None, "stale_admits": 0, "over_ceiling": 0, "last_done_ms": 0.0,
+                      "over_peak_admits": 0, "last_over_peak": None, "fast_gates": 0}
+        # SRV-775: the gate counters a side slot's gate far under the peak (`_fast_gate`) moves without `lock`
+        self._stats_lock = threading.Lock()
+        # SRV-775: the server's strict peak (QSE_PEAK_STRICT): every gate takes `lock`, a side slot's too
+        self.strict = False
         self.refused_in_a_row = 0
         # () -> bytes: free memory in the roles' own pools, which counts in `reserved` but which
         # the engine's allocator cannot use (the stale-reserve rule leaves it out)
         self.foreign_free = None
+        # SPD-257: () -> dict, the allocator's pools now (`TorchPools`, set under expandable segments only):
+        # `default_free`, the default pool's free bytes, the only free reserve a workspace can take (the stale
+        # rule, the peak stage), and the graphs' pools' figures; None: the whole free reserve less
+        # `foreign_free`, as before
+        self.pools_probe = None
         self.events: deque = deque(maxlen=50)
         self.lock = threading.Lock()
 
@@ -462,6 +669,13 @@ class Budget:
         if level not in self.LEVELS:
             raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
         self.shedders[level] = fn
+
+    def register_partial(self, level: str, fn) -> None:
+        """SPD-249: `fn(safe, need) -> {"freed": bytes, ...}` gives back about `need` bytes of the level (the
+        gate's room under its limit) instead of all of it; the dict's other keys go into the shed's log line."""
+        if level not in self.LEVELS:
+            raise ValueError(f"unknown level {level!r}: {self.LEVELS}")
+        self.partial[level] = fn
 
     def _excluded(self) -> tuple[int, int]:
         """(allocated, reserved) bytes that are not the engine's: `exclude()` gives one figure for
@@ -484,6 +698,51 @@ class Budget:
         # a model whose workspace stops growing (its adapter's `workspace_cap`; the 27B's: none)
         return min(w, self.ws_cap) if self.ws_cap is not None else w
 
+    def workspace_rows(self, n: int, rows: int | None = None, line: bool = True) -> int:
+        """SRV-773: the workspace of a prefill that forwards `rows` of its `n` served rows (None: all of them, a cold
+        prompt): the adapter's model (`CostModel.workspace_rows`) where it has one, under the same cap, and never
+        under the line for a cold prompt (what `prefilled` learned); else the line, whatever the rows. A resumed
+        turn of 21 rows took 0.10 GiB at every context from 8k to 146k (Flash-Next, 2026-11-02), where the line
+        charged it 2.75-10.39.
+
+        SRV-775: `line` False, the admission's count of a prefill in flight (server/app.py `_par_admit`): by the rows
+        alone where the model can say it, a cold prompt without the line's floor; the gate keeps the floor."""
+        n = int(n)
+        rows = n if rows is None else max(1, min(int(rows), n))
+        if self._ws_rows is None:
+            return self.workspace(n)
+        if not line and self._ws_rows_line:
+            w = int(self._ws_rows(n, rows, line=False))
+        else:
+            w = int(self._ws_rows(n, rows))
+            if rows == n:
+                w = max(w, self.workspace(n))
+        return min(w, self.ws_cap) if self.ws_cap is not None else w
+
+    @property
+    def ws_now(self) -> int:
+        """SRV-775: the largest workspace of the prefills admitted and not yet run, every slot's (`_ws_live`): what a
+        cache's allocation must leave room for under the peak (`admit`), as its one figure was before; the admission's
+        `ws_in_flight_gib` is their sum. Summed, eight short cold prompts at the gate's 2.75 GiB floor (22 GiB) made
+        `admit` refuse the stash and shed the state store during a burst (2026-11-02)."""
+        with self._ws_lock:
+            return max(self._ws_live.values(), default=0)
+
+    @ws_now.setter
+    def ws_now(self, v: int) -> None:
+        """This thread's prefill's workspace (0: none)."""
+        tid = threading.get_ident()
+        with self._ws_lock:
+            if int(v):
+                self._ws_live[tid] = int(v)
+            else:
+                self._ws_live.pop(tid, None)
+
+    def ws_own(self) -> int:
+        """SRV-775: this thread's prefill's workspace in `ws_now` (0: none)."""
+        with self._ws_lock:
+            return int(self._ws_live.get(threading.get_ident(), 0))
+
     def _event(self, kind: str, **kw) -> dict:
         ev = dict(kind=kind, ts=round(time.time(), 3), **kw)
         self.events.append(ev)
@@ -494,16 +753,159 @@ class Budget:
                 pass
         return ev
 
-    def shed(self, level: str, why: str, safe: bool = False) -> int:
+    def shed(self, level: str, why: str, safe: bool = False, need: int | None = None, heads: bool = True) -> int:
+        """Give back a level: all of it, or with `need` and a partial shedder about `need` bytes (`heads`: its
+        last entries may go too)."""
+        part = self.partial.get(level) if need is not None else None
         fn = self.shedders.get(level)
-        if fn is None:
+        if part is None and fn is None:
             return 0
-        freed = int(fn(safe) or 0)
+        info: dict = {}
+        try:
+            alloc, res = self.memory()                 # SPD-257: what the level was shed at, in the log
+        except Exception:                                          # noqa: BLE001
+            alloc = res = None
+        if part is not None:
+            info = dict(part(safe, int(need), heads) or {})
+            freed = int(info.pop("freed", 0) or 0)
+            self.last_partial = dict(info)
+        else:
+            freed = int(fn(safe) or 0)
         if freed:
             self.stats["shed"][level] += 1
             self.stats["shed_bytes"][level] += freed
-            self._event("shed", level=level, why=why, freed=freed, safe=safe)
+            self._event("shed", level=level, why=why, freed=freed, safe=safe,
+                        **({"need": int(need)} if part is not None else {}), **info,
+                        allocated=alloc, reserved=res)
         return freed
+
+    #: SPD-249: a chunk under this many bytes says nothing about the reserve (the allocator frees whole segments,
+    #: and a small entry's blocks can share one with live tensors): its stop does not keep the level's heads
+    PROOF_BYTES = 256 << 20
+
+    def _shed_to(self, lv: str, why: str, over) -> bool:
+        """SPD-249: a partial level shed in chunks while `over()` (bytes past the limit) is positive, each chunk
+        about what is over. The limit counts the reserve, what the box feels: a chunk whose bytes stay in the
+        allocator's cache (the reserve fell by less than half of them, after the free blocks went back) relieves
+        nothing and ends the level's shed, and the gate goes on to the next level. A level's last entries (the
+        store's heads) go after a chunk that lowered the reserve, and when nothing else of the level is left or the
+        chunks before them were too small to tell (`PROOF_BYTES`): the next level is dearer than a head. The
+        shedder still keeps a head that cannot close what is needed (`StateStore.shed_to`)."""
+        done, lowered = False, False
+        while True:
+            need = over()
+            if need <= 0:
+                return done
+            before = self.memory()[1]
+            self.last_partial = {}
+            freed = self.shed(lv, why, need=need, heads=lowered)
+            heads_left = int(self.last_partial.get("heads_kept", 0) or 0) > 0
+            if not freed:
+                if not lowered and heads_left:
+                    lowered = True                 # only heads are left: they go before the next level
+                    continue
+                return done
+            done = True
+            self.empty(why)
+            after = self.memory()[1]
+            ok = before - after >= freed // 2
+            small = not ok and not lowered and heads_left and freed < self.PROOF_BYTES
+            self._event("shed_chunk", level=lv, why=why, freed=freed, reserved_before=before, reserved_after=after,
+                        decision="continue" if ok else "continue: too small to tell" if small
+                        else "stop: the reserve kept the bytes")
+            if not ok and not small:
+                return done
+            lowered = True
+
+    def _foreign(self) -> int:
+        if self.foreign_free is None:
+            return 0
+        try:
+            return max(0, int(self.foreign_free()))
+        except Exception:                                          # noqa: BLE001
+            return 0
+
+    def pools(self) -> dict | None:
+        """SPD-257: the allocator's pools now (`pools_probe`), None without a probe or when it fails."""
+        if self.pools_probe is None:
+            return None
+        try:
+            return self.pools_probe()
+        except Exception:                                          # noqa: BLE001
+            return None
+
+    def default_free(self, alloc: int, res: int) -> int:
+        """SPD-257: the free reserve a prefill's workspace can take without new memory from the box: the
+        engine's free reserve less the roles' pools (`_foreign`) and, when `pools_probe` reads them, less the
+        graphs' pools' free bytes (their free blocks only their graphs reuse). A reading that fails leaves the
+        last one's graphs' free bytes out, and with none there is no such room: a workspace is never admitted
+        on the graphs' scratch for want of a reading."""
+        if self.pools_probe is None:
+            return self._less_graphs(alloc, res, None)
+        p = self.pools()
+        if p is None:
+            p = getattr(self.pools_probe, "last", None)
+            if not p or p.get("graphs_free") is None:
+                return 0
+        return self._less_graphs(alloc, res, p)
+
+    def _less_graphs(self, alloc: int, res: int, p: dict | None) -> int:
+        """SPD-257: the engine's free reserve less the roles' pools (`_foreign`) and the graphs' free bytes of the
+        reading `p` (none: nothing more)."""
+        free = max(0, int(res) - int(alloc) - self._foreign())
+        return max(0, free - int((p or {}).get("graphs_free") or 0))
+
+    def workspace_spare(self) -> int:
+        """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box:
+        `default_free` on the live counters, less the roles' pools' free bytes of the same reading (those blocks are
+        never the workspace's). The admission counts a prefill admitted over the peak (`admit_over_peak`) as new
+        memory past this figure only (server/slots.py `Admission.check`). A credit only on a live reading: without
+        a pools probe, or when the walk fails (`default_free` would then take the last walk's scratch, with the
+        roles' pools' free bytes left in), 0, the whole workspace counts as new memory."""
+        alloc, res = self.memory()
+        p = self.pools()
+        if p is None:
+            return 0
+        return max(0, self.default_free(alloc, res) - int(p.get("mempools_free") or 0))
+
+    def _ceiling_over(self) -> int:
+        """SPD-257: bytes the ceiling stage sheds for: the reserve over the ceiling, less the graphs' pools' free
+        bytes when `pools_probe` reads them (`_exempt`). Those are the scratch each captured graph's replays
+        write: no shed or `empty` lowers them, and the graphs captured after the load add to them (on 2026-10-31
+        from 1.07 to 3.19 GiB in 20 minutes on 296 to 603 pools), so a ceiling that counted them gave the store
+        and the park away with what is allocated under it. The peak still counts every byte of the reserve.
+        Under the ceiling the pools are not read: the scratch only lowers the figure, and a walk of the
+        allocator holds the interpreter lock for 10 to 140 ms."""
+        alloc, res = self.memory()
+        over = res - self.ceiling
+        if over <= 0:
+            return over
+        return over - self._exempt()
+
+    def _exempt(self) -> int:
+        """SPD-257: the graphs' scratch the ceiling leaves out, at most the room between the ceiling and the peak
+        less the smallest prefill's workspace (`ws_floor`). Between requests the engine then holds at most
+        `peak - ws_floor`, so a short prompt's prefill still fits under the peak with nothing shed; scratch past
+        that bound counts against the ceiling again and the levels go for it."""
+        return min(self._scratch(), max(0, self.peak - self.ceiling - self.ws_floor))
+
+    def _scratch(self) -> int:
+        """SPD-257: the graphs' pools' free bytes (`pools_probe`), 0 without a reading. Never a role's own pool
+        (`MemPool`): its bytes up to the role's claim are out of `memory()` already, and its excess is the
+        `roles` level's to give back at the ceiling."""
+        p = self.pools()
+        return int(p.get("graphs_free") or 0) if p is not None else 0
+
+    def _peak_over(self, ws: int) -> int:
+        """SPD-257: bytes the peak stage still sheds for: positive while the reserve plus the workspace is
+        over the peak AND the stale rule does not hold (the workspace under the peak on what is allocated,
+        inside the default pool's free blocks). A reserve over the peak that only the graphs' pools or
+        the fragments hold is no reason to shed a cache that would not lower it."""
+        alloc, res = self.memory()
+        plain = res + ws - self.peak
+        if plain <= 0:
+            return plain
+        return min(plain, max(alloc + ws - self.peak, ws - self.default_free(alloc, res)))
 
     def empty(self, why: str) -> int:
         """Hand the allocator's free blocks back to the driver. Between requests only: the verify
@@ -522,69 +924,147 @@ class Budget:
         return freed
 
     # --- the request's start ---------------------------------------------------------------
-    def gate(self, n: int, count: bool = True) -> dict:
+    #: SRV-775: a side slot's gate whose reserve plus workspace stays this far under the peak admits without `lock`
+    FAST_MARGIN = 512 << 20
+
+    def gate(self, n: int, count: bool = True, rows: int | None = None, others: int = 0,
+             ceiling: bool = True) -> dict:
         """Before a prefill of an `n`-token prompt: back under the ceiling, room for the
-        workspace under the peak, or `MemoryRefused`. Called with the engine lock held and
-        before the response has started, so a refusal is still an HTTP status."""
+        workspace under the peak, or `MemoryRefused`. Called before the response has started, so a
+        refusal is still an HTTP status; every slot's request thread calls it (slot 0's with the
+        engine lock held), one at a time through the policy's own lock. SPD-257: its time is the
+        calling request's `gate` part, and the last `done` before it the request's `done` part
+        (`req_ms_fields`).
+
+        SRV-773: `rows`, the rows the prefill forwards (it resumes at `n - rows`): the workspace is theirs
+        (`workspace_rows`); None: all `n`. SRV-775: `others`, bytes of the other prefills in flight the peak test adds
+        to the reserve (0 unless the server's strict peak, QSE_PEAK_STRICT). Every slot's prefill passes it, a side
+        slot's too, on the reserve as it is. `ceiling` False (a side slot's): the peak stage only, as side slots before
+        had no gate at all; the ceiling stage and its allocator walks stay slot 0's (2026-11-02: every side gate ran
+        it, 57 ms median, and a c8 round's first tokens came 0.5 s later). A side slot's gate with no others and no
+        strict peak whose reserve plus workspace stays `FAST_MARGIN` under the peak admits on one reading without the
+        lock (`_fast_gate`): at a c8 round's start the eight gates queued on it behind slot 0's (2026-11-02, hold 4:
+        side gates 49.3 ms median, 88.5 max, with the reserve under the ceiling)."""
+        d = getattr(_REQ, "ms", None)
+        if d is not None and "done" not in d:
+            d["done"] = float(self.stats.get("last_done_ms") or 0.0)
+        t0 = time.perf_counter()
+        try:
+            return self._gate(n, count, rows, others, ceiling)
+        finally:
+            req_ms_add("gate", (time.perf_counter() - t0) * 1e3)
+
+    def _gate(self, n: int, count: bool = True, rows: int | None = None, others: int = 0,
+              ceiling: bool = True) -> dict:
         if not self.on:
             return {}
+        if not ceiling and not others and not self.strict:
+            g = self._fast_gate(n, rows)
+            if g is not None:
+                return g
         with self.lock:
-            self.stats["gates"] += 1
+            with self._stats_lock:
+                self.stats["gates"] += 1
             shed: list = []
             alloc, res = self.memory()
-            if res > self.ceiling and res > alloc:
-                self.empty("ceiling")
-                alloc, res = self.memory()
-            for lv in self.LEVELS:
-                if res <= self.ceiling:
-                    break
-                if self.shed(lv, "ceiling"):
-                    shed.append(lv)
+            if ceiling:
+                if res > self.ceiling and res > alloc and self._ceiling_over() > 0:
                     self.empty("ceiling")
                     alloc, res = self.memory()
-            ws = self.workspace(n)
-            if res + ws > self.peak and res > alloc:
+                for lv in self.LEVELS:
+                    if self._ceiling_over() <= 0:
+                        break
+                    if lv in self.partial:
+                        if self._shed_to(lv, "ceiling", self._ceiling_over):
+                            shed.append(lv)
+                            alloc, res = self.memory()
+                        continue
+                    if self.shed(lv, "ceiling"):
+                        shed.append(lv)
+                        self.empty("ceiling")
+                        alloc, res = self.memory()
+                if shed and res > self.ceiling:
+                    self._over_ceiling(alloc, res, shed)
+            ws = self.workspace_rows(n, rows)
+            # SRV-775: the other prefills in flight, counted on the reserve under the strict peak only
+            need = ws + max(0, int(others))
+            said = {**({"rows": int(rows)} if rows is not None else {}), **({"others": int(others)} if others else {})}
+            if res + need > self.peak and res > alloc:
                 self.empty("peak")
                 alloc, res = self.memory()
+            # SPD-257: shed while over the peak and the stale rule does not hold either (`_peak_over`)
+            over = self._peak_over(need)
+            if over > 0:
+                self._event("peak_over", n=int(n), ws=ws, allocated=alloc, reserved=res,
+                            default_free=self.default_free(alloc, res), over=over, **said)
             for lv in self.LEVELS:
-                if res + ws <= self.peak:
+                if self._peak_over(need) <= 0:
                     break
+                if lv in self.partial:
+                    if self._shed_to(lv, "peak", lambda: self._peak_over(need)):
+                        shed.append(lv)
+                        alloc, res = self.memory()
+                    continue
                 if self.shed(lv, "peak"):
                     shed.append(lv)
                     self.empty("peak")
                     alloc, res = self.memory()
-            if res + ws > self.peak:
+            if self._peak_over(need) > 0:
                 # the last try before a refusal: what only a collection frees (a frame or a
-                # traceback that still holds tensors), then the allocator's free blocks back
+                # traceback that still holds tensors), then the allocator's free blocks back.
+                # Not while the stale rule holds: those free blocks are the workspace's room
                 gc.collect()
                 self.empty("refuse")
                 alloc, res = self.memory()
             g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res,
-                 "shed": shed, "ts": round(time.time(), 3)}
+                 "shed": shed, "ts": round(time.time(), 3), **said}
             self.stats["last_gate"] = g
-            foreign = 0
-            if self.foreign_free is not None:
-                try:
-                    foreign = max(0, int(self.foreign_free()))
-                except Exception:                                  # noqa: BLE001
-                    foreign = 0
-            if (res + ws > self.peak and alloc + ws <= self.peak
-                    and ws <= res - alloc - foreign):
+            if (res + need > self.peak and alloc + need <= self.peak
+                    and need <= self.default_free(alloc, res)):
                 # a stale reserve: the workspace fits in what the allocator already holds free,
                 # so the prefill takes no new memory from the box. Never refuse it
                 # (a 12-token prompt refused for 25 minutes on a reserve nothing could give back)
                 self.stats["stale_admits"] += 1
-                self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws)
+                self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws, **said)
                 g["stale"] = True
-            elif res + ws > self.peak:
-                exc = MemoryRefused(res + ws, self.peak, n)
+            elif res + need > self.peak:
+                exc = MemoryRefused(res + need, self.peak, n, rows=rows)
                 exc.detail = dict(allocated=alloc, reserved=res)
                 if count:
                     self._count_refused(exc)
+                self.ws_now = 0                # SRV-775: a refused prefill holds no workspace, a pass before it none
                 raise exc
             self.refused_in_a_row = 0
-            self.ws_now = ws
+            self.ws_now = ws                   # SRV-775: this thread's, until its prefill has run
             return g
+
+    def _fast_gate(self, n: int, rows: int | None) -> dict | None:
+        """SRV-775: a side slot's gate on one reading of the reserve, without `lock`. Its reserve plus workspace
+        `FAST_MARGIN` or more under the peak is admitted at once: the locked peak stage takes the same decision there
+        (nothing over the peak: no empty, no shed, no refusal). Else None, and the gate takes the lock as before."""
+        alloc, res = self.memory()
+        ws = self.workspace_rows(n, rows)
+        if res + ws > self.peak - self.FAST_MARGIN:
+            return None
+        g = {"n": int(n), "workspace": ws, "allocated": alloc, "reserved": res, "shed": [],
+             "ts": round(time.time(), 3), **({"rows": int(rows)} if rows is not None else {}), "fast": True}
+        with self._stats_lock:
+            self.stats["gates"] += 1
+            self.stats["fast_gates"] += 1
+        self.stats["last_gate"] = g
+        self.refused_in_a_row = 0
+        self.ws_now = ws                       # this thread's, until its prefill has run
+        return g
+
+    def _over_ceiling(self, alloc: int, res: int, shed: list) -> None:
+        """SPD-257: the ceiling stage shed a level and the reserve is still over the ceiling: what holds it (the
+        graphs' pools, the part of their scratch the ceiling left out, the default pool's free blocks) for the
+        log, which says it at most every few minutes."""
+        p = self.pools()
+        self.stats["over_ceiling"] += 1
+        self._event("over_ceiling", allocated=alloc, reserved=res, over=res - self.ceiling, shed=list(shed),
+                    graphs_reserved=(p or {}).get("graphs_reserved"), graphs_free=(p or {}).get("graphs_free"),
+                    exempt=self._exempt(), default_free=self._less_graphs(alloc, res, p) if p else None)
 
     def refused(self, exc: "MemoryRefused") -> None:
         """Count a refusal of `gate`: its own, or the caller's when it ran the gate with
@@ -599,28 +1079,62 @@ class Budget:
         self._event("refused", n=exc.n, need=exc.need, peak=exc.peak,
                     in_a_row=self.refused_in_a_row, **getattr(exc, "detail", {}))
 
+    def admit_over_peak(self, n: int, rows: int, ws: int, slot, **info) -> None:
+        """SRV-775: a prefill the gate refused runs all the same: alone, with no other prefill in flight to wait
+        for (server/app.py `_par_admit`, which checks the box's floor next). Counted, the last one kept for
+        /health, an `over_peak_admit` event (`info`: the request's id, where it resumes) with the reserve and the
+        bytes it goes over the peak by, and its workspace in `ws_now` as any admitted prefill's. A long-lived
+        server's reserve sits at the peak with graphs' scratch and fragments no shed lowers (SPD-273): such a
+        request would wait for good."""
+        _, res = self.memory()
+        by = max(0, int(res) + int(ws) - self.peak)
+        self.stats["over_peak_admits"] += 1
+        self.stats["last_over_peak"] = {"slot": slot, "ws": int(ws), "rows": int(rows), "n": int(n), "by": by,
+                                        "ts": round(time.time(), 3)}
+        self._event("over_peak_admit", n=int(n), rows=int(rows), ws=int(ws), slot=slot, reserved=int(res),
+                    peak=self.peak, by=by, **info)
+        self.ws_now = ws
+
+    def over_peak(self) -> int:
+        """SRV-775: bytes the engine's reserve is over its declared peak now (0 under it), for /health."""
+        _, res = self.memory()
+        return max(0, int(res) - int(self.peak))
+
     def admit(self, level: str, nbytes: int) -> bool:
         """May a cache allocate `nbytes` more? Under `ceiling - slack` allocated and, while a
         prefill is still to run, with its workspace still under the peak. When not, the levels
-        below `level` give back what nothing is using, once, and the question is asked again."""
+        below `level` give back what nothing is using, once, and the question is asked again.
+
+        SPD-257: with the allocator's pools read (`pools_probe`) the peak counts the whole buffer on top of the
+        reserve: the reserve over what is allocated is mostly the graphs' scratch, which no cache's buffer takes.
+        Without them, as before: a reserve over what is allocated counts as room. A shed lowers what is
+        allocated, not the reserve, so when that peak test failed the shed's free blocks go back to the driver
+        (`empty`, under expandable segments their pages too) before it is asked again: a shed the reserve kept
+        whole could never pass it, and gave the levels below away for a refusal. An admission runs on the
+        request's own thread, where Flash-Next's prefill also empties the allocator between its chunks."""
         if not self.on or nbytes <= 0:
             return True
         lower = self.LEVELS[:self.LEVELS.index(level)] if level in self.LEVELS else ()
         for attempt in range(2):
             alloc, res = self.memory()
-            if (alloc + nbytes <= self.ceiling - self.slack
-                    and max(res, alloc + nbytes) + self.ws_now <= self.peak):
+            top = res + nbytes if self.pools_probe is not None else max(res, alloc + nbytes)
+            under_peak = top + self.ws_now <= self.peak
+            if alloc + nbytes <= self.ceiling - self.slack and under_peak:
                 self.stats["admitted"] += 1
                 return True
             if attempt == 0:
                 if not any([self.shed(lv, f"admit:{level}", safe=True) for lv in lower]):
                     break
+                if self.pools_probe is not None and not under_peak:
+                    self.empty(f"admit:{level}")
         self.stats["admit_refused"] += 1
         self._event("admit_refused", level=level, nbytes=int(nbytes))
         return False
 
-    def mark(self) -> None:
-        """A prefill's forwards start here: the allocator's peak counts from now."""
+    def mark(self, rows: int | None = None) -> None:
+        """A prefill's forwards start here: the allocator's peak counts from now. SRV-773: `rows`, the rows it
+        forwards (None: not said); a continuation teaches the line nothing (`prefilled`)."""
+        self._mark_rows = None if rows is None else int(rows)
         try:
             self.lifetime_peak = max(self.lifetime_peak, self._peak())
             self._peak(reset=True)
@@ -642,8 +1156,11 @@ class Budget:
         the anchors and the store snapshot a prefill takes on its way are still allocated at its
         end, and counting them as workspace taught the estimate 113 kB a token from a 48k prompt
         (27.6 GiB at 262k) in the 2026-10-01 gate. Only a long prefill (64k tokens and more)
-        teaches the slope, where the context's part dominates the fixed one."""
-        self.ws_now = 0
+        teaches the slope, where the context's part dominates the fixed one. SRV-773: and only a cold one (`mark`
+        without rows, or with all `n`): a resumed turn's few rows say nothing of a whole prompt's workspace."""
+        self.ws_now = 0                    # this thread's (SRV-775)
+        cold = self._mark_rows is None or self._mark_rows == int(n)
+        self._mark_rows = None
         workspace = None
         if self._mark is not None:
             try:
@@ -656,7 +1173,7 @@ class Budget:
             except Exception:                                      # noqa: BLE001
                 workspace = None
         self._mark = None
-        if workspace is None or n < 65_536:
+        if workspace is None or n < 65_536 or not cold:
             return
         self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
                                   "estimate": self.workspace(n)}
@@ -670,31 +1187,54 @@ class Budget:
                         per_token=per, was=self.ws_per_token)
             self.ws_per_token = per
 
-    def done(self) -> int:
-        """After a request: the reserve over its slack goes back to the driver."""
+    def prefill_done(self) -> None:
+        """SRV-775: this thread's prefill has run (or will not): its workspace leaves `ws_now`. A side slot's prefill
+        runs without the policy (`prefill(..., mem=None)`), so `prefilled` never runs there; the server calls this."""
         self.ws_now = 0
+
+    def done(self) -> int:
+        """After a request: the reserve over its slack goes back to the driver. SPD-257: the graphs' scratch
+        is no such reserve (`_scratch`): with it counted, a reserve the graphs held over the slack emptied
+        the allocator after every request, and the next prefill mapped its workspace again. Its time is
+        `stats["last_done_ms"]`, the next request's `done` part (`req_ms_fields`)."""
+        t0 = time.perf_counter()
+        try:
+            return self._done()
+        finally:
+            self.stats["last_done_ms"] = round((time.perf_counter() - t0) * 1e3, 2)
+
+    def _done(self) -> int:
+        self.ws_now = 0                    # SRV-775: this thread's only: a side slot's prefill in flight keeps its own
         if not self.on:
             return 0
         with self.lock:
             alloc, res = self.memory()
-            if res - alloc > self.slack:
+            if res - alloc > self.slack and res - alloc - self._scratch() > self.slack:
                 return self.empty("idle")
         return 0
 
     def report(self) -> dict:
         alloc, res = self.memory()
+        last = getattr(self.pools_probe, "last", None)
         return {"ceiling": self.ceiling, "peak": self.peak, "slack": self.slack,
                 "fixed": self.fixed, "allocated": alloc, "reserved": res, "reserve": res - alloc,
+                # SPD-257: the pools as the policy last read them (a report never walks the allocator), and the
+                # free reserve a workspace can take by the policy's own figure (`default_free`: the roles' pools
+                # left out, which `pools.default_free` still holds); None before the first reading
+                "pools": last,
+                "default_free": (self._less_graphs(alloc, res, last) if self.pools_probe is None or last
+                                 else None),
                 "ws_floor": self.ws_floor, "ws_per_token": self.ws_per_token,
+                "ws_now": self.ws_now,             # SRV-775: the largest prefill admitted and not yet run
                 "events": list(self.events)[-20:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
 
 
 # --------------------------------------------------------------------------- the state store
 class _Entry:
-    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind")
+    __slots__ = ("tokens", "snap", "conv_id", "created", "hits", "kind", "mark", "stale")
 
-    def __init__(self, tokens, snap, conv_id, kind="prefix"):
+    def __init__(self, tokens, snap, conv_id, kind="prefix", mark=None):
         self.tokens = tokens
         self.snap = snap
         self.conv_id = conv_id
@@ -703,6 +1243,8 @@ class _Entry:
         # where the snapshot came from: the end of a turn ("session") or a prefill chunk boundary
         # ("prefix"). One store holds both and a lookup cannot tell them apart otherwise.
         self.kind = kind
+        self.mark = mark          # SPD-249: the grid mark of the prefill that took it (`Grid`)
+        self.stale = False        # SPD-249: a head a newer head of the same prompt replaced
 
 
 class StateStore:
@@ -741,7 +1283,7 @@ class StateStore:
 
     # --- writing ---------------------------------------------------------------------------
     def put(self, tokens, snap: StateSnapshot, conv_id: str | None = None,
-            hashes: list[int] | None = None, kind: str = "prefix") -> None:
+            hashes: list[int] | None = None, kind: str = "prefix", mark: int | None = None) -> None:
         n = snap.length
         if self.max_entry and snap.nbytes > self.max_entry:
             self.stats["declined_big"] = self.stats.get("declined_big", 0) + 1
@@ -766,21 +1308,59 @@ class StateStore:
                 self._lengths[n] -= 1
                 if not self._lengths[n]:
                     del self._lengths[n]
-            self._d[key] = _Entry(tuple(tokens[:n]), snap, conv_id, kind)
+            self._d[key] = new = _Entry(tuple(tokens[:n]), snap, conv_id, kind, mark)
+            if mark is not None and n == mark:
+                self._stale_heads(key, new)
             self._lengths[n] = self._lengths.get(n, 0) + 1
             self.bytes += snap.nbytes
             self.stats["puts"] += 1
             self._evict_locked()
 
+    #: SPD-249: two heads that share at least this many leading rows are one prompt's (the same template
+    #: and class note; the index or a note changed): the older is stale (`put`)
+    same_head_rows = 256
+
+    @staticmethod
+    def _head(key, e) -> bool:
+        """A live head: a snapshot at its prompt's head mark that no newer head of that prompt replaced."""
+        return e.mark is not None and key[0] == e.mark and not e.stale
+
     def _evict_locked(self, room: int = 0) -> None:
+        """The oldest entries go until `room` fits. SPD-249: a snapshot at a prompt head's mark (the
+        head every chat of a user shares, `Grid`) goes last: a burst's eight turn ends would push it
+        out right after the chats it was taken for, and the next burst would read the head again. A
+        store of heads alone evicts the oldest head; a stale head is an entry like any other."""
         while self.bytes + room > self.budget and self._d:
-            key, entry = self._d.popitem(last=False)
-            self.bytes -= entry.snap.nbytes
-            n = key[0]
-            self._lengths[n] -= 1
-            if not self._lengths[n]:
-                del self._lengths[n]
+            self._evict_one_locked()
             self.stats["evictions"] += 1
+
+    def _evict_one_locked(self) -> tuple[int, bool]:
+        """The store's next victim out: the oldest entry that is not a live head, else the oldest head.
+        (bytes, whether it was a head)."""
+        key = next((k for k, e in self._d.items() if not self._head(k, e)), None)
+        head = key is None
+        if head:
+            key = next(iter(self._d))
+            self.stats["evictions_head"] = self.stats.get("evictions_head", 0) + 1
+        entry = self._d.pop(key)
+        self.bytes -= entry.snap.nbytes
+        n = key[0]
+        self._lengths[n] -= 1
+        if not self._lengths[n]:
+            del self._lengths[n]
+        return entry.snap.nbytes, head
+
+    def _stale_heads(self, key, new) -> None:
+        """SPD-249: a new head makes every older head of the same prompt stale (they share at least
+        `same_head_rows` leading rows: the profile's notes changed, its old head is never asked for)."""
+        for k, e in self._d.items():
+            if k == key or not self._head(k, e):
+                continue
+            m = min(len(e.tokens), len(new.tokens))
+            same = next((i for i in range(m) if e.tokens[i] != new.tokens[i]), m)
+            if same >= self.same_head_rows:
+                e.stale = True
+                self.stats["heads_stale"] = self.stats.get("heads_stale", 0) + 1
 
     def reserve(self, nbytes: int) -> bool:
         """Make room for a snapshot of `nbytes` BEFORE it is cloned (OPS-47): evict the oldest
@@ -819,6 +1399,33 @@ class StateStore:
         self.clear()
         return freed
 
+    #: SPD-249: what a partial shed gives back past the gate's need (the allocator's segments round it)
+    shed_margin = 256 << 20
+
+    def shed_to(self, safe: bool, need: int, heads: bool = True) -> dict:
+        """SPD-249, the memory gate's store level in part: entries out in the store's own order (plain ones
+        oldest first, the snapshots at a head's mark last) until `need` + `shed_margin` bytes went. A burst's
+        admission shed the whole store, the heads with it, and every chat of the next burst read its head
+        again. A head goes only when what the store still holds (heads included) can cover what is still
+        needed: otherwise the next level is shed whole anyway, and the head's bytes buy nothing. `heads=False`:
+        plain entries only (the gate's first chunk, before it knows the reserve follows the store's frees)."""
+        need = int(need)
+        target = need + self.shed_margin
+        with self.lock:
+            freed = dropped = hd = 0
+            while freed < target and self._d:
+                if next((k for k, e in self._d.items() if not self._head(k, e)), None) is None:
+                    if not heads or self.bytes < need - freed:
+                        break                      # only heads left, and they cannot close the need: kept
+                b, h = self._evict_one_locked()
+                freed += b
+                dropped += 1
+                hd += h
+            self.stats["shed_entries"] = self.stats.get("shed_entries", 0) + dropped
+            kept = sum(1 for k, e in self._d.items() if self._head(k, e))
+            return {"freed": freed, "dropped": dropped, "heads_dropped": hd, "heads_kept": kept,
+                    "whole": not self._d}
+
     def set_limits(self, budget_bytes: int | None = None, max_entry_bytes: int | None = None):
         """A new budget or entry cap, from the next request on; over the budget goes now."""
         with self.lock:
@@ -828,26 +1435,34 @@ class StateStore:
                 self.max_entry = int(max_entry_bytes)
             self._evict_locked()
 
-    def boundaries(self, eng, drafter, start: int, n: int, chunk: int) -> set | None:
+    def boundaries(self, eng, drafter, start: int, n: int, chunk: int,
+                   grid: "Grid | None" = None) -> set | None:
         """The chunk boundaries of a prefill over [start, n) to snapshot, or None for every one
-        (`per_prefill` 0, where `capture` refuses the ones over the cap as it goes)."""
+        (`per_prefill` 0, where `capture` refuses the ones over the cap as it goes). SPD-249: on a
+        marked grid its lines, the mark always among them (the head other prompts share)."""
         if not self.per_prefill:
             return None
-        lines = range((start // chunk + 1) * chunk, n, chunk)
+        lines = (grid.lines(start, n) if grid is not None and grid.mark is not None
+                 else range((start // chunk + 1) * chunk, n, chunk))
         fit = [L for L in lines
                if not self.max_entry or _snapshot_estimate(eng, L, drafter) <= self.max_entry]
         if len(fit) < len(lines):
             self.stats["skipped_big"] = self.stats.get("skipped_big", 0) + 1
-        return set(fit[-self.per_prefill:])
+        keep = set(fit[-self.per_prefill:])
+        if grid is not None and grid.mark is not None and grid.mark in fit:
+            keep.add(grid.mark)
+        return keep
 
     # --- reading ---------------------------------------------------------------------------
-    def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0):
+    def find(self, tokens, hashes: list[int], max_len: int, min_len: int = 0,
+             grid: "Grid | None" = None):
         """The longest stored prefix of `tokens` no longer than `max_len`, or None.
 
         `max_len` is normally `len(tokens) - 1`: a request needs at least one token to forward,
         because the logits it answers with are the ones that token's own forward produces and no
         snapshot holds them. `min_len`: only an entry LONGER than this counts -- the resident
         prefix already offers that much without a copy, so a shorter entry is not a hit.
+        `grid` (SPD-249): only a snapshot that resumes this prefill's grid (`Grid.accepts`).
         """
         with self.lock:
             cands = sorted((L for L in self._lengths if min_len < L <= max_len), reverse=True)
@@ -855,6 +1470,8 @@ class StateStore:
                 key = (L, hashes[L])
                 entry = self._d.get(key)
                 if entry is None:
+                    continue
+                if grid is not None and not grid.accepts(L, entry.mark, entry.kind):
                     continue
                 if entry.tokens != tuple(tokens[:L]):
                     # a 64-bit collision, or two different token streams at one boundary. Either
@@ -1111,12 +1728,18 @@ class ResidentPrefix:
         self.tokens: list[int] = []        # the prompt the live rows [0, valid) were prefilled from
         self.valid = 0
         self.anchors: dict[int, tuple] = {}
+        self.grid = None              # SPD-249: the running prefill's `Grid` (`best`), else None
         self._free: list[tuple] = []       # an evicted anchor's buffers, for the next one
         self._allocated = 0                # anchor buffers alive, in use or free
         self._anchor_bytes = 0
         self._stash: dict | None = None    # the rows a guest may overwrite, copied aside
         self._stash_bufs: list | None = None
         self._stash_rows = 0
+        # SPD-257: a guest's rows are being copied into the stash (`_stash_for`): its buffers are in use
+        # before `_stash` names them, and a shed from another slot's gate (a side slot's idle stash goes
+        # at `stash_idle`) gives back nothing then (`shed_stash`); `_stash_lock` orders the two
+        self._stash_busy = False
+        self._stash_lock = threading.Lock()
         self.capturing = False             # this request's prefill may add anchors
         # the pinned head of an earlier prompt: rows [0, pin_rows) of every view, and anchors
         self.pin_budget = int(pin_bytes)
@@ -1154,6 +1777,12 @@ class ResidentPrefix:
         self.end: dict | None = None
         self.end_lost: str | None = None   # why the last end anchor went (`_drop_end`)
         self._end_bufs: tuple | None = None
+        # SPD-257: the end anchor's buffers are this prefix's own from the load on (`reserve_end`), outside
+        # the memory policy: no gate sheds them, no admission refuses them
+        self.end_reserved = False
+        # SPD-257: when this prefix last served a conversation (time.monotonic(): a kept end, a prompt that
+        # replaced the rows, a promoted guest); 0.0 for never (the server's slot order, `promote_guest`)
+        self.t_used = 0.0
         # SPD-215: the end of the last prompt the prefill read (`keep_prompt_end`): its line `at` and its
         # tokens; its state in `_pend_bufs`. An agent's next turn shares the conversation up to there
         # and parts at the answer the client sends back in its own words: it resumes here instead of at
@@ -1184,7 +1813,9 @@ class ResidentPrefix:
                       "end_cut": 0,
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
                       "park_spills": 0, "park_given_up": 0, "side_carries": 0,
-                      "carry_vacated": 0, "park_ends": 0, "park_end_hits": 0}
+                      "carry_vacated": 0, "park_ends": 0, "park_end_hits": 0,
+                      "end_rereserved": 0, "stash_lost": 0, "stash_held": 0,
+                      "guests_promoted": 0, "guest_end_unkept": 0}
         # the session spill (engine/spill.py): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
@@ -1214,25 +1845,50 @@ class ResidentPrefix:
         return lo
 
     def best(self, c: int, max_len: int) -> int:
-        """The largest anchor at or below both `c` and `max_len`; 0 for none."""
+        """The largest anchor at or below both `c` and `max_len`; 0 for none. SPD-249: during a
+        prefill on a grid (`grid`), only its lines."""
         lim = min(c, max_len)
-        return max((b for b in self.anchors if b <= lim), default=0)
+        g = getattr(self, "grid", None)
+        return max((b for b in self.anchors if b <= lim and (g is None or g.is_line(b))), default=0)
 
     # --- the request's start ---------------------------------------------------------------
     def settle_guest(self, eng) -> None:
         """Put back what the last guest request may have overwritten. Called before anything
-        else reads the resident rows."""
-        st = self._stash
-        if st is None:
-            return
-        self._stash = None
+        else reads the resident rows. SPD-257: the stash's buffers are in use until the rows are back
+        (`_stash_busy`, as in `_stash_for`), and the stash is cleared only then: a shed from another slot's
+        gate in between gives back nothing (`shed_stash`). Cleared first, a shed of the idle stash there found
+        no stash, gave the buffers back, and the guest's rows counted as lost (the slot's conversation cut).
+        Its time is the calling request's `settle` part (`req_ms_fields`)."""
+        t0 = time.perf_counter()
+        try:
+            with self._stash_lock:
+                st = self._stash
+                if st is None:
+                    return
+                self._stash_busy = True
+            try:
+                self._settle(eng, st)
+            finally:
+                self._stash = None
+                self._stash_busy = False
+        finally:
+            req_ms_add("settle", (time.perf_counter() - t0) * 1e3)
+
+    def _settle(self, eng, st: dict) -> None:
         s, r = st["start"], st["rows"]
+        bufs = self._stash_bufs
+        if bufs is None or len(bufs) != len(st["views"]) or self._stash_rows < r:
+            # SPD-257: the buffers went (or were made smaller) while the guest ran: the rows from `s` are
+            # the guest's, not the resident's, and the next turn reads them again
+            self.stats["stash_lost"] += 1
+            self._cut(s)
+            return
         # how far the guest wrote, read BEFORE the rows go back: an engine whose length lands a pending
         # commit when read (Flash-Next's chain block) writes the guest's last rows then, and after the
         # copy that write went over the resident's restored rows (2026-10-12: a guest after a guest
         # answered differently from a cold prefill)
         reach = int(eng.kv.length) + GUEST_SLACK_ROWS
-        for (t, ax), buf in zip(st["views"], self._stash_bufs):
+        for (t, ax), buf in zip(st["views"], bufs):
             _kvp.ensure_for(t, s + r)         # SRV-307
             t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
         self.stats["stash_restored"] += 1
@@ -1287,7 +1943,9 @@ class ResidentPrefix:
                 return "ahead"
             e = len(tokens)
         if self._end_bufs is None:
-            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
+            if self.end_reserved:
+                self._rereserve_end(eng)
+            elif self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
                 # SRV-655: the end is worth more than an anchor below it (the next turn resumes
                 # there and reads only its new messages): an anchor's buffers take it, the
                 # anchor that leaves the smallest gap, before the end is refused
@@ -1315,8 +1973,84 @@ class ResidentPrefix:
         if e > n_prompt:
             self.taint = n_prompt if self.taint is None else min(self.taint, n_prompt)
         self.end_lost = None
+        self.t_used = time.monotonic()
         self.stats["end_kept"] += 1
         return "kept"
+
+    def reserve_end(self, eng) -> bool:
+        """SPD-257: the end anchor's buffers now and for good, outside the memory policy. Called at the
+        load, where they count in the engine's own memory (a side slot's in what the policy's limits are
+        raised by for it), so a turn's end never waits on room the other caches hold: on 2026-10-31 every
+        turn's end was refused at the ceiling (128 times in two hours, `end anchor not kept (memory)`) and
+        each follow-up read the chat again from the last grid line. False when this prefix keeps no end."""
+        if not self.end_on or self.chunk <= 0:
+            return False
+        if self._end_bufs is None:
+            self._end_bufs = state_empty(eng)
+        self.end_reserved = True
+        return True
+
+    def _rereserve_end(self, eng) -> None:
+        """The reserved buffers again after the park took them with the end it parked (`_park_now`, a
+        swap): a free anchor's buffers, else new ones, as at the load. The park's pair is shed with the
+        park, so a reserving prefix holds at most one pair more than its own."""
+        if self._free:
+            self._end_bufs = self._free.pop()
+            self._allocated -= 1
+        else:
+            self._end_bufs = state_empty(eng)
+        self.stats["end_rereserved"] += 1
+
+    def promote_guest(self, eng, drafter, tokens, n_prompt: int, owner: str | None = None) -> bool:
+        """SPD-257: the guest on a side slot becomes its resident conversation at its end, so its next turn
+        resumes at its end anchor (`keep_end`) instead of reading it again. The resident's rows above where
+        the guest began are the guest's now: the stash is not put back, the anchors above it go to the free
+        list and the old conversation keeps the head it shared (its next turn resumes at the anchors there).
+        `tokens` is the guest's context, `n_prompt` its prompt's length. False, nothing changed, when no
+        guest's stash waits, the guest's prompt does not hold the shared head, or the end that `keep_end`
+        would then keep cannot be kept (`_end_keepable`): the old conversation is never cut for an end
+        that is not kept."""
+        st = self._stash
+        n = int(n_prompt)
+        if st is None:
+            return False
+        s = int(st["start"])
+        if n < s or len(tokens) < n or [int(t) for t in tokens[:s]] != self.tokens[:s]:
+            return False
+        if not self._end_keepable(eng, drafter, tokens, n):
+            self.stats["guest_end_unkept"] += 1
+            return False
+        self._stash = None                 # the stash buffers stay, idle, for the next guest
+        old_taint = self.taint
+        self._cut(s)
+        self.tokens = [int(t) for t in tokens[:n]]
+        self.valid = n
+        # the guest's rows came from a grid prefill that resumed at or above `s`: under the gate only when
+        # the rows below it were (`begin`), so a taint below `s` is kept and one above it moves to `s`
+        self.taint = None if old_taint is None else min(int(old_taint), s)
+        self.owner = owner
+        self.capturing = False
+        self.t_used = time.monotonic()
+        self.stats["guests_promoted"] += 1
+        return True
+
+    def _end_keepable(self, eng, drafter, tokens, n_prompt: int) -> bool:
+        """SPD-257: what `keep_end` needs, checked before a guest's promotion cuts the old conversation: the
+        end on for a drafter that resumes in place, the engine at or past the prompt and within the committed
+        tokens (a pending block past them is cut back now, `trim_pending`, as `keep_end` would), and the end
+        anchor's buffers in hand (reserved, kept from an earlier end, or admitted now)."""
+        if not self.end_on or self.chunk <= 0 or not resident_capable(drafter):
+            return False
+        e = int(eng.kv.length)
+        if e < int(n_prompt):
+            return False
+        if self._end_bufs is None and not self.end_reserved:
+            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
+                return False
+            self._end_bufs = state_empty(eng)
+        if e > len(tokens) and not eng.trim_pending(len(tokens)):
+            return False
+        return True
 
     def keep_prompt_end(self, eng, drafter, tokens, n: int) -> str:
         """SPD-215: after a prefill that read the prompt to its end `n`: the state there, with the prompt's
@@ -1364,6 +2098,22 @@ class ResidentPrefix:
             return 0
         e = self.end["at"] if self.end is not None else 0
         return e if (e and c >= e and e <= max_len and e > self.best(c, max_len)) else 0
+
+    def resume_estimate(self, keys, n: int, mm_ok: bool = False) -> tuple[int, str | None]:
+        """SRV-773: where a prompt of `keys` (`n` served rows) resumes in place, before its prefill: the end
+        anchor over the prompt's end over the anchors, with the calls and thresholds `_prefill` makes; (0, None)
+        for none. Host work only, nothing changes (no settle, no restore, no unpark). A store entry, the NVMe,
+        the park or the pin can only resume it later: the memory gate then charges more rows than the prefill
+        forwards, never fewer."""
+        c = self.common(keys)
+        b = self.best(c, n - 1)
+        be = self.end_offer(c, n - 1, mm_ok=mm_ok)
+        bpe = self.pend_offer(c, n - 1) if not mm_ok else 0
+        if be:
+            return be, "end"
+        if bpe:
+            return bpe, "pend"
+        return (b, "resident") if b else (0, None)
 
     def resume_end(self, eng, drafter, saved: int = 0) -> None:
         """Bring the engine to the end anchor's line: the state its generation ended in, the rows
@@ -1504,6 +2254,8 @@ class ResidentPrefix:
         self.valid = start
         self.owner = session
         self.capturing = self.chunk > 0 and not scratch
+        if not scratch:
+            self.t_used = time.monotonic()
         if kind in ("end", "pend"):
             # a prefill from the end of a generation (or of the last prompt: off the grid) writes a
             # session's rows
@@ -1593,10 +2345,13 @@ class ResidentPrefix:
         if not self.end_on or int(end["at"]) != self.valid:
             return None
         if self._end_bufs is None:
-            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
+            if self.end_reserved:
+                self._rereserve_end(eng)
+            elif self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
                 self.stats["end_refused"] += 1
                 return None
-            self._end_bufs = state_empty(eng)
+            else:
+                self._end_bufs = state_empty(eng)
         self.end = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                     "mark": end.get("mark")}
         if end.get("served_hidden"):
@@ -1698,6 +2453,14 @@ class ResidentPrefix:
 
     # --- guests ----------------------------------------------------------------------------
     def _stash_for(self, eng, drafter, s: int, reach: int | None = None) -> None:
+        with self._stash_lock:
+            self._stash_busy = True
+        try:
+            self._stash_rows_for(eng, drafter, s, reach)
+        finally:
+            self._stash_busy = False
+
+    def _stash_rows_for(self, eng, drafter, s: int, reach: int | None) -> None:
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
         cap = self.stash_budget // max(1, per_row)
@@ -2259,6 +3022,8 @@ class ResidentPrefix:
         its 7,953 tokens from 0; the levels after it (the park, the pin, the roles) go first."""
         if self._end_bufs is None or ((safe or self.end_hold) and self.end is not None):
             return 0
+        if self.end_reserved:
+            return 0                       # SPD-257: the prefix's own buffers (`reserve_end`), never shed
         self._drop_end("memory")
         freed = sum(_nbytes(x) for x in self._end_bufs)
         self._end_bufs = None
@@ -2266,7 +3031,17 @@ class ResidentPrefix:
 
     def shed_stash(self, safe: bool = False) -> int:
         """The guest stash's buffers. A stash still waiting to be put back is the resident
-        prompt's rows: unless `safe`, the prompt is cut where the guest began and they go too."""
+        prompt's rows: unless `safe`, the prompt is cut where the guest began and they go too.
+        SPD-257: nothing while a guest's rows are being copied in (`_stash_busy`): a side slot's
+        idle stash goes at `stash_idle` from any slot's gate, and its buffers are in use then."""
+        with self._stash_lock:
+            if self._stash_busy:
+                if self._stash_bufs is not None:
+                    self.stats["stash_held"] += 1
+                return 0
+            return self._shed_stash(safe)
+
+    def _shed_stash(self, safe: bool) -> int:
         freed = 0
         if self._stash is not None:
             if safe:
@@ -2367,6 +3142,24 @@ class ResidentPrefix:
         return (self.anchor_bytes + self.stash_bytes + self.pin_bytes + self.park_bytes
                 + self.end_bytes)
 
+    @property
+    def pend_bytes(self) -> int:
+        return sum(_nbytes(x) for x in (self._pend_bufs or ()))
+
+    def owners(self) -> dict:
+        """SPD-257: the bytes this prefix holds, by part, for the engine's memory report by owner:
+        anchors in use and free, the end anchor's buffers (reserved or asked for), the last prompt's
+        end, the guest stash (a guest's rows waiting or idle), the pin and the park."""
+        ab = self._anchor_bytes
+        out = {"anchors": len(self.anchors) * ab, "anchors_free": len(self._free) * ab,
+               "end": self.end_bytes, "prompt_end": self.pend_bytes, "stash": self.stash_bytes,
+               "pin": self.pin_bytes, "park": self.park_bytes}
+        out["total"] = sum(out.values())
+        out.update(end_reserved=self.end_reserved, end_at=self.end["at"] if self.end else None,
+                   stash_waiting=self._stash is not None, valid=int(self.valid),
+                   idle_s=(round(time.monotonic() - self.t_used, 1) if self.t_used else None))
+        return out
+
     def report(self) -> dict:
         return {"valid": self.valid, "anchors": sorted(self.anchors),
                 "anchor_bytes": self._anchor_bytes, "anchor_buffers": self._allocated,
@@ -2386,7 +3179,9 @@ class ResidentPrefix:
                 "park_end_at": self.park_end["at"] if self.park_end else None,
                 "end_on": self.end_on, "end_at": self.end["at"] if self.end else None,
                 "end_hidden": sum(len(h) for _, h in self.end["hidden"]) if self.end else 0,
-                "end_bytes": self.end_bytes, "taint": self.taint,
+                "end_bytes": self.end_bytes, "end_reserved": self.end_reserved,
+                "prompt_end_bytes": self.pend_bytes, "anchor_free_buffers": len(self._free),
+                "taint": self.taint,
                 "last_switch": self.switches[-1] if self.switches else None,
                 "switch_list": list(self.switches), **self.stats}
 
@@ -2414,7 +3209,55 @@ def _short(session: str | None) -> str | None:
     return None if session is None else (session if len(session) <= 12 else session[:12] + "…")
 
 
-# --------------------------------------------------------------------------- the prefill itself
+# --------------------------------------------------------------------------- the prefill's grid
+class Grid:
+    """The lines a prefill is cut at, and where its anchors and snapshots are taken (SPD-249).
+
+    Without a mark: every `chunk` rows from row 0, as it always was. With a mark (the end of a
+    prompt's stable head, `prefill`'s `grid_mark`): the multiples of `chunk` below it, the mark,
+    then every `chunk` rows from the mark. Every prefill of a prompt with that mark cuts there,
+    cold or warm, so a resume from a snapshot at any of its lines splits the rest exactly as the
+    cold prefill does: the bit identity of the 0-anchored grid, kept for a head off that grid. A
+    mark on the 0-anchored grid is no mark."""
+
+    __slots__ = ("chunk", "mark")
+
+    def __init__(self, chunk: int, mark: int | None = None):
+        self.chunk = int(chunk)
+        m = int(mark) if mark else 0
+        self.mark = m if (self.chunk > 0 and m > 0 and m % self.chunk) else None
+
+    def next(self, i: int) -> int:
+        """The first line after row `i`."""
+        c, m = self.chunk, self.mark
+        if m is not None and i < m:
+            return min(m, (i // c + 1) * c)
+        base = 0 if m is None else m
+        return base + ((i - base) // c + 1) * c
+
+    def is_line(self, i: int) -> bool:
+        c, m = self.chunk, self.mark
+        if m is None:
+            return i % c == 0
+        return i == m or ((i - m) % c == 0 if i > m else i % c == 0)
+
+    def lines(self, start: int, n: int) -> list[int]:
+        """The lines in (start, n)."""
+        out, i = [], self.next(start)
+        while i < n:
+            out.append(i)
+            i = self.next(i)
+        return out
+
+    def accepts(self, L: int, entry_mark, kind: str = "prefix") -> bool:
+        """Whether a store snapshot at `L` (taken on a grid with `entry_mark`) resumes this grid's
+        prefill bit for bit: a line of this grid. A turn's end ("session") is a session resume
+        whatever the grid, and a snapshot of an unmarked grid serves an unmarked one as before."""
+        if kind == "session" or (self.mark is None and entry_mark is None):
+            return True
+        return self.is_line(L)
+
+
 def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     """The chunk a server's prefill runs at.
 
@@ -2461,7 +3304,7 @@ def _layer_marks(live: dict, device):
     def mark() -> None:
         marks = live["layers"]
         if cuda:
-            if not capture_lock.LOCK.acquire(blocking=False):
+            if not capture_lock.GUARD.acquire(blocking=False):
                 return
             try:
                 ev = torch.cuda.Event()
@@ -2471,7 +3314,7 @@ def _layer_marks(live: dict, device):
                 while k < len(marks) and marks[k].query():
                     k += 1
             finally:
-                capture_lock.LOCK.release()
+                capture_lock.GUARD.release()
         else:
             marks.append(_Done)
             k = len(marks)
@@ -2480,7 +3323,7 @@ def _layer_marks(live: dict, device):
     return mark
 
 
-def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
+def _window_plan(eng, i: int, n: int, chunk: int, win: int, grid: "Grid | None" = None) -> list | None:
     """The chunks (start, rows) one layer-major window takes from row `i`: the chunk loop's own
     grid, as many chunks as fit in `win` rows; None when fewer than two would (or the engine
     cannot run the window), and the loop forwards one chunk the usual way."""
@@ -2490,7 +3333,7 @@ def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
         return None
     plan, j = [], i
     while j < n:
-        t = min(chunk - (j % chunk), n - j)
+        t = min((grid.next(j) if grid is not None else (j // chunk + 1) * chunk) - j, n - j)
         if plan and (j + t) - i > max(win, chunk):
             break
         plan.append((j, t))
@@ -2499,16 +3342,18 @@ def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
 
 
 def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim, keys,
-                 hashes, conv_id, mem) -> None:
+                 hashes, conv_id, mem, grid: "Grid | None" = None) -> None:
     """What the prefill takes at the line `i` a chunk has just reached: the resident anchor, the
-    disk's anchor and the store's snapshot (the engine stands at `i`)."""
+    disk's anchor and the store's snapshot (the engine stands at `i`). SPD-249: the lines of the
+    prefill's `Grid`; the disk's, those of the 0-anchored grid among them."""
+    line = grid.is_line(i) if grid is not None else (chunk > 0 and i % chunk == 0)
     if res is not None:
         res.advanced(i)
-        if i < n and i % chunk == 0:
+        if i < n and line:
             res.anchor(eng, i)
-    if job is not None and i < lim and i % chunk == 0:
+    if job is not None and i < lim and line and i % chunk == 0:
         _disk(disk, "capture", job, eng, i)
-    if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
+    if (store is not None and checkpoint and i < lim and chunk > 0 and line
             and (ckpt is None or i in ckpt)):
         # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
         est = _snapshot_estimate(eng, i, drafter)
@@ -2520,7 +3365,8 @@ def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i
         else:
             snap = capture(eng, drafter, max_bytes=store.max_entry)
             if snap is not None:
-                store.put(keys, snap, conv_id, hashes)
+                store.put(keys, snap, conv_id, hashes,
+                          mark=grid.mark if grid is not None else None)
             else:
                 store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
 
@@ -2531,7 +3377,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
             compacting: bool = False, checkpoint_upto: int | None = None,
             disk=None, disk_tag: dict | None = None, end_mm: bool = False,
-            scratch: bool = False, reach: int | None = None, stay: bool = False):
+            scratch: bool = False, reach: int | None = None, stay: bool = False,
+            grid_mark: int | None = None):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -2583,7 +3430,31 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     (`ResidentPrefix.keep_end`); the caller has set the engine's rotary offset to that end's.
     `scratch`: the rows written are nobody's (`ResidentPrefix.begin`); no prefix snapshot is taken.
     `stay`: the session comes back (an agent's worker, ENG-371): never a guest of the resident.
+
+    `grid_mark` (SPD-249): the end of the prompt's stable head (the conductor's notes at the head):
+    the prefill cuts there and every `chunk` rows after it (`Grid`), takes its anchors and the
+    store's snapshots on those lines, and resumes only from snapshots and anchors on them, so
+    another prompt with the same head resumes at the mark bit for bit. The disk tier keeps the
+    0-anchored grid: it serves and writes only the lines below the mark. None: the grid of old.
     """
+    grid = Grid(chunk, grid_mark) if chunk > 0 else None
+    if resident is not None:
+        resident.grid = grid
+    try:
+        return _prefill(eng, drafter, ids, device, store=store, chunk=chunk, conv_id=conv_id,
+                        checkpoint=checkpoint, resident=resident, on_chunk=on_chunk, info=info,
+                        key_ids=key_ids, mem=mem, compacting=compacting,
+                        checkpoint_upto=checkpoint_upto, disk=disk, disk_tag=disk_tag,
+                        end_mm=end_mm, scratch=scratch, reach=reach, stay=stay, grid=grid)
+    finally:
+        if resident is not None:
+            resident.grid = None
+
+
+def _prefill(eng, drafter, ids, device, *, store, chunk, conv_id, checkpoint, resident, on_chunk,
+             info, key_ids, mem, compacting, checkpoint_upto, disk, disk_tag, end_mm, scratch,
+             reach, stay, grid):
+    """`prefill` on its grid (`Grid`)."""
     n = len(ids)
     if scratch:
         checkpoint = False
@@ -2621,13 +3492,15 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     bpe = res.pend_offer(c, n - 1) if (res is not None and not end_mm) else 0
     hit, via, dh = None, None, None
     if store is not None:
-        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be, bpe))
+        hit = store.find(keys, hashes, max_len=n - 1, min_len=max(b, bp, bk, be, bpe), grid=grid)
     if disk is not None:
         # after every cache in RAM: the disk only where it starts later than all of them, and
         # over the rows a session's state wrote (from `taint`), which are not a cold grid's
         have = c if res is None or res.taint is None else min(c, res.taint)
         dh = _disk(disk, "find", keys, hashes, n - 1, max(b, bp, bk, be, bpe, hit[0] if hit else 0),
                    have)
+        if dh is not None and grid is not None and not grid.is_line(dh.L):
+            dh = None                         # SPD-249: past the mark the disk's lines are no lines
         if dh is not None:
             hit = None
     if hit is None and dh is None and max(bp, bk) > max(be, bpe):
@@ -2645,7 +3518,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             be = res.end_offer(c, n - 1, mm_ok=end_mm)
             res.stats[f"{via}_tokens_reused"] += max(b, be)
         elif store is not None:
-            hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
+            hit = store.find(keys, hashes, max_len=n - 1, min_len=b, grid=grid)
     if dh is not None:
         start, kind = dh.L, "disk"
     elif hit is not None:
@@ -2722,18 +3595,20 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         checkpoint, kind_disk = False, "session"
     else:
         kind_disk = kind
-    ckpt = (store.boundaries(eng, drafter, start, lim, chunk)
+    ckpt = (store.boundaries(eng, drafter, start, lim, chunk, grid)
             if (store is not None and checkpoint and chunk > 0) else None)
-    job = (_disk(disk, "plan", keys, hashes, start, n, lim, kind_disk, conv_id, disk_tag)
-           if disk is not None and not scratch else None)
+    # SPD-249: the disk writes the 0-anchored grid's lines only, the ones below a mark
+    dlim = lim if grid is None or grid.mark is None else min(lim, grid.mark - grid.mark % chunk)
+    job = (_disk(disk, "plan", keys, hashes, start, n, dlim, kind_disk, conv_id, disk_tag)
+           if disk is not None and not scratch and (dlim == lim or dlim > start) else None)
     if mem is not None:
-        mem.mark()
+        mem.mark(rows=n - start)           # SRV-773: a continuation teaches the workspace line nothing
     lines = res is not None or job is not None or (store is not None and checkpoint and chunk > 0)
     win = PREFILL_WINDOW if lines else PREFILL_WINDOW_FREE
     try:
         while i < n:
             cap = WINDOW_CAP() if WINDOW_CAP is not None else None
-            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)))
+            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)), grid)
             if plan is not None:
                 # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
                 # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The
@@ -2781,7 +3656,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                         drafter.sync(ids[a:a + t], hid[c][0], a)
                     i = a + t
                     _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n,
-                                 lim, keys, hashes, conv_id, mem)
+                                 lim, keys, hashes, conv_id, mem, grid)
                     if on_chunk is not None and i < n:
                         on_chunk(i, n)
                 del bufs, toks, hid, taps
@@ -2797,7 +3672,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 # request resuming from one of those would inherit the misalignment for ever. This
                 # way the only forward that differs from a cold run's is the first one after a
                 # session resume.
-                t = min(chunk - (i % chunk), n - i)
+                # SPD-249: a marked grid (`Grid`) cuts at its head's end first, the same way
+                t = min(grid.next(i) - i, n - i)
             else:
                 t = n - i
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
@@ -2809,7 +3685,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
             i += t
             _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim,
-                         keys, hashes, conv_id, mem)
+                         keys, hashes, conv_id, mem, grid)
             if on_chunk is not None and i < n:
                 on_chunk(i, n)
     finally:

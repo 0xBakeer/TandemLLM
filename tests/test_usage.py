@@ -480,14 +480,16 @@ def test_the_timings_are_consistent():
 
 
 def test_the_req_line_is_unchanged():
-    """The `[req]` line keeps rc4's format: row3 and accept_hist parse it."""
+    """The `[req]` line keeps rc4's format: row3 and accept_hist parse it. SPD-257: the request's time in the
+    memory policy follows at the end, by part (`cache.req_ms_fields`)."""
     from tools.rowlog import parse_requests
     head, raw, log = _run(_chat(max_tokens=10), engine=_engine_with_blocks(10, [(7, 2, 3)]))
     line = [x for x in log.splitlines() if x.startswith("[req]")][0]
     import re
     assert re.fullmatch(r"\[req\] chatcmpl-[0-9a-f]{24} stream prompt=\d+ completion=10 "
                         r"finish=length \d+ ms [0-9.]+ tok/s blocks=3 committed=9 "
-                        r"decode_ms=[0-9.]+ accept=7:2x3", line), line
+                        r"decode_ms=[0-9.]+ accept=7:2x3 gate_ms=[0-9.]+ done_ms=[0-9.]+ remember_ms=[0-9.]+ "
+                        r"settle_ms=[0-9.]+", line), line
     assert parse_requests(log)[0]["completion"] == 10
 
 

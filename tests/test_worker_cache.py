@@ -726,7 +726,7 @@ def test_the_gate_holds_the_end_the_request_resumes_at_until_its_prefill():
         def refused(self, exc):
             pass
 
-        def gate(self, n, count=True):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
             self.seen.append(res.end_hold)
             if self.refuse and res.end_hold:
                 raise cache.MemoryRefused(2, 1, n)
@@ -762,7 +762,7 @@ def test_a_gate_refused_with_a_waited_for_park_kept_runs_once_more_and_may_take_
         def refused(self, exc):
             pass
 
-        def gate(self, n, count=True):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
             self.passes += 1
             if not app._shed_park(res, False):
                 raise cache.MemoryRefused(2, 1, n)
@@ -1013,14 +1013,14 @@ def test_a_hold_left_by_a_request_that_prefilled_nothing_blocks_no_other():
     nxt = ids + out + tokens(8, seed=82)
 
     class Pass:
-        def gate(self, n, count=True):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
             pass
 
         def refused(self, exc):
             pass
 
     class NeedsEnd(Pass):                  # over the peak by less than the end anchor's bytes
-        def gate(self, n, count=True):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
             if not res.shed_end(False):
                 raise cache.MemoryRefused(2, 1, n)
     app._gate_holding_end(Pass(), res, nxt, len(nxt), False)      # no prefill follows
@@ -1047,7 +1047,7 @@ def test_a_refusal_counts_once_at_the_outcome():
         def __init__(self, refuse_twice):
             self.twice, self.passes, self.counted = refuse_twice, 0, 0
 
-        def gate(self, n, count=True):
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
             self.passes += 1
             if self.passes == 1 or self.twice:
                 if count:
@@ -1075,6 +1075,85 @@ def test_a_refusal_counts_once_at_the_outcome():
     except cache.MemoryRefused:
         pass
     assert m.passes == 1 and m.counted == 1, (m.passes, m.counted)
+
+
+class _EndGate:
+    """A memory gate that refuses while `res` holds its end: a pass without the end admits the same charge."""
+
+    def __init__(self, res):
+        self.res, self.seen, self.counted = res, [], 0
+
+    def gate(self, n, count=True, rows=None, others=0, ceiling=True):
+        self.seen.append((rows, self.res.end_hold))
+        if self.res.end_hold:
+            raise cache.MemoryRefused(2, 1, n, rows=rows)
+
+    def refused(self, exc):
+        self.counted += 1
+
+
+def test_srv773_a_continuation_keeps_its_end_through_a_refusal():
+    """SRV-773: a continuation is charged the rows after its end. A refusal with that end held raises with the hold
+    kept (the parallel admission waits, or runs it over the peak, with the end in place): a pass that gave the end
+    away on the same charge admitted g8's 21 rows at 0.80 GiB, and the prefill forwarded ~57,100. A whole-prompt
+    charge (`rows` None: a scratch turn's) still runs once more without the end."""
+    res = _state()
+    ids = WHEAD + tokens(100, seed=87)
+    out, _ = wturn(ids, 6, "chat-a-task-1", stay=True)
+    nxt = ids + out + tokens(8, seed=88)
+    rows = len(nxt) - int(res.end["at"])
+    assert 0 < rows < len(nxt) and app._end_held(res, nxt, len(nxt), False)
+    for count in (False, True):
+        m = _EndGate(res)
+        try:
+            app._gate_holding_end(m, res, nxt, len(nxt), False, rows=rows, count=count)
+            raise AssertionError("admitted on the continuation's charge without its end")
+        except cache.MemoryRefused as exc:
+            assert exc.rows == rows
+        assert m.seen == [(rows, True)] and res.end_hold and res.end is not None, m.seen
+        assert m.counted == int(count), m.counted
+    assert res.shed_end(False) == 0 and res.end is not None, "held through the caller's wait"
+    m = _EndGate(res)
+    app._gate_holding_end(m, res, nxt, len(nxt), False)
+    assert m.seen == [(None, True), (None, False)] and not res.end_hold, m.seen
+    return f"{rows} rows: one pass, refused with the end held; the whole prompt: two passes"
+
+
+def test_srv773_a_continuation_gives_a_waited_for_park_its_pass_with_the_end_held():
+    """A side slot's gate keeps slot 0's parked parent; refused, it runs once more and the park may go. For a
+    continuation that pass keeps the end held: only the park is given up."""
+    res = _state(park_bytes=1 << 30)
+    wturn(PHEAD + tokens(200, seed=89), 6, "chat-p")
+    app.PARENTS.clear()
+    app._note_parent("chat-p")
+    w = WHEAD + tokens(60, seed=90)
+    out, _ = wturn(w, 6, "chat-p-task-1", stay=True)
+    assert res.park_owner == "chat-p"
+    nxt = w + out + tokens(6, seed=91)
+    assert app._end_held(res, nxt, len(nxt), False)
+    rows = len(nxt) - int(res.end["at"])
+
+    class Mem:
+        def __init__(self):
+            self.seen = []
+
+        def refused(self, exc):
+            pass
+
+        def gate(self, n, count=True, rows=None, others=0, ceiling=True):
+            self.seen.append((rows, res.end_hold))
+            if not app._shed_park(res, False):
+                raise cache.MemoryRefused(2, 1, n, rows=rows)
+    slots_mod.bind(slots_mod.Slot(1, 1024))
+    try:
+        m = Mem()
+        app._gate_holding_end(m, res, nxt, len(nxt), False, rows=rows)
+        assert m.seen == [(rows, True), (rows, True)] and not res.park_rows, (m.seen, res.park_rows)
+        assert res.end_hold and res.end is not None
+    finally:
+        slots_mod.bind(None)
+        app.PARENTS.clear()
+        res.end_hold = False
 
 
 def test_a_side_slots_write_waits_for_slot_0s_spill_io():

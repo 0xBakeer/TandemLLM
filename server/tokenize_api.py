@@ -1,7 +1,7 @@
 """`POST /v1/tokenize`: exact token counts with the model's own chat template (SRV-347).
 
-    {"model"?, "messages"?, "tools"?, "text"?}  ->  {"tokens": n, "parts": {"system", "tools",
-                                                    "messages"}}
+    {"model"?, "messages"?, "tools"?, "text"?, "ids"?}  ->  {"tokens": n, "parts": {"system", "tools",
+                                                             "messages"}, "ids"?: [...]}
 
 The Context panel splits a chat's context by part; chatd counts what it adds itself (the system
 prompt, the tool schemas, attachments) here, so the split adds up to what the engine reads. The
@@ -9,7 +9,12 @@ count is the prompt a real request with the same messages and tools would get, r
 way (server/app.py `build_prompt(body, count=True)`: the host tokenizer, nothing on the GPU), so
 `tokens` equals that request's `prompt_tokens`. The parts are differences of renders: `tools` is
 the prompt with the tools less the prompt without, `system` the system messages over an empty user
-turn less the empty turn alone, `messages` the rest. `text` counts a bare string.
+turn less the empty turn alone, `messages` the rest. `text` counts a bare string, as
+`/v1/completions` tokenizes its `prompt`.
+
+`"ids": true` also returns the token ids (SPD-249): the chat prompt's, or the text's as
+`/v1/completions` reads it. A client that sends a rendered chat prompt to `/v1/completions` proves
+with them that the engine reads the same ids as the chat endpoint would (tools/parallel_card.py).
 
 Open like `/v1/models` (it reads nothing but what it is sent), and rate-limited like the library:
 240 a minute from one address.
@@ -39,9 +44,17 @@ def allowed(who: str, now: float | None = None) -> bool:
         return True
 
 
-def count(body: dict, count_fn, encode_text) -> dict:
-    """`count_fn(body) -> int`: the prompt length of a chat body; `encode_text(str) -> int`."""
+def count(body: dict, count_fn, encode_text, ids_fn=None, text_ids=None) -> dict:
+    """`count_fn(body) -> int`: the prompt length of a chat body; `encode_text(str) -> int`. With `"ids": true`
+    in the body, `ids_fn(body) -> list` (a chat body's prompt ids) and `text_ids(str) -> list` give the ids too."""
+    want = body.get("ids") is True
+    if want and (ids_fn is None or text_ids is None):
+        raise ValueError("ids are not served here")
     if isinstance(body.get("text"), str) and "messages" not in body:
+        if want:
+            ids = [int(t) for t in text_ids(body["text"])]
+            n = len(ids)
+            return {"tokens": n, "parts": {"system": 0, "tools": 0, "messages": n}, "ids": ids}
         n = int(encode_text(body["text"]))
         return {"tokens": n, "parts": {"system": 0, "tools": 0, "messages": n}}
     messages = body.get("messages")
@@ -59,12 +72,15 @@ def count(body: dict, count_fn, encode_text) -> dict:
         sys_n = max(0, int(count_fn({**base, "messages": system + empty}))
                     - int(count_fn({**base, "messages": empty})))
     tools_n = max(0, total - bare)
-    return {"tokens": total,
-            "parts": {"system": sys_n, "tools": tools_n,
-                      "messages": max(0, total - tools_n - sys_n)}}
+    out = {"tokens": total,
+           "parts": {"system": sys_n, "tools": tools_n,
+                     "messages": max(0, total - tools_n - sys_n)}}
+    if want:
+        out["ids"] = [int(t) for t in ids_fn({**base, "messages": messages, **({"tools": tools} if tools else {})})]
+    return out
 
 
-def handle(handler, body, count_fn, encode_text) -> None:
+def handle(handler, body, count_fn, encode_text, ids_fn=None, text_ids=None) -> None:
     who = handler.headers.get("X-Real-IP") or (handler.client_address or ("",))[0]
     if not allowed(who):
         return handler._json(429, {"error": {"type": "rate_limited",
@@ -74,7 +90,7 @@ def handle(handler, body, count_fn, encode_text) -> None:
         return handler._json(400, {"error": {"type": "invalid_request_error",
                                              "message": "the body must be a JSON object"}})
     try:
-        out = count(body, count_fn, encode_text)
+        out = count(body, count_fn, encode_text, ids_fn, text_ids)
     except Exception as exc:                                       # noqa: BLE001
         # a body the template cannot render (a jinja error, a bad role) is the client's
         return handler._json(400, {"error": {"type": "invalid_request_error",

@@ -110,8 +110,8 @@
    },
    {
     "id": "conductor",
-    "label": "Conductor",
-    "default": true,
+    "label": "Chat (beta)",
+    "default": false,
     "required": false,
     "depends_on": [],
     "conflicts": [],
@@ -133,7 +133,7 @@
    {
     "id": "laya",
     "label": "Laya decision models",
-    "default": true,
+    "default": false,
     "required": false,
     "depends_on": [
      "conductor"
@@ -145,7 +145,7 @@
    {
     "id": "shadow",
     "label": "Shadow reader",
-    "default": true,
+    "default": false,
     "required": false,
     "depends_on": [
      "conductor"
@@ -384,8 +384,8 @@
    "components": [
     {
      "id": "conductor",
-     "label": "Conductor",
-     "default": true,
+     "label": "Chat (beta)",
+     "default": false,
      "required": false,
      "depends_on": [],
      "conflicts": [],
@@ -601,8 +601,8 @@
    "components": [
     {
      "id": "conductor",
-     "label": "Conductor",
-     "default": true,
+     "label": "Chat (beta)",
+     "default": false,
      "required": false,
      "depends_on": [],
      "conflicts": [],
@@ -624,7 +624,7 @@
     {
      "id": "laya",
      "label": "Laya decision models",
-     "default": true,
+     "default": false,
      "required": false,
      "depends_on": [
       "conductor"
@@ -769,8 +769,8 @@
    "components": [
     {
      "id": "conductor",
-     "label": "Conductor",
-     "default": true,
+     "label": "Chat (beta)",
+     "default": false,
      "required": false,
      "depends_on": [],
      "conflicts": [],
@@ -792,7 +792,7 @@
     {
      "id": "laya",
      "label": "Laya decision models",
-     "default": true,
+     "default": false,
      "required": false,
      "depends_on": [
       "conductor"
@@ -898,7 +898,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 75.55,
+    "total_gb": 72.43,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -953,19 +953,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -996,16 +983,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 574730,
+    "context_tokens_fit": 606112,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 57.14,
+    "room_gb": 60.26,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 151.36 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 574,730 tokens of conversation fit in all, 71,841 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 148.24 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 606,112 tokens of conversation fit in all, 75,764 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1017,7 +1005,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 76.98,
+    "total_gb": 73.86,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1072,19 +1060,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1115,16 +1090,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 560346,
+    "context_tokens_fit": 591728,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 55.71,
+    "room_gb": 58.83,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.79 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 560,346 tokens of conversation fit in all, 70,043 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 149.67 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 591,728 tokens of conversation fit in all, 73,966 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1136,7 +1112,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 78.57,
+    "total_gb": 75.45,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1191,19 +1167,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1234,16 +1197,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 544354,
+    "context_tokens_fit": 575736,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 54.12,
+    "room_gb": 57.24,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.38 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 544,354 tokens of conversation fit in all, 68,044 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 151.26 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 575,736 tokens of conversation fit in all, 71,967 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1255,7 +1219,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 80.16,
+    "total_gb": 77.04,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1310,19 +1274,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1353,16 +1304,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 528361,
+    "context_tokens_fit": 559743,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 52.53,
+    "room_gb": 55.65,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.97 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 528,361 tokens of conversation fit in all, 66,045 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.85 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 559,743 tokens of conversation fit in all, 69,967 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1374,7 +1326,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1429,19 +1381,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1472,16 +1411,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1493,7 +1433,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 86.05,
+    "total_gb": 82.93,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1548,19 +1488,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1591,16 +1518,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 469118,
+    "context_tokens_fit": 500500,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 46.64,
+    "room_gb": 49.76,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 161.86 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 469,118 tokens of conversation fit in all, 58,639 a lane when all 8 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 158.74 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 500,500 tokens of conversation fit in all, 62,562 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1612,7 +1540,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 82.32,
+    "total_gb": 79.2,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1667,19 +1595,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1710,16 +1625,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 506635,
+    "context_tokens_fit": 538017,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 50.37,
+    "room_gb": 53.49,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 158.13 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 506,635 tokens of conversation fit in all, 63,329 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.01 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 538,017 tokens of conversation fit in all, 67,252 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -1733,7 +1649,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.35,
+    "total_gb": 78.23,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -1782,19 +1698,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -1825,28 +1728,29 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 516392,
+    "context_tokens_fit": 547774,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.34,
+    "room_gb": 54.46,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.16 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 516,392 tokens of conversation fit in all, 64,549 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.04 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 547,774 tokens of conversation fit in all, 68,471 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "conductor off",
+   "name": "conductor on",
    "selection": {
     "model": "qwen3.8-27b",
     "components": {
-     "conductor": false,
-     "narrator": false,
+     "conductor": true,
      "laya": false,
-     "shadow": false
+     "shadow": false,
+     "narrator": false
     }
    },
    "expect": {
@@ -1945,6 +1849,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1954,12 +1859,15 @@
    "selection": {
     "model": "qwen3.8-27b",
     "components": {
-     "narrator": true
+     "narrator": true,
+     "conductor": true,
+     "laya": false,
+     "shadow": false
     }
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 85.14,
+    "total_gb": 82.02,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2020,17 +1928,121 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 208.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 509653,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 208.5,
+    "room_gb": 50.67,
+    "lane_full_gb": 26.06,
+    "lanes_full": 1,
+    "notes": [
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 509,653 tokens of conversation fit in all, 63,706 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "laya on",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "laya": true,
+     "conductor": true,
+     "shadow": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 80.02,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
       "id": "laya",
       "label": "Laya decision models",
       "gb": 1.6,
       "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -2063,24 +2075,27 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 478271,
+    "context_tokens_fit": 529769,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 47.55,
+    "room_gb": 52.67,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 160.95 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 478,271 tokens of conversation fit in all, 59,783 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 529,769 tokens of conversation fit in all, 66,221 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
   {
-   "name": "laya off",
+   "name": "shadow on",
    "selection": {
     "model": "qwen3.8-27b",
     "components": {
+     "shadow": true,
+     "conductor": true,
      "laya": false
     }
    },
@@ -2187,121 +2202,8 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.75 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 530,574 tokens of conversation fit in all, 66,321 a lane when all 8 are full (the window is 262,144)."
-    ]
-   }
-  },
-  {
-   "name": "shadow off",
-   "selection": {
-    "model": "qwen3.8-27b",
-    "components": {
-     "shadow": false
-    }
-   },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 80.02,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 4.5 bpw)",
-      "gb": 16.14,
-      "kind": "fixed"
-     },
-     {
-      "id": "graphs",
-      "label": "CUDA graphs (the verify step)",
-      "gb": 6.63,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state and warm-up workspace",
-      "gb": 1.28,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.6,
-      "kind": "reserve"
-     },
-     {
-      "id": "side_slots",
-      "label": "7 more slot(s), beyond their KV",
-      "gb": 8.33,
-      "kind": "fixed"
-     },
-     {
-      "id": "drafters",
-      "label": "Draft models",
-      "gb": 5.41,
-      "kind": "fixed"
-     },
-     {
-      "id": "lookup",
-      "label": "Lookup store",
-      "gb": 0.19,
-      "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "vision",
-      "label": "Vision",
-      "gb": 0.86,
-      "kind": "reserve",
-      "worst_gb": 1.36
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), committed as they grow",
-      "gb": 26.06,
-      "kind": "kv",
-      "worst_gb": 208.5
-     }
-    ],
-    "fits": true,
-    "fits_worst": false,
-    "context_tokens_fit": 529769,
-    "kv_bytes_per_token": 106752,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 208.5,
-    "room_gb": 52.67,
-    "lane_full_gb": 26.06,
-    "lanes_full": 2,
-    "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 529,769 tokens of conversation fit in all, 66,221 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2315,7 +2217,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 80.68,
+    "total_gb": 77.56,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2370,19 +2272,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -2406,16 +2295,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 523131,
+    "context_tokens_fit": 554513,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 52.01,
+    "room_gb": 55.13,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.49 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 523,131 tokens of conversation fit in all, 65,391 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.37 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 554,513 tokens of conversation fit in all, 69,314 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2429,7 +2319,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.11,
+    "total_gb": 77.99,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2482,19 +2372,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -2520,16 +2397,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 518806,
+    "context_tokens_fit": 550188,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.58,
+    "room_gb": 54.7,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.92 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 518,806 tokens of conversation fit in all, 64,850 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.80 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 550,188 tokens of conversation fit in all, 68,773 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2543,7 +2421,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.05,
+    "total_gb": 77.93,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2596,19 +2474,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -2634,16 +2499,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 519409,
+    "context_tokens_fit": 550791,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.64,
+    "room_gb": 54.76,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 156.86 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 519,409 tokens of conversation fit in all, 64,926 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.74 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 550,791 tokens of conversation fit in all, 68,848 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2652,12 +2518,14 @@
    "selection": {
     "model": "qwen3.8-27b",
     "components": {
-     "response_cache": true
+     "response_cache": true,
+     "laya": false,
+     "shadow": false
     }
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.79,
+    "total_gb": 78.67,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2710,19 +2578,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -2761,16 +2616,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 511966,
+    "context_tokens_fit": 543348,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 50.9,
+    "room_gb": 54.02,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.60 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 511,966 tokens of conversation fit in all, 63,995 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.48 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 543,348 tokens of conversation fit in all, 67,918 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2785,7 +2641,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2840,19 +2696,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -2883,16 +2726,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -2906,7 +2750,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -2961,19 +2805,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -3004,16 +2835,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -3022,12 +2854,14 @@
    "selection": {
     "model": "qwen3.8-27b",
     "components": {
-     "proxy": true
+     "proxy": true,
+     "laya": false,
+     "shadow": false
     }
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3082,19 +2916,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -3125,16 +2946,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -3146,7 +2968,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 50.41,
+    "total_gb": 47.29,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3193,19 +3015,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -3238,15 +3047,15 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 598266,
+    "context_tokens_fit": 629648,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
-    "room_gb": 59.48,
+    "room_gb": 62.6,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "About 598,266 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
+     "About 629,648 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
     ]
    }
   },
@@ -3258,7 +3067,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 54.86,
+    "total_gb": 51.74,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3313,19 +3122,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -3356,16 +3152,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 586297,
+    "context_tokens_fit": 617679,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 52.12,
-    "room_gb": 58.29,
+    "room_gb": 61.41,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
      "All 2 lanes can hold the full 262,144-token window at once (26.06 GiB each).",
-     "About 586,297 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
+     "About 617,679 tokens of conversation fit in all, 262,144 a lane when all 2 are full (the window is 262,144)."
     ]
    }
   },
@@ -3377,7 +3173,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 59.3,
+    "total_gb": 56.18,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3432,19 +3228,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -3475,16 +3258,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 574327,
+    "context_tokens_fit": 605709,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 78.19,
-    "room_gb": 57.1,
+    "room_gb": 60.22,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 3 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 21.09 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 574,327 tokens of conversation fit in all, 191,442 a lane when all 3 are full (the window is 262,144)."
+     "2 of 3 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 17.97 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 605,709 tokens of conversation fit in all, 201,903 a lane when all 3 are full (the window is 262,144)."
     ]
    }
   },
@@ -3496,7 +3280,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 60.63,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3551,19 +3335,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -3594,16 +3365,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 593740,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "room_gb": 59.03,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 4 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 48.34 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a lane when all 4 are full (the window is 262,144)."
+     "2 of 4 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 45.22 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 593,740 tokens of conversation fit in all, 148,435 a lane when all 4 are full (the window is 262,144)."
     ]
    }
   },
@@ -3615,7 +3387,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3668,19 +3440,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -3713,16 +3472,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -3734,7 +3494,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 62.0,
+    "total_gb": 58.88,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3787,19 +3547,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -3832,16 +3579,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 6.52,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 0.81,
     "lanes_full": 8,
     "notes": [
      "All 8 lanes can hold the full 8,192-token window at once (0.81 GiB each).",
-     "About 514,481 tokens of conversation fit in all, 8,192 a lane when all 8 are full (the window is 8,192)."
+     "About 545,863 tokens of conversation fit in all, 8,192 a lane when all 8 are full (the window is 8,192)."
     ]
    }
   },
@@ -3853,7 +3600,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -3906,19 +3653,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -3951,16 +3685,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 3.26,
     "lanes_full": 8,
     "notes": [
      "All 8 lanes can hold the full 32,768-token window at once (3.26 GiB each).",
-     "About 514,481 tokens of conversation fit in all, 32,768 a lane when all 8 are full (the window is 32,768)."
+     "About 545,863 tokens of conversation fit in all, 32,768 a lane when all 8 are full (the window is 32,768)."
     ]
    }
   },
@@ -3972,7 +3706,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4025,19 +3759,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -4069,17 +3790,17 @@
      }
     ],
     "fits": true,
-    "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "fits_worst": true,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 52.12,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 6.52,
-    "lanes_full": 7,
+    "lanes_full": 8,
     "notes": [
-     "7 of 8 lanes can hold the full 65,536-token window at once (6.52 GiB each); every lane at it would need 0.98 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 65,536)."
+     "All 8 lanes can hold the full 65,536-token window at once (6.52 GiB each).",
+     "About 545,863 tokens of conversation fit in all, 65,536 a lane when all 8 are full (the window is 65,536)."
     ]
    }
   },
@@ -4091,7 +3812,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4144,19 +3865,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -4189,16 +3897,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 104.25,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 13.03,
-    "lanes_full": 3,
+    "lanes_full": 4,
     "notes": [
-     "3 of 8 lanes can hold the full 131,072-token window at once (13.03 GiB each); every lane at it would need 53.10 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 131,072)."
+     "4 of 8 lanes can hold the full 131,072-token window at once (13.03 GiB each); every lane at it would need 49.98 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 131,072)."
     ]
    }
   },
@@ -4210,7 +3919,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4265,19 +3974,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -4308,16 +4004,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -4330,7 +4027,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4385,19 +4082,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -4428,16 +4112,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -4450,7 +4135,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 63.75,
+    "total_gb": 60.63,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4503,19 +4188,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -4548,16 +4220,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 593740,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
-    "room_gb": 55.91,
+    "room_gb": 59.03,
     "lane_full_gb": 6.52,
     "lanes_full": 4,
     "notes": [
      "All 4 lanes can hold the full 65,536-token window at once (6.52 GiB each).",
-     "About 562,358 tokens of conversation fit in all, 65,536 a lane when all 4 are full (the window is 65,536)."
+     "About 593,740 tokens of conversation fit in all, 65,536 a lane when all 4 are full (the window is 65,536)."
     ]
    }
   },
@@ -4570,7 +4242,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 154.97,
+    "total_gb": 151.85,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4625,19 +4297,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -4668,18 +4327,18 @@
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 562358,
+    "context_tokens_fit": 593740,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 104.25,
-    "room_gb": 55.91,
+    "room_gb": 59.03,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "Over the budget by 48.34 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
+     "Over the budget by 45.22 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 562,358 tokens of conversation fit in all, 140,589 a lane when all 4 are full (the window is 262,144)."
+     "About 593,740 tokens of conversation fit in all, 148,435 a lane when all 4 are full (the window is 262,144)."
     ]
    }
   },
@@ -4693,7 +4352,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 61.37,
+    "total_gb": 58.25,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4748,19 +4407,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -4791,16 +4437,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 586297,
+    "context_tokens_fit": 617679,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 13.03,
-    "room_gb": 58.29,
+    "room_gb": 61.41,
     "lane_full_gb": 6.52,
     "lanes_full": 2,
     "notes": [
      "All 2 lanes can hold the full 65,536-token window at once (6.52 GiB each).",
-     "About 586,297 tokens of conversation fit in all, 65,536 a lane when all 2 are full (the window is 65,536)."
+     "About 617,679 tokens of conversation fit in all, 65,536 a lane when all 2 are full (the window is 65,536)."
     ]
    }
   },
@@ -4814,7 +4460,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 67.22,
+    "total_gb": 64.1,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -4863,19 +4509,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -4906,15 +4539,15 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 658515,
+    "context_tokens_fit": 689897,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 26.06,
-    "room_gb": 65.47,
+    "room_gb": 68.59,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "About 658,515 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
+     "About 689,897 tokens of conversation fit in all, 262,144 a lane when all 1 are full (the window is 262,144)."
     ]
    }
   },
@@ -4926,7 +4559,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 10.0,
@@ -4981,19 +4614,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5024,16 +4644,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 564772,
+    "context_tokens_fit": 596154,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 56.15,
+    "room_gb": 59.27,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
     "notes": [
-     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 564,772 tokens of conversation fit in all, 70,596 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 149.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 596,154 tokens of conversation fit in all, 74,519 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5045,7 +4666,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 40.0,
@@ -5100,19 +4721,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5143,16 +4751,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 263024,
+    "context_tokens_fit": 294405,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 26.15,
+    "room_gb": 29.27,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 182.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 263,024 tokens of conversation fit in all, 32,878 a lane when all 8 are full (the window is 262,144)."
+     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 179.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 294,405 tokens of conversation fit in all, 36,800 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5169,7 +4778,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 268.74,
+    "total_gb": 265.62,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5224,19 +4833,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5273,18 +4869,18 @@
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 466603,
+    "context_tokens_fit": 497985,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 46.39,
+    "room_gb": 49.51,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "Over the budget by 162.11 GiB. The largest parts: Conversations (KV), every window at load 208.50 GiB, Weights (EXL3 6.0 bpw) 20.65 GiB, The OS and other programs 10.00 GiB.",
+     "Over the budget by 158.99 GiB. The largest parts: Conversations (KV), every window at load 208.50 GiB, Weights (EXL3 6.0 bpw) 20.65 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 466,603 tokens of conversation fit in all, 58,325 a lane when all 8 are full (the window is 262,144)."
+     "About 497,985 tokens of conversation fit in all, 62,248 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5381,18 +4977,18 @@
    "name": "exactly at the budget",
    "selection": {
     "model": "qwen3.8-27b",
-    "floor_gb": 34.2,
+    "floor_gb": 37.32,
     "kv_pool": false,
     "slots": 2,
     "window": 196608
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 87.43,
+    "total_gb": 84.31,
     "available_gb": null,
     "device_gb": 121.63,
-    "floor_gb": 34.2,
-    "budget_gb": 87.43,
+    "floor_gb": 37.32,
+    "budget_gb": 84.31,
     "parts": [
      {
       "id": "os",
@@ -5441,19 +5037,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -5503,18 +5086,18 @@
    "name": "a cent over the budget",
    "selection": {
     "model": "qwen3.8-27b",
-    "floor_gb": 34.21,
+    "floor_gb": 37.33,
     "kv_pool": false,
     "slots": 2,
     "window": 196608
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 87.43,
+    "total_gb": 84.31,
     "available_gb": null,
     "device_gb": 121.63,
-    "floor_gb": 34.21,
-    "budget_gb": 87.42,
+    "floor_gb": 37.33,
+    "budget_gb": 84.3,
     "parts": [
      {
       "id": "os",
@@ -5563,19 +5146,6 @@
       "label": "Lookup store",
       "gb": 0.19,
       "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
      },
      {
       "id": "vision",
@@ -5636,7 +5206,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.54,
+    "total_gb": 78.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5691,19 +5261,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5734,16 +5291,17 @@
     ],
     "fits": true,
     "fits_worst": false,
-    "context_tokens_fit": 514481,
+    "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 208.5,
-    "room_gb": 51.15,
+    "room_gb": 54.27,
     "lane_full_gb": 26.06,
-    "lanes_full": 1,
+    "lanes_full": 2,
     "notes": [
-     "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.35 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
-     "About 514,481 tokens of conversation fit in all, 64,310 a lane when all 8 are full (the window is 262,144)."
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -5756,7 +5314,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 68.2,
+    "total_gb": 65.08,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5811,19 +5369,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5854,16 +5399,16 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 550389,
+    "context_tokens_fit": 581771,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 16.29,
-    "room_gb": 54.72,
+    "room_gb": 57.84,
     "lane_full_gb": 3.26,
     "lanes_full": 5,
     "notes": [
      "All 5 lanes can hold the full 32,768-token window at once (3.26 GiB each).",
-     "About 550,389 tokens of conversation fit in all, 32,768 a lane when all 5 are full (the window is 32,768)."
+     "About 581,771 tokens of conversation fit in all, 32,768 a lane when all 5 are full (the window is 32,768)."
     ]
    }
   },
@@ -5876,7 +5421,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 482.0,
+    "total_gb": 478.88,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5931,19 +5476,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -5974,18 +5506,18 @@
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 418726,
+    "context_tokens_fit": 450108,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 417.0,
-    "room_gb": 41.63,
+    "room_gb": 44.75,
     "lane_full_gb": 26.06,
     "lanes_full": 1,
     "notes": [
-     "Over the budget by 375.37 GiB. The largest parts: Conversations (KV), every window at load 417.00 GiB, 15 more slot(s), beyond their KV 17.85 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
+     "Over the budget by 372.25 GiB. The largest parts: Conversations (KV), every window at load 417.00 GiB, 15 more slot(s), beyond their KV 17.85 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 418,726 tokens of conversation fit in all, 26,170 a lane when all 16 are full (the window is 262,144)."
+     "About 450,108 tokens of conversation fit in all, 28,131 a lane when all 16 are full (the window is 262,144)."
     ]
    }
   },
@@ -5998,7 +5530,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 152.71,
+    "total_gb": 149.59,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6053,19 +5585,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
-      "id": "shadow",
-      "label": "Shadow reader",
-      "gb": 1.52,
-      "kind": "reserve",
-      "worst_gb": 5.52
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.86,
@@ -6096,17 +5615,17 @@
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 322971,
+    "context_tokens_fit": 354353,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 78.19,
-    "room_gb": 32.11,
+    "room_gb": 35.23,
     "lane_full_gb": 3.26,
-    "lanes_full": 9,
+    "lanes_full": 10,
     "notes": [
-     "Over the budget by 46.08 GiB. The largest parts: Conversations (KV), committed as they grow 78.19 GiB, 23 more slot(s), beyond their KV 27.37 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
+     "Over the budget by 42.96 GiB. The largest parts: Conversations (KV), committed as they grow 78.19 GiB, 23 more slot(s), beyond their KV 27.37 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 322,971 tokens of conversation fit in all, 13,457 a lane when all 24 are full (the window is 32,768)."
+     "About 354,353 tokens of conversation fit in all, 14,764 a lane when all 24 are full (the window is 32,768)."
     ]
    }
   },
@@ -6151,9 +5670,105 @@
      "conductor": false
     }
    },
-   "error": {
-    "status": 422,
-    "code": "invalid_combination"
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 78.42,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 208.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 545863,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 208.5,
+    "room_gb": 54.27,
+    "lane_full_gb": 26.06,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
+    ]
    }
   },
   {
@@ -6281,6 +5896,7 @@
     "lanes_full": 4,
     "notes": [
      "4 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 13.44 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 583,591 tokens of conversation fit in all, 72,948 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -6388,6 +6004,7 @@
     "lanes_full": 1,
     "notes": [
      "1 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 48.87 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 406,504 tokens of conversation fit in all, 50,813 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -6495,6 +6112,7 @@
     "lanes_full": 6,
     "notes": [
      "6 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 6.02 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 840,265 tokens of conversation fit in all, 105,033 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -6602,6 +6220,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -6709,6 +6328,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 20.62 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 335,219 tokens of conversation fit in all, 41,902 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -7173,6 +6793,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -7187,7 +6808,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 94.0,
+    "total_gb": 92.4,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7227,12 +6848,6 @@
       "id": "side_slots",
       "label": "7 more slot(s), beyond their KV",
       "gb": 0.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
       "kind": "fixed"
      },
      {
@@ -7263,7 +6878,7 @@
     "kv_bytes_per_token": 28672,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 56.0,
-    "room_gb": 68.63,
+    "room_gb": 70.23,
     "lane_full_gb": 7.0,
     "lanes_full": 8,
     "notes": [
@@ -7282,7 +6897,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 66.88,
+    "total_gb": 65.28,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7325,12 +6940,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.16,
@@ -7358,7 +6967,7 @@
     "kv_bytes_per_token": 14784,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 28.88,
-    "room_gb": 68.63,
+    "room_gb": 70.23,
     "lane_full_gb": 3.61,
     "lanes_full": 8,
     "notes": [
@@ -7374,7 +6983,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 127.65,
+    "total_gb": 126.05,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7417,12 +7026,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.35,
@@ -7453,18 +7056,18 @@
     ],
     "fits": false,
     "fits_worst": false,
-    "context_tokens_fit": 1178774,
+    "context_tokens_fit": 1248679,
     "kv_bytes_per_token": 24576,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 48.0,
-    "room_gb": 26.98,
+    "room_gb": 28.58,
     "lane_full_gb": 6.0,
     "lanes_full": 4,
     "notes": [
-     "Over the budget by 21.02 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
+     "Over the budget by 19.42 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
-     "About 1,178,774 tokens of conversation fit in all, 147,346 a lane when all 8 are full (the window is 262,144)."
+     "About 1,248,679 tokens of conversation fit in all, 156,084 a lane when all 8 are full (the window is 262,144)."
     ]
    }
   },
@@ -7476,7 +7079,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 91.65,
+    "total_gb": 90.05,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -7519,12 +7122,6 @@
       "kind": "fixed"
      },
      {
-      "id": "laya",
-      "label": "Laya decision models",
-      "gb": 1.6,
-      "kind": "fixed"
-     },
-     {
       "id": "vision",
       "label": "Vision",
       "gb": 0.35,
@@ -7559,7 +7156,7 @@
     "kv_bytes_per_token": 24576,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 12.0,
-    "room_gb": 26.98,
+    "room_gb": 28.58,
     "lane_full_gb": 6.0,
     "lanes_full": 2,
     "notes": [

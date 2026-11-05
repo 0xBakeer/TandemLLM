@@ -369,8 +369,10 @@ def test_responses_passthrough_and_deepseek_usage_and_contract():
         r = px.rows()[-1]
         assert r["cached_tokens"] == 3 and r["cost_micros"] == round(
             (r["prompt_tokens"] - 3) * 0.27 + 3 * 0.07 + r["completion_tokens"] * 1.10)
+        # a fixed date fell out of the hour buckets' 31-day span once the calendar moved on
+        since = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
         for name, path in (("requests", "/v1/dashboard/requests"),
-                           ("usage", "/v1/dashboard/usage?bucket=hour&from=2026-10-01"),
+                           ("usage", "/v1/dashboard/usage?bucket=hour&from=" + since),
                            ("summary", "/v1/dashboard/summary"),
                            ("system", "/v1/dashboard/system")):
             doc = json.loads(px.get(path)[2])

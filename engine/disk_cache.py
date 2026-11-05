@@ -1059,7 +1059,7 @@ class DiskTier:
                     # every CUDA call of this thread waits for a graph capture on the engine
                     # thread to end, and holds the next one off until it is done (2026-10-02 21:09:
                     # a copy inside the drafter's capture failed both; engine/capture_lock.py)
-                    with capture_lock.LOCK:
+                    with capture_lock.GUARD:
                         self._ensure_chunk_slots(job.views)
                         buf = self.buf_chunk[0]
                         with self._fence:
@@ -1677,10 +1677,23 @@ def _arithmetic_knobs(path: str) -> bytes | None:
     return None
 
 
+def _tools_files(root: str, n: str) -> list[str]:
+    """The files of `tools.<n>`: tools/<n>.py, or every module of the package tools/<n>/ (the GPU
+    adapters, tools/gpu), in name order; [] for neither."""
+    q = os.path.join(root, "tools", n + ".py")
+    if os.path.isfile(q):
+        return [q]
+    pkg = os.path.join(root, "tools", n)
+    if n and os.path.isfile(os.path.join(pkg, "__init__.py")):
+        return sorted(os.path.join(pkg, f) for f in os.listdir(pkg) if f.endswith(".py"))
+    return []
+
+
 def _tools_modules(root: str, files: list[str]) -> list[str]:
-    """The `tools/` modules (kernels, quantized linears, the head) the engine's modules import,
-    and the ones those import, in name order. They compute rows as much as `engine/` does."""
-    seen: set[str] = set()
+    """The `tools/` modules (kernels, quantized linears, the head, the GPU adapters) the engine's
+    modules import, and the ones those import, in name order. They compute rows as much as `engine/`
+    does."""
+    seen: dict[str, list[str]] = {}
     todo = list(files)
     while todo:
         p = todo.pop()
@@ -1694,11 +1707,12 @@ def _tools_modules(root: str, files: list[str]) -> list[str]:
                      if m.group(1) else [m.group(2) or m.group(3)])
             for n in names:
                 n = n.split(" as ")[0].strip()
-                q = os.path.join(root, "tools", n + ".py")
-                if n and n not in seen and os.path.isfile(q):
-                    seen.add(n)
-                    todo.append(q)
-    return [os.path.join(root, "tools", n + ".py") for n in sorted(seen)]
+                if n and n not in seen:
+                    got = _tools_files(root, n)
+                    if got:
+                        seen[n] = got
+                        todo += got
+    return [f for n in sorted(seen) for f in seen[n]]
 
 
 def module_digest(rel: str, data: bytes, same: dict | None = None) -> bytes:

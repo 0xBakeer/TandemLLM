@@ -419,6 +419,7 @@ class JointGraphs:
         self.lru.evicted += len(self.lru.items)
         self.lru.items.clear()
         self.lru.nbytes.clear()
+        capture_lock.graphs_reset()                # SPD-257: the old pool's blocks went back
         # the old pool has no graph left (torch refuses a capture into a pool whose graphs were all reset while
         # some of its blocks live on); the set captures into a new one
         self.pool = torch.cuda.graph_pool_handle()

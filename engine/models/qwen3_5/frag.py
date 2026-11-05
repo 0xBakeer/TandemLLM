@@ -21,6 +21,7 @@ from __future__ import annotations
 import torch
 
 from engine import native_build as nb
+from tools import gpu as _gpu
 from engine.settings import SETTINGS as _S
 
 ON = _S.get("EXL3_FRAG") == "1"
@@ -60,12 +61,13 @@ def module():
     global _MOD
     if _MOD is None:
         from tools import exl3_linear as X
-        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_PDL {int(X.PDL)}\n" + _source()    # SPD-245
+        pdl = X.PDL and _gpu.profile().pdl()
+        src = f"#define EXL3_ST {X.STAGES}\n#define EXL3_PDL {int(pdl)}\n" + _source()    # SPD-245
         cpp = X._CPP + _CPP_ADD
         tag = nb.tag(cpp, src)
         _MOD = nb.load(f"qwen35_exl3_frag_{tag}", cpp_sources=[cpp], cuda_sources=[src],
                        functions=["exl3_gemm", "exl3_rot_in_frag", "exl3_rot_in_silu_frag"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_frag")],
                        verbose=False)
     return _MOD
 

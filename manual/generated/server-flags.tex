@@ -49,7 +49,7 @@
 \texttt{-{}-relax-\allowbreak{}rank} & \texttt{1} & Breaks the agreement rule: accept a drafted token among the target's top r. 1, the default, keeps the rule. \\
 \texttt{-{}-think-\allowbreak{}stall} & \texttt{on} & with -\kern0pt-conductor shadow or on, run the reasoning-loop arms of the policy's reasoning\_loop task (a pattern repeated over 128+ tokens, the history-wide 16-gram repeat, novelty collapse); the monitor decides whether a hit closes the ... \\
 \texttt{-{}-no-\allowbreak{}think-\allowbreak{}stall} & \texttt{sets think\_\allowbreak{}stall off} & never run the reasoning-loop arms (the budget still applies). \\
-\texttt{-{}-conductor} & \texttt{raw; served:\allowbreak{} on} & the second-level harness (server/conductor/monitor/). raw, the default (off is the same): nothing of it runs and the output is the raw engine's. shadow: every rule runs and journals, nothing is done. on: each task acts in its ... One of: raw, off, shadow, on. \\
+\texttt{-{}-conductor} & \texttt{raw} & the second-level harness (server/conductor/monitor/). raw, the default (off is the same): nothing of it runs and the output is the raw engine's. shadow: every rule runs and journals, nothing is done. on: each task acts in its ... One of: raw, off, shadow, on. \\
 \texttt{-{}-conductor-\allowbreak{}policy} & \texttt{none} & the monitor's policy file (default ops/supervisor.yaml), validated at start against ops/supervisor.schema.json. \\
 \texttt{-{}-conductor-\allowbreak{}watch-\allowbreak{}s} & \texttt{30} & with -\kern0pt-conductor shadow or on, how often the stall watchdog's watch looks for sessions whose client has gone. \\
 \texttt{-{}-think-\allowbreak{}budget} & \texttt{0} & default cap on reasoning tokens per request, 0 = uncapped. \\
@@ -135,7 +135,7 @@
 \texttt{-{}-image-\allowbreak{}act-\allowbreak{}gb} & \texttt{6} & admission: an image whose encode would need more than this (the tower's byte math, engine/vision.py) is refused with a 400. \\
 \texttt{-{}-usage-\allowbreak{}default} & \texttt{on (QSE\_\allowbreak{}USAGE\_\allowbreak{}DEFAULT)} & a streamed request that sends no stream\_options gets usage, timings and metrics on its finish chunk (on, the default: Open WebUI asks for include\_usage only when a model's Usage capability is ticked), or nothing, as before (off). ... One of: on, off. \\
 \texttt{-{}-usage-\allowbreak{}ledger} & \texttt{off; served:\allowbreak{} (a path)} & the SQLite usage ledger's path, or off (the default). \\
-\texttt{-{}-conductor-\allowbreak{}config} & \texttt{off; served:\allowbreak{} (a path)} & the conductor's config directory (versioned profiles, router, roles, packages and its journal, server/conductor/), or off (the default). \\
+\texttt{-{}-conductor-\allowbreak{}config} & \texttt{off} & the conductor's config directory (versioned profiles, router, roles, packages and its journal, server/conductor/), or off (the default). \\
 \texttt{-{}-backends} & \texttt{off} & the proxy's config database (proxy/, docs/proxy.md), or off (the default). \\
 \texttt{-{}-host-\allowbreak{}collector} & \texttt{on} & the System view's hosts (proxy/hostcollect.py): this machine's memory, GPU, CPU, disks and network, and the process behind each backend on it. One of: on, off. \\
 \texttt{-{}-usage-\allowbreak{}retention-\allowbreak{}days} & \texttt{400} & days the usage ledger keeps its rows (at least 400). \\

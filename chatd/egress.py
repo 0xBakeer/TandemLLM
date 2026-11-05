@@ -29,13 +29,17 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import os
+import select
 import socket
 import ssl
 import threading
+import time
 import urllib.parse
 
 CHUNK = 65536
 CONNECT_TIMEOUT_S = 15.0
+SPLICE_IDLE_TIMEOUT_S = 300.0        # a tunnel with nothing either way this long is half-open:
+                                     # the pump ends on it and both sockets close
 MAX_FETCH = 4 * 1024 * 1024
 
 
@@ -223,7 +227,7 @@ class Proxy:
                 up.sendall(f"{method} {path} HTTP/1.1\r\n".encode() + b"\r\n".join(keep) +
                            b"\r\nConnection: close\r\n\r\n" + body)
             c.settimeout(None)
-            _splice(c, up)
+            _splice(c, up)                       # the pumps carry the idle timeout
         except (Refused, ValueError) as exc:
             self.stats["refused"] += 1
             msg = str(exc).encode()
@@ -244,13 +248,32 @@ class Proxy:
                         pass
 
 
-def _splice(a: socket.socket, b: socket.socket) -> None:
+def _splice(a: socket.socket, b: socket.socket,
+            idle: float = SPLICE_IDLE_TIMEOUT_S) -> None:
+    """Pump both ways until either side ends. The idle clock is SHARED by the two pumps:
+    traffic in either direction feeds it, so a download — a client that sends nothing for
+    minutes while upstream streams a pip/Hugging Face/git/SSE transfer — is not read as an
+    idle tunnel. Only a tunnel both directions have stopped speaking through for `idle`
+    dies, which is the half-open case this exists for."""
+    last = [time.monotonic()]                # one shared cell: both pumps feed it
+
     def pump(src, dst):
         try:
             while True:
+                # The poll is a select, not a socket timeout: a 1 s timeout set for this
+                # pump's recv covered the same socket's sendall in the other pump, so a
+                # client that pauses reading for longer than it lost a live download.
+                # The sockets stay blocking — a blocked sendall waits the pause out as
+                # backpressure — and select answers the poll.
+                r, _, _ = select.select([src], [], [], min(1.0, idle))
+                if not r:
+                    if time.monotonic() - last[0] > idle:
+                        break
+                    continue
                 d = src.recv(CHUNK)
                 if not d:
                     break
+                last[0] = time.monotonic()
                 dst.sendall(d)
         except OSError:
             pass

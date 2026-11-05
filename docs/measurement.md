@@ -80,7 +80,9 @@ The paper's run covers 25 workloads: prose, chat, code, a 48-token answer and a 
 
 Each weight card in the setup guide carries one speed row of the current build (SPD-245): the `parallel` rows of `models/<id>/model.yaml`. `tools/parallel_card.py` measures a row against the server running the profile and writes its raw file to `models/<id>/measurements/`. The file holds every request's record, the `/health` samples of every round, the server's limit knobs and the row itself. The registry refuses a row that differs from its raw file's `row`.
 
-- Prompts: `bench/card-prompts-v1.json`, a code and a prose workload of about 190 to 250 tokens. The prefill filler is `bench/heldout_prose.txt`, repeated to the length. Every request starts with a nonce line and sends `cache_prompt: false` and `X-Tandem: raw`, with thinking off and a seed of its own. The row records the prompt set's version and hash, and the prompt tokens of each workload.
+A row measures the engine (SPD-249). Every request goes to `/v1/completions` with its prompt as text and `X-Tandem: raw`, so no conductor or chat-layer step runs. The prompt is the model's chat template over the card's messages with thinking off: the tool asks `/v1/tokenize` for the template's ids (`"ids": true`), turns them into text with the model's tokenizer (`--tokenizer`, the weights' directory), and checks that `/v1/tokenize` reads that text as the same ids, which are the ids `/v1/completions` reads. A prompt whose ids differ stops the run, and the raw file counts the prompts checked (`prompts_checked`). `/v1/chat/completions` works and is in beta; no published speed number comes from it.
+
+- Prompts: `bench/card-prompts-v1.json`, a code and a prose workload of about 190 to 250 tokens. The prefill filler is `bench/heldout_prose.txt`, repeated to the length. Every request starts with a nonce line and sends `cache_prompt: false`, with thinking off and a seed of its own. The row records the prompt set's version and hash, and the prompt tokens of each workload.
 - Decode: each workload alone, three runs after one warm-up each. A run's rate is (completion tokens - 1) / (last token - first token), and the row gives the median per workload.
 - Prefill: cold prompts of 2,048, 8,192 and 32,768 tokens, counted with `/v1/tokenize` and checked against the request's own `prompt_tokens`, three runs each, one token out. The row gives the median time to first token and prompt tokens over that time.
 - At once: 1, 2, 4 and 8 prose requests released together, one discarded warm-up round and three measured rounds a level, 512 tokens a request. The wall rate is all completion tokens over the time from the send to the last end, so it includes the first tokens. The decode rate counts the tokens after each request's first one, over the time from the first first token to the last token. The row gives the median of each over the rounds, and the median time to first token.
@@ -90,6 +92,18 @@ Each weight card in the setup guide carries one speed row of the current build (
 ## Baselines
 
 The paper compares StairCut with the same engine in two other configurations, on the same weights and the same box: plain greedy decoding (speculation off), and one drafter at a fixed block width (8 or 16) with its released tree budgets ([speculative-decoding.md](speculative-decoding.md)). On the benchmark row with the store off that is 49.89 tok/s for StairCut, 47.13 for block 8, 44.80 for block 16 and 13.69 for plain greedy decoding.
+
+## One measuring method
+
+Release pages, weight cards and the quality gate measure the same things: decode at one request, prefill, requests at once, long prompts. `tools/measure` measures each of them once and keeps the result, so a number measured for one of them is never measured again for another.
+
+- One row list, [tools/measure/rows.yaml](../tools/measure/rows.yaml). A row has a stable id (`length.32k`, `conc.card.c8`, `prefill.64k`, ...), what it measures, its request shape (prompt and its length, tokens out, requests at once, runs or rounds), the views that use it, and the server it runs on. Two rows of a different shape are two rows: the card's 1/2/4/8 at once use 169-246-token prompts, the report's requests at once use ~2k-token prompts with their prefill in the wall time; `prefill.32k` is one token out, `length.32k` is 512.
+- One runner. `python -m tools.measure run --url URL --rows ... | --view report --out DIR` measures only the rows the record store at DIR does not hold for this server's key: the row, the build, the pack, the box and a hash of the server's limit knobs. `--force` measures a row again. Every request goes to `/v1/completions` with `X-Tandem: raw` and every answer's mode is checked; a row of N requests at once is invalid without the server's own count of N decoding together.
+- A record store. One JSON per run under `DIR/runs/`, and `DIR/index.json` from the key to the run file. `python -m tools.measure merge` imports records that exist already (a gate report and its raw results, a report's data.json and the card tool's raw files). An imported record keeps its source, the tool, the date and the file, and the page shows it beside its rows.
+- Three views, none of which measures anything. `render report` writes the HTML page ([benchmark-report.md](benchmark-report.md)), for one pack or several packs of one model on one page. `render card` writes a weight card's numbers in the shape `tools/parallel_card.py` writes them. `render gate --base DIR --head DIR` gives the gate's verdict table from two stores, with the gate's own rules; every gate run writes its arms' records to `OUT/records/base` and `OUT/records/head` ([quality-gate.md](quality-gate.md)). `compare --old A --new B` sets two builds' rows side by side with a noise band.
+- A plan before the GPU. `python -m tools.measure plan --view report --pack P --build B --out DIR` lists every row with its record and source, or the hold that will measure it. Rows that need their own fresh server are grouped by server, and the groups are packed into holds of at most 62 minutes. It refuses when a row would be measured twice: a row asked by id that has a record, a warm row whose earlier rows already have records, or code that measures a recorded row beside the one asked.
+
+`tools/parallel_card.py`, `python -m tools.release_report` and `python -m tools.gate run` keep working; their help says where the one method is.
 
 ## Traps
 
@@ -103,6 +117,10 @@ Each of these cost a wrong number once.
 - A kernel probe whose working set fits in cache measures the cache. 266 GB/s on a 273 GB/s board is not a real reading.
 - Two runs that agree to six decimals have not agreed. They are the same run: once, a test server had bound its port beside another.
 - A quiet log is not a hung process. Python block-buffers into a pipe, so use `python -u`.
+- A lane count past the pool's guarantee reads as a slow model. Requests that wait for a lane and for the turn look the same as slow decoding, and a Prometheus row of the decode rate alone cannot tell the two apart. Compare the `/health` `parallel.turn` waits with the lane count.
+- A fresh engine can measure better than a used one. The resident conversation and the side slots keep their KV, and a long-lived session has more of it. Restart before comparing configurations.
+- The engine's own turns look like a client's. The preparer and the memory writer run generations over the client's context; count them with `qse_prepare_runs_total` and `qse_memory_writer_runs_total` (server/METRICS.md), or measure raw with the conductor off.
+- A first request after a restart is not a baseline. The pack's page cache is dropped at the start, so the first measurement runs on a busy disk.
 
 ## Limits
 

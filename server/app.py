@@ -66,6 +66,7 @@ from server import sampling_defaults  # noqa: E402  (SPD-245 a request's filters
 from server import prefill_burst  # noqa: E402  (SPD-245 the prefills of requests that arrive together)
 from server import roundlog as _roundlog  # noqa: E402  (SPD-187 the round logger, QWEN38_ROUND_LOG)
 from server import round_runner as _round_runner  # noqa: E402  (SPD-201 the runner-owned round)
+from server import health_cache  # noqa: E402  (SPD-249 /health's parts and reuse)
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
 from engine.models.adapter import ServeSpec  # noqa: E402  (ENG-406 what the family says about its model)
@@ -97,6 +98,7 @@ from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
 from server import cache_peek, chat_forward, model_card, tokenize_api  # noqa: E402
 from server import memory_api  # noqa: E402
+from server import mode as mode_mod  # noqa: E402  (OPS-260 engine or chat, and what runs beside the engine)
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
 from server import session_tokens as session_tokens_mod  # noqa: E402
@@ -298,6 +300,8 @@ class ClientGone(ConnectionResetError):
     request -- the stream's handler, `_complete_logged` -- treats this one the same way."""
 INFLIGHT = {"waiting": 0, "running": 0, "lane": 0, "served": 0, "refused": 0, "errors": 0,
             "timeouts": 0, "abandoned": 0}
+#: SPD-249: `/health`'s full body, its parts timed and reused for QSE_HEALTH_TTL_MS (server/health_cache.py)
+HEALTH = health_cache.HealthCache()
 
 # S1: who waits for the engine, in what order, and who holds it. Every waiter has a rank: a short
 # side request (a client's title call, capped and without thinking) goes first, because it holds
@@ -543,11 +547,93 @@ def _lane_room(job, where: str) -> bool:
         return where != "prefill"
 
 
-def _par_status() -> dict:
+def _health_body(part) -> dict:
+    """`/health`'s full body but the fields `HEALTH.answer`'s caller builds fresh (status, fault,
+    uptime, in flight, engine busy); `part(name, fn)` times each report (server/health_cache.py)."""
+    roles = part("roles", _safe, roles_report)
+    return {
+        "status_port": _status_port(),
+        "model": served_name(), "base_model": STATE.get("model"),
+        "version": STATE.get("version", ""), "weights": part("weights", weights_profile),
+        "max_queue": STATE.get("max_queue"),
+        "request_timeout_s": STATE.get("request_timeout"),
+        "max_len": STATE.get("max_len"),
+        "sampling": part("sampling", _health_sampling),
+        "penalty": {"rep": STATE["pen_spec"].rep,
+                    "presence": STATE["pen_spec"].presence,
+                    "freq": STATE["pen_spec"].freq,
+                    "no_repeat": STATE["pen_spec"].no_repeat},
+        "default_max_tokens": STATE.get("default_max_tokens"),
+        "cache": part("cache", cache_stats),
+        "memory": part("memory", _memory),
+        # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
+        **({"kv_pool": part("kv_pool", kv_pool_report)} if kvpool.POOL is not None else {}),
+        # the small models and the memory governor (server/rolemem.py)
+        "roles": roles,
+        # OPS-260: engine or chat, and what runs beside the engine (server/mode.py)
+        **part("mode", _mode_report, roles),
+        **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
+        # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
+        **_par_status(part),
+    }
+
+
+def _mode_report(roles: dict | None = None) -> dict:
+    """OPS-260's `mode` and `loaded` (server/mode.py), from a roles report already built when given;
+    never raises: a report that fails says so in `loaded` and /health stays up."""
+    try:
+        roles = _safe(roles_report) if roles is None else roles
+        return mode_mod.report(STATE, roles if "error" not in roles else None)
+    except Exception as exc:                                       # noqa: BLE001
+        return {"mode": "chat" if STATE.get("conductor") is not None else "engine",
+                "loaded": {"error": f"{type(exc).__name__}: {exc}"[:200]}}
+
+
+# /v1/models's copy of it, built at most once a MODES_TTL_S: clients poll the route (OPS-260)
+MODES_TTL_S = 2.0
+_modes_last: dict = {"at": None, "body": None}
+
+
+def _models_mode(clock=time.monotonic) -> dict:
+    now = clock()
+    if _modes_last["at"] is None or now - _modes_last["at"] >= MODES_TTL_S:
+        _modes_last.update(at=now, body=_mode_report())
+    return _modes_last["body"]
+
+
+def _health_sampling() -> dict:
+    return {"temperature": STATE.get("temperature", 0.0),
+            "top_p": STATE.get("top_p", 1.0),
+            "top_k": STATE.get("top_k", 0),
+            # SPD-245: what a sampled request that names no filter runs with
+            "unnamed_filters": sampling_defaults.resolve(
+                None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
+            # SPD-245: whether an unseeded sampled request draws its own seed
+            "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
+                         "keyed": sampling_defaults.keys_unseeded(
+                             _S.get("FRESH_SEED"), _sampled_q_free())},
+            # SRV-241: what a regenerate samples with, and how many there were
+            "regenerate": (STATE["regenerate"].report()
+                           if STATE.get("regenerate") is not None
+                           else {"mode": "off"}),
+            # SRV-475: the checkpoint's sampling and the loop escape's counts
+            "card": STATE.get("card_sampling"),
+            "loop_escape": (STATE["escapes"].report()
+                            if STATE.get("escapes") is not None else None),
+            # SRV-477: `--reasoning-effort none|off` turns thinking off
+            "thinking_default": STATE.get("thinking_default", "on")}
+
+
+def _untimed(name, fn, *args):
+    return fn(*args)
+
+
+def _par_status(part=_untimed) -> dict:
     """`/health`'s `parallel` key: the pool's report with side slots, the one slot and why when `--parallel N`
-    asked for more than the model's engine builds (#104), nothing otherwise."""
+    asked for more than the model's engine builds (#104), nothing otherwise. `part(name, fn)` times a
+    report (SPD-249, server/health_cache.py)."""
     if dict.get(STATE, "pool") is not None:
-        return {"parallel": _par_health()}
+        return {"parallel": _par_health(part)}
     n = dict.get(STATE, "parallel_unbuilt")
     if n:
         return {"parallel": {"n": 1, "running": INFLIGHT["running"], "decoding": [], "requested": n,
@@ -556,26 +642,34 @@ def _par_status() -> dict:
     return {}
 
 
-def _par_health() -> dict:
+def _par_health(part=_untimed) -> dict:
     """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
     (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader), and the
     joint decode graphs the engine keeps (`joint_graphs`, engine/models/graph_lru.py; None without)."""
-    out = dict.get(STATE, "pool").report()
+    out = part("par_pool", dict.get(STATE, "pool").report)
     r = dict.get(STATE, "disk_side")
-    out["side_disk"] = r.report() if r is not None else None
+    out["side_disk"] = part("par_side_disk", r.report) if r is not None else None
     eng = dict.get(STATE, "engine")
+    st0 = getattr(eng, "stats", None)
+    if out.get("slots") and isinstance(st0, dict):
+        # SPD-271: slot 0's engine is the server's own (its slot keeps no values)
+        out["slots"][0]["capture_failed"] = st0.get("idle_capture_failed")
     jg = getattr(getattr(eng, "fn", None), "__dict__", {}).get("joint_graphs")
-    out["joint_graphs"] = jg.report() if hasattr(jg, "report") else None
+    out["joint_graphs"] = part("par_joint_graphs", jg.report) if hasattr(jg, "report") else None
     rep = getattr(eng, "joint_graphs_report", None)
     if out["joint_graphs"] is None and callable(rep):
-        out["joint_graphs"] = rep()                  # SPD-163: the 27B's joint verify graphs
+        out["joint_graphs"] = part("par_joint_graphs", rep)      # SPD-163: the 27B's joint verify graphs
+    js = getattr(eng, "joint_stats", None)
+    # SPD-249: the joint-pass shape; a family's report that raises gives an error entry, not a failed /health
+    out["joint_stats"] = part("par_joint_stats", _safe, js) if callable(js) else None
     rr = _round_runner.RUNNER
-    out["round_runner"] = rr.report() if rr is not None else None      # SPD-201
+    out["round_runner"] = part("par_runner", rr.report) if rr is not None else None      # SPD-201
     pool = dict.get(STATE, "pool")
     pl = getattr(getattr(pool, "meeting", None), "planner", None)
-    out["planner"] = pl.report() if pl is not None and hasattr(pl, "report") else None   # SPD-187
+    out["planner"] = (part("par_planner", pl.report)
+                      if pl is not None and hasattr(pl, "report") else None)   # SPD-187
     if kvpool.POOL is not None:
-        out["kv_pool"] = kv_pool_report()
+        out["kv_pool"] = part("par_kv_pool", kv_pool_report)
     # SRV-709: lanes that gave their memory back mid-answer and went on (`Handler._recomputing`)
     out["recompute"] = {"on": KV_RECOMPUTE, "admit_rows": KV_ADMIT_ROWS,
                         **(dict.get(STATE, "kv_recompute") or {"gave_way": 0, "resumed": 0,
@@ -622,6 +716,20 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
 #: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
 KV_RECOMPUTE_MAX = 16
+#: SRV-775: a request the memory gate refuses waits for the prefills in flight; alone, it runs over the
+#: engine's declared peak and is counted (`_par_admit`). 1: a lone one waits too, and the gate counts the
+#: workspaces of the prefills in flight on the reserve, as the admission holds them: by their rows (in no profile)
+PEAK_STRICT = os.environ.get("QSE_PEAK_STRICT") == "1"
+#: SRV-773: memory gate passes for one admission while each moves the resume point down (`_par_admit`); the
+#: last charges every row
+GATE_PASSES = 3
+#: SRV-775: a request waiting for the prefills in flight runs the memory gate again once one of them has run, its
+#: resume point moved, or this many seconds passed (`_par_admit`; a pass sheds, collects and empties the allocator
+#: while the other lanes decode, and it ran every second)
+PEAK_REGATE_S = 5.0
+#: SRV-773: the `[req]` line's `peak_gib=`: the allocator's peak over the request less what was allocated at
+#: its prefill's start, read for a request that ran alone (the peak is reset then); a measurement knob
+REQ_PEAK = os.environ.get("QSE_REQ_PEAK") == "1"
 
 #: The least output a side slot's window must leave a request (its prompt and the margins
 #: taken): below it the request waits for slot 0, at or above it the request runs there with its
@@ -799,6 +907,22 @@ SIDE_SLOT0_WAIT_S = float(_S.get("SIDE_SLOT0_WAIT_S") or 3.0)
 SIDE_RESIDENT_GB = float(_S.get("SIDE_RESIDENT_GB") or 0.5)
 SIDE_STASH_GB = float(_S.get("SIDE_STASH_GB") or 1.0)
 
+#: SPD-257: `on`: every resident prefix (slot 0's and each side slot's) holds its end anchor's buffers
+#: from the load on, outside the memory policy (`ResidentPrefix.reserve_end`), so a turn's end is
+#: never refused for room the other caches hold; `off`: asked of the policy at every end, as before
+END_RESERVE = (_S.get("END_RESERVE") or "on").strip().lower()
+
+#: SPD-257: `promote`: a chat that ran as a guest on a side slot becomes the slot's conversation at
+#: its end and keeps its end anchor (`ResidentPrefix.promote_guest`), when its rows above the head
+#: it shared are at least the old conversation's or the old one has been idle SIDE_GUEST_IDLE_S;
+#: `off`: the guest's end is not kept and the slot's conversation stays (as before)
+SIDE_GUEST_END = (_S.get("SIDE_GUEST_END") or "promote").strip().lower()
+SIDE_GUEST_IDLE_S = float(_S.get("SIDE_GUEST_IDLE_S") or 300.0)
+
+#: SPD-257: `on`: a new conversation or a guest takes the free side slot whose conversation was
+#: served longest ago (`Pool.take_side`); `off`: the lowest free slot, as before
+SIDE_LRU = (_S.get("SIDE_LRU") or "on").strip().lower()
+
 #: SRV-629: `on`: a request with images may take a side slot (each slot is its own engine over the
 #: same weights, with its own `mm` and rotary offset; the tower runs in the slot's prefill), routed
 #: on its expanded key ids (`_mm_keys`); `off`: slot 0 only, as 0.12.0. Live 2026-10-19: two
@@ -890,10 +1014,238 @@ def _slot0_stale(now: float | None = None) -> str | None:
 SIDE_AFTER_OWN_S = 15.0
 
 
-def _side_ok(waited_s: float, holder) -> bool:
+#: SPD-249: `on`: TandemLLM's own raw questions take an idle side slot (`_par_side_need`'s
+#: `lane_side`, `_side_ok`'s `own`); `off`: the side lane and the SIDE_AFTER_OWN_S wait, as before
+OWN_SIDE = (_S.get("OWN_SIDE") or "on").strip().lower()
+
+
+def _side_ok(waited_s: float, holder, own: bool = False) -> bool:
     """May a request that has waited `waited_s` take a side slot, given slot 0's holder
-    (`_own_holder()`: None for a client request or a free slot, else TandemLLM's own work)?"""
-    return holder is None or waited_s >= SIDE_AFTER_OWN_S
+    (`_own_holder()`: None for a client request or a free slot, else TandemLLM's own work)?
+    SPD-249: TandemLLM's own question (`own`) may at once: the wait keeps a client's conversation
+    for slot 0's caches, and a question has none (`no_carry`). In a burst of chats the router's
+    longer questions waited the 15 s behind each other on slot 0 and ran out their 8 s timeout."""
+    return holder is None or waited_s >= SIDE_AFTER_OWN_S or (own and OWN_SIDE == "on")
+
+
+#: SPD-249: `on`: the router skips its Qwen stage when `_own_eta_ms` says the answer cannot come
+#: inside the stage's timeout; `off`: it asks and waits the timeout out, as before
+OWN_ETA = (_S.get("OWN_ETA") or "on").strip().lower()
+#: SRV-763: `solo`: that estimate's prefill rate is the requests' that prefilled alone (`_own_rate`);
+#: `all`: every request's (the peek's rate), as before
+OWN_RATE = (_S.get("OWN_RATE") or "solo").strip().lower()
+#: SRV-763: `prefill`: the other slots charge a unit a turn while they prefill or decode, or hold a
+#: request that has not reached its prefill yet (`_turn_units_ms`); `busy`: every busy slot that
+#: does not decode charges a whole chunk, as before
+OWN_UNITS = (_S.get("OWN_UNITS") or "prefill").strip().lower()
+#: SRV-763: the rate of that estimate's burst term (the requests in the router or waiting for a
+#: slot, `_burst_others`): `peek`, every request's (the peek's rate, as before), since a burst's
+#: prefills share the GPU; `solo`, `_own_rate`'s
+OWN_BURST_RATE = (_S.get("OWN_BURST_RATE") or "peek").strip().lower()
+#: SPD-249: the chat template's rows around a raw question's two messages (a margin, not a count)
+OWN_TEMPLATE_ROWS = 16
+#: SPD-249: the decode turns a question's answer takes after its prefill (a choice id: its first token
+#: comes with the prefill, the rest in a block or two)
+OWN_ANSWER_TURNS = 2
+#: SPD-249: a decoding round's time before the runner has measured one (ms)
+OWN_ROUND_MS = 200.0
+
+
+#: SPD-249: the requests inside the router now (`_planning`): a burst's other chats, whose questions
+#: and then prefills share the GPU with a question asked now
+PLANNING = {"n": 0}
+
+
+@contextlib.contextmanager
+def _planning():
+    with QUEUE:
+        PLANNING["n"] += 1
+    try:
+        yield
+    finally:
+        with QUEUE:
+            PLANNING["n"] -= 1
+
+
+def _burst_others() -> int:
+    """SPD-249: the requests of a burst that a question asked now competes with and that no slot
+    shows yet: the other requests inside the router (the asker's own request is one of them) and
+    the client requests waiting for a slot. Each prefills at least a question's rows within its
+    timeout (its own question, or its prompt once the router is done with it)."""
+    with QUEUE:
+        planning = PLANNING["n"]
+        waiting = sum(1 for w in WAITERS if not w.get("own"))
+    return max(0, planning - 1) + waiting
+
+
+def _turn_units_ms(rate: float) -> list[float]:
+    """SPD-249: the other GPU holders' units now, each the most it holds the shared turn before its
+    next safe point: the round runner's round (one unit for all its lanes), a slot loop's block
+    (one unit for the lanes in the joint barrier, one each alone), a prefill chunk at `rate` for a
+    slot that prefills (the chunk it is on, SRV-763) and for TandemLLM's own job on slot 0
+    (`OWN_UNITS=busy`: for every busy slot that does not decode, as before)."""
+    pool = dict.get(STATE, "pool")
+    if pool is None:
+        return []
+    rr = _round_runner.RUNNER
+    rnd = OWN_ROUND_MS
+    if rr is not None and rr.stats.get("rounds"):
+        rnd = rr.ms.get("round", 0.0) / rr.stats["rounds"] or OWN_ROUND_MS
+    chunk = int(STATE.get("prefix_chunk") or 0) or 4096
+    units = []
+    # slot 0 runs under the engine lock (its pool slot may have a lock of its own that nobody takes)
+    busy = [s for s in pool.slots if (LOCK.locked() if s.index == 0 else s.busy)]
+    phases = [s.phase for s in busy]
+    if "runner" in phases:
+        units.append(rnd)
+    if "decode" in phases:
+        units.append(rnd)
+    units += [rnd for p in phases if p == "solo"]
+    if OWN_UNITS != "prefill":
+        units += [1e3 * chunk / rate for p in phases if p not in ("runner", "decode", "solo")]
+        return units
+    # SRV-763: a slot charges a prefill unit while it prefills (the chunk it is on), on slot 0
+    # while TandemLLM's own job (no request) holds it, and while its request has not reached its
+    # prefill (its prompt's rows, up to a chunk: the memory admission, the vision tower). A
+    # request's slot in its end's bookkeeping has no GPU work to wait for (idle 2026-10-31: the
+    # router's class question, ended, still held slot 0, and the package question's estimate
+    # read 3 turns x 3.8 s for it)
+    for s in busy:
+        if s.phase == "prefill":
+            left = getattr(s, "prefill_left", None)
+            left = chunk if left is None else left
+            units.append(1e3 * max(1, min(chunk, int(left))) / rate)
+        elif s.phase == "" and s.index == 0 and _own_job_holds():
+            units.append(1e3 * chunk / rate)
+        elif s.phase == "" and getattr(s, "pending_rows", None):
+            units.append(1e3 * max(1, min(chunk, int(s.pending_rows))) / rate)
+    return units
+
+
+def _pending_mark(pool, side, rows: int) -> None:
+    """SRV-763: the slot a request was granted (`side`, else slot 0) holds `rows` prompt rows its
+    prefill has not started on (`_prefill_mark` and `_par_end` clear it), for the other requests'
+    `_turn_units_ms`."""
+    if pool is None:
+        return
+    slot = side if side is not None else pool.slots[0]
+    slot.pending_rows = int(rows) if int(rows or 0) > 0 else None
+
+
+def _own_job_holds() -> bool:
+    """SRV-763: slot 0 is held by TandemLLM's own work that is no request (the prepare or memory
+    job, the shadow reader, a lock no request took), whose prefill's progress nobody reports."""
+    with QUEUE:
+        who = HOLDER["who"]
+    if who is None:
+        return LOCK.locked()
+    return who.get("rank") in (RANK_SHADOW, RANK_PREP)
+
+
+def _own_rate() -> float | None:
+    """SRV-763: the prefill rate `_own_eta_ms` reads: with OWN_RATE `solo` the median of the last
+    requests whose prefill had the GPU turn alone (`cache_peek.SOLO_RATES`; live 2026-10-31 13:45 to
+    18:10: 969 tok/s alone, 178 shared, and after a burst every request of the peek's window was
+    shared), else (or without one yet) the peek's rate."""
+    if OWN_RATE == "solo":
+        r = cache_peek.SOLO_RATES.rate()
+        if r:
+            return r
+    return _peek_rate()
+
+
+def _burst_rate(rate: float) -> float:
+    """SRV-763: the prefill rate of `_own_eta_ms`'s burst term: with OWN_BURST_RATE `peek` the peek's
+    (every request's, as before: in a burst the prefills share the GPU, and an estimate too short
+    asks a question that then runs out its timeout), else (or without one) `rate`."""
+    if OWN_BURST_RATE == "peek":
+        r = _peek_rate()
+        if r:
+            return r
+    return rate
+
+
+def _own_side_free(rows: int, max_new: int, lane_job: bool, holder) -> bool:
+    """SPD-249: whether an idle side slot takes a raw internal question of `rows` prompt rows now,
+    as the handler's admission does: one short enough for the side lane takes a slot whose last end
+    is not kept for a carry (`lane_side`; OWN_SIDE off: the lane, no slot), a longer one any idle
+    slot when `_side_ok` lets it."""
+    pool = dict.get(STATE, "pool")
+    if pool is None or pool.n < 2:
+        return False
+    need = int(rows) + int(max_new) + SIDE_MARGIN
+    if lane_job:
+        return OWN_SIDE == "on" and pool.side_free(need, _carry_keep_s())
+    return _side_ok(0.0, holder, own=True) and pool.side_free(need)
+
+
+def _carry_keep_s() -> float:
+    """FX10: how long a side slot's last end is kept from a short unrelated request."""
+    return CARRY_KEEP_S if SIDE_CARRY != "off" else 0.0
+
+
+def _own_eta_ms(texts, max_new: int = 24) -> float | None:
+    """SPD-249 (the router's `own_eta`): ms from now until a raw question of `texts` (its system
+    prompt and its message) to this server has its prefill done (`queue_wait.own_eta_ms`): at
+    once on a free slot; through the side lane after the jobs pending there; behind slot 0's
+    holder otherwise (TandemLLM's own question: what is left of its prefill, then the own
+    questions waiting; a client's turn: not in time). A question on its own slot shares the GPU
+    turn with the slots that run (`_turn_units_ms`): its prefill chunks and answer blocks each
+    wait a unit of every other holder (live 2026-10-29: a 449-token question beside slot 0's
+    background prefill took 17.9 s on a free side slot). The burst it arrives in is not on any slot
+    yet: every other request inside the router or waiting for a slot (`_burst_others`) will prefill
+    beside it, and with the turn shared the question's rows come after as many rows of each
+    (8 chats of 2k at once, live: 16 of 32 questions ran out their 8 s). None without a measured
+    prefill rate, or when slot 0 is held by something that is no request: the question is asked
+    as before."""
+    tok = STATE.get("tok")
+    rows = OWN_TEMPLATE_ROWS
+    for t in texts:
+        try:
+            rows += len(tok(t, add_special_tokens=False).input_ids)
+        except Exception:                                          # noqa: BLE001
+            rows += int(len(t or "") / 3.5) + 1
+    rate = _own_rate()
+    if not rate:
+        return None
+    lane = STATE.get("lane")
+    lane_job = lane is not None and lane.eligible(rows, max_new)
+    with QUEUE:
+        who = HOLDER["who"]
+        own_rows = sum(int(w.get("rows") or 0) for w in WAITERS if w.get("own"))
+    chunk = int(STATE.get("prefix_chunk") or 0) or 4096
+    turns = -(-rows // chunk) + OWN_ANSWER_TURNS
+    others = _burst_others()
+    share = (qwait.turn_wait_ms(turns, _turn_units_ms(rate))
+             + (1e3 * rows * others / _burst_rate(rate) if others else 0.0))
+    if not LOCK.locked() or _own_side_free(rows, max_new, lane_job, _own_holder()):
+        return qwait.own_eta_ms(rows, rate, free=True, turn_ms=share)
+    if lane_job:
+        ahead = sum(len(j.ids) for j in list(lane.jobs) if j.state == "pending")
+        return qwait.own_eta_ms(rows, rate, free=False, ahead_rows=ahead, holder_ms=0.0)
+    if who is None:
+        return None
+    if who.get("own"):
+        held = time.monotonic() - float(who.get("t_hold") or time.monotonic())
+        left = 1e3 * int(who.get("rows") or 0) / rate - 1e3 * held
+        return qwait.own_eta_ms(rows, rate, free=False, ahead_rows=own_rows, holder_ms=left,
+                                turn_ms=share)
+    return qwait.own_eta_ms(rows, rate, free=False, holder_ms=None)
+
+
+def _own_idle_s() -> float | None:
+    """VIS-119 (the router's `own_idle`): the seconds since the last request or side-lane job
+    ended while nothing runs, waits, plans in the router or holds the engine lock; None while
+    something does. The router's shadow questions after their turn wait for it
+    (server/conductor/deferred.py)."""
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or INFLIGHT["lane"] or WAITERS or \
+                PLANNING["n"]:
+            return None
+    if LOCK.locked() or STATE.get("draining"):
+        return None
+    last = max(float(STATE.get("last_end_mono") or 0.0), float(STATE.get("lane_end_mono") or 0.0))
+    return max(0.0, time.monotonic() - last)
 
 
 def _holder_name() -> str:
@@ -950,7 +1302,8 @@ def _mm_rows(n_text: int, images: list) -> int:
 
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
-                   parent: str | None = None, session: str | None = None) -> int | None:
+                   parent: str | None = None, session: str | None = None,
+                   own: bool = False) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images while SIDE_IMAGES is off (or
     with a tower that builds its own context, `_mm_keys`), or one no side slot is long enough for.
@@ -972,7 +1325,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     worker's call that continues slot 0's rows (or its park or NVMe entry) does. Live
     2026-10-18 01:00: two parents' returns, their rows on the NVMe, took the side slot after
     `prefer_side` and read 11,119 and 11,010 tokens again: the client's copy, without the
-    router's notes, matched no entry there."""
+    router's notes, matched no entry there.
+
+    SPD-249: TandemLLM's own raw question short enough for the side lane (`own`, `lane_kind` raw) gets
+    a side window (`why["lane_side"]`): it has no conversation of its own, and an idle side slot
+    serves it where the lane would serve it after the questions ahead of it, from row 0 on slot 0.
+    A guest of slot 0's conversation is said as before (`why["guest"]`), so the handler tries
+    an idle side slot before an idle slot 0 and slot 0's rows stay that conversation's."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
@@ -986,9 +1345,28 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     lane = lane_kind is not None
     try:
         ids = build_prompt(body, client, count="ids", left_out=left_out)
-    except Exception:                                              # noqa: BLE001
-        return None                       # the render fails again under the lock, as a 400
+    except Exception as exc:                                       # noqa: BLE001
+        # the render fails again under the lock, as a 400; SPD-249: said, since this request now waits for slot 0
+        print(f"[parallel] no side window: the prompt's ids failed ({type(exc).__name__}: {exc})", flush=True)
+        return None
     rows = len(ids)
+    if lane and own and lane_kind == "raw" and OWN_SIDE == "on" and not images:
+        why.update(ids=ids, lane_side=True)
+        need = rows + int(max_new) + SIDE_MARGIN
+        why["need"] = need
+        if not any(need <= s.max_len for s in pool.side()):
+            return None
+        res = dict.get(STATE, "resident")
+        if res is not None and SIDE_GUESTS == "on":
+            # with slot 0 free, a guest of its conversation still takes an idle side slot first
+            try:
+                valid = int(getattr(res, "valid", 0) or 0)
+                chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
+                if valid and _guest_of_slot0(res, rows, res.common(ids), chunk):
+                    why["guest"] = valid
+            except Exception:                                      # noqa: BLE001
+                pass
+        return need
     if images:
         # SRV-629: the window holds the expanded rows, not one placeholder an image (8
         # screenshots: about 7,700 rows), and every test below runs on the key ids, as the caches
@@ -1151,13 +1529,20 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                      or bool(res.end is not None and res.end.get("mm")))
             # ENG-371: a worker beside its own parent: the parent stays on slot 0
             mine = stay and parent is not None and getattr(res, "owner", None) == parent
+            # SRV-773: a homeless long prompt takes a free side slot before the slot whose conversation resumes
+            # at a kept end (2026-11-02: an 85k turn sent a 62.9k conversation to the NVMe and was refused on
+            # the one closed slot)
+            kept_end = getattr(res, "end", None) is not None and valid >= 2 * chunk
+            long_end = kept_end and len(ids) > int(getattr(res, "guest_max", 0) or 0)
             stale = (_slot0_stale() if other and valid >= 2 * chunk and bound and not mine
                      else None)
             if stale is not None:
                 why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
-            elif other and valid >= 2 * chunk and (bound or mine):
+            elif other and valid >= 2 * chunk and (bound or mine or long_end):
                 why["prefer_side"] = valid
-                if len(ids) <= SIDE_NEW_SHORT and not stay:
+                if long_end and not (bound or mine):
+                    why["prefer_side_end"] = valid     # no wait for a busy side slot (`prefer_side_wait`)
+                elif len(ids) <= SIDE_NEW_SHORT and not stay:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
                     # takes slot 0 and sends the long conversation to the NVMe
                     why["prefer_side_wait"] = True
@@ -1207,8 +1592,8 @@ def _par_nums(why: dict) -> str:
     nums = " ".join(f"{k}={why[k]}" for k in ("view", "view_common", "valid", "res_common",
                                               "conv", "need", "guest", "park", "slot0_wait_s",
                                               "home", "home_share", "home_wait", "hop_from",
-                                              "prefer_side", "slot0_stale", "new_wait", "spill",
-                                              "spill_head", "slot0_wait")
+                                              "prefer_side", "prefer_side_end", "slot0_stale", "new_wait",
+                                              "spill", "spill_head", "slot0_wait")
                     if k in why)
     if "n_images" in why:
         nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
@@ -1296,12 +1681,17 @@ def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
 
 
 def _par_end(pool, side, cid) -> None:
-    """A request's end on its slot: its bytes out of the admission, its slot out of the barrier,
-    the turn and the side slot given back."""
+    """A request's end on its slot: its bytes out of the admission and its workspace out of the memory
+    policy's prefills in flight (SRV-775: a request that passed the gate and never prefilled too), its slot
+    out of the barrier, the turn and the side slot given back."""
     if pool.admission is not None:
         pool.admission.release(cid)
+    mem = dict.get(STATE, "mem")
+    if getattr(mem, "prefill_done", None) is not None:
+        mem.prefill_done()
     if pool.burst is not None:
         pool.burst.leave(side.index if side is not None else 0)
+    (side if side is not None else pool.slots[0]).pending_rows = None     # SRV-763
     if side is None:
         pool.slots[0].phase = ""
         return
@@ -1317,6 +1707,19 @@ def _par_end(pool, side, cid) -> None:
 # ------------------------------------------------------------------ parallel requests
 # `--parallel N` (server/slots.py). Every helper below runs only when `STATE["pool"]` exists; a
 # server without side slots never calls one.
+def _par_prefilled(cid) -> None:
+    """SRV-775: the request's prefill has run: its workspace leaves the admission's reservation (its KV
+    part stays until `_par_end`) and the memory policy's prefills in flight. A side slot prefills without
+    the policy (`cache.prefill(..., mem=None)`), so `Budget.prefilled` never runs there; this does, on
+    every slot (and with no side slots only the policy's part)."""
+    pool = dict.get(STATE, "pool")
+    if cid is not None and pool is not None and pool.admission is not None:
+        pool.admission.prefilled(cid)
+    mem = dict.get(STATE, "mem")
+    if getattr(mem, "prefill_done", None) is not None:
+        mem.prefill_done()
+
+
 def _burst_prefilled() -> None:
     """SPD-245: a member of the prefill burst has prefilled: the GPU turn back, until every member has."""
     pool = dict.get(STATE, "pool")
@@ -1344,13 +1747,33 @@ def _joint_forward(eng, tokens, start: int, whole: bool):
     i = _par_index()
     if not pool.burst.member(i):
         return None
-    ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+    # SPD-249: an adapter with its own joint prefill (`prefill_joint_ok(T, start)` and a static
+    # `prefill_joint(items)` of the same contract) runs the burst through it; else engine/model.py's
+    own_ok = getattr(eng, "prefill_joint_ok", None)
+    err = None
+    if own_ok is not None:
+        ok = bool(whole and tokens is not None and own_ok(int(tokens.numel()), int(start)))
+        run = type(eng).prefill_joint
+        prep = getattr(eng, "prefill_joint_prepare", None)
+        if ok and prep is not None:
+            # SPD-249: the member's own steps before the forward (its chain, its start, its KV pages) on its
+            # own thread: what fails there is this member's alone. It joins with no job (out of the joint forward,
+            # which the others run without it) and raises it after the join, as its own forward would.
+            try:
+                prep(int(tokens.numel()), int(start))
+            except BaseException as e:             # noqa: BLE001 - raised below, after the join
+                ok, err = False, e
+    else:
+        ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+        run = model_mod.prefill_joint
     held = pool.turn is not None and pool.turn.held_by(i)
     done, logits = pool.burst.join(
-        i, (eng, tokens, int(start)) if ok else None, model_mod.prefill_joint,
+        i, (eng, tokens, int(start)) if ok else None, run,
         release=(lambda: pool.turn.release(i)) if held else None,
         acquire=(lambda: pool.turn.acquire(i)) if held else None,
         rows=int(tokens.numel()) if ok else 0)
+    if err is not None:
+        raise err
     return logits if done else None
 
 
@@ -1382,10 +1805,78 @@ def _par_chunks(on_chunk):
         if on_chunk is not None:
             on_chunk(done, total)
         pool = dict.get(STATE, "pool")
+        if pool is not None:
+            slot = pool.slots[_par_index()]
+            if slot.phase == "prefill":
+                slot.prefill_left = max(0, int(total) - int(done))     # SRV-763
         if pool is not None and pool.turn is not None:
             pool.turn.pause(_par_index())
     hook.info = getattr(on_chunk, "info", None)
     return hook
+
+
+#: SRV-773 (`REQ_PEAK`): thread -> (allocated at its prefill's start, whether it ran alone)
+_REQ_PEAK_AT: dict = {}
+
+
+def _req_peak_start() -> None:
+    """SRV-773 (`REQ_PEAK`): at a prefill's start, what is allocated; the allocator's peak is reset when the
+    request runs alone (no other request running, no other slot busy), so the peak is its own."""
+    pool = dict.get(STATE, "pool")
+    busy = sum(1 for s in pool.slots if s.busy) if pool is not None else 0
+    alone = int(INFLIGHT.get("running", 0)) <= 1 and busy <= 1
+    if alone:
+        torch.cuda.reset_peak_memory_stats()
+    _REQ_PEAK_AT[threading.get_ident()] = (cache.cuda_stats("allocated_bytes.all.current")[0], alone)
+
+
+def _req_peak_field() -> str:
+    """SRV-773 (`REQ_PEAK`): the `[req]` line's `peak_gib=`: the allocator's peak since this request's prefill
+    started less what was allocated then, decode included; `-` for a request that did not run alone."""
+    a0, alone = _REQ_PEAK_AT.pop(threading.get_ident(), (None, False))
+    if a0 is None or not alone:
+        return " peak_gib=-"
+    try:
+        return f" peak_gib={(cache.cuda_stats('allocated_bytes.all.peak')[0] - a0) / 2**30:.2f}"
+    except Exception:                                              # noqa: BLE001
+        return " peak_gib=-"
+
+
+@contextlib.contextmanager
+def _prefill_mark(rows: int):
+    """SRV-763: this request's slot reads "prefill" with `rows` left (the chunk hook counts them
+    down) while its prompt prefills, for the other requests' `_turn_units_ms`; a slot whose phase is
+    set already keeps it. No-op without side slots."""
+    pool = dict.get(STATE, "pool")
+    slot = _par_slot(pool) if pool is not None else None
+    if slot is not None:
+        slot.pending_rows = None             # its prefill started (`_pending_mark`)
+    if slot is None or slot.phase != "":
+        yield
+        return
+    slot.phase, slot.prefill_left = "prefill", int(rows)
+    try:
+        yield
+    finally:
+        if slot.phase == "prefill":
+            slot.phase = ""
+        slot.prefill_left = None
+
+
+def _alone_watch(rec, pool) -> None:
+    """SRV-763: whether the request's prompt, from the engine lock (its turn taken) to its first token,
+    had the GPU turn alone: no other holder acquired the turn meanwhile (`Turn.stats`). Without side
+    slots the engine lock serializes the requests. `_account` notes the rate of a request that had it
+    (`cache_peek.SOLO_RATES`)."""
+    turn = getattr(pool, "turn", None) if pool is not None else None
+    if turn is None:
+        rec.prefill_alone = True
+        return
+    mark = turn.stats["acquires"]
+
+    def first():
+        rec.prefill_alone = turn.stats["acquires"] == mark
+    rec.on_first = first
 
 
 def _par_block(pool, tree_mode: bool) -> None:
@@ -1769,13 +2260,15 @@ def _run_draft_round(meet) -> None:
 
 
 def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos, bs, k,
-                   deadline, device, think=None):
+                   deadline, device, think=None, sup=None):
     """SPD-201: hand this slot's decode to the round runner and stream what it pushes. The turn is the
-    runner's while it decodes; this thread takes it back before the request's bookkeeping."""
+    runner's while it decodes; this thread takes it back before the request's bookkeeping. Returns None when
+    the runner ended the request; SPD-249: the task when it came back (`Task.back`, `_runner_back`). SP1 is
+    asked here, when the tokens before its marker are out: the runner waits for the verdict."""
     i = _par_index()
     slot = par.slots[i]
     task = _round_runner.Task(slot, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out, max_new, eos,
-                              bs, k, deadline, device, think)
+                              bs, k, deadline, device, think, sup=sup)
     slot.phase = "runner"
     owner = slot.owner
     par.wake()
@@ -1785,6 +2278,10 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
     try:
         while True:
             kind, val = task.q.get()
+            if kind == "sp1":
+                task.verdict = [_sp1(sup, think, *val)]
+                runner.poke()
+                continue
             if kind != "tokens":
                 break
             for t in val:
@@ -1798,6 +2295,89 @@ def _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
             slot.phase = ""
     if task.err is not None:
         raise task.err
+    return task if task.back is not None else None
+
+
+def _end_generation(source) -> None:
+    """SPD-249: the generation's own end before the request's bookkeeping. A stream that stops at its end token, a
+    stop string or an argument loop leaves its generation open (a generation that runs to its length has ended by
+    then); closing it here runs that end now: a slot whose decode went to the round runner takes the GPU turn back
+    (`_runner_decode`), so the bookkeeping after it (`_remember`'s state snapshot: the engine's `settle` and the
+    clone of its rows) never runs beside the runner's passes or a graph capture the runner makes. On 2026-10-31 a
+    copy ask ending at its end token cloned its rows while the runner captured a joint graph: the capture failed
+    (cudaErrorStreamCaptureInvalidated) and every lane of that round ended in an error. `_serve`'s finally closes
+    it again (a no-op)."""
+    if source is None:
+        return
+    try:
+        source.close()
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+
+
+def _runner_back(back: dict, eng, drafter, think, ctx, pos, device, pen, pstop, sampler, sup, eos,
+                 start: int, n_out: int, max_new: int):
+    """SPD-249: the request the runner handed back, at the point where `_generate_stream`'s tree loop
+    asks the supervisor or closes the block, done as that loop does it (this thread holds the turn).
+    Yields the tokens the loop yields there; returns (pos, n_out) to decode on, or None at the end.
+
+    sp2 / sp2_plain: the runner committed the rows before the end token and took nothing of the block
+    (`extra`) or of the end token. SP2 is asked with them as `_sp2_block` / the plain step ask it; then the
+    drafter, the penalties and the stop patterns take what the loop keeps (with the end token when
+    nothing was decided), the tokens go out, and a hidden continue is forwarded. sp1: the verdict the
+    runner read, an action (GIVE_UP ends). budget: the forced close of a spent budget."""
+    why, act = back["why"], back.get("act")
+    if why in ("sp2", "sp2_plain"):
+        extra, end = list(back["extra"]), back["end"]
+        if why == "sp2":
+            act = _sp2(sup, think, ctx, start, n_out + len(extra), back["room"] - len(extra) - 1,
+                       extra=extra, end=end)
+        else:
+            act = _sp2(sup, think, ctx, start, n_out, back["room"], end=end)
+        take = extra if act is not None else extra + [end]
+        stop_now = False
+        if take:
+            if drafter is not None:
+                drafter.observe(take)
+            if pen is not None:
+                pen.commit(take)
+            stop_now = pstop is not None and pstop.observe(take)
+        for t in take:
+            ctx.append(t)
+            n_out += 1
+            yield t
+            if t in eos or n_out >= max_new:
+                return None
+        if stop_now:
+            return None
+        if think is not None and take:
+            think.observe(take)
+    if why == "budget":
+        for t in _force_close(eng, drafter, think, ctx, pos, device, pen=pen, pstop=pstop,
+                              sampler=sampler, sup=sup, eos=eos, start=start, n_out=n_out):
+            n_out += 1
+            yield t
+            if n_out >= max_new:
+                return None
+        if pstop is not None and pstop.hit:
+            return None
+        if sup is not None and ctx[-1] in eos:
+            return None
+        pos += 1 + len(think.close_ids)
+        if sup is not None:
+            pos = len(ctx) - 1
+        return pos, n_out
+    if act is not None and act.kind == GIVE_UP and why == "sp1":
+        return None
+    for t in _force_close(eng, drafter, think, ctx, pos, device, pen=pen, pstop=pstop, sampler=sampler,
+                          act=act, sup=sup, eos=eos, start=start, n_out=n_out):
+        n_out += 1
+        yield t
+        if n_out >= max_new:
+            return None
+    if (pstop is not None and pstop.hit) or ctx[-1] in eos:
+        return None
+    return len(ctx) - 1, n_out
 
 
 def _draft_meet(drafter, anchor: int, pos0: int):
@@ -1915,6 +2495,17 @@ def _sampled_q_free() -> bool:
     return bool(STATE.get("sampled_tree") == "det" and STATE.get("tree"))
 
 
+def _grid_mark(plan, prompt, mm) -> int | None:
+    """SPD-249: the prefill's grid mark, the row where the plan's head notes end (`Plan.head_end`),
+    when the served prompt still begins with the head the plan spliced (no images, which move rows;
+    nothing put before it since)."""
+    end = getattr(plan, "head_end", None) if plan is not None else None
+    head = getattr(plan, "head_ids", None)
+    if not end or head is None or mm is not None or int(prompt.numel()) <= end:
+        return None
+    return int(end) if prompt[:end].tolist() == list(head) else None
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -1934,7 +2525,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
                     disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
-                    scratch: bool = False, stay: bool = False, cold: bool = False):
+                    scratch: bool = False, stay: bool = False, cold: bool = False,
+                    grid_mark: int | None = None):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -1983,6 +2575,13 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     `cold` (#98, a request's `cache_prompt: false`): the prompt is read whole and no prompt cache
     is read or written (`COLD_KEY`, `COLD_SESSION`); the handler gives the rows back after it
     (`_cold_release`).
+
+    `grid_mark` (SPD-249): the row where the prompt's stable head ends (the conductor's notes at the
+    head, `Plan.head_end`): the prefill's grid is cut there (engine/cache.py `Grid`).
+
+    SRV-775: once the prompt is prefilled its workspace leaves the admission and the memory policy
+    (`_par_prefilled`, by the record `on_prefill` carries: `Handler._prefill_watch`), and the record gets the
+    rows it forwarded for its `[req]` line (`rec.fwd`).
     """
     from engine.model import h2d           # not at import: the fake engine's server has no triton
     eng = STATE["engine"]
@@ -2031,6 +2630,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 det = (STATE.get("sampled_tree") == "det" and STATE.get("tree")
                        and sampler is not None and sampler.on)
                 drafter.set_sampling(None if det else sampler)
+            if hasattr(drafter, "set_keyed"):
+                # SPD-249: a seeded sampled request's sampler for a head that drafts coupled (its own picks under
+                # the target's keyed noise); the target's sampling and walk are untouched
+                drafter.set_keyed(sampler if sampler is not None and sampler.coupled else None)
             if hasattr(drafter, "note_sampled"):
                 drafter.note_sampled(sampler is not None and bool(sampler.on))   # SPD-181
             if hasattr(drafter, "prime"):
@@ -2054,17 +2657,24 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             # #98: a key no cache holds, so nothing resumes; another session's, so the resident
             # conversation is stashed (a short prompt) or parked or spilled as for any other one
             keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
-        logits, reused, forwarded = cache.prefill(
-            eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
-            chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
-            checkpoint=bool(STATE.get("prefix_cache")) and not cold,
-            resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
-            key_ids=keys, mem=STATE.get("mem"),
-            compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
-            end_mm=end_mm, scratch=scratch, stay=stay,
-            # FX5: the highest row this generation can write, for a guest's stash; the monitor's
-            # hidden tokens are not in `max_new`
-            reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
+        if REQ_PEAK:
+            _req_peak_start()                   # SRV-773: the `[req]` line's `peak_gib=`
+        with _prefill_mark(len(ctx)):           # SRV-763: the other slots' estimates see it
+            logits, reused, forwarded = cache.prefill(
+                eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
+                chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
+                checkpoint=bool(STATE.get("prefix_cache")) and not cold,
+                resident=STATE.get("resident"), on_chunk=on_chunk, info=where,
+                key_ids=keys, mem=STATE.get("mem"),
+                compacting=compacting, disk=None if cold else _slot_disk(), disk_tag=disk_tag,
+                end_mm=end_mm, scratch=scratch, stay=stay, grid_mark=None if cold else grid_mark,
+                # FX5: the highest row this generation can write, for a guest's stash; the
+                # monitor's hidden tokens are not in `max_new`
+                reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
+        rec_ = getattr(on_prefill, "rec", None)  # the request's record; None for the engine's own turns
+        _par_prefilled(getattr(rec_, "request_id", None))     # SRV-775: its workspace is free again
+        if rec_ is not None:
+            rec_.fwd = int(forwarded)           # SRV-773: the `[req]` line's `fwd=`, beside the gate's rows
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
         _burst_prefilled()
@@ -2155,10 +2765,23 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             # block's bookkeeping goes with it while nothing can close the block (no budget, no arms)
             why = _round_runner.why_not(sup=sup, probe=probe, lpr=lpr, think=think, ahead=ahead,
                                         drafter=drafter, lane=STATE.get("lane"), turn=par.turn)
-            if why is None:
-                yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok, n_out,
-                                          max_new, eos, bs, k, deadline, prompt.device, think)
-                return
+            while why is None:
+                task = yield from _runner_decode(par, eng, drafter, sampler, pen, pstop, ctx, pos, tok,
+                                                 n_out, max_new, eos, bs, k, deadline, prompt.device, think,
+                                                 sup)
+                if task is None:
+                    return
+                # SPD-249: handed back where the loop below asks the supervisor or closes the block
+                got = yield from _runner_back(task.back, eng, drafter, think, ctx, task.pos, prompt.device,
+                                              pen, pstop, sampler, sup, eos, start, task.n_out, max_new)
+                if got is None:
+                    return
+                pos, n_out = got
+                tok = ctx[-1]
+                if n_out >= max_new or (deadline is not None and deadline.expired()):
+                    return
+                if sup is not None and pos >= eng.max_len - 1:
+                    return                 # hidden tokens took rows the output clamp did not count
         while n_out < max_new:
             if deadline is not None and deadline.expired():
                 return
@@ -2618,7 +3241,7 @@ def context_choice(ids: list[int], letters: list[int], at: int, conv_id: str | N
     stage's prompt expands them exactly as the turn's does (`_mm_prompt`): the same rows, the same
     rotary coordinates, the same `key_ids` the caches compare, and the tower's output from the
     embedding cache when the turn asks for it again."""
-    with torch.no_grad():
+    with torch.no_grad(), _turn_ws_kept():
         logits, reused, forwarded = _context_prefill(ids, at, conv_id, on_chunk, images)
         row = logits[0, -1].float()
         picked = row[torch.tensor(letters, device=row.device)].tolist()
@@ -2633,11 +3256,25 @@ def context_rows(ids: list[int], conv_id: str | None = None, on_chunk=None,
     tapped layers and the post-norm row, fp32 on the host -- with their names and the counts.
     Under the engine lock."""
     eng, drafter = STATE["engine"], STATE["drafter"]
-    with torch.no_grad():
+    with torch.no_grad(), _turn_ws_kept():
         _, reused, forwarded = _context_prefill(ids, len(ids), conv_id, on_chunk, images)
         names, _, rows = probe_mod.rows_of(eng, drafter)
         vec = torch.stack([r[-1] for r in rows]).float().cpu() if rows else None
     return vec, names, {"reused": int(reused), "forwarded": int(forwarded)}
+
+
+@contextlib.contextmanager
+def _turn_ws_kept():
+    """SRV-775: a stage's own gate and prefill on the turn's thread (the in-context stage, the probe rows) leave the
+    turn's workspace, charged at its admission (`_par_admit`), in the memory policy's prefills in flight: the
+    turn's own prefill is still to run. Their `Budget.prefilled` would take it out with the stage's."""
+    mem = STATE.get("mem")
+    own = mem.ws_own() if getattr(mem, "ws_own", None) is not None else 0
+    try:
+        yield
+    finally:
+        if own:
+            mem.ws_now = own
 
 
 def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
@@ -2849,13 +3486,19 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
+    notes = note_calls = 0
+    takes = getattr(sup, "memory_notes", None)
+    if takes is not None and answer:
+        # the memory notes the client never gets (server/memblock.py): not the answer's calls,
+        # and an answer of notes alone is empty (E1 case M continues it after a hidden result)
+        answer, notes, note_calls = memblock.without_notes(answer, calls=bool(takes))
     fmt = _tool_format()
     # the checks read the model's own call format as the stream and the final parse do: an
     # arg-key or Pythonic call is a call here too, not a block that does not parse
     answer = rewrite_native(answer, fmt, eos=True)
     calls = ""
     sup.lift_ids = None
-    if (not answer.strip() and getattr(sup.req, "tools_offered", False)
+    if (not answer.strip() and not notes and getattr(sup.req, "tools_offered", False)
             and getattr(sup.req, "n", 1) == 1):
         # SRV-199: the calls a turn wrote inside its reasoning and then stopped (E1's case C)
         try:
@@ -2876,7 +3519,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     try:
         act = sup.at_finish(conductor.FinishEvent(
             "eos", inside, answer, think.n if think is not None else 0, n_out,
-            len(ctx) + len(extra), calls=calls), room)
+            len(ctx) + len(extra), calls=calls, notes=notes + note_calls,
+            note_calls=note_calls), room)
     finally:
         if extra and real is not None:
             sup.on_event = real
@@ -3129,9 +3773,31 @@ def _answer(ctx, start: int, extra, think) -> str:
     return text[i + len("</think>"):] if i >= 0 else text
 
 
-def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
-              learn: bool = True) -> None:
+def _disk_session_id(client_kind: str | None, plan, conv_id: str | None) -> str | None:
+    """The session the disk tier files a request under. A request's own id wins. Hermes sends
+    none, so under an active plan its main requests take the router's head key (`h:`, the messages
+    through the first user message) and a new session's head is saved on its first request. A side
+    request (Hermes' title call) shares `Session("side")` and keeps no name, as does a raw request."""
+    if conv_id is not None or client_kind != "hermes" or plan is None:
+        return conv_id
+    if not plan.active or plan.side is not None or plan.session is None:
+        return None
+    return plan.session.key
+
+
+def _remember(*args, **kw) -> None:
+    """`_remember_turn`, its time the calling request's `remember` part of the [req] line (SPD-257,
+    `cache.req_ms_fields`)."""
+    t0 = time.perf_counter()
+    try:
+        _remember_turn(*args, **kw)
+    finally:
+        cache.req_ms_add("remember", (time.perf_counter() - t0) * 1e3)
+
+
+def _remember_turn(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
+                   mm=None, hidden=(), delta: int = 0, served_hidden=None, cold: bool = False,
+                   learn: bool = True) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
     `learn` (SPD-151): False leaves the suffix store as it was (`suffix_learns`: a request that
@@ -3245,6 +3911,14 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     res = STATE.get("resident")
     if res is not None and res.end_on and committed:
         if mm is None and not delta:
+            if getattr(res, "_stash", None) is not None and _guest_promotes(res, committed, conv_id):
+                # SPD-257: a chat that ran as a guest on a side slot is the slot's conversation from here
+                n_p = int(STATE.get("last_prompt_n") or 0)
+                old_valid, old_owner = int(res.valid), res.owner
+                if res.promote_guest(eng, drafter, committed, n_p, conv_id) and STATE.get("verbose"):
+                    print(f"[parallel] guest kept as the slot's conversation: {n_p} prompt tokens, "
+                          f"{old_owner or 'the old one'} cut from {old_valid} to its shared head",
+                          flush=True)
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                list(hidden) + list(STATE.get("hidden_spans") or []))
             if why == "kept" and res.end is not None:
@@ -3274,7 +3948,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                delta=int(mm.delta) if mm is not None else int(delta), mm=True)
         if STATE.get("verbose") and why != "kept":
-            more = f", {cache.mem_words(STATE.get('mem'))}" if why == "memory" else ""
+            # SPD-257: the resident's own policy (a side slot's STATE has none: the line said "no policy")
+            more = f", {cache.mem_words(getattr(res, 'mem', None))}" if why == "memory" else ""
             print(f"[cache] end anchor not kept ({why}{more}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
         if slots_mod.current() is not None:
@@ -3392,6 +4067,34 @@ def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
               f"refused: {ref.get('why')}" + (f" at {ref['at']:,}" if ref.get("at") is not None else "")
               + ")", flush=True)
     return got
+
+
+def _guest_promotes(res, committed, conv_id) -> bool:
+    """SPD-257 (`SIDE_GUEST_END`): whether the guest that just ran on this side slot becomes the slot's
+    conversation (`ResidentPrefix.promote_guest`). A conversation's turn (a session, not the router's
+    question nor a lane job: `no_carry`) on a side slot, whose rows above the head it shares are at least
+    the old conversation's, or the old one has been idle `SIDE_GUEST_IDLE_S`. Slot 0 keeps its guests:
+    its park and pin hold another session there. Never over a conversation that comes back (ENG-371,
+    `_comes_back`): a parent waiting on its worker sits idle behind it for as long as the worker runs, and a
+    promotion would cut its rows without the NVMe write `_keep_parent` gives them before any other cut;
+    the guest's stash puts them back instead, as before."""
+    if SIDE_GUEST_END != "promote" or conv_id is None:
+        return False
+    slot = slots_mod.current()
+    if slot is None or getattr(slot, "no_carry", False):
+        return False
+    st = getattr(res, "_stash", None)
+    if st is None:
+        return False
+    owner = getattr(res, "owner", None)
+    if owner is not None and owner != conv_id and _comes_back(owner):
+        return False
+    s = int(st["start"])
+    mine = len(committed) - s
+    theirs = int(getattr(res, "valid", 0) or 0) - s
+    used = float(getattr(res, "t_used", 0.0) or 0.0)
+    idle = (time.monotonic() - used) if used else float("inf")
+    return mine > 0 and (mine >= theirs or idle >= SIDE_GUEST_IDLE_S)
 
 
 def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
@@ -3993,7 +4696,7 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
     # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
     # slot 0, and its request ended in an error)
-    with capture_lock.LOCK, torch.no_grad():
+    with capture_lock.GUARD, torch.no_grad():
         info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
     where = f"slot {slot.index}" if slot is not None else "slot 0"
@@ -4059,7 +4762,26 @@ def _end_held(res, keys: list[int], n: int, mm_ok: bool) -> bool:
             and res.end_offer(res.common(keys), n - 1, mm_ok=mm_ok) > 0)
 
 
-def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
+def _served_keys(prompt, mm, comp) -> tuple[list[int], bool]:
+    """The served prompt's keys for the end anchor's test (`_end_held`), with the router's notes and the
+    images in: the images' key ids, else the prompt's; and whether an end after images may be offered (SRV-669:
+    a compaction served as the continuation resumes at the end anchor, `end_mm`, after images too)."""
+    keys = list(mm.key_ids) if mm is not None else prompt.tolist()
+    return keys, (mm is not None and MM_END == "on") or comp is not None
+
+
+def _hold_served_end(res, prompt, mm, comp, n: int) -> None:
+    """SRV-773: a parallel server's gate (`_par_admit`) runs on the client's tokens, before the router's notes, the
+    images' rows and a compaction's continuation are in the prompt: a conductor turn's tokens part from the slot's
+    rows at the first replayed note, so that gate held no end. Held here on the served prompt, as the gate at this
+    point held it before (ENG-371, SRV-669, SRV-546), until the prefill's `begin`; the charge is the admission's."""
+    if res is not None:
+        keys, mm_ok = _served_keys(prompt, mm, comp)
+        res.end_hold = _end_held(res, keys, n, mm_ok)
+
+
+def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool, rows: int | None = None,
+                      others: int = 0, count: bool = True, ceiling: bool = True) -> None:
     """The memory gate (`Budget.gate`) with the end anchor this request resumes at held
     (`ResidentPrefix.end_hold`), so the levels after it go first: live 2026-10-18 01:58 the gate
     gave back the end a worker's call had just been carried into slot 0 with, and the call read
@@ -4070,22 +4792,34 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
     later, rather than a 503 at every retry; only a refusal of the last pass counts. The hold is
     set or cleared at every gate, and the handler clears it in its `finally` (a request that
     passes the gate and prefills nothing: A1's give-up, a prepared summary, a response-cache hit,
-    a client that left), so a hold never outlives its request."""
+    a client that left), so a hold never outlives its request.
+
+    SRV-773: `rows`, the rows the prefill forwards (its workspace's), and `others`, the strict peak's
+    prefills in flight (`Budget.gate`). `count` False: a refusal is not counted here either, its caller
+    decides the outcome (the parallel admission waits or runs it over the peak, `_par_admit`). A
+    continuation (`rows` under `n`) keeps its end through a refusal: it is charged the rows after that
+    end, and a pass without it would admit a re-read of the conversation on that charge (g8's 21 rows,
+    0.80 GiB, then about 57,100 rows forwarded from the prompt's end). It runs once more only for a
+    waited-for park, with the end still held; the hold stays through the caller's wait. SRV-775:
+    `ceiling` False (a side slot's request): the gate's peak stage only (`Budget.gate`)."""
     hold = _end_held(res, keys, n, mm_ok)
     if res is not None:
         res.end_hold = hold                  # never a hold another request left behind
+    keep = hold and rows is not None and int(rows) < int(n)
     _PARK_LET_GO.kept = False
     try:
-        mem.gate(n, count=False)             # a refusal counts once, at the outcome
+        mem.gate(n, count=False, rows=rows, others=others,      # a refusal counts once, at the outcome
+                 ceiling=ceiling)
     except cache.MemoryRefused as exc:
-        if not hold and not _PARK_LET_GO.kept:
-            mem.refused(exc)
+        if (not hold or keep) and not _PARK_LET_GO.kept:
+            if count:
+                mem.refused(exc)
             raise
-        if hold:
+        if hold and not keep:
             res.end_hold = False
         _PARK_LET_GO.on = True               # and a waited-for park may go unwritten
         try:
-            mem.gate(n)
+            mem.gate(n, count=count, rows=rows, others=others, ceiling=ceiling)
         finally:
             _PARK_LET_GO.on = False
 
@@ -4411,6 +5145,42 @@ def prepare_once() -> str:
 
 #: the engine's idle graph captures wait this long after the last request ended (s)
 GRAPHS_IDLE_S = 1.0
+#: SPD-271: the served family's "an idle capture failed and was recorded" error (its serving module's
+#: `IdleCaptureFailed`, set at load by `_idle_capture_failed`); () for a family without one
+IDLE_CAPTURE_FAILED: "type | tuple" = ()
+
+
+def _idle_capture_failed(eng) -> "type | tuple":
+    """SPD-271: the `IdleCaptureFailed` of the module that defines the engine's class or one it builds on, else ()."""
+    for c in type(eng).__mro__:
+        got = getattr(sys.modules.get(c.__module__), "IdleCaptureFailed", None)
+        if isinstance(got, type) and issubclass(got, BaseException):
+            return got
+    return ()
+
+
+def _graphs_at_peak(mem) -> bool:
+    """SPD-273: is the reserve plus the smallest prefill's workspace over the memory policy's peak? Read off
+    `Budget.memory()` without the policy's lock; "[graphs] idle captures paused" is said once until the reserve is
+    back under. No policy, or one that is off: never. A read that raises counts as over."""
+    if mem is None or not getattr(mem, "on", False):
+        return False
+    try:
+        _, res = mem.memory()
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return True
+    if res + int(mem.ws_floor) <= int(mem.peak):
+        STATE["graphs_peak_said"] = False
+        return False
+    # every capture keeps a private pool no shed or `empty` lowers (about 20 MB a graph; 1,280 pools in 80 minutes
+    # on 2026-11-02, 635 of the 1,390 captures from these windows); past here a capture ahead of the state takes the
+    # reserve over the peak, where the smallest prefill no longer fits under it
+    if not STATE.get("graphs_peak_said"):
+        STATE["graphs_peak_said"] = True
+        print(f"[graphs] idle captures paused: reserve {res / 2**30:.1f} GiB + the workspace floor "
+              f"{int(mem.ws_floor) / 2**30:.2f} > peak {int(mem.peak) / 2**30:.1f}", flush=True)
+    return True
 
 
 def graphs_once() -> str:
@@ -4420,13 +5190,16 @@ def graphs_once() -> str:
     0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
     of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`). An engine also takes
     the classes ahead of its state's length (`idle_captures(wants=...)`): a conductor-planned prompt
-    starts in a class the class of a short state never reached (SRV-713)."""
+    starts in a class the class of a short state never reached (SRV-713). SPD-273: none while the reserve
+    plus the smallest prefill's workspace is over the memory policy's peak ("peak"), checked before the
+    window and again before each capture in it (a request's own class still captures at its first use)."""
     if STATE.get("draining"):
         return "off"
     pool = STATE.get("pool")
-    engines = [(STATE.get("engine"), STATE.get("drafter"))] + (
-        [(s.values.get("engine"), s.values.get("drafter")) for s in pool.side()] if pool is not None else [])
-    engines = [(e, d) for e, d in engines if getattr(e, "idle_captures", None) is not None]
+    engines = [(0, STATE.get("engine"), STATE.get("drafter"))] + (
+        [(s.index, s.values.get("engine"), s.values.get("drafter")) for s in pool.side()]
+        if pool is not None else [])
+    engines = [(i, e, d) for i, e, d in engines if getattr(e, "idle_captures", None) is not None]
     if not engines:
         return "off"
     with QUEUE:
@@ -4435,26 +5208,44 @@ def graphs_once() -> str:
     if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
         return "recent"
     # a length where the drafter takes the plain step anyway (260,800 tokens) captures nothing
-    engines = [(e, d) for e, d in engines
+    engines = [(i, e, d) for i, e, d in engines
                if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
     if not engines:
         return "plain"
+    mem = STATE.get("mem")
+    if _graphs_at_peak(mem):
+        return "peak"
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         return "busy"
     t0, n, why = time.perf_counter(), 0, "nothing"
     try:
-        for e, d in engines:
-            # SRV-713: and the classes ahead of the state's length where drafting can pay there
-            steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
-            if steps is None:
-                continue
-            why = "captured"
-            for _ in steps:
-                n += 1
-                if _waiting():
-                    why = "stopped"
-                    return why
+        for idx, e, d in engines:
+            try:
+                # SRV-713: and the classes ahead of the state's length where drafting can pay there
+                steps = e.idle_captures(wants=getattr(d, "wants_graphs", None))
+                if steps is None:
+                    continue
+                why = "captured"
+                for _ in steps:
+                    n += 1
+                    if _waiting():
+                        why = "stopped"
+                        return why
+                    # SPD-273: again before the next capture; one window of 222 graphs took the reserve from 67.6
+                    # to 74.2 GiB (2026-11-03), so a window that starts under the bound can end over the peak
+                    if _graphs_at_peak(mem):
+                        why = "peak"
+                        return why
+            except Exception as exc:                               # noqa: BLE001
+                # SPD-271: one engine's failed capture leaves the others their idle window; the engine records
+                # the class and skips it until its state changes, so this line is printed once per failure
+                if not isinstance(exc, IDLE_CAPTURE_FAILED):
+                    logbuf.print_exc()
+                print(f"[graphs] slot {idx}: idle capture failed ({exc}); not retried until the slot's state "
+                      f"changes", flush=True)
+                if why == "nothing":
+                    why = "failed"
         return why
     except Exception:                                              # noqa: BLE001
         logbuf.print_exc()
@@ -5020,10 +5811,44 @@ def _compacting(plan, body: dict, client_kind: str | None = None) -> bool:
         return False
 
 
+#: SPD-257: when the log last said the reserve stays over the ceiling (`_memory_event`, at most every
+#: OVER_CEILING_LOG_S)
+_OVER_CEILING_LOGGED = [0.0]
+OVER_CEILING_LOG_S = 300.0
+
+
 def _memory_event(ev: dict) -> None:
     """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
     kind = ev.get("kind")
-    if kind in ("shed", "refused", "estimate_raised"):
+    if kind == "over_ceiling":
+        # SPD-257: the ceiling stage shed a level and the reserve is still over the ceiling: what holds it
+        now = time.monotonic()
+        if now - _OVER_CEILING_LOGGED[0] >= OVER_CEILING_LOG_S:
+            _OVER_CEILING_LOGGED[0] = now
+
+            def g(k):
+                v = ev.get(k)
+                return "?" if v is None else f"{int(v) / 2**30:.2f}"
+            print(f"[memory] over the ceiling by {g('over')} GiB after shedding {','.join(ev.get('shed') or ())}: "
+                  f"graphs' pools {g('graphs_reserved')} GiB ({g('graphs_free')} free, their replays' scratch, "
+                  f"{g('exempt')} of it left out of the ceiling), default pool free {g('default_free')} GiB; "
+                  f"allocated {g('allocated')}, reserved {g('reserved')} GiB", flush=True)
+        return
+    if kind in ("peak_over", "stale_admit"):
+        # SPD-257: the peak stage's start (what it sheds for) and a prefill admitted on the stale rule
+        print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items() if k not in ("kind", "ts")),
+              flush=True)
+        return
+    if kind == "over_peak_admit":
+        # SRV-775: a lone prefill the gate refused runs over the declared peak (`_par_admit`), counted
+        def g(k):
+            v = ev.get(k)
+            return "?" if v is None else f"{int(v) / 2**30:.2f}"
+        print(f"[memory] over_peak_admit {ev.get('cid')} slot={ev.get('slot')} ws={g('ws')} rows={ev.get('rows')} "
+              f"ctx={ev.get('n')} kind={ev.get('resume')} reserved={g('reserved')} peak={g('peak')} by={g('by')} GiB",
+              flush=True)
+        return
+    if kind in ("shed", "shed_chunk", "refused", "estimate_raised"):
         print(f"[memory] {kind} " + " ".join(f"{k}={v}" for k, v in ev.items()
                                              if k not in ("kind", "ts")), flush=True)
         cond = STATE.get("conductor")
@@ -5322,6 +6147,10 @@ PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().l
 PREFILL_BURST = (os.environ.get("QSE_PREFILL_BURST") or "joint").strip().lower()
 PREFILL_BURST = "wait" if PREFILL_BURST == "on" else PREFILL_BURST if PREFILL_BURST in ("wait", "joint") else None
 PREFILL_BURST_WAIT_S = float(os.environ.get("QSE_PREFILL_BURST_WAIT_S") or 10.0)
+#: SRV-769: "out": a request whose own question (the conductor's, `X-Tandem-Parent`) runs on this server
+#: is not on its way to a slot while it does (`Burst.ask`), so the question never holds for its own turn;
+#: "in" counts it as before (the A/B)
+PREFILL_BURST_ASKING = (os.environ.get("QSE_PREFILL_BURST_ASKING") or "out").strip().lower()
 
 
 def _par_window_yield() -> None:
@@ -5353,7 +6182,9 @@ def _par_window_cap() -> int | None:
     if pool is None:
         return None
     me = _par_index()
-    return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
+    # SPD-201: a slot the round runner decodes (phase "runner") is decoding too
+    return PAR_WINDOW_ROWS if any(s.index != me and s.phase in ("decode", "runner")
+                                  for s in pool.slots) else None
 
 
 def _roles_idle() -> bool:
@@ -5796,7 +6627,11 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     text = body.get("prompt")
     if isinstance(text, list):
         text = text[0]
-    ids = _as_ids(tok(text or "", return_tensors="pt"))
+    # SPD-249: on the host until the caller wants the tensor. `count` runs before any lock (`_par_side_need`): a
+    # copy to the device there landed inside the idle window's graph capture on a fresh server, broke the capture
+    # (cudaErrorStreamCaptureInvalidated) and failed the count, so the request waited for slot 0 behind a whole
+    # generation (8 raw requests at once: 7 decoding, the 8th's first token after 34 s)
+    ids = _as_ids(tok(text or "", return_tensors="pt"), device="cpu")
     # SRV-443: a text prompt answers every `count` as a chat prompt does (`_par_side_need` asks
     # for the host ids before it picks a slot; a tensor there was a 500 on every
     # /v1/completions request with parallel slots)
@@ -5806,7 +6641,7 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         return int(ids.numel()), False
     if count:
         return int(ids.numel())
-    return ids, "text", False
+    return ids.to(STATE["device"]), "text", False
 
 
 def _vision_context(ids: list[int], images: list, eng, on_encode=None) -> tuple:
@@ -6081,9 +6916,16 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     # SRV-197: the sequence slot it ran on, with `--parallel N`
     slot_s = (f" slot={rec.slot}" if rec is not None and getattr(rec, "slot", None) is not None
               else "")
+    # SRV-773: the rows its prefill forwarded beside the rows and the workspace the memory gate charged it
+    ws_s = ""
+    if rec is not None and getattr(rec, "ws_rows", None) is not None:
+        fwd = getattr(rec, "fwd", None)
+        ws_s = f" fwd={'-' if fwd is None else fwd} ws_rows={rec.ws_rows} ws_gib={rec.ws_gib:.2f}"
+    if REQ_PEAK:
+        ws_s += _req_peak_field()
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
-          f"{slot_s}{tools_s}{blk_s}{tail}", flush=True)
+          f"{slot_s}{tools_s}{blk_s}{ws_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
 
 
 def _tools_note(body: dict, parsed: int, dropped: int = 0) -> str | None:
@@ -6268,6 +7110,8 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     STATE["last_request_end"] = time.time()          # the prewarm's "in use" (SRV-349)
     if not rec.replay:
         cache_peek.RATES.note(int(rec.forwarded), rec.prompt_ms)    # the peek's estimate
+        if rec.prefill_alone:
+            cache_peek.SOLO_RATES.note(int(rec.forwarded), rec.prompt_ms)   # SRV-763: `_own_rate`
     try:
         metrics.on_record(rec)
     except Exception:                                              # noqa: BLE001
@@ -6320,10 +7164,10 @@ def _system() -> dict:
     try:
         if torch.cuda.is_available():
             budget = STATE.get("mem")
-            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
-                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+            mem = {"gpu_allocated_bytes": alloc, "gpu_reserved_bytes": res,
                    "gpu_max_allocated_bytes": int(budget.lifetime() if budget is not None
-                                                  else torch.cuda.max_memory_allocated())}
+                                                  else cache.cuda_stats("allocated_bytes.all.peak")[0])}
     except Exception:                                              # noqa: BLE001
         pass
     mem.update(dashboard_api.meminfo())
@@ -7045,14 +7889,33 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
-                   stream: bool = False, rows: int | None = None, respond: bool = True) -> bool:
-        """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
-        worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
-        shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
-        slot -- is reserved while it runs; with other requests in flight it waits, in one-second
-        slices with the GPU turn given up, while MemAvailable less the engine's growth
-        (`_par_growth`), the other requests' reservations and its own would fall under the floor.
-        False: refused, the response is sent.
+                   stream: bool = False, rows: int | None = None, respond: bool = True,
+                   cold: bool = False) -> bool:
+        """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
+        (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
+        resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
+        gives the rows its prefill forwards and their workspace (`Budget.workspace_rows`). A prefill
+        no reserve could ever take (the engine's load plus that workspace over its declared peak) gets
+        its 503 at once. Then the memory gate on the live reserve sheds the caches for it, with the end
+        anchor it resumes at held (`_gate_holding_end`; a side slot's gate runs the peak stage only, the
+        ceiling stage stays slot 0's); when the gate still refuses it, the request waits for the other
+        prefills in flight, or alone runs over the peak and is counted (`Budget.admit_over_peak`: no shed
+        lowers a long-lived server's reserve for it, SPD-273; `PEAK_STRICT`: it waits too). The rows are
+        priced again before every gate pass, over-peak admit and reservation (a shed moves the resume
+        point down), and the gate runs again on rows that grew since it admitted them. Then its own worst
+        case -- the workspace by its rows (a cold prompt without the line's floor the gate keeps) and,
+        with the shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
+        slot -- is reserved while MemAvailable less the caches' growth, the workspaces of the prefills in
+        flight and its own, together at most the engine's room to its peak (`_par_room`: the gate keeps
+        each prefill it admits under the peak), less the KV pages still to commit and its own, stays at
+        the floor, alone too; a request admitted over the peak counts its workspace past the room, in full
+        less the allocator's free default-pool blocks, which it takes before any new memory (`_par_spare`),
+        so the floor alone bounds it. The idle conversations' pages come back only for a request this
+        floor holds back, never for one the gate refuses while other prefills run. A wait is in
+        one-second slices with the GPU turn given up; a request that waits leaves the prefill burst
+        (it prefills alone once admitted, and the burst's others go on without it), and one waiting for
+        a prefill runs the gate again only when the prefills in flight dropped, its resume point moved
+        or `PEAK_REGATE_S` passed. False: refused, the response is sent.
 
         SRV-250 (FX7, 2026-10-07): every request was counted as 2.1 GiB (the workspace's 1.15 GiB
         floor plus a whole state-store entry, 1 GiB, whatever its length) against 6.4 to 8.4 GiB of
@@ -7082,8 +7945,87 @@ class Handler(BaseHTTPRequestHandler):
             return True
         n = max(int(prompt.numel()), int(rows or 0))
         mem = dict.get(STATE, "mem")
-        ws = mem.workspace(n) if mem is not None else max(
-            cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
+        gated = mem is not None and getattr(mem, "on", False)
+        if gated and slots_mod.current() is None:
+            memlimits.refresh(STATE)          # slot 0: a new residency document's limits, before its gate
+        # SRV-773: the rows the prefill forwards, from where it resumes in place on this slot. With images
+        # the keys are the prompt's ids (one placeholder an image), which part from the rows at the first
+        # image: more rows charged, never fewer
+        res_ = STATE.get("resident")
+        keys = prompt.tolist()
+        mm_ok = rows is not None and MM_END == "on"
+        est: dict = {}
+
+        def price(full: bool = False) -> int:
+            """SRV-773: the rows the prefill forwards from where it resumes in place now, their workspace and
+            `rec`'s `ws_*`; `full`: all `n`. Priced again before every gate pass, over-peak admit and reservation:
+            a shed in between (this request's gate taking a branch's anchor, another slot's gate during a wait)
+            moves the resume point down, and the charge priced before it is the smaller one."""
+            start, kind = ((0, None) if full or res_ is None or cold
+                           else res_.resume_estimate(keys, n, mm_ok))
+            fwd = max(1, n - int(start))
+            ws = mem.workspace_rows(n, fwd) if mem is not None else max(
+                cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
+            # SRV-775: the box's floor counts it by its rows alone, a cold prompt without the line's floor the gate
+            # keeps (2026-11-02: 8 short cold prompts counted 8 x 2.75 GiB and the eighth waited 12 s; before, all 8 ran)
+            ws_r1 = mem.workspace_rows(n, fwd, line=False) if mem is not None else ws
+            est.update(fwd=fwd, ws=ws, ws_r1=ws_r1, kind=kind)
+            if rec is not None:
+                rec.ws_gib, rec.ws_rows, rec.ws_kind = ws / (1 << 30), fwd, kind
+            return fwd
+
+        price()
+        if gated:
+            # SRV-773: a prefill no reserve could ever take (the engine's load plus its workspace over the
+            # peak) is refused at once: nothing is shed or reclaimed for it
+            load = int((dict.get(STATE, "mem_load") or {}).get("allocated") or 0)
+            if load + est["ws"] > int(mem.peak):
+                exc = cache.MemoryRefused(load + est["ws"], mem.peak, n, rows=est["fwd"])
+                exc.detail = {"load": load}
+                mem.refused(exc)
+                if rec is not None:
+                    rec.stop_detail = "memory"
+                print(f"[memory] {cid} refused: {exc}", flush=True)
+                if respond:
+                    self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                return False
+
+        def gate() -> dict | None:
+            """SRV-775: the memory gate on the live reserve. None: the prefill may run (alone it runs over
+            the peak, counted once); else the line of its wait for the prefills in flight. SRV-773: priced
+            before every pass, and again after a pass that admitted it: one that shed the anchor a branch
+            resumes at moved the resume point down, and the gate runs again on the rows the prefill now
+            forwards (the last of `GATE_PASSES` on every row)."""
+            if not gated:
+                return None
+            full = False
+            for left in range(GATE_PASSES, 0, -1):
+                fwd = price(full)
+                try:
+                    _gate_holding_end(mem, res_, keys, n, mm_ok, rows=fwd,
+                                      others=adm.ws_in_flight() if PEAK_STRICT else 0, count=False,
+                                      ceiling=slots_mod.current() is None)
+                except cache.MemoryRefused as exc:
+                    if not full:
+                        price()                 # what the refused pass shed moves its charge too
+                    if adm.ws_in_flight() > 0 or PEAK_STRICT:
+                        det = getattr(exc, "detail", None) or {}
+                        return {"peak_wait": True, "need": exc.need, "peak": exc.peak, "ws": est["ws"],
+                                "reserved": det.get("reserved"), "over": exc.need - exc.peak}
+                    est["gated"] = est["fwd"]
+                    if est.get("over_peak"):
+                        mem.ws_now = est["ws"]      # admitted over the peak before: its charge, counted once
+                    else:
+                        est["over_peak"] = True
+                        mem.admit_over_peak(n, est["fwd"], est["ws"], _par_index(), cid=cid,
+                                            resume=est["kind"])
+                    return None
+                if full or left == 1 or price() <= fwd:
+                    est["gated"] = est["fwd"]
+                    return None
+                full = left == 2
+            return None
+
         kv, owner = 0, None
         if kvpool.POOL is not None:
             eng = STATE.get("engine")
@@ -7094,16 +8036,33 @@ class Handler(BaseHTTPRequestHandler):
                 grow = int(max_new)
                 if KV_RECOMPUTE and KV_ADMIT_ROWS > 0:
                     grow = min(grow, KV_ADMIT_ROWS)
-                rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
-                kv = pages.need_bytes(rows)
+                kv_rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
+                kv = pages.need_bytes(kv_rows)
                 owner = pages.owner
-        need = ws + kv
-        ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
-        if not ok and _kv_reclaim_idle(d, owner):
-            # SRV-307: the pages idle conversations keep come back before anyone waits
-            ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
-        if ok:
-            return True
+
+        def reserve() -> tuple[bool, dict]:
+            """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
+            workspace past the engine's room, in full less the allocator's free default-pool blocks
+            (`Admission.check`)."""
+            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")))
+        d = gate()
+        gate_again = d is not None
+        if gate_again:
+            adm.stats["peak_waits"] += 1
+        else:
+            ok, d = reserve()
+            if not ok and _kv_reclaim_idle(d, owner):
+                # SRV-307: the pages idle conversations keep come back before anyone waits
+                ok, d = reserve()
+            if ok:
+                return True
+        i = _par_index()
+        burst = getattr(pool, "burst", None)
+        if burst is not None:
+            # SRV-775: a member of the prefill burst that waits for memory leaves it: the others prefill without
+            # it, not after up to the burst's wait (2026-11-02: one member's 12 s wait held the seven others'
+            # first tokens to 10.5-13.7 s); admitted, it prefills alone. `_par_end`'s leave is then a no-op
+            burst.leave(i)
         print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
         adm.stats["waits"] += 1
         self._mem_wait = True
@@ -7111,7 +8070,10 @@ class Handler(BaseHTTPRequestHandler):
             rec.wait_reason = "memory"
             rec.waiting_memory = True
         t0 = time.perf_counter()
-        i = _par_index()
+        st0 = getattr(mem, "stats", None)
+        e0 = (int(st0.get("empties") or 0), float(st0.get("empty_ms") or 0.0)) if isinstance(st0, dict) else None
+        # SRV-775: the prefills in flight and the time at the gate's last refusal (`PEAK_REGATE_S`)
+        seen, t_gate = adm.ws_in_flight(), time.monotonic()
         limit = (float(STATE.get("request_timeout") or 3600.0) if stream
                  else float(STATE.get("queue_timeout", 120.0)))
         until = time.monotonic() + limit
@@ -7119,11 +8081,26 @@ class Handler(BaseHTTPRequestHandler):
         try:
             while time.monotonic() < until:
                 if self._client_gone():
+                    if respond:
+                        # SRV-777: no response has started, so nothing else books this end: abandoned, as the
+                        # queue books a client that left it (a lane resuming in its answer is the stream's to book)
+                        waited = time.perf_counter() - t0
+                        with QUEUE:
+                            INFLIGHT["abandoned"] += 1
+                        if rec is not None:
+                            if rec.client_gone_at is None:
+                                rec.client_gone_at = time.perf_counter()
+                            rec.finish_reason = "abandoned"
+                            rec.stop_detail = "left_while_waiting_memory"
+                            rec.wait_mem_ms = round(waited * 1e3, 1)
+                        print(f"[req] {cid} left while waiting for memory ({waited * 1e3:.0f} ms)", flush=True)
                     raise ClientGone("client left while waiting for memory")
                 place = adm.wait(cid)
                 if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
                     said = time.monotonic()
-                    short = max(0.0, (d.get("floor", 0) - (d.get("after") or 0)) / slots_mod.GiB)
+                    gap = ((d.get("over") or 0) if d.get("peak_wait")       # SRV-775: over the peak
+                           else d.get("floor", 0) - (d.get("after") or 0))
+                    short = max(0.0, gap / slots_mod.GiB)
                     try:
                         try:
                             say(short, place)
@@ -7142,17 +8119,34 @@ class Handler(BaseHTTPRequestHandler):
                 # the first in line only: arrival order among the requests that wait for memory
                 if place > 1:
                     continue
-                ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                if price() > est.get("gated", n):
+                    gate_again = True           # SRV-773: a shed during the wait moved the resume point down
+                elif (gate_again and adm.ws_in_flight() >= seen
+                      and time.monotonic() - t_gate < PEAK_REGATE_S):
+                    continue                    # SRV-775: no prefill has run since the refusal: nothing to re-gate
+                if gate_again:
+                    # SRV-775: the memory gate first, again: it waits while another prefill runs
+                    got = gate()
+                    if got is not None:
+                        d = got
+                        seen, t_gate = adm.ws_in_flight(), time.monotonic()
+                        continue
+                    gate_again = False
+                ok, d = reserve()
                 if not ok and _kv_reclaim_idle(d, owner):
-                    ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                    ok, d = reserve()
                 if ok:
                     waited = time.perf_counter() - t0
                     if rec is not None:
                         rec.wait_mem_ms = round(waited * 1e3, 1)
                         if rec.t_lock is not None:
                             rec.t_lock += waited            # the wait is the queue's, not prefill
+                    st = getattr(mem, "stats", None)
+                    emp = (f"; empties +{int(st.get('empties') or 0) - e0[0]} "
+                           f"({float(st.get('empty_ms') or 0.0) - e0[1]:.1f} ms)"
+                           if e0 is not None and isinstance(st, dict) else "")
                     print(f"[parallel] {cid} admitted after {waited:.1f} s: "
-                          f"{slots_mod.Admission.describe(d)}", flush=True)
+                          f"{slots_mod.Admission.describe(d)}{emp}", flush=True)
                     return True
         finally:
             adm.unwait(cid)
@@ -7256,6 +8250,7 @@ class Handler(BaseHTTPRequestHandler):
                 watch.say(done, total, now)     # S1: the prefill's progress line, when it is due
         watch.info = {}                  # the prefill fills it: start, chunk, t0, kind
         watch.say = None
+        watch.rec = rec                  # SRV-775: whose workspace leaves the admission once prefilled
         return watch
 
     # -------------------------------------------------------------- routes
@@ -7328,52 +8323,12 @@ class Handler(BaseHTTPRequestHandler):
                 # through the proxy, the status and nothing about the configuration (a page there
                 # reaches the status responder through the same proxy, OPS-175)
                 return self._json(code, {"status": status, **failed})
-            return self._json(code, {
-                "status": status, **failed,
-                "status_port": _status_port(),
-                "model": served_name(), "base_model": STATE.get("model"),
-                "version": STATE.get("version", ""), "weights": weights_profile(),
-                "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
-                "engine_busy": LOCK.locked(),
-                "inflight": dict(INFLIGHT),
-                "max_queue": STATE.get("max_queue"),
-                "request_timeout_s": STATE.get("request_timeout"),
-                "max_len": STATE.get("max_len"),
-                "sampling": {"temperature": STATE.get("temperature", 0.0),
-                             "top_p": STATE.get("top_p", 1.0),
-                             "top_k": STATE.get("top_k", 0),
-                             # SPD-245: what a sampled request that names no filter runs with
-                             "unnamed_filters": sampling_defaults.resolve(
-                                 None, STATE.get("sampling_flags"), STATE.get("card_sampling")),
-                             # SPD-245: whether an unseeded sampled request draws its own seed
-                             "unseeded": {"fresh_seed": _S.get("FRESH_SEED"),
-                                          "keyed": sampling_defaults.keys_unseeded(
-                                              _S.get("FRESH_SEED"), _sampled_q_free())},
-                             # SRV-241: what a regenerate samples with, and how many there were
-                             "regenerate": (STATE["regenerate"].report()
-                                            if STATE.get("regenerate") is not None
-                                            else {"mode": "off"}),
-                             # SRV-475: the checkpoint's sampling and the loop escape's counts
-                             "card": STATE.get("card_sampling"),
-                             "loop_escape": (STATE["escapes"].report()
-                                             if STATE.get("escapes") is not None else None),
-                             # SRV-477: `--reasoning-effort none|off` turns thinking off
-                             "thinking_default": STATE.get("thinking_default", "on")},
-                "penalty": {"rep": STATE["pen_spec"].rep,
-                            "presence": STATE["pen_spec"].presence,
-                            "freq": STATE["pen_spec"].freq,
-                            "no_repeat": STATE["pen_spec"].no_repeat},
-                "default_max_tokens": STATE.get("default_max_tokens"),
-                "cache": cache_stats(),
-                "memory": _memory(),
-                # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
-                **({"kv_pool": kv_pool_report()} if kvpool.POOL is not None else {}),
-                # the small models and the memory governor (server/rolemem.py)
-                "roles": _safe(roles_report),
-                **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
-                # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
-                **_par_status(),
-            })
+            # SPD-249: the full body from HEALTH (server/health_cache.py): its parts timed, built at most
+            # once a QSE_HEALTH_TTL_MS; what a watchdog decides on is built fresh on every call
+            fresh = {"status": status, **failed,
+                     "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                     "engine_busy": LOCK.locked(), "inflight": dict(INFLIGHT)}
+            return self._send_bytes(code, HEALTH.answer(fresh, _health_body))
         if path == "/metrics/up":
             # a public page with one number and nothing else, so the scrape can tell an
             # engine that is down from a metrics token that is wrong (the real page's 401).
@@ -7400,6 +8355,14 @@ class Handler(BaseHTTPRequestHandler):
             if not self._allowed("cache_read"):
                 return
             return self._json(200, cache_stats())
+        if path == "/v1/cache/memory":
+            # SPD-257: the engine's memory by owner; `?pools=1` adds the allocator's segments by pool
+            # (walks every block: on demand only)
+            if not self._allowed("cache_read"):
+                return
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            return self._json(200, memory_owners(pools=(q.get("pools") or ["0"])[-1] == "1"))
         if path == "/v1/models":
             # with the conductor on, `TandemLLM` alone: the raw engine's name is a hidden alias
             cond = STATE.get("conductor")
@@ -7418,6 +8381,8 @@ class Handler(BaseHTTPRequestHandler):
                 # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
                                                                      STATE["started"])
+            # OPS-260: engine or chat and what runs beside the engine, beside `data` too
+            out.update(_models_mode())
             return self._json(200, out)
         if path == "/v1/laya" and STATE.get("deciders") is not None:
             # L1: Laya for the model's scripts, what the route takes (server/laya_api.py)
@@ -7550,8 +8515,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("POST", body)
         if path == "/v1/tokenize":
             # SRV-347: exact counts with the model's own template (server/tokenize_api.py)
+            # SPD-249: a text through build_prompt's own text path, as /v1/completions reads its prompt
             return tokenize_api.handle(self, body, lambda b: build_prompt(b, count=True),
-                                       lambda t: len(STATE["tok"](t)["input_ids"]))
+                                       lambda t: build_prompt({"prompt": t}, count=True),
+                                       lambda b: build_prompt(b, count="ids"),
+                                       lambda t: build_prompt({"prompt": t}, count="ids"))
         if path in ("/v1/cache/peek", "/v1/cache/prewarm"):
             # SRV-349: where a conversation's rows are, and the NVMe read back while idle
             if not self._allowed("cache_read"):
@@ -7648,13 +8616,24 @@ class Handler(BaseHTTPRequestHandler):
         # SPD-245: on its way to a slot, for the prefill burst (server/prefill_burst.py `received`)
         pool = dict.get(STATE, "pool")
         burst = pool.burst if pool is not None else None
-        self._burst_tok = burst.received() if burst is not None else None
+        self._burst_tok = asked = None
+        if burst is not None:
+            # SRV-769: the conductor's question names its turn; the turn waits for the answer, so it is
+            # not on its way while the question is
+            par = (self.headers.get(ledger_mod.PARENT_HEADER)
+                   if (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA) else None)
+            par = par[:80] if isinstance(par, str) and par else None
+            if par is not None and PREFILL_BURST_ASKING != "in":
+                self._burst_tok, asked = burst.question(par)
+            else:
+                self._burst_tok = burst.received(parent=par)
         try:
             with logbuf.serving(body):
                 return self._complete_logged(body, path)
         finally:
             if burst is not None:
                 burst.settle(self._burst_tok)
+                burst.answered(asked)
             self._burst_tok = None
 
     def _loop_escape(self, body: dict, plan, rec, sampler, cid: str):
@@ -7824,6 +8803,9 @@ class Handler(BaseHTTPRequestHandler):
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
                                       bool(body.get("stream")), t_arrival=t_req)
         rec.usage_context = STATE.get("usage_context", "client")
+        rec.req_ms = cache.req_ms_start()    # SPD-257: the [req] line's gate/done/remember/settle parts
+        if getattr(self, "_burst_tok", None) is not None:
+            STATE["pool"].burst.name(self._burst_tok, cid)    # SRV-769: its questions find it by its id
         rec.model = str(body.get("model") or STATE.get("model", ""))
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
@@ -8102,11 +9084,12 @@ class Handler(BaseHTTPRequestHandler):
             rec.queue_why = OWN_WAIT["question"]
             try:
                 # the prompt's length is rendered only if the in-context stage asks for it
-                plan = rec.plan = STATE["conductor"].plan(
-                    body, self.headers, client_kind=rec.client_kind, request_id=cid, chat=chat,
-                    count_tokens=lambda: build_prompt(body, client, count=True,
-                                                       left_out=left_out),
-                    user=self._memory_user(rec))
+                with _planning():
+                    plan = rec.plan = STATE["conductor"].plan(
+                        body, self.headers, client_kind=rec.client_kind, request_id=cid,
+                        chat=chat, count_tokens=lambda: build_prompt(body, client, count=True,
+                                                                     left_out=left_out),
+                        user=self._memory_user(rec))
             except ConductorConfigError as exc:
                 return self._json(400, {"error": {"message": str(exc),
                                                   "type": "invalid_request_error",
@@ -8114,6 +9097,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        # the name the prefix capture and the session snapshot (the disk tier) file this request
+        # under; conv_id itself, which compaction, the preparer and the memory writer key on, stays
+        disk_id = _disk_session_id(rec.client_kind, plan, conv_id)
         # SRV-241: a regenerate (server/regenerate.py) samples with a fresh seed; every other
         # request keeps the sampler it had (greedy unless the client asked). Under an active plan
         # only: raw requests (benchmarks) and side requests are never looked at.
@@ -8414,15 +9400,18 @@ class Handler(BaseHTTPRequestHandler):
         # busy, from its length and whether it continues slot 0's resident conversation
         par = dict.get(STATE, "pool")
         par_why: dict = {}
+        own_q = (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA)
         side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
-                                    par_why, stay=stay, parent=parent, session=conv_id)
+                                    par_why, stay=stay, parent=parent, session=conv_id, own=own_q)
                      if par is not None else None)
         side = None
         me = {"rank": rank, "t": time.monotonic(),
               "side": plan.side if plan is not None and plan.side is not None else None,
               # the conductor's own question to Qwen (server/conductor/classify.py's agent): the
               # waiting line of a turn behind it says so
-              "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA),
+              "own": own_q,
+              # SPD-249: its prompt rows, for the router's `own_eta` behind it
+              "rows": len(par_why.get("ids") or ()),
               "rec": rec}                 # SRV-249: the holder's live work, for the estimate
         rec.queue_why = _queue_why(par, par_why, side_need, 0.0, me)     # 0.8.2, the Lanes view
         with QUEUE:
@@ -8487,8 +9476,19 @@ class Handler(BaseHTTPRequestHandler):
             slot0_first = bool(par_why.get("slot0_first")) and side_need is not None
             if not got and home is None and not new_wait:
                 got = _take(me, None)
+            lane_side = bool(par_why.get("lane_side")) and side_need is not None
+            if not got and lane_side:
+                # SPD-249: slot 0 busy: an idle side slot before the lane (not one whose last end
+                # waits for its conversation's next turn); none, the lane as before
+                side = par.take_side(side_need, owner=cid, keep_carry_s=_carry_keep_s())
+                got = side is not None
+                if got:
+                    side.no_carry = True
+                    with par._lk:
+                        par.stats["lane_side"] = par.stats.get("lane_side", 0) + 1
             if (not got and home is None and not new_wait and side_need is not None
-                    and not slot0_first and _side_ok(0.0, _own_holder())):
+                    and not slot0_first and not lane_side
+                    and _side_ok(0.0, _own_holder(), own=me["own"])):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
                 if got:
@@ -8565,7 +9565,7 @@ class Handler(BaseHTTPRequestHandler):
                     own_wait[0] += time.monotonic() - t_slice
                     own_rank = holder_own
                 waited = time.monotonic() - t_wait
-                if (not got and side_need is not None and _side_ok(waited, _own_holder())
+                if (not got and side_need is not None and _side_ok(waited, _own_holder(), own=me["own"])
                         and (not slot0_first
                              or waited >= float(par_why.get("slot0_wait_s") or SIDE_SLOT0_WAIT_S))):
                     side = par.take_side(side_need, owner=cid)
@@ -8653,7 +9653,8 @@ class Handler(BaseHTTPRequestHandler):
         if par is not None and not micro and par.burst is not None:
             # SPD-245: a member of the prefill burst when none of the slots decodes (or one is open)
             par.burst.arrive(side.index if side is not None else 0,
-                             idle=not any(s.phase in ("decode", "runner") for s in par.slots))
+                             idle=not any(s.phase in ("decode", "runner") for s in par.slots),
+                             way=getattr(self, "_burst_tok", None))
         if par is not None and par.burst is not None:
             par.burst.settle(getattr(self, "_burst_tok", None))       # SPD-245: bound (or a micro lane)
         if side is not None:
@@ -8667,6 +9668,8 @@ class Handler(BaseHTTPRequestHandler):
             rec.slot = 0
         if not micro:
             rec.lock_acquired()
+            _alone_watch(rec, par)
+            _pending_mark(par, side, len(par_why.get("ids") or ()))   # SRV-763: until it prefills
             STATE.pop("spill_restored", None)
             STATE.pop("side_carried", None)
             STATE.pop("park_returned", None)
@@ -8686,7 +9689,7 @@ class Handler(BaseHTTPRequestHandler):
                     "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
-                    rows=_mm_rows(int(prompt.numel()), images) if images else None):
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -8848,6 +9851,9 @@ class Handler(BaseHTTPRequestHandler):
                     and plan.session is not None else None)
                 if ui is not None:
                     sup.on_event = ui.monitor
+                # SP2 reads the answer as the client gets it: without the memory notes the
+                # filter takes out (an answer of notes alone is an empty answer)
+                sup.memory_notes = _memory_takes(plan, chat, n_choices, tool_names)
                 if plan is not None and plan.acts:
                     sup.adopt(plan.acts)            # the router's outcome note (J1)
                 if plan is not None and plan.outcome is not None and \
@@ -9028,25 +10034,35 @@ class Handler(BaseHTTPRequestHandler):
             # has started. A compaction drops its session's store entries and parked rows first;
             # then the engine is brought under its ceiling and the prefill's workspace under its
             # declared peak, the caches given back cheapest first -- or the request gets a 503.
+            # SRV-773: a parallel server's gate ran in `_par_admit`, on every slot; this one is a
+            # single-sequence server's, charged the rows the prompt forwards from where it resumes
             compacting = bool(chat and _compacting(plan, body, rec.client_kind))
             mem = STATE.get("mem")
-            if mem is not None and not micro:
-                memlimits.refresh(STATE)
+            if dict.get(STATE, "mem") is not None and not micro:
+                if mem is not None:
+                    memlimits.refresh(STATE)
                 if compacting and conv_id:
                     for name in ("state_store", "resident"):
                         obj = STATE.get(name)
                         if obj is not None:
                             obj.drop_session(conv_id)
-                try:
+                if par is not None:
+                    _hold_served_end(res_, prompt, mm, comp, n_prompt)   # SRV-773: the served prompt's end
+                elif mem is not None:
                     # SRV-669: a compaction served as the continuation resumes at the end
                     # anchor (`end_mm`), after images too: its end is held as well
-                    _gate_holding_end(mem, res_, list(mm.key_ids) if mm is not None
-                                      else prompt.tolist(), n_prompt,
-                                      (mm is not None and MM_END == "on") or comp is not None)
-                except cache.MemoryRefused as exc:
-                    rec.stop_detail = "memory"
-                    print(f"[memory] {cid} refused: {exc}", flush=True)
-                    return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                    keys_, mm_ok_ = _served_keys(prompt, mm, comp)
+                    start_, kind_ = (res_.resume_estimate(keys_, n_prompt, mm_ok_)
+                                     if res_ is not None and not cold else (0, None))
+                    rows_ = max(1, n_prompt - int(start_))
+                    rec.ws_gib, rec.ws_rows, rec.ws_kind = (mem.workspace_rows(n_prompt, rows_) / (1 << 30),
+                                                            rows_, kind_)
+                    try:
+                        _gate_holding_end(mem, res_, keys_, n_prompt, mm_ok_, rows=rows_)
+                    except cache.MemoryRefused as exc:
+                        rec.stop_detail = "memory"
+                        print(f"[memory] {cid} refused: {exc}", flush=True)
+                        return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
             # the reasoning-loop arms compute only for a request the monitor watches
             arms = sup.arms if sup is not None and STATE.get("think_stall", True) else None
             if sup is not None:
@@ -9142,16 +10158,19 @@ class Handler(BaseHTTPRequestHandler):
                     kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
                 if stay:
                     kw["stay"] = True                  # ENG-371: never a guest of the resident
+                mark = _grid_mark(plan, prompt, mm)
+                if mark is not None:
+                    kw["grid_mark"] = mark             # SPD-249: the head the chats share
                 if cold:
                     kw["cold"] = True                  # #98
                 if KV_RECOMPUTE and par is not None:
                     # SRV-709: a lane the pool refuses gives way and goes on (`_recomputing`)
                     return rec.track(self._recomputing(
                         par, cid, rec, stream, prompt, max_new, budget_state,
-                        lambda p, n: generate_stream(p, n, eos, budget_state, conv_id, deadline,
+                        lambda p, n: generate_stream(p, n, eos, budget_state, disk_id, deadline,
                                                      pen=pen, pstop=guard, sampler=samp,
                                                      on_prefill=watch, **kw)))
-                return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
+                return rec.track(generate_stream(prompt, max_new, eos, budget_state, disk_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
 
@@ -9293,9 +10312,9 @@ class Handler(BaseHTTPRequestHandler):
                         _finishing(rec, "saving_state")
                     # 2026-10-05: the answer's memory blocks, written and taken out of the text
                     mem_taken = _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt,
-                                             comp is None and mm is None)
+                                             comp is None and mm is None, tool_names)
                     if (cached_ids is None or ci) and not micro:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                        _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
@@ -9487,7 +10506,7 @@ class Handler(BaseHTTPRequestHandler):
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
-            mf = [_memory_filter(plan, chat, n_choices, ui)]
+            mf = [_memory_filter(plan, chat, n_choices, ui, tool_names)]
             # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
             # client (a conductor plan only: the raw path is the release's, byte for byte)
             stray = [StrayClose() if chat and plan is not None and plan.active else None]
@@ -9940,11 +10959,12 @@ class Handler(BaseHTTPRequestHandler):
                 failed = exc
                 finish = "error"
                 logbuf.print_exc()
+            _end_generation(source)
             mem_taken = _memory_close(plan, mf[-1] if len(mf) > 1 else mf[0], ids, n_prompt,
                                       comp is None and mm is None)
             if cached_ids is None and failed is None and not micro:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
@@ -10011,6 +11031,7 @@ class Handler(BaseHTTPRequestHandler):
                 with QUEUE:
                     INFLIGHT["lane"] -= 1
                     INFLIGHT["served"] += 1
+                STATE["lane_end_mono"] = time.monotonic()   # VIS-119: `_own_idle_s` counts it
             else:
                 # the allocator's reserve over its slack goes back to the driver, with the answer
                 # already sent and before the next request may take the engine (OPS-47)
@@ -10097,10 +11118,10 @@ def _memory() -> dict:
     out = {}
     mem = STATE.get("mem")
     try:
-        out["allocated_gb"] = round(torch.cuda.memory_allocated() / 2**30, 3)
-        out["reserved_gb"] = round(torch.cuda.memory_reserved() / 2**30, 3)
+        out["allocated_gb"] = round(cache.cuda_stats("allocated_bytes.all.current")[0] / 2**30, 3)
+        out["reserved_gb"] = round(cache.cuda_stats("reserved_bytes.all.current")[0] / 2**30, 3)
         out["max_allocated_gb"] = round((mem.lifetime() if mem is not None
-                                         else torch.cuda.max_memory_allocated()) / 2**30, 3)
+                                         else cache.cuda_stats("allocated_bytes.all.peak")[0]) / 2**30, 3)
     except Exception as exc:                                      # noqa: BLE001
         out["error"] = str(exc)
     if mem is not None and mem.on:
@@ -10111,22 +11132,198 @@ def _memory() -> dict:
             out.update(ceiling_gb=round(mem.ceiling / 2**30, 3), peak_gb=round(mem.peak / 2**30, 3),
                        engine_reserved_gb=round(res / 2**30, 3),
                        engine_allocated_gb=round(alloc / 2**30, 3))
+            # SRV-775: the reserve over the declared peak now, and the lone prefills run over it
+            last = mem.stats.get("last_over_peak") or {}
+            out.update(over_peak_gib=round(mem.over_peak() / 2**30, 3), over_peak_slot=last.get("slot"),
+                       over_peak_admits=mem.stats.get("over_peak_admits", 0))
         except Exception:                                          # noqa: BLE001
             pass
+    try:
+        out["owners"] = _owners_cached()                         # SPD-257: what holds it, by part
+    except Exception:                                              # noqa: BLE001
+        pass
     try:
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     out["rss_gb"] = round(int(line.split()[1]) / 2**20, 3)
-                    break
+                elif line.startswith("VmSize:"):
+                    # SPD-257: the address space; each expandable segment of the CUDA allocator reserves about
+                    # 1.125 times the device's memory of it (a soak watches this against the 48-bit limit)
+                    out["vm_size_gb"] = round(int(line.split()[1]) / 2**20, 1)
     except Exception:
         pass
+    # SPD-257: the captures' switch to plain segments (engine/capture_lock.py): on, how often, why off
+    a = capture_lock.ALLOC
+    out["capture_plain_segments"] = {"on": a.get("on"), "toggles": a.get("toggles"), "errors": a.get("errors"),
+                                     "error": a.get("error")}
     # The interpreter singletons' reference counts now (server/refwatch.py); a count
     # that falls from one look to the next is a C extension dropping references (bool_dealloc)
     out["python_refs"] = {name: sys.getrefcount(obj) for name, obj in refwatch_mod.WATCH}
     w = STATE.get("refwatch")
     if w is not None:
         out["python_refs_warnings"] = w.warnings
+    return out
+
+
+def _caches_by_owner() -> dict:
+    """SPD-257: every serving cache's bytes by owner: each slot's resident prefix by part
+    (`ResidentPrefix.owners`), the state store, the image embedding cache."""
+    out: dict = {}
+    res0 = dict.get(STATE, "resident")
+    if res0 is not None:
+        out["slot0"] = res0.owners()
+    pool = dict.get(STATE, "pool")
+    for sl in (pool.side() if pool is not None else ()):
+        r = (sl.values or {}).get("resident")
+        if r is not None:
+            out[f"slot{sl.index}"] = r.owners()
+    store = dict.get(STATE, "state_store")
+    if store is not None:
+        out["store"] = {"total": int(store.bytes), "entries": len(getattr(store, "_d", {}) or {})}
+    ic = dict.get(STATE, "image_cache")
+    nb = getattr(ic, "bytes", None) if ic is not None else None
+    if isinstance(nb, int):
+        out["image_embeds"] = {"total": nb}
+    return out
+
+
+def _caches_total(by: dict) -> int:
+    return sum(int((v or {}).get("total") or 0) for v in by.values())
+
+
+def _mem_load_mark(stages=None) -> None:
+    """SPD-257: what the engine holds once the load is done, the base the memory report by owner
+    counts from (`memory_owners`), with the allocator's pools then: the default pool's free bytes and
+    the graphs' private pools (`cache.allocator_pools`), and whether the allocator setting took
+    (PYTORCH_CUDA_ALLOC_CONF, expandable segments)."""
+    mem = dict.get(STATE, "mem")
+    try:
+        if mem is not None and mem.on:
+            mem.empty("load")
+            alloc, res = mem.memory()
+        else:
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+    except Exception:                                              # noqa: BLE001
+        return
+    by = _caches_by_owner()
+    try:
+        pools = _allocator_pools()
+    except Exception as exc:                                       # noqa: BLE001
+        pools = {"error": str(exc)}
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF") or ""
+    STATE["mem_load"] = {"allocated": int(alloc), "reserved": int(res), "caches": _caches_total(by),
+                         "ts": round(time.time(), 3), "alloc_conf": conf, "pools": pools,
+                         "stages": [{"stage": x.get("stage"), "allocated": x.get("allocated")}
+                                    for x in (stages or ())]}
+    d, g, mp = pools.get("default") or {}, pools.get("graphs") or {}, pools.get("mempools") or {}
+    roles = (f", roles' pools {mp.get('pools', 0)} reserved {_gib(mp.get('reserved') or 0)} GiB"
+             if mp.get("pools") else "")
+    a = capture_lock.ALLOC
+    # the captures' switch only where the setting asks for expandable segments, or a switch failed (`on` False)
+    plain = (f"; captures on plain segments ({a.get('toggles')} switches"
+             + (f", off: {a.get('error')}" if a.get("errors") else "") + ")"
+             ) if a.get("on") is True or a.get("errors") else ""
+    print(f"[memory] after the load: {_gib(alloc)} GiB allocated, {_gib(res)} GiB reserved, "
+          f"caches {_gib(_caches_total(by))} GiB (end anchors reserved); default pool free "
+          f"{_gib(d.get('free') or 0)} GiB, graphs' pools {g.get('pools', 0)} reserved "
+          f"{_gib(g.get('reserved') or 0)} GiB free {_gib(g.get('free') or 0)} GiB{roles}; allocator "
+          f"PYTORCH_CUDA_ALLOC_CONF={conf or '(unset)'}, expandable segments "
+          f"{sum(int(x.get('expandable') or 0) for x in (d, g, mp))} of "
+          f"{sum(int(x.get('segments') or 0) for x in (d, g, mp))} (graphs' {int(g.get('expandable') or 0)} of "
+          f"{int(g.get('segments') or 0)}){plain}", flush=True)
+
+
+def _allocator_pools() -> dict:
+    """SPD-257: the allocator's segments by pool (`cache.allocator_pools` over `cache.allocator_segments`,
+    every segment and block of the process, from the snapshot call that drops no reference: on demand only)."""
+    t0 = time.perf_counter()
+    out = cache.allocator_pools(cache.allocator_segments(), blocks=True)
+    out["snapshot_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
+    return out
+
+
+def memory_owners(pools: bool = False) -> dict:
+    """SPD-257: the engine's memory by owner, against what it held once loaded (`_mem_load_mark`):
+    the caches by slot and part, what the KV pool committed (outside the allocator when the device
+    maps its pages), and what is allocated above the load's base that no cache holds (`unattributed`:
+    a prefill in flight, a graph captured since, a leak). `pools`: the allocator's segments by pool
+    (`_allocator_pools`), which walks every block."""
+    mem = dict.get(STATE, "mem")
+    try:
+        alloc, res = (mem.memory() if mem is not None
+                      else (cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")))
+    except Exception as exc:                                       # noqa: BLE001
+        return {"error": str(exc)}
+    by = _caches_by_owner()
+    caches = _caches_total(by)
+    load = dict.get(STATE, "mem_load") or {}
+    base = load.get("allocated")
+    out = {"allocated": int(alloc), "reserved": int(res), "reserve": int(res) - int(alloc),
+           "load": load or None, "caches": caches, "by_owner": by}
+    if base is not None:
+        grown = int(alloc) - int(base)
+        out["above_load"] = grown
+        out["caches_since_load"] = caches - int(load.get("caches") or 0)
+        out["unattributed"] = grown - out["caches_since_load"]
+    if mem is not None and mem.on:
+        out["limits"] = {"ceiling": mem.ceiling, "peak": mem.peak, "slack": mem.slack,
+                         "room": mem.ceiling - mem.slack - int(alloc)}
+        if pools:
+            # the walk is the policy's own (`Budget.pools`): the free reserve a workspace can take
+            out["limits"]["default_free"] = mem.default_free(int(alloc), int(res))
+            out["limits"]["pools"] = mem.pools()
+    pool = kvpool.POOL
+    if pool is not None:
+        try:
+            rep = pool.report()
+            out["kv_pool"] = {"committed": int(round(float(rep.get("committed_gib") or 0) * (1 << 30))),
+                              "outside_allocator": kvpool.Driver.get() is not None}
+        except Exception:                                          # noqa: BLE001
+            pass
+    if pools:
+        try:
+            out["allocator_pools"] = _allocator_pools()
+        except Exception as exc:                                   # noqa: BLE001
+            out["allocator_pools"] = {"error": str(exc)}
+    return out
+
+
+#: SPD-257: `/health`'s summary of the memory by owner: (monotonic time, the summary), rebuilt at most every
+#: OWNERS_TTL_S. It walks every slot's buffers in the server's Python, which holds the interpreter lock the
+#: round runner needs: built on every `/health` build (and once more in `/v1/cache/stats`), it took a
+#: `/health` build from 43 to 63 ms on average on a test server.
+_OWNERS_LAST: list = [0.0, None]
+OWNERS_TTL_S = 10.0
+
+
+def _owners_cached() -> dict:
+    now = time.monotonic()
+    if _OWNERS_LAST[1] is None or now - _OWNERS_LAST[0] >= OWNERS_TTL_S:
+        _OWNERS_LAST[0], _OWNERS_LAST[1] = now, dict(_owners_gib(memory_owners()), age_s=0.0)
+        return _OWNERS_LAST[1]
+    return dict(_OWNERS_LAST[1], age_s=round(now - _OWNERS_LAST[0], 1))
+
+
+def _owners_gib(o: dict) -> dict:
+    """The compact form for /health: GiB, the caches summed by part over the slots."""
+    def g(b):
+        return round(int(b or 0) / (1 << 30), 3)
+    parts: dict = {}
+    for name, d in (o.get("by_owner") or {}).items():
+        if name.startswith("slot"):
+            for k in ("anchors", "anchors_free", "end", "prompt_end", "stash", "pin", "park"):
+                parts[k] = parts.get(k, 0) + int(d.get(k) or 0)
+        else:
+            parts[name] = parts.get(name, 0) + int(d.get("total") or 0)
+    out = {"caches_gb": g(o.get("caches")), "by_part_gb": {k: g(v) for k, v in parts.items()}}
+    for k in ("above_load", "caches_since_load", "unattributed"):
+        if k in o:
+            out[f"{k}_gb"] = g(o[k])
+    if o.get("load"):
+        out["load_allocated_gb"] = g(o["load"].get("allocated"))
+    if o.get("kv_pool"):
+        out["kv_pool_committed_gb"] = g(o["kv_pool"].get("committed"))
     return out
 
 
@@ -10192,14 +11389,25 @@ def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = No
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
-def _memory_filter(plan, chat: bool, n_choices: int, ui):
-    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
-    choice of a chat request; None otherwise (the stream is the release's)."""
+def _memory_takes(plan, chat: bool, n_choices: int, tool_names=()) -> bool | None:
+    """What the memory filter takes out of this request's answer: None (no filter: the stream
+    is the release's), False (the blocks), True (the blocks and the `tandem_memory` calls,
+    unless the client offers a tool of that name: then the calls are its own)."""
     cond = STATE.get("conductor")
     if (cond is None or plan is None or not plan.active or not chat or n_choices != 1
-            or getattr(plan, "memory", None) is None):
+            or not getattr(plan, "memory", None)
+            or plan.memory.get("mode") not in ("on", "shadow")):
         return None
-    return cond.memory.filter(plan.memory, ui)
+    return memblock.TOOL not in (tool_names or ())
+
+
+def _memory_filter(plan, chat: bool, n_choices: int, ui, tool_names=()):
+    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
+    choice of a chat request; None otherwise (the stream is the release's)."""
+    takes = _memory_takes(plan, chat, n_choices, tool_names)
+    if takes is None:
+        return None
+    return STATE["conductor"].memory.filter(plan.memory, ui, calls=takes)
 
 
 def _answer_mask(plan, chat: bool, body: dict):
@@ -10273,10 +11481,12 @@ def _memory_close(plan, mfilter, ids: list[int], n_prompt: int, spans_ok: bool) 
     return hidden, (_memory_spans(hidden, ids, n_prompt) if spans_ok else [])
 
 
-def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -> tuple:
+def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok,
+                 tool_names=()) -> tuple:
     """The non-streamed answer's memory blocks: each closed block of the answer written, every
-    closed one returned with its hidden span (the text drops them later)."""
-    f = _memory_filter(plan, chat, n_choices, ui)
+    closed one returned with its hidden span (the text drops them later, a call form before
+    the calls are read)."""
+    f = _memory_filter(plan, chat, n_choices, ui, tool_names)
     if f is None:
         return [], []
     text = STATE["tok"].decode(ids, skip_special_tokens=True)
@@ -10294,6 +11504,11 @@ def _memory_row(plan, failed: list[str], shown=()) -> None:
     if ctx.get("written"):
         info["written"] = [{k: v for k, v in w.items() if k != "chars"}
                            for w in ctx["written"]]
+        moved = [w["demoted"] for w in ctx["written"] if w.get("demoted")]
+        if moved:
+            # a rule about the user from a tool turn: kept for this session only (notes.py)
+            print(f"[memory] {plan.row.get('request_id') or '-'}: {len(moved)} rule(s) kept at "
+                  f"session scope ({', '.join(f'{w} -> session' for w in moved)})", flush=True)
     if failed:
         info["failed"] = list(failed)
         hid = [w for w in failed if w not in shown]
@@ -11224,6 +12439,8 @@ def _load(a) -> None:
         raise SystemExit(f"[server] the {arch.name} family names no builder (engine/models: Arch.serve)")
     m = build(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
+    global IDLE_CAPTURE_FAILED
+    IDLE_CAPTURE_FAILED = _idle_capture_failed(eng)         # SPD-271: `graphs_once` prints it once, no traceback
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
     gen_cfg = os.path.join(m["path"], "generation_config.json")
     cfg_eos = None
@@ -11294,6 +12511,7 @@ def _load(a) -> None:
     print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
         f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
         for x in led.stages()), flush=True)
+    _mem_load_mark(led.stages())
 
 
 def _kv_pool_open(a) -> None:
@@ -11335,12 +12553,18 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                                       exclude=lambda: memlimits.role_exclude(STATE),
                                       ws_floor=cost.workspace_floor or cache.WORKSPACE_FLOOR,
                                       ws_per_token=cost.workspace_per_token or cache.WORKSPACE_PER_TOKEN,
-                                      ws_cap=cost.workspace_cap, on_event=_memory_event)
+                                      ws_cap=cost.workspace_cap, on_event=_memory_event,
+                                      # SRV-773: a model's workspace by the rows a prefill forwards, else the line
+                                      ws_rows=getattr(cost, "workspace_rows", None))
     # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
     # the stale-reserve rule leaves them out of what the engine's allocator holds free
     mem.register("roles", _release_roles)
     mem.foreign_free = lambda: memlimits.role_pool_free(STATE)
+    # SPD-257: the allocator's pools (the graphs' scratch out of the ceiling, the idle empty and the stale rule; a
+    # cache's whole buffer against the peak) only under expandable segments: without them the policy as before
+    mem.pools_probe = cache.TorchPools() if capture_lock.alloc_expandable() else None
+    mem.strict = PEAK_STRICT               # SRV-775: the strict peak's gates all take the policy's lock
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=int(a.store_entry_gb * gib),
@@ -11356,8 +12580,11 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                 if resident_on else None)
     if store is not None:
         mem.register("store", store.shed)
+        mem.register_partial("store", store.shed_to)      # SPD-249: the gate takes what it needs
     if resident is not None:
         resident.glue = glue_ids(tok)
+        if END_RESERVE == "on":
+            resident.reserve_end(eng)     # SPD-257: its end anchor's buffers, before any other cache
         if resident.end_on:
             STATE["end_align"] = endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
@@ -11414,15 +12641,26 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
 
 def _par_room() -> int | None:
     """SRV-250: the engine's room to `--mem-peak-gib` under its memory policy (the reservation
-    now against the peak), None without a policy. Every cache asks `Budget.admit` before it grows
-    and every prefill passes `Budget.gate`, so the caches, the requests in flight and a new one
-    take at most this together; the caches' budgets alone counted 6.4 to 8.4 GiB the policy would
-    never have let them grow."""
+    now against the peak), None without a policy: what caps the caches' growth in the admission,
+    since every cache asks `Budget.admit` before it grows (the caches' budgets alone counted 6.4 to
+    8.4 GiB the policy would never have let them grow). SRV-775: it caps the caches' growth, the
+    workspaces of the prefills in flight and the request's own, as before: every prefill, a side
+    slot's too, passes `Budget.gate` on the live reserve, which keeps each one it admits under the
+    peak. Only a prefill the gate admitted over the peak (alone, counted) has its workspace counted
+    past this room, in full less the free default-pool blocks it takes first (`_par_spare`)."""
     mem = dict.get(STATE, "mem")
     if mem is None or not getattr(mem, "on", False):
         return None
     _, reserved = mem.memory()
     return max(0, int(mem.peak) - int(reserved))
+
+
+def _par_spare() -> int:
+    """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box
+    (`Budget.workspace_spare`), for the admission's count of a prefill admitted over the peak (`Admission.check`);
+    0 without a policy."""
+    mem = dict.get(STATE, "mem")
+    return int(mem.workspace_spare()) if mem is not None and getattr(mem, "on", False) else 0
 
 
 def _par_growth() -> int:
@@ -11562,7 +12800,10 @@ def _side_resident(a, tok):
     res.glue = glue_ids(tok)
     res.keeper = _keep_parent             # ENG-371: a parent's rows to the NVMe before they go
     if mem is not None:
-        for level, fn in (("anchors", res.shed_anchors), ("end", res.shed_end),
+        # SPD-257: a side slot's idle stash buffers (no guest's rows in them) go with slot 0's at
+        # `stash_idle`, before the anchors and the ends: they were given back only at `stash`, after them
+        for level, fn in (("stash_idle", lambda safe=False: res.shed_stash(True)),
+                          ("anchors", res.shed_anchors), ("end", res.shed_end),
                           ("stash", res.shed_stash)):
             prev = mem.shedders.get(level)
 
@@ -11597,11 +12838,12 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
+                              spare=_par_spare,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]
-    a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    a0, r0 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     depth0 = a.depth
     paged = kvpool.POOL is not None and kvpool.Driver.get() is not None
     not_built = None
@@ -11618,7 +12860,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
             print(f"[parallel] {not_built}", flush=True)
             break
         mi0 = slots_mod.read_meminfo() or {}
-        a1 = torch.cuda.memory_allocated()
+        a1 = cache.cuda_stats("allocated_bytes.all.current")[0]
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
         e2, d2 = make(L, drafter0) if make is not None else hooks["make"](L, drafter0)
@@ -11626,6 +12868,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         values = {k: None for k in slots_mod.OVERLAY}
         values.update(engine=e2, drafter=d2, max_len=L)
         res_i = _side_resident(a, tok)
+        if res_i is not None and END_RESERVE == "on":
+            res_i.reserve_end(e2)         # SPD-257: counted in the slot's bytes the limits go up by
         if res_i is not None:
             values.update(resident=res_i, end_align=endalign.EndAlign(
                 endalign.token_bytes(tok), on=a.end_align == "on",
@@ -11660,15 +12904,15 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         torch.cuda.synchronize()
         mi1 = slots_mod.read_meminfo() or {}
         print(f"[parallel] slot {i}: window {L:,}, built in {time.time() - t0:.1f}s, "
-              f"+{_gib(torch.cuda.memory_allocated() - a1)} GiB allocated, MemAvailable "
+              f"+{_gib(cache.cuda_stats('allocated_bytes.all.current')[0] - a1)} GiB allocated, MemAvailable "
               f"{_gib(mi0.get('MemAvailable'))} -> {_gib(mi1.get('MemAvailable'))} GiB "
               f"(estimate {_gib(need)})", flush=True)
     if len(slots) < 2:
         print(f"[parallel] no side slot fits under the {a.parallel_floor_gb:g} GiB floor: one "
               f"sequence, as without --parallel", flush=True)
         return
-    added_a = torch.cuda.memory_allocated() - a0
-    added_r = torch.cuda.memory_reserved() - r0
+    a1, r1 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+    added_a, added_r = a1 - a0, r1 - r0
     mem = dict.get(STATE, "mem")
     if mem is not None and mem.on:
         side = max(added_a, added_r)
@@ -11716,9 +12960,11 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
+    pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
     if PREFILL_BURST:
         pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
+        pool.burst.log = lambda line: print(line, flush=True)    # SRV-769: who holds, for whom
         if PREFILL_BURST == "joint":
             cache.FIRST_FORWARD = _joint_forward
     slots[0].lock = LOCK
@@ -11895,6 +13141,10 @@ def _serve(a, led) -> None:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         cond.router.session_tokens = STATE["session_tokens"]
+        # SPD-249: no Qwen question whose answer cannot come in time
+        cond.router.own_eta = _own_eta_ms if OWN_ETA == "on" else None
+        # VIS-119: the shadow questions after their turn wait for an idle server
+        cond.router.own_idle = _own_idle_s
         # stored documents a fix must reach (a shipped default reaches only a box without one)
         from server.conductor import migrations as cond_migrations
         cond_migrations.run(cond.store, cond.journal)
@@ -11972,6 +13222,8 @@ def _serve(a, led) -> None:
     # the singletons' reference counts (server/refwatch.py): a C extension that drops their
     # references kills the process at 0 (bool_dealloc, 2026-10-05 13:12); this says so hours ahead
     STATE["refwatch"] = refwatch_mod.start(log=lambda s: print(s, flush=True))
+    # SPD-249 (QSE_RUNNER_GC): what the load and the warm-up left is frozen out of every later collection
+    _round_runner.gc_after_load(log=lambda s: print(s, flush=True))
     print(f"[server] listening on http://{a.host}:{a.port}  model {a.served_model}", flush=True)
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)

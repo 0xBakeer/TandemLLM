@@ -112,6 +112,10 @@ def check(m: dict, body) -> dict:
         if not isinstance(on, bool):
             raise SelectionError(422, "invalid_selection", f"components.{cid}: true or false")
         comps[cid] = on
+    # OPS-260: a tool `with_parent` the selection does not name is on with what it depends on
+    for c in m["components"]:
+        if c.get("with_parent") and c["id"] not in given and all(comps[d] for d in c["depends_on"]):
+            comps[c["id"]] = True
     # a community pack whose entry says images do not work on its load path (ENG-271): the vision
     # tower stays off whatever was sent, so the overlay writes VISION=off and the estimate counts none
     if registry.profile(m, pid).get("vision") is False:
@@ -287,6 +291,8 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
                      f"conversations give their memory back first, and a lane that would take the "
                      f"box under its floor stops with memory_full; the Chat tab continues it once "
                      f"memory is free.")
+        notes.append("Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane "
+                     "its full window.")
     elif slots > 1:
         notes.append(f"All {slots} lanes can hold the full {window:,}-token window at once "
                      f"({_r(lane_full):.2f} GiB each).")

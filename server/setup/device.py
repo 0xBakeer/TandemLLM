@@ -199,9 +199,11 @@ def preset(m: dict, total_gib: float | None, gpu_name: str | None) -> str | None
     not measured on this machine."""
     if total_gib is None:
         return None
+    from tools import gpu as _gpu
     for d in m["devices"]:
-        if abs(d["total_gib"] - total_gib) <= 2.0 and (gpu_name is None or "GB10" in gpu_name
-                                                         or d["id"] != "dgx-spark"):
+        # a preset keyed by a GPU adapter's own key needs that GPU (tools/gpu `key_matches`)
+        if abs(d["total_gib"] - total_gib) <= 2.0 and (gpu_name is None
+                                                         or _gpu.key_matches(d["id"], gpu_name)):
             return d["id"]
     return None
 

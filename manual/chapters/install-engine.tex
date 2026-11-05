@@ -45,13 +45,13 @@ Run one engine per board\index{one engine per board}. Two engines loading side b
 Since 0.8.1 a new DGX Spark needs two commands and no Hugging Face token. Every file a profile reads is public on Hugging Face: our own packs, the vendors' releases, and turboderp's Flash-Next packs (Chapter~\ref{ch:flashnext}).
 
 \begin{shell}
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.2/install.sh
 bash install.sh --setup --yes
 \end{shell}
 
 The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant, and the two Wikipedia shards of the lookup corpus (1.2~GB). The corpus itself needs the model's tokenizer, so \code{ops/use-profile.sh} builds it once the model is on the disk. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model loaded.
 
-Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; it walks through the model, the weights, the tools and the parallel slots in eight steps. \code{docs/setup.md} describes the page.
+Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; a new browser opens its simple form, three pages: the model, its weights, and one page of folded settings. The switch at the top brings back all eight steps, through the model, the weights, the tools and the parallel slots. \code{docs/setup.md} describes the page.
 
 \begin{itemize}
 \item On the box itself, open \texttt{http://127.0.0.1:8000/dashboard/\#/setup}.
@@ -80,15 +80,15 @@ bash ~/TandemLLM/run/ops/use-profile.sh <profile>
 \toprule
 \hd{profile} & \hd{downloads} & \hd{size} & \hd{free disk} \\
 \midrule
-\code{flashnext-3.05} & the pack's branch of \code{turboderp/Qwen3.8-Flash-Next-exl3} & 85.1~GB & 145~GB \\
+\code{flashnext-3.05} & the pack's branch of \code{turboderp/Qwen3.8-Flash-Next-exl3}; the drafts' corrector (\code{0xBakeer/TandemLLM-Qwen3.8-Flash-Next-EXL3-3.05-corrector}, into \code{~/TandemLLM/src/ops/correctors/qwen3.8-flash-next}) & 85.1 + 0.035~GB & 145~GB \\
 \code{exl3-4.5} & \code{0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5}; the K3 drafters and the K4 head (\code{...-EXL3-drafters}); the BF16 drafters (\code{...-DFlash2-b8}, \code{-b16}, into \code{~/TandemLLM/src/train}); the base checkpoint \code{Qwen/Qwen3.8-27B-FP8}, without \code{mtp.safetensors} & 18.4 + 1.9 + 7.7 + 30.4~GB & 118~GB \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-A folder appears only when all its files are there. If a download stops, run the same command again: it keeps the files that finished and continues. The engine then needs about 80~GiB of free memory for a 27B profile and 70~GiB for \code{flashnext-3.05}. If the profile does not come up, the script brings setup mode back.
+A folder appears only when all its files are there. If a download stops, run the same command again: it keeps the files that finished and continues. The corrector file of \code{flashnext-3.05} is checked against the sha256 the profile pins. If it does not download, the script prints a warning and goes on, and Flash-Next drafts without it: the same text, fewer drafts accepted. The engine then needs about 80~GiB of free memory for a 27B profile and 70~GiB for \code{flashnext-3.05}. If the profile does not come up, the script brings setup mode back.
 
-The installer checks out the tag \code{v0.15.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.15.0'}. \code{--ref} picks another release, and \code{--repo} another repository.
+The installer checks out the tag \code{v0.15.2} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.15.2'}. \code{--ref} picks another release, and \code{--repo} another repository.
 
 \section{Updating a box in setup mode}\label{sec:update-setup}\index{upgrade}
 
@@ -104,14 +104,14 @@ bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 Without \code{--setup}, one command sets up the NVFP4 profile, StairCut included:
 
 \begin{shell}
-curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.2/install.sh | bash
 \end{shell}
 
 The installer works in seven steps, and each step is skipped when it is already done, so running it again updates an install and resumes a download that stopped.
 
 \begin{enumerate}
 \item Checks. The GPU needs its driver and the CUDA compiler, the disk and the memory need room, and Hugging Face must answer.
-\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.15.0}.
+\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.15.2}.
 \item A Python venv in \code{~/TandemLLM/venv} with the pinned packages; torch and torchvision come from the CUDA 13.0 index. If neither \code{uv} nor Python 3.11 is on the machine, the installer fetches \code{uv} first.
 \item The weights, into the normal Hugging Face cache: the vendor's FP8 checkpoint (it supplies the tensors the NVFP4 overlays do not replace, and the tokenizer), the four NVFP4 files and both fine-tuned drafters. With \code{--setup}, only Wren's model; \code{use-profile.sh} fetches the rest later.
 \item A lookup corpus built from public text (one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens). \code{--no-corpus} skips it. With \code{--setup}, only the two shards: \code{use-profile.sh} builds the corpus for the model it installs, under \code{corpus/tokenizers/}, with no network.
@@ -159,9 +159,17 @@ The control script takes one command:
 ~/TandemLLM/bin/tandem logs       # follow the engine's log
 \end{shell}
 
+\section{Engine only, or the chat (beta)}\label{sec:mode}\index{qsemode@\texttt{QSE\_MODE}}
+
+A new install serves the engine alone: the OpenAI API under the served model's own name, the dashboard and the caches. Nothing runs beside it: no conductor (no \code{TandemLLM} model, router, user memory, packages, library or session monitor), no decision models, narrator, shadow reader or roles, and no chatd; the Chat tab says the chat is off and how to turn it on. One setting decides it, \code{QSE_MODE} in \code{serve.env}: \code{engine} or \code{chat}.
+
+The chat (beta) is the Chat tab with chatd and the conductor, with the small models the weight profile names. Turn it on with \code{install.sh --with-chat} (a re-run works too), with the Setup Guide's \emph{Chat (beta)} switch, which writes \code{QSE_MODE=chat} to \code{run/setup.env} and turns on Laya's decision models with it, or with \code{QSE_MODE=chat} in \code{run/local.env} and \code{tandem restart}. \code{--engine-only} turns it off again, and the next start stops the chatd the install started. On a box set up in the Setup Guide its switch decides: \code{run/setup.env} is read after the installer's \code{QSE_MODE}, so the two flags there only warn. The last block of \code{ops/serve.env} applies the mode after the weight profile, \code{run/setup.env} and \code{run/local.env}; \code{ops/use-profile.sh} keeps it.
+
+An upgrade keeps each box's mode. Left empty, \code{QSE_MODE} is \code{chat} on a box whose conductor directory (\code{QSE_CONDUCTOR_CONFIG}, by default \code{~/.qwen38-spark-engine/conductor}) exists, so a box that ran the conductor stays a chat box with its documents, memory and sessions; \code{QSE_CONDUCTOR_CONFIG=off} set by hand stays engine only. \code{/health} and \code{/v1/models} say \code{"mode": "engine"} or \code{"chat"} and what is \code{loaded}: the conductor and its monitor's mode, the decision models, the narrator, the loaded roles, and whether chatd answers.
+
 \section{The first request}
 
-The server speaks the OpenAI API on port 8000. With the conductor on, as in the shipped profile, it serves one model called \code{TandemLLM}, and any model name a client sends is served as \code{TandemLLM}:
+The server speaks the OpenAI API on port 8000. In engine-only mode it serves the engine under its own model name (\code{/v1/models} lists it). With the chat on, it serves one model called \code{TandemLLM}, and any model name a client sends is served as \code{TandemLLM}:
 
 \begin{shell}
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
@@ -178,14 +186,14 @@ Point other clients at the same address:
 \hd{client} & \hd{setting} \\
 \midrule
 an OpenAI SDK & \code{OPENAI_BASE_URL=http://<host>:8000/v1} and any key \\
-opencode & an OpenAI-compatible provider with that base URL and the model \code{TandemLLM}; it gets the \code{coding} profile by itself \\
-Open WebUI & an OpenAI connection to that base URL, with the connection header \code{X-OpenWebUI-Chat-Id: {{CHAT_ID}}} so each chat is its own conductor session (Section~\ref{sec:router-session}); it gets the \code{chat} profile \\
-\code{curl}, a script & as above; it gets the \code{general} profile \\
+opencode & an OpenAI-compatible provider with that base URL and the model \code{TandemLLM}; with the chat (beta) on it gets the \code{coding} profile by itself \\
+Open WebUI & an OpenAI connection to that base URL, with the connection header \code{X-OpenWebUI-Chat-Id: {{CHAT_ID}}} so each chat is its own conductor session with the chat (beta) on (Section~\ref{sec:router-session}); it gets the \code{chat} profile \\
+\code{curl}, a script & as above; with the chat (beta) on it gets the \code{general} profile \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-For the engine without the conductor, send the header \code{X-Tandem: raw}\index{X-Tandem header}. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
+An engine-only box (Section~\ref{sec:mode}) has no profiles: every client gets the raw path under the served model's own name, so opencode and Open WebUI name that model instead of \code{TandemLLM}. With the chat (beta) on, the header \code{X-Tandem: raw}\index{X-Tandem header} gives the engine without the conductor for one request. That is the release's raw path, the one the benchmarks and the paper measure. Chapter~\ref{ch:conductor} explains the profiles.
 
 \screenshot[trim=0 640 0 0, clip]{client-open-webui}{Open WebUI with \texttt{TandemLLM} as its model: a demo request on the test board in October 2026, served under the \texttt{chat} profile, with the reasoning folded into \enquote{Thought for 1 seconds}. Only the message pane is shown.}{fig:shot-open-webui}
 
@@ -317,7 +325,7 @@ The balanced and FP8 profiles source \code{ops/serve.env} and change two lines, 
 
 \section{Upgrading and uninstalling}\index{upgrade}\index{uninstall}
 
-To upgrade, run the installer again with the same \code{--dir}. It checks out the new release, installs the new lock and rewrites \code{serve.env} from the release's template; \code{local.env} stays. The usage ledger migrates in place at the first start: columns are added and every row is kept. A box installed with \code{--setup} and switched to a profile since then upgrades with \code{--setup --force-setup} and the profile switch after it, as Section~\ref{sec:update-setup} shows.
+To upgrade, run the installer again with the same \code{--dir}. It checks out the new release, installs the new lock and rewrites \code{serve.env} from the release's template; \code{local.env} stays, and so does the box's mode (Section~\ref{sec:mode}). The usage ledger migrates in place at the first start: columns are added and every row is kept. A box installed with \code{--setup} and switched to a profile since then upgrades with \code{--setup --force-setup} and the profile switch after it, as Section~\ref{sec:update-setup} shows.
 
 Coming from 0.3.0, a client sees these changes:
 

@@ -44,6 +44,7 @@ Run: python tests/test_fresh_install.py   (3 and 4 need Linux: install.sh stops 
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import io
@@ -168,6 +169,20 @@ exec {py} "$@"
 _BOX: dict = {}
 
 
+def _cleanup() -> None:
+    """The install's temp folder (a copy of this checkout and every HOME the tests made) goes, after a test or an
+    install that failed too: left behind, every run added one."""
+    box = _BOX.get("_")
+    _BOX.clear()
+    if box is not None:
+        shutil.rmtree(box["tmp"], ignore_errors=True)
+
+
+def teardown_module(module=None) -> None:
+    """pytest: after the module's last test, whatever the tests did."""
+    _cleanup()
+
+
 def _box(name: str = "plain", hf_home: str | None = None) -> dict | None:
     """install.sh --setup --no-start into a HOME of its own (`hf_home`: HF_HOME under it), once per
     name; the release is this checkout's files as one commit of a repository of their own. None off
@@ -178,18 +193,24 @@ def _box(name: str = "plain", hf_home: str | None = None) -> dict | None:
         return _BOX[name]
     if not _BOX:
         tmp = tempfile.mkdtemp(prefix="fresh-install-")
-        rel, stubs = os.path.join(tmp, "release"), os.path.join(tmp, "stubs")
-        skip = shutil.ignore_patterns("node_modules", "__pycache__", "*.pdf")
-        shutil.copytree(ROOT, rel, symlinks=True, ignore=lambda d, names: set(skip(d, names)) | (
-            {".git", "run", "logs", "train"} & set(names) if os.path.samefile(d, ROOT) else set()))
-        git = ["git", "-C", rel, "-c", "user.name=t", "-c", "user.email=t@example.com"]
-        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "release"]):
-            subprocess.run(git + cmd, check=True, capture_output=True)
-        for p, text in _STUBS.items():
-            _write(os.path.join(stubs, p), text.encode())
-            os.chmod(os.path.join(stubs, p), 0o755)
-        _BOX["_"] = {"tmp": tmp, "rel": rel, "stubs": stubs, "ref": subprocess.run(
-            git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()}
+        _BOX["_"] = {"tmp": tmp}            # from here on `_cleanup` removes it (at exit too)
+        atexit.register(_cleanup)
+        try:
+            rel, stubs = os.path.join(tmp, "release"), os.path.join(tmp, "stubs")
+            skip = shutil.ignore_patterns("node_modules", "__pycache__", "*.pdf")
+            shutil.copytree(ROOT, rel, symlinks=True, ignore=lambda d, names: set(skip(d, names)) | (
+                {".git", "run", "logs", "train"} & set(names) if os.path.samefile(d, ROOT) else set()))
+            git = ["git", "-C", rel, "-c", "user.name=t", "-c", "user.email=t@example.com"]
+            for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "release"]):
+                subprocess.run(git + cmd, check=True, capture_output=True)
+            for p, text in _STUBS.items():
+                _write(os.path.join(stubs, p), text.encode())
+                os.chmod(os.path.join(stubs, p), 0o755)
+            _BOX["_"].update(rel=rel, stubs=stubs, ref=subprocess.run(
+                git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip())
+        except BaseException:
+            _cleanup()
+            raise
     rel, stubs, ref = (_BOX["_"][k] for k in ("rel", "stubs", "ref"))
     home = os.path.join(_BOX["_"]["tmp"], name)
     d = os.path.join(home, "TandemLLM")
@@ -266,7 +287,7 @@ def test_the_setup_message():
     assert "--host 0.0.0.0" in tail and "use-profile.sh" not in tail, tail
     # OPS-155: the Chat tab waits for the setup, and says how to see chatd
     assert "The Chat tab starts with the engine once the setup is done (" in tail and \
-        "/bin/tandem chat status)." in tail, tail
+        "/bin/tandem chat status) when Chat (beta) is on in the guide" in tail, tail   # OPS-260
 
 
 def test_a_setup_install_takes_an_exl3_profile():
@@ -414,5 +435,4 @@ if __name__ == "__main__":
             if name.startswith("test_") and callable(fn):
                 fn(); print(f"  {name:60s} ok")
     finally:
-        if _BOX:
-            shutil.rmtree(_BOX["_"]["tmp"], ignore_errors=True)
+        _cleanup()

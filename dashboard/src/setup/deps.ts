@@ -89,7 +89,11 @@ export function toggleComponent(m: SetupModel, sel: Record<string, boolean>, id:
   const av = availability(m, sel)[id];
   if (on && av.disabled) return { ok: false, error: av.reason ?? S.tool.noComponent(id) };
   const next = { ...sel, [id]: on };
-  if (on) return { ok: true, components: next, cascaded: [], notice: null };
+  if (on) {
+    // OPS-260: a `with_parent` tool (it depends on this one alone, registry.py) comes on with it: Chat (beta) brings Laya
+    for (const d of m.components) if (d.with_parent && d.depends_on.includes(id)) next[d.id] = true;
+    return { ok: true, components: next, cascaded: [], notice: null };
+  }
   const cascaded = dependentsOf(m, id).filter((d) => isOn(d, sel) && !d.required);
   for (const d of cascaded) next[d.id] = false;
   const notice = cascaded.length ? S.cascadeOff(lowerLabel(c.label), cascaded.map((d) => d.label)) : null;

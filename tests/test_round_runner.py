@@ -144,16 +144,33 @@ def test_slot_0_goes_with_the_runner_and_its_lane_is_served_between_rounds():
     return out + f"; slot 0's lane served at {st['lane_jobs']} of {st['rounds']} round starts"
 
 
-def test_a_block_that_can_be_closed_keeps_the_slot_loop():
+def test_a_block_that_can_be_closed_or_a_supervisor_goes_with_the_runner():
+    """SPD-249: a budget, stall arms or a supervisor go with the runner (handed back at SP1, SP2 and the
+    budget); QSE_RUNNER_SUPERVISED=0 keeps them on the slot loop, counted, as before."""
     from engine.spec import ThinkBudget
-    R.SKIPS.clear()
-    kw = dict(sup=None, probe=None, lpr=None, ahead=None, drafter=object(), lane=None, turn=object())
-    assert R.why_not(think=ThinkBudget(_Tok(5, 6), 64), **kw) == "think_budget"
-    assert R.why_not(think=ThinkBudget(_Tok(5, 6), 0, arms={"loop": None}), **kw) == "think_budget"
-    assert R.why_not(think=ThinkBudget(_Tok(5, 6), 0), **kw) is None
-    assert R.why_not(think=None, **kw) is None
-    assert R.SKIPS == {"think_budget": 2}, R.SKIPS
-    return "a budget or stall arms: the slot's own loop (counted); a passive block or none: the runner"
+    kw = dict(probe=None, lpr=None, ahead=None, drafter=object(), lane=None, turn=object())
+    saved = R.SUPERVISED
+    try:
+        for on in (True, False):
+            R.SUPERVISED = on
+            R.SKIPS.clear()
+            got = [R.why_not(sup=None, think=ThinkBudget(_Tok(5, 6), 64), **kw),
+                   R.why_not(sup=None, think=ThinkBudget(_Tok(5, 6), 0, arms={"loop": None}), **kw),
+                   R.why_not(sup=object(), think=ThinkBudget(_Tok(5, 6), 0), **kw),
+                   R.why_not(sup=None, think=ThinkBudget(_Tok(5, 6), 0), **kw),
+                   R.why_not(sup=None, think=None, **kw)]
+            if on:
+                assert got == [None] * 5 and R.SKIPS == {}, (got, R.SKIPS)
+            else:
+                assert got == ["think_budget", "think_budget", "supervisor", None, None], got
+                assert R.SKIPS == {"think_budget": 2, "supervisor": 1}, R.SKIPS
+        R.SUPERVISED = True
+        R.SKIPS.clear()
+        assert R.why_not(sup=object(), think=None, probe=None, lpr=object(), ahead=None, drafter=object(),
+                         lane=None, turn=object()) == "logprobs"
+    finally:
+        R.SUPERVISED = saved
+    return "budget, arms, supervisor: the runner; QSE_RUNNER_SUPERVISED=0: the slot loop (counted)"
 
 
 def test_a_stream_read_half_way_and_closed_after_its_slot_went_back_leaves_the_turn_free():
@@ -249,6 +266,27 @@ def test_the_report_gives_each_phase_by_the_slots_in_the_round():
     # SPD-239: slot counts with fewer than 8 rounds are left out; the rest are ms a round
     d = {8: {"n": 10, "verify": 1180.0, "tails": 52.0}, 2: {"n": 3, "verify": 90.0}}
     assert R.Runner._by_e(d) == {8: {"n": 10, "tails": 5.2, "verify": 118.0}}
+
+
+def test_host_counters_change_no_token_and_cut_each_round():
+    """SPD-249 (QSE_RUNNER_COUNTERS): with the counters on, two requests through the runner write their alone texts;
+    the report cuts the 2-lane rounds into host segments and counts their kept rows by depth and accepted lengths."""
+    import gc
+    old = R.COUNTERS
+    R.COUNTERS = True
+    try:
+        out = _check(2)
+        g = R.RUNNER.report()["counters"]
+    finally:
+        R.COUNTERS = old
+        if R._gc_cb in gc.callbacks:
+            gc.callbacks.remove(R._gc_cb)
+    d = g["by_lanes"][2]
+    assert {"rest", "cut", "verify", "walk", "tail_a", "commit", "tail_b", "end"} <= set(d["seg"]), d["seg"]
+    assert all(len(v) == 4 and v[0] >= 0 for v in d["seg"].values()), d["seg"]
+    assert sum(d["deepest"].values()) == 2 * d["rounds"] and sum(d["acc"].values()) == 2 * d["rounds"], d
+    assert sum(d["depth"].values()) == sum(k * v for k, v in d["rows"].items()), d
+    return f"{out}; {d['rounds']} rounds of 2 lanes counted, segments {sorted(d['seg'])}"
 
 
 
@@ -389,6 +427,676 @@ def test_a_family_that_commits_a_round_at_once_gets_one_call():
         del Qwen38Engine.commit_tree_multi
     assert calls and all(n > 1 for n in calls), calls
     return f"{out}; {len(calls)} rounds committed in one call each"
+
+
+# ------------------------------------------------------------------ SPD-249: hand-backs, runner vs slot loop
+
+class _GapTree(T.OracleTree):
+    """The oracle tree, with no draft at every third context length: the plain step (with `joint_plain`, the
+    anchor alone in the joint pass)."""
+
+    def propose_tree(self, ctx, count):
+        if len(ctx) % 3 == 0:
+            from engine.tree import DraftTree
+            return DraftTree(tokens=[int(ctx[-1])], parents=[-1])
+        return super().propose_tree(ctx, count)
+
+
+_JP_ANCHORS = [0]
+
+
+def _jp_engine(cfg, w):
+    """The CPU engine as a family that joins a plain step to the joint pass (`joint_plain`): a one-row block
+    is the plain step (its row written at once, nothing left to commit), every other block the tree verify."""
+    import dataclasses
+    from engine.model import forward_tree_multi as ftm
+    from engine.models.qwen3_5.adapter import Qwen38Engine
+
+    class JointPlain(Qwen38Engine):
+        caps = dataclasses.replace(Qwen38Engine.caps, joint_plain=True)
+        _anchor = False
+
+        def forward_tree(self, block, parents, start=0):
+            if len(parents) == 1:
+                _JP_ANCHORS[0] += 1
+                self._anchor, self.picks = True, None
+                return self.forward(block, start=start, last_only=True)[0]
+            self._anchor = False
+            return super().forward_tree(block, parents, start=start)
+
+        def commit_tree(self, path):
+            if self._anchor:
+                self._anchor = False
+                return None
+            return super().commit_tree(path)
+
+        @staticmethod
+        def forward_tree_multi(items):
+            out = [None] * len(items)
+            rest = [(k, it) for k, it in enumerate(items) if len(it[2]) > 1]
+            for k, (eng, tokens, parents, start) in enumerate(items):
+                if len(parents) == 1:
+                    out[k] = eng.forward_tree(tokens, parents, start=start)
+            if rest:
+                for (k, it), lg in zip(rest, ftm([it for _, it in rest])):
+                    it[0]._anchor = False
+                    out[k] = lg
+            return out
+
+    eng = JointPlain(cfg, w, max_len=256, device="cpu")
+    eng.kv.k = eng.kv.k.to(T.DT)
+    eng.kv.v = eng.kv.v.to(T.DT)
+    eng.state.conv = eng.state.conv.to(T.DT)
+    return eng
+
+
+def _serve(cfg, w, prompts, fulls, n, mk, *, runner, gap=False, joint_plain=None, consume=None):
+    """The requests decoding at once on slot 0 and side slots, through the runner (`runner`) or each slot's
+    own loop. `mk(i)` gives request i's generate_stream keywords (eos, think, sup, ...), fresh for each run;
+    `consume(i, gen, pool)` reads its stream (all of it by default). Returns per request (tokens, hidden
+    spans, keywords), and the runner's stats."""
+    import threading
+    import torch
+    from server import app, slots
+    import test_supervisor_frame as F
+    saved_on = R.ON
+    R.ON, R.RUNNER = runner, None
+    engines = [(_jp_engine if joint_plain else T._engine)(cfg, w) for _ in prompts]
+    mkd = (lambda f: _GapTree(f)) if gap else (lambda f: T.OracleTree(f))
+    pool = T._setup(engines, [mkd(f) for f in fulls])
+    app.STATE["tok"] = F.MonTok()
+    kws = [mk(i) for i in range(len(prompts))]
+    outs, spans, errs = {}, {}, []
+    go = threading.Barrier(len(prompts))
+    read = consume or (lambda i, gen, pool: list(gen))
+
+    def run(i):
+        kw = dict(kws[i])
+        eos = kw.pop("eos", set())
+        try:
+            go.wait()
+            if i == 0:
+                with app.LOCK:
+                    with torch.no_grad():
+                        outs[i] = read(i, app.generate_stream(torch.tensor(prompts[i]), n, eos, **kw), pool)
+                    spans[i] = [(a, list(b)) for a, b in app.STATE.get("hidden_spans") or []]
+                return
+            s = pool.slots[i]
+            slots.bind(s)
+            s.owner = f"req-{i}"
+            pool.turn.reset(i)
+            pool.turn.acquire(i)
+            try:
+                with torch.no_grad():
+                    outs[i] = read(i, app.generate_stream(torch.tensor(prompts[i]), n, eos, **kw), pool)
+                spans[i] = [(a, list(b)) for a, b in app.STATE.get("hidden_spans") or []]
+            finally:
+                if pool.turn.held_by(i):
+                    pool.turn.release(i)
+                s.phase, s.owner = "", None
+                slots.bind(None)
+        except BaseException as exc:                               # noqa: BLE001
+            errs.append(exc)
+
+    ths = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(len(prompts))]
+    try:
+        with F.quiet():                         # the [think] lines; sys.stdout is the process's, never a thread's
+            for th in ths:
+                th.start()
+            for th in ths:
+                th.join(120)
+        alive = [th.is_alive() for th in ths]
+        owner = pool.turn.owner
+        stats = dict(R.RUNNER.stats) if R.RUNNER is not None else None
+        T._teardown()
+    finally:
+        R.ON = saved_on
+    if errs:
+        raise errs[0]
+    assert not any(alive), f"a request never ended (deadlock?): {alive}"
+    assert owner is None, f"the turn held by {owner!r} after every request ended"
+    return [(outs[i], spans.get(i), kws[i]) for i in range(len(prompts))], stats
+
+
+def _prompts(k, think=True):
+    from test_supervisor_frame import OPEN
+    base = [[(3 + 7 * i + 11 * j) % 88 + 1 for j in range(10 + 3 * i)] for i in range(k)]
+    return [p + [OPEN] for p in base] if think else base
+
+
+def _pair(mk, k=2, n=40, eos_at=None, gap=False, joint_plain=None, think=True, consume=None):
+    """Runner vs slot loop over the same requests: (slot loop results, runner results, runner stats)."""
+    cfg = T.tiny_config()
+    w = T.FakeWeights(cfg, seed=18)          # a seed whose greedy texts do not fall into a 2-cycle at once
+    prompts = _prompts(k, think)
+    refs = [T._greedy(cfg, w, p, n) for p in prompts]
+    fulls = [p + r for p, r in zip(prompts, refs)]
+
+    def mk2(i):
+        kw = mk(i)
+        if eos_at is not None and "eos" not in kw:
+            # an end token the request writes at `eos_at` (its first time), so SP2 is asked there
+            at = next(j for j in range(eos_at, n) if refs[i][j] not in refs[i][:j])
+            kw["eos"] = {refs[i][at]}
+        return kw
+    R.SKIPS.clear()
+    loop, _ = _serve(cfg, w, prompts, fulls, n, mk2, runner=False, gap=gap, joint_plain=joint_plain)
+    skips0 = dict(R.SKIPS)
+    run, stats = _serve(cfg, w, prompts, fulls, n, mk2, runner=True, gap=gap, joint_plain=joint_plain,
+                        consume=consume)
+    assert "supervisor" not in R.SKIPS and "think_budget" not in R.SKIPS, R.SKIPS
+    assert stats is not None and stats["tasks"] >= k and stats["errors"] == 0, stats
+    del skips0
+    return loop, run, stats
+
+
+def _same(loop, run, what=""):
+    for i, ((a, sa, ka), (b, sb, kb)) in enumerate(zip(loop, run)):
+        assert a == b, (what, i, "texts", a, b)
+        assert sa == sb, (what, i, "hidden spans", sa, sb)
+        sup_a, sup_b = ka.get("sup"), kb.get("sup")
+        if sup_a is not None:
+            assert (sup_a.acted, sup_a.gave_up, list(sup_a.cuts), sup_a.hidden_tokens) == \
+                (sup_b.acted, sup_b.gave_up, list(sup_b.cuts), sup_b.hidden_tokens), (what, i, "supervisor")
+        th_a, th_b = ka.get("think"), kb.get("think")
+        if th_a is not None:
+            assert (th_a.inside, th_a.done, th_a.n, th_a.reason) == (th_b.inside, th_b.done, th_b.n, th_b.reason), \
+                (what, i, "think")
+
+
+def _sup_kw(tasks, budget=0, arms=None, tools=(), max_tokens=64):
+    """Request keywords: a fresh supervisor on `tasks` and its ThinkBudget (arms: the supervisor's own, or
+    `arms`)."""
+    from engine.spec import ThinkBudget
+    import test_supervisor_frame as F
+    mon = F.monitor("on", tasks)
+    sup = F.begin(mon, tools=tools, max_tokens=max_tokens)
+    return {"sup": sup, "think": ThinkBudget(F.MonTok(), budget=budget, arms=arms or sup.arms)}
+
+
+def test_spd249_a_supervisor_that_never_acts_writes_the_slot_loops_text():
+    """Every SP1 marker answered None and every SP2 ask passed: the slot loop's texts, nothing skipped, SP1's
+    markers waited for (and the slots sat out while they waited)."""
+    import test_supervisor_frame as F
+    with F.rule("t249_pass1", "SP1", lambda ev, task, sup: None), \
+            F.rule("t249_pass2", "SP2", lambda ev, task, sup: None):
+        tasks = {"P1": {"rule": "t249_pass1", "mode": "act"}, "P2": {"rule": "t249_pass2", "mode": "act"}}
+        loop, run, st = _pair(lambda i: _sup_kw(tasks), eos_at=20)
+    _same(loop, run, "pass")
+    assert all(len(o) < 40 and o[-1] in kw["eos"] for o, _, kw in run), [len(o) for o, _, _ in run]
+    assert st["back"].get("sp2", 0) + st["back"].get("sp2_plain", 0) >= 2, st["back"]
+    assert "sp1" not in st["back"] and st["sp1_marks"] > 0 and st["joint"] > 0, st
+    return (f"no act: the slot loop's texts; {st['sp1_marks']} SP1 verdicts None, hand-backs {st['back']}, "
+            f"{st['joint']} joint passes, {st['sat_out']} rounds sat out")
+
+
+def test_spd249_sp2_hidden_continue_keeps_texts_and_hidden_spans():
+    import test_supervisor_frame as F
+    with F.rule("t249_cont", "SP2", F._continue_once):
+        tasks = {"T": {"rule": "t249_cont", "mode": "act"}}
+        loop, run, st = _pair(lambda i: _sup_kw(tasks), eos_at=12)
+    _same(loop, run, "sp2")
+    assert all(kw["sup"].acted and sp for _, sp, kw in run), [(sp, kw["sup"].acted) for _, sp, kw in run]
+    assert st["back"].get("sp2", 0) + st["back"].get("sp2_plain", 0) >= 2, st["back"]
+    return f"SP2 continued once a request: texts and hidden spans equal; hand-backs {st['back']}"
+
+
+def test_spd249_sp1_closes_the_reasoning_at_a_block():
+    import test_supervisor_frame as F
+    loop, run, st = _pair(lambda i: _sup_kw(F.backstop(9 + 4 * i)))
+    _same(loop, run, "sp1")
+    assert all(kw["sup"].acted and sp for _, sp, kw in run), [sp for _, sp, _ in run]
+    assert st["back"].get("sp1", 0) == 2, st["back"]
+    return f"SP1 closed each reasoning block at its backstop; hand-backs {st['back']}"
+
+
+def test_spd249_give_up_at_sp1_ends_the_stream():
+    import test_supervisor_frame as F
+    from server.conductor.monitor.policy import GIVE_UP
+    from server.conductor.monitor import Action
+
+    def give_up(ev, task, sup):
+        return Action(GIVE_UP, reason="t") if ev.reasoning_tokens >= 7 else None
+    with F.rule("t249_give", "SP1", give_up):
+        loop, run, st = _pair(lambda i: _sup_kw({"G": {"rule": "t249_give", "mode": "act"}}))
+    _same(loop, run, "give_up")
+    assert all(kw["sup"].gave_up and len(o) < 40 for o, _, kw in run), [len(o) for o, _, _ in run]
+    assert st["back"].get("sp1", 0) == 2, st["back"]
+    return f"GIVE_UP at SP1: the stream ended where the slot loop ends it ({[len(o) for o, _, _ in run]})"
+
+
+def test_spd249_a_d1_arm_stall_closes_through_sp1():
+    """D1: the ThinkBudget's stall arms set the reason, the supervisor's reasoning_loop closes at SP1."""
+    import test_supervisor_frame as F
+    arms = {"loop": {"min_size": 1, "max_size": 8, "min_count": 2, "min_span": 6},
+            "novelty": {"window": 8, "gram": 2, "min_tokens": 8, "below": 0.9}}
+    tasks = {"D1": {"rule": "reasoning_loop", "mode": "act", "close": F.CLOSE_TEXT, "arms": arms}}
+    loop, run, st = _pair(lambda i: _sup_kw(tasks), n=48)
+    _same(loop, run, "d1")
+    fired = [kw["think"].reason for _, _, kw in run]
+    assert all(fired) and all(kw["sup"].acted for _, _, kw in run), fired
+    assert st["back"].get("sp1", 0) == 2, st["back"]
+    return f"the arms fired ({fired}) and SP1 closed: texts equal"
+
+
+def test_spd249_a_spent_budget_is_closed_on_the_slots_thread():
+    """A client's reasoning budget, with and without a supervisor: the forced close (its phrase streamed) is
+    the slot loop's."""
+    from engine.spec import ThinkBudget
+    import test_supervisor_frame as F
+    for with_sup in (False, True):
+        def mk(i):
+            if with_sup:
+                return _sup_kw({}, budget=6 + 5 * i)
+            return {"think": ThinkBudget(F.MonTok(), budget=6 + 5 * i)}
+        loop, run, st = _pair(mk)
+        _same(loop, run, f"budget sup={with_sup}")
+        assert all(kw["think"].done for _, _, kw in run), [kw["think"].n for _, _, kw in run]
+        assert st["back"].get("budget", 0) == 2, st["back"]
+    return f"the budget's forced close on the slot's thread, with and without a supervisor ({st['back']})"
+
+
+def test_spd249_sp3_regenerate_records_the_same_cuts():
+    import test_supervisor_frame as F
+    from server.conductor.monitor import Action
+    from server.conductor.monitor.policy import REGENERATE_CALL
+
+    def regen(ev, task, sup):
+        if sup.memo.get("regen"):
+            return None
+        sup.memo["regen"] = True
+        a = Action(REGENERATE_CALL, reason="t", text="again")
+        a.ids = sup.monitor.ids(sup.policy.templates["regen_turn"].replace("{text}", "again"))
+        a.visible = []
+        return a
+    with F.rule("t249_regen", "SP2", regen):
+        loop, run, st = _pair(lambda i: _sup_kw({"R": {"rule": "t249_regen", "mode": "act"}}), eos_at=10)
+    _same(loop, run, "sp3")
+    cuts = [list(kw["sup"].cuts) for _, _, kw in run]
+    assert all(cuts), cuts
+    return f"REGENERATE_CALL at SP2: the cuts {cuts} and texts equal"
+
+
+def test_spd249_plain_steps_with_and_without_joint_plain():
+    """No draft at every third block: the plain step alone (`_plain`, SP2 there too), or with `joint_plain`
+    the anchor alone in the joint pass (the 27B's and LFM2.5's families): the slot loop's texts."""
+    import test_supervisor_frame as F
+    with F.rule("t249_cont", "SP2", F._continue_once):
+        tasks = {"T": {"rule": "t249_cont", "mode": "act"}}
+        for jp in (False, True):
+            _JP_ANCHORS[0] = 0
+            loop, run, st = _pair(lambda i: _sup_kw(tasks, budget=14 + 3 * i), eos_at=8, gap=True,
+                                  joint_plain=jp)
+            _same(loop, run, f"joint_plain={jp}")
+            assert st["plain" if not jp else "joint"] > 0, st
+            assert (_JP_ANCHORS[0] > 0) == jp, _JP_ANCHORS
+            assert sum(st["back"].values()) >= 2, st["back"]
+    return f"plain steps and joint anchors with hand-backs: texts equal ({st['back']})"
+
+
+def test_spd249_a_slow_consumer_waits_alone():
+    """SP1 is asked when the stream has read up to its marker: a slow reader keeps its task out of the
+    rounds (no deadlock), and the other lane writes the slot loop's text."""
+    import time
+    import test_supervisor_frame as F
+    with F.rule("t249_pass1", "SP1", lambda ev, task, sup: None):
+        tasks = {"P1": {"rule": "t249_pass1", "mode": "act"}}
+
+        def slow(i, gen, pool):
+            out = []
+            for t in gen:
+                out.append(t)
+                if i == 1:
+                    time.sleep(0.02)
+            return out
+        loop, run, st = _pair(lambda i: _sup_kw(tasks), consume=slow, n=36)
+    _same(loop, run, "slow")
+    assert st["sat_out"] > 0, st
+    return f"a slow reader: {st['sat_out']} rounds sat out, texts equal"
+
+
+def test_spd249_a_client_that_leaves_during_a_hand_back_frees_the_turn():
+    """The client of slot 1 stops reading inside a hand-back (the tokens before a dropped end token, after a
+    hidden continue); its slot is given back and the stream closed later: the turn is free at the end, and
+    slot 0 writes the slot loop's text."""
+    import test_supervisor_frame as F
+
+    def leave(i, gen, pool):
+        out = []
+        if i == 0:
+            return list(gen)
+        for t in gen:
+            out.append(t)
+            if len(out) >= 3 and _acted[0]:
+                break
+        if pool.turn.held_by(i):                              # `_par_end`
+            pool.turn.release(i)
+        s = pool.slots[i]
+        s.phase, s.owner = "", None
+        from server import slots
+        slots.bind(None)
+        gen.close()
+        return out
+    _acted = [False]
+
+    def mk(i):
+        kw = _sup_kw({"T": {"rule": "t249_cont", "mode": "act"}})
+        if i == 1:
+            real = kw["sup"].at_finish
+
+            def at_finish(ev, room):
+                a = real(ev, room)
+                _acted[0] = _acted[0] or a is not None
+                return a
+            kw["sup"].at_finish = at_finish
+        return kw
+    with F.rule("t249_cont", "SP2", F._continue_once):
+        loop, run, st = _pair(mk, eos_at=12, consume=leave)
+    assert loop[0][0] == run[0][0], (loop[0][0], run[0][0])
+    assert _acted[0] and len(run[1][0]) < len(loop[1][0]), (len(run[1][0]), len(loop[1][0]))
+    return f"slot 1 left after {len(run[1][0])} tokens inside a hand-back; the turn free, slot 0's text kept"
+
+
+def _hooked_multi(extra=None):
+    """engine.model's joint pass with the family's GPU-wait hook after it (`busy.busy()`, as Flash-Next calls it between
+    its pass's issue and its wait); `extra()` runs first. Returns (module, the real pass)."""
+    import engine.model as M
+    from engine.methods import busy
+    real = M.forward_tree_multi
+
+    def multi(items):
+        out = real(items)
+        if extra is not None:
+            extra()
+        busy.busy()
+        return out
+    M.forward_tree_multi = multi
+    return M, real
+
+
+def _knobs_off(M, real):
+    from engine.methods import busy
+    M.forward_tree_multi = real
+    R.BUSY_WORK = R.GC_CTL = False
+    busy.HOOK = None
+    busy.hold(False)
+
+
+def test_spd249_busy_work_hands_the_tokens_over_in_the_gpu_wait():
+    """SPD-249 (QSE_RUNNER_BUSY_WORK): a joint round's tokens are held and handed to the slots' threads in the next
+    pass's GPU wait (the family's `busy()`), a gated thread waits for that window; every request writes its alone text.
+    A family that never calls the hook: nothing is held."""
+    from engine.methods import busy
+    M, real = _hooked_multi()
+    R.BUSY_WORK = True
+    try:
+        out = _check(3)
+        hk = dict(R.RUNNER.stats["busy"])
+        rep = R.RUNNER.report()["host_work"]
+        w0 = busy.report()["windows"]
+    finally:
+        _knobs_off(M, real)
+    assert hk["waits"] > 0 and hk["flushed"] > 0, hk
+    assert rep["busy_work"] and w0 > 0, (rep, w0)
+    R.BUSY_WORK = True
+    try:
+        _check(2)
+        hk2 = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, M.forward_tree_multi)
+    assert hk2["waits"] == 0 and hk2["flushed"] == 0, hk2
+    return f"{out}; held tokens handed over in {hk['waits']} GPU waits ({hk['flushed']} pushes, {hk['late']} late)"
+
+
+def test_spd249_a_held_task_ends_hands_back_and_marks_in_order():
+    """Busy work with the supervisor's hand-backs and SP1 markers: every message after the tokens held before it, no
+    deadlock, the slot loop's texts."""
+    M, real = _hooked_multi()
+    R.BUSY_WORK = True
+    try:
+        out = test_spd249_a_supervisor_that_never_acts_writes_the_slot_loops_text()
+        hk = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, real)
+    assert hk["waits"] > 0, hk
+    return f"{out}; {hk}"
+
+
+def test_spd249_held_tokens_go_before_another_holder_takes_the_turn():
+    """Busy work with a holder waiting for the turn (a prefill chunk, a burst, a lane job): before the runner releases the
+    turn to it, the tokens it holds are on the slots' queues and its windows are given up, so neither a stream nor a
+    gated thread waits through the other holder's work; the texts stay the alone texts."""
+    import threading
+    import time
+    from engine.methods import busy
+    from server import app
+    seen: dict = {}
+    th: list = []
+
+    def holder(turn):
+        turn.acquire("prefill")             # waits behind the runner's round
+        try:
+            r = R.RUNNER
+            seen["held"] = sum(len(t.held) for t in list(r.tasks) + list(r._held.values()))
+            seen["busy_held"] = busy.report()["held"]
+            t0 = time.perf_counter()
+            seen["gate"] = busy.gate(1.0)
+            seen["gate_ms"] = 1e3 * (time.perf_counter() - t0)
+            seen["round"] = r.stats["rounds"]
+            time.sleep(0.05)                # the other holder's work
+        finally:
+            turn.release("prefill")
+
+    def extra():
+        r = R.RUNNER
+        if th or r is None or r.stats["rounds"] < 3 or not r._held:
+            return
+        turn = app.LOCK.turn
+        th.append(threading.Thread(target=holder, args=(turn,)))
+        th[0].start()
+        t_end = time.perf_counter() + 2.0
+        while "prefill" not in turn._waiting and time.perf_counter() < t_end:
+            time.sleep(0.001)                   # the holder queued behind this round before the round goes on
+        seen["waiting"] = int("prefill" in turn._waiting)
+    M, real = _hooked_multi(extra)
+    R.BUSY_WORK = True
+    try:
+        out = _check(3)
+        hk = dict(R.RUNNER.stats["busy"])
+    finally:
+        _knobs_off(M, real)
+        for x in th:
+            x.join(5.0)
+    assert th and seen.get("waiting", 0) >= 1, seen
+    assert seen["held"] == 0 and not seen["busy_held"], seen
+    assert seen["gate"] and seen["gate_ms"] < 50, seen
+    assert hk["handoff"] > 0 and hk["waits"] > 0, hk
+    return (f"{out}; the other holder got the turn after round {seen['round']} with 0 tokens held, its gate at once "
+            f"({seen['gate_ms']:.1f} ms); {hk['handoff']} pushes handed over before hand-offs")
+
+
+def test_spd249_a_turn_that_would_wait_takes_the_held_tokens_first():
+    """Busy work, the runner's acquire: a free turn keeps the held tokens for the next GPU wait; a turn another holder took
+    between the rounds gets them onto the queues (and the windows given up) before the runner waits for it."""
+    import threading
+    import time
+    import types
+    from engine.methods import busy, draft_meet
+    from server import slots
+    R.BUSY_WORK, meet0 = True, draft_meet.MEET
+    try:
+        turn = slots.Turn(quantum_s=0.0)
+        r = R.Runner(types.SimpleNamespace(turn=turn), None)
+        t = R.Task(None, None, None, None, None, None, [], 0, 0, 0, 8, set(), None, 1, None, "cpu")
+        t.hold([1, 2], 1)
+        r._held[id(t)] = t
+        r._busy_on = True
+        busy.hold(True)
+        r._acquire(turn)                                # free: no hand-off, the tokens wait for the GPU wait
+        assert turn.held_by("runner") and t.held and t.q.empty() and busy.report()["held"]
+        turn.release("runner")
+        turn.acquire("prefill")                         # another holder between the rounds
+        got = []
+        th = threading.Thread(target=lambda: (r._acquire(turn), got.append(turn.held_by("runner"))), daemon=True)
+        th.start()
+        t_end = time.perf_counter() + 2.0
+        while not turn.waiting() and time.perf_counter() < t_end:
+            time.sleep(0.001)
+        assert turn.waiting() == 1 and not got
+        assert not t.held and t.q.get_nowait() == ("tokens", [1, 2]), t.held
+        assert not busy.report()["held"] and busy.gate(1.0) and r.stats["busy"]["handoff"] == 1, (
+            busy.report(), r.stats["busy"])                 # one held message (a push of two tokens)
+        turn.release("prefill")
+        th.join(2.0)
+        assert got == [True], got
+        turn.release("runner")
+    finally:
+        for who in ("prefill", "runner"):
+            if turn.held_by(who):
+                turn.release(who)
+        R.BUSY_WORK, draft_meet.MEET = False, meet0
+        busy.HOOK = None
+        busy.hold(False)
+    return "free turn: held for the GPU wait; taken turn: on the queue and the windows given up before the wait"
+
+
+def test_spd249_a_stream_that_stops_early_ends_its_generation_before_the_bookkeeping():
+    """SPD-249: `_serve`'s streamed loop breaks at the end token (a stop string, an argument loop) with the generation
+    still open; `_end_generation` closes it right after the loop, before `_remember` (the state snapshot), so a
+    runner-decoded slot has its GPU turn back (`_runner_decode`'s finally) while it clones its rows. 2026-10-31: the
+    clone ran beside a joint graph capture and failed it (cudaErrorStreamCaptureInvalidated)."""
+    import ast
+    from server import app
+    seen = []
+
+    def gen():
+        try:
+            for t in (1, 2, 3, 99, 4):
+                yield t
+        finally:
+            seen.append("end")                  # `_runner_decode`: the turn back
+    g = gen()
+    for t in g:
+        if t == 99:
+            break
+    assert seen == []
+    app._end_generation(g)
+    assert seen == ["end"]
+    app._end_generation(g)                      # closed already: nothing
+    app._end_generation(None)
+    assert seen == ["end"]
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server", "app.py")).read()
+    tree = ast.parse(src)
+    loops = [n for n in ast.walk(tree) if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
+             and n.iter.id == "source" and any(isinstance(b, ast.Break) for b in ast.walk(n))]
+    assert loops, "the streamed loop over `source` with its breaks"
+    calls = [(c.lineno, c.func.id) for c in ast.walk(tree) if isinstance(c, ast.Call)
+             and isinstance(c.func, ast.Name) and c.func.id in ("_remember", "_end_generation")]
+    for lp in loops:
+        after = sorted(x for x in calls if x[0] > lp.end_lineno)
+        first_rem = next(n for n, f in after if f == "_remember")
+        assert any(f == "_end_generation" and lp.end_lineno < n < first_rem for n, f in after), (lp.lineno, after[:4])
+    return f"the generation's end runs at once; {len(loops)} breaking stream loop(s) close it before `_remember`"
+
+
+def test_spd249_task_messages_keep_their_order():
+    t = R.Task(None, None, None, None, None, None, [], 0, 0, 0, 8, set(), None, 1, None, "cpu")
+    t.hold([1, 2], 3)
+    t.hold([3], 3)
+    assert t.q.empty() and t.held_at == 3
+    t.push([4])
+    t.hold([5], 4)
+    t.put(("sp1", None))
+    t.hold([6], 5)
+    t.end("eos")
+    got = []
+    while not t.q.empty():
+        got.append(t.q.get())
+    assert got == [("tokens", [1, 2]), ("tokens", [3]), ("tokens", [4]), ("tokens", [5]), ("sp1", None),
+                   ("tokens", [6]), ("end", "eos")], got
+    return "held, pushed, marked and ended: one order"
+
+
+def test_spd249_a_gated_thread_waits_for_the_next_window():
+    import threading
+    import time
+    from engine.methods import busy
+    assert busy.gate(5.0)                               # no runner holds windows: at once
+    busy.hold(True)
+    busy.opened()                                       # an open window does not count: the next one does
+    got = []
+    th = threading.Thread(target=lambda: got.append((busy.gate(5.0), time.perf_counter())))
+    th.start()
+    time.sleep(0.05)
+    assert not got
+    t0 = time.perf_counter()
+    busy.closed()
+    busy.opened()
+    th.join(2.0)
+    assert got and got[0][0] and got[0][1] - t0 < 1.0, got
+    assert not busy.gate(0.02)                          # held, no window: the timeout
+    th = threading.Thread(target=lambda: got.append((busy.gate(5.0), 0)))
+    th.start()
+    time.sleep(0.02)
+    busy.hold(False)                                    # the runner gives windows up: every waiter goes
+    th.join(2.0)
+    assert len(got) == 2 and got[1][0], got
+    return "at once while not held; the next window; the timeout; a release lets waiters go"
+
+
+class _Cyc:
+    """Cyclic garbage the collector alone frees."""
+
+    alive = 0
+
+    def __init__(self):
+        _Cyc.alive += 1
+        self.me = self
+
+    def __del__(self):
+        _Cyc.alive -= 1
+
+
+def test_spd249_no_automatic_collection_in_the_rounds_and_memory_stays_bounded():
+    """SPD-249 (QSE_RUNNER_GC): the load frozen; no automatic collection while the rounds run, the young
+    generations collected in the GPU waits, the full one every GC_FULL_ROUNDS rounds and in the idle gap, Python's
+    collector back on when the runner idles; 300 cyclic objects a pass never pile up; every text its alone text."""
+    import gc
+    import time
+    seen = {"auto_on": 0, "passes": 0, "peak": 0}
+
+    def garbage():
+        seen["passes"] += 1
+        seen["auto_on"] += int(gc.isenabled())
+        for _ in range(300):
+            _Cyc()
+        seen["peak"] = max(seen["peak"], _Cyc.alive)
+    M, real = _hooked_multi(garbage)
+    R.GC_CTL, full0, R.GC_FULL_ROUNDS = True, R.GC_FULL_ROUNDS, 7
+    for k in [k for k in R.GC_STATS if k not in ("frozen", "load_ms")]:
+        del R.GC_STATS[k]
+    try:
+        R.gc_after_load(log=lambda s: None)
+        frozen = R.GC_STATS["frozen"]
+        out = _check(3)
+        t_end = time.perf_counter() + 5.0
+        while time.perf_counter() < t_end and ("full_idle" not in R.GC_STATS or not gc.isenabled()):
+            time.sleep(0.05)
+        st = {k: v for k, v in R.GC_STATS.items()}
+        rep = R.RUNNER.report()["host_work"]
+    finally:
+        gc.unfreeze()
+        R.GC_FULL_ROUNDS = full0
+        _knobs_off(M, real)
+        gc.enable()
+    assert frozen and frozen > 1000, frozen
+    assert seen["passes"] > 0 and seen["auto_on"] == 0, seen
+    assert st.get("young_busy", [0])[0] > 0 and st.get("full_busy", [0])[0] > 0, st
+    assert "full_idle" in st and rep["gc_enabled"], (st, rep)
+    gc.collect()
+    assert seen["peak"] <= 300 * 4 and _Cyc.alive == 0, (seen, _Cyc.alive)
+    return (f"{out}; {frozen} frozen, young in {st['young_busy'][0]} waits, full {st['full_busy'][0]} in waits + "
+            f"{st['full_idle'][0]} idle, peak {seen['peak']} live cyclic objects")
 
 if __name__ == "__main__":
     passed = 0

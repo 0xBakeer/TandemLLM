@@ -164,7 +164,11 @@ _PAR_SETUP = _obj({"env": _STR, "lanes": _INT1, "window": _INT1, "max_tokens": _
                    "sampling": _obj({"temperature": _NUM0, "top_k": {"type": "integer", "minimum": 0},
                                      "top_p": _NUM0, "min_p": _NUM0, "seed": _STR}),
                    "prompts": _obj({"set": _STR, "sha256": {"type": "string", "pattern": r"^[0-9a-f]{16}$"},
-                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())})})
+                                    "prompt_tokens": _obj({"code": _INT1, "prose": _INT1}, required=())}),
+                   # SPD-249: whether a family's draft corrector loaded (the raw file has its file and sha256)
+                   "corrector_loaded": {"type": "boolean"}},
+                  required=("env", "lanes", "window", "max_tokens", "suffix_store", "response_cache", "thinking",
+                            "sampling", "prompts"))
 _PAR_LEVEL = _obj({"wall_tok_s": _NUM0, "decode_tok_s": {"type": ["number", "null"], "minimum": 0},
                    "ttft_s": {"type": ["number", "null"], "minimum": 0},
                    "at_once": {"type": "integer", "minimum": 0}, "rounds": _INT1})
@@ -190,7 +194,10 @@ _COMPONENT = _obj({"id": _ID, "label": _STR, "group": {"enum": list(GROUPS)}, "w
                    "assets": _IDS, "docs": _STR, "note": _NOTE,
                    # the KV bytes a token while it is on (a cache kept in fewer bytes), in place of
                    # parallelism.kv_bytes_per_token; optional
-                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1}},
+                   "kv_bytes_per_token": {"type": ["integer", "null"], "minimum": 1},
+                   # OPS-260, optional: off by default, and on with what it depends on when that is
+                   # switched on (Chat (beta) brings the decision models it ships with)
+                   "with_parent": {"type": "boolean"}},
                   required=("id", "label", "group", "what", "default", "required", "memory_gib",
                             "memory_max_gib", "elastic", "disk_gb", "depends_on", "conflicts", "knobs",
                             "assets", "docs", "note"))
@@ -500,6 +507,8 @@ def _cross(m: dict, root: str) -> list[str]:
                 errs.append(f"$.components[{i}].assets: no asset {a!r}")
         if c["required"] and not c["default"]:
             errs.append(f"$.components[{i}]: a required component is on by default")
+        if c.get("with_parent") and (c["default"] or c["required"] or len(c["depends_on"]) != 1):
+            errs.append(f"$.components[{i}].with_parent: off by default, optional, and depends on one other")
         if c["default"]:
             for d in c["depends_on"]:
                 if d in comps and not comps[d]["default"]:
