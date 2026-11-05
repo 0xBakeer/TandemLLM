@@ -4,14 +4,17 @@
 read-until-EOF, a permanently hung handler thread per keep-alive connection -- and any
 client-sized number buffered that much before any auth would answer. The shared module
 `server/http_body.py` validates the header first: a number, not negative, within the
-body cap, else a 400/413 and a closed connection. And the throttle key is
-the TCP peer, never the `X-Real-IP` header (the client's to write: a script rotating it
-filed every failure in its own bucket and the 429 never fired). The auth table's overflow
+body cap, else a 400/413 and a closed connection. And the throttle key follows
+`Auth.login_key`: from loopback, or a peer named in TANDEM_TRUSTED_PROXY, `X-Real-IP` is
+the key when it is set; from any other peer the header is ignored (it is the client's to
+write) and the peer is the key. The auth table's overflow
 used to `clear()` -- a flood of one-shot keys wiped every active ban.
 
     a negative Content-Length          400 at once, not a hung thread
     a Content-Length over the cap      413 before the body arrives
-    rotating X-Real-IP failures        the peer's bucket still trips the 429
+    five wrong tokens, no X-Real-IP    keyed on the peer, the 429 fires
+    X-Real-IP from loopback            the header is the key
+    X-Real-IP from any other peer      ignored, the peer is the key
     a 10k-key flood of failures        an active ban survives the eviction
 
 Run: python tests/test_proxy_http_hardening.py
