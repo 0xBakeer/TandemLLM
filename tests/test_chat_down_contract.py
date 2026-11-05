@@ -125,13 +125,17 @@ def test_no_forward_key():
 
 
 def test_nothing_listens():
+    # the port stays bound without listen(): a connect is refused, and no other test in a parallel
+    # run can take the port meanwhile (a closed port could be reused and answer)
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     dead = s.getsockname()[1]
-    s.close()
-    msg = _assert_unavailable(*_forward("GET", "/v1/chat-app/capabilities",
-                                        {"QSE_CHAT_FORWARD_KEY": "k" * 64,
-                                         "QSE_CHAT_URL": f"http://127.0.0.1:{dead}"}))
+    try:
+        msg = _assert_unavailable(*_forward("GET", "/v1/chat-app/capabilities",
+                                            {"QSE_CHAT_FORWARD_KEY": "k" * 64,
+                                             "QSE_CHAT_URL": f"http://127.0.0.1:{dead}"}))
+    finally:
+        s.close()
     assert msg == "the chat service is not running"
 
 

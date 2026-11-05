@@ -322,7 +322,9 @@ def test_models_real_ids_collision_rules_and_404():
         assert st == 200 and h["X-Tandem-Backend"] == "f1"
         st, _, body = px.post("/v1/chat/completions", _chat("x", model="nope"))
         assert st == 404 and json.loads(body)["error"]["code"] == "model_not_found"
-        r = px.rows()[-1]
+        # a relay accounts after its client read the answer, a refusal at once: the 404's row may
+        # come before the previous request's, so it is found by its model
+        r = [x for x in px.rows() if x["model"] == "nope"][-1]
         assert r["status"] == 404 and r["error_type"] == "model_not_found"
     s1.shutdown()
     s2.shutdown()
