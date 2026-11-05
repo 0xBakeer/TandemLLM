@@ -22,7 +22,7 @@ __device__ __forceinline__ float warp_sum(float v) {
 // ------------------------------------------------------------------------------ commits (SPD-239)
 // The copies of many states' commits in one launch: E [ne][16] int64, one entry a CTA column (grid (ne, 8)).
 // kind 0, rows: dst row i (i < n) = src row idx[i], `words` 4-byte words a row (strides in words):
-//   [0, src, src_stride, dst, dst_stride, words, idx (int64 [n] on the device), n]
+//   [0, src, src_stride, dst, dst_stride, words, idx (int64 [n] on the device), n, first dst row (int32 * or 0)]
 // kind 1, a bf16 window [C, w] (w <= 9) in place from its own columns and a block's rows: column j becomes
 //   cols[j] < w ? the window's column cols[j] : row cols[j] - w of src (a row's C channels at src + row * stride);
 //   a thread owns a channel, so every read of the channel is before its writes:
@@ -38,9 +38,11 @@ __global__ void __launch_bounds__(256) commit_multi_kernel(const long long* __re
         const long long ss = e[2], ds = e[4];
         const int words = (int)e[5], n = (int)e[7];
         const long long* idx = reinterpret_cast<const long long*>(e[6]);
+        // SPD-249: e[8] (when set) an int32 on the device: the destination's first row (rows already parked)
+        const int off = e[8] ? *reinterpret_cast<const int*>(e[8]) : 0;
         for (int i = 0; i < n; ++i) {
             const uint32_t* s = src + idx[i] * ss;
-            uint32_t* d = dst + (long long)i * ds;
+            uint32_t* d = dst + (long long)(off + i) * ds;
             for (int w = first; w < words; w += step) d[w] = s[w];
         }
         return;
@@ -111,6 +113,53 @@ __global__ void __launch_bounds__(256) gdn_pre_kernel(const __nv_bfloat16* __res
     }
 }
 
+// SPD-249: `gdn_pre_kernel` for every state of a joint pass in one launch, grid (nC + 1, rows max, states):
+// state z's call from its entry E[z] = [x, ldx, conv state, src, y, ldy, ab, ldab, g, beta, M, 0...] (16
+// fields); each CTA computes what the state's own launch computes for that row (no shift: verify rows only).
+__global__ void __launch_bounds__(256) gdn_pre_multi_kernel(const long long* __restrict__ E,
+        const __nv_bfloat16* __restrict__ W, int C, int nC, const float* __restrict__ ALOG,
+        const float* __restrict__ DTB, int H) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.z * 16;
+    const int m = blockIdx.y;
+    if (m >= (int)e[10]) return;
+    const __nv_bfloat16* X = reinterpret_cast<const __nv_bfloat16*>(e[0]);
+    const int ldx = (int)e[1];
+    const __nv_bfloat16* CS = reinterpret_cast<const __nv_bfloat16*>(e[2]);
+    const int* SRC = reinterpret_cast<const int*>(e[3]);
+    __nv_bfloat16* Y = reinterpret_cast<__nv_bfloat16*>(e[4]);
+    const int ldy = (int)e[5];
+    const __nv_bfloat16* AB = reinterpret_cast<const __nv_bfloat16*>(e[6]);
+    const int ldab = (int)e[7];
+    float* G = reinterpret_cast<float*>(e[8]);
+    float* BETA = reinterpret_cast<float*>(e[9]);
+    if ((int)blockIdx.x == nC) {
+        const int h = threadIdx.x;
+        if (h >= H) return;
+        const float a = b2f(AB[(size_t)m * ldab + h]), b = b2f(AB[(size_t)m * ldab + H + h]);
+        const float x = a + DTB[h];
+        const float sp = x > 20.0f ? x : ::logf(1.0f + ::expf(x));
+        G[(size_t)m * H + h] = -::expf(ALOG[h]) * sp;
+        BETA[(size_t)m * H + h] = 1.0f / (1.0f + ::expf(-b));
+        return;
+    }
+    const int c = blockIdx.x * 256 + threadIdx.x;
+    if (c >= C) return;
+    const float x = b2f(X[(size_t)m * ldx + c]);
+    float tap[3];
+#pragma unroll
+    for (int j = 0; j < 3; ++j) {
+        const int s = SRC[m * 3 + j];
+        tap[j] = s >= 0 ? b2f(X[(size_t)s * ldx + c]) : b2f(CS[(size_t)c * 3 + (-1 - s)]);
+    }
+    float acc = 0.f;
+#pragma unroll
+    for (int j = 0; j < 3; ++j) acc = fmaf(tap[j], b2f(W[(size_t)c * 4 + j]), acc);
+    acc = fmaf(x, b2f(W[(size_t)c * 4 + 3]), acc);
+    Y[(size_t)m * ldy + c] = __float2bfloat16_rn(acc / (1.0f + ::expf(-acc)));
+}
+
 // ------------------------------------------------------------------------------ GDN recurrence
 // One row of the rule on the thread's 16 values of the tile (lane l: key rows l + 32 j; warp w:
 // columns c0 .. c0 + 3):
@@ -171,12 +220,13 @@ __device__ __forceinline__ void tile_store(const float (&s)[4][4], float* __rest
 // (load, save): load -1 continue from the previous row's tile, -2 the entry state S, >= 0 scratch
 // slot; save >= 0 leaves the tile in that slot after the row. WRITE: the last row's tile goes back
 // to S (a decode step).
+#define GDN_PEND_ROWS 33   // the parked-row buffers' rows (engine.py `_pend_bufs`)
 __device__ __forceinline__ void gdn_rows_body(const __nv_bfloat16* __restrict__ QKV, int ldq,
         int koff, int voff, const float* __restrict__ G, const float* __restrict__ BETA,
         float* __restrict__ S, float* __restrict__ STK, const int* __restrict__ CTL, int M,
         __nv_bfloat16* __restrict__ OUT, int H, int REP, int write,
         const __nv_bfloat16* __restrict__ PRE, int ldp, const float* __restrict__ PG, const float* __restrict__ PB,
-        const int* __restrict__ PN) {
+        const int* __restrict__ PN, int LIMIT) {
     const int h = blockIdx.x, vb = blockIdx.y;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int c0 = vb * 16 + warp * 4;
@@ -184,15 +234,20 @@ __device__ __forceinline__ void gdn_rows_body(const __nv_bfloat16* __restrict__ 
     const size_t hs = (size_t)h * 128 * 128;
     float s[4][4];
     const int P = PN != nullptr ? *PN : 0;
+    // SPD-249: LIMIT > 0 (a joint pass): with at most LIMIT rows parked and room for this block's path after them
+    // (GDN_PEND_ROWS), the parked rows stay parked: the walked tile is not written back, the block's first row
+    // starts from it in registers, the next call walks them again (an fp32 store and load are exact, so every
+    // row's bits are the written-back state's). The caller zeroes the count where this did not defer.
+    const bool defer = LIMIT > 0 && P > 0 && P <= LIMIT && P + M <= GDN_PEND_ROWS;
     if (P > 0) {
         tile_load(s, S + hs, lane, c0);
         for (int p = 0; p < P; ++p)
             gdn_row(s, PRE + (size_t)p * ldp, koff, voff, PG[(size_t)p * H + h], PB[(size_t)p * H + h], h, hk, lane, c0, nullptr);
-        tile_store(s, S + hs, lane, c0);
+        if (!defer) tile_store(s, S + hs, lane, c0);
     }
     for (int m = 0; m < M; ++m) {
         const int ld = CTL[2 * m], sv = CTL[2 * m + 1];
-        if (ld != -1 || m == 0)
+        if ((ld != -1 || m == 0) && !(m == 0 && ld < 0 && P > 0 && LIMIT > 0))   // the entry tile is in registers
             tile_load(s, (ld >= 0) ? STK + (size_t)ld * H * 128 * 128 + hs : S + hs, lane, c0);
         gdn_row(s, QKV + (size_t)m * ldq, koff, voff, G[(size_t)m * H + h], BETA[(size_t)m * H + h], h, hk, lane, c0,
                 OUT + ((size_t)m * H + h) * 128);
@@ -209,11 +264,11 @@ __global__ void __launch_bounds__(128) gdn_rows_kernel(const __nv_bfloat16* __re
         const int* __restrict__ PN) {
     pdl_wait();
     pdl_trigger();
-    gdn_rows_body(QKV, ldq, koff, voff, G, BETA, S, STK, CTL, M, OUT, H, REP, write, PRE, ldp, PG, PB, PN);
+    gdn_rows_body(QKV, ldq, koff, voff, G, BETA, S, STK, CTL, M, OUT, H, REP, write, PRE, ldp, PG, PB, PN, 0);
 }
 
 // SPD-239: `gdn_rows_kernel` for several states in one launch, grid (H, 8, states): state z's call from its
-// entry E[z] = [qkv, ldq, g, beta, S, scratch (its own slots), ctl, M, out, pre, ldp, pg, pb, pn, write, 0]
+// entry E[z] = [qkv, ldq, g, beta, S, scratch (its own slots), ctl, M, out, pre, ldp, pg, pb, pn, write, limit]
 // (pre / pg / pb / pn 0: no parked rows), each CTA the one-state kernel's own arithmetic
 __global__ void __launch_bounds__(128) gdn_rows_multi_kernel(const long long* __restrict__ E, int koff, int voff,
                                                              int H, int REP) {
@@ -225,7 +280,7 @@ __global__ void __launch_bounds__(128) gdn_rows_multi_kernel(const long long* __
                   reinterpret_cast<float*>(e[4]), reinterpret_cast<float*>(e[5]), reinterpret_cast<const int*>(e[6]),
                   (int)e[7], reinterpret_cast<__nv_bfloat16*>(e[8]), H, REP, (int)e[14],
                   reinterpret_cast<const __nv_bfloat16*>(e[9]), (int)e[10], reinterpret_cast<const float*>(e[11]),
-                  reinterpret_cast<const float*>(e[12]), reinterpret_cast<const int*>(e[13]));
+                  reinterpret_cast<const float*>(e[12]), reinterpret_cast<const int*>(e[13]), (int)e[15]);
 }
 
 // --------------------------------------------------------------------------------------- PLE
@@ -269,6 +324,35 @@ __global__ void __launch_bounds__(256) ple_conv_kernel(const __nv_bfloat16* __re
     pdl_trigger();
     const int m = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
     if (c >= C) return;
+    float acc = 0.f;
+#pragma unroll
+    for (int j = 0; j < 3; ++j) {
+        const int s = SRC[m * 3 + j];
+        const float v = s >= 0 ? b2f(GVN[(size_t)s * C + c]) : b2f(PS[(size_t)c * slen + (-1 - s)]);
+        acc = fmaf(v, b2f(W[(size_t)c * 4 + j]), acc);
+    }
+    acc = fmaf(b2f(GVN[(size_t)m * C + c]), b2f(W[(size_t)c * 4 + 3]), acc);
+    const float a = bfr(acc);
+    const float sl = bfr(a / (1.0f + ::expf(-a)));
+    Y[(size_t)m * C + c] = __float2bfloat16_rn(b2f(GV[(size_t)m * C + c]) + sl);
+}
+
+// SPD-249: `ple_conv_kernel` for every lane of a joint pass in one launch, grid (C / 256, rows max, lanes): lane z's
+// call from its entry E[z] = [gvn, gv, state, slen, w, src, y, M, 0...] (16 fields; gvn / gv / y the lane's rows,
+// src's rows lane-relative); each CTA computes what the lane's own launch computes for that row.
+__global__ void __launch_bounds__(256) ple_conv_multi_kernel(const long long* __restrict__ E, int C) {
+    pdl_wait();
+    pdl_trigger();
+    const long long* e = E + (size_t)blockIdx.z * 16;
+    const int m = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x;
+    if (m >= (int)e[7] || c >= C) return;
+    const __nv_bfloat16* GVN = reinterpret_cast<const __nv_bfloat16*>(e[0]);
+    const __nv_bfloat16* GV = reinterpret_cast<const __nv_bfloat16*>(e[1]);
+    const __nv_bfloat16* PS = reinterpret_cast<const __nv_bfloat16*>(e[2]);
+    const int slen = (int)e[3];
+    const __nv_bfloat16* W = reinterpret_cast<const __nv_bfloat16*>(e[4]);
+    const int* SRC = reinterpret_cast<const int*>(e[5]);
+    __nv_bfloat16* Y = reinterpret_cast<__nv_bfloat16*>(e[6]);
     float acc = 0.f;
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
@@ -478,6 +562,19 @@ void seq_gdn_pre(torch::Tensor x, torch::Tensor cs, torch::Tensor w, torch::Tens
         H, shift ? 1 : 0);
 }
 
+void seq_gdn_pre_multi(torch::Tensor E, torch::Tensor w, torch::Tensor alog, torch::Tensor dtb, int64_t rows_max) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    TORCH_CHECK(w.dtype() == torch::kBFloat16 && w.is_contiguous() && w.dim() == 2 && w.size(1) == 4, "conv weight bf16 [C, 4]");
+    TORCH_CHECK(alog.dtype() == torch::kFloat && dtb.dtype() == torch::kFloat && alog.numel() <= 256, "A_log, dt_bias fp32 [H]");
+    if (E.size(0) == 0 || rows_max <= 0) return;
+    const int C = w.size(0), H = alog.numel(), nC = (C + 255) / 256;
+    launch(gdn_pre_multi_kernel, dim3(nC + 1, (unsigned)rows_max, (unsigned)E.size(0)), dim3(256), st,
+           (const long long*)E.data_ptr(), (const __nv_bfloat16*)w.data_ptr(), C, nC, (const float*)alog.data_ptr(),
+           (const float*)dtb.data_ptr(), H);
+}
+
 void seq_gdn_rows(torch::Tensor qkv, int64_t koff, int64_t voff, torch::Tensor g, torch::Tensor beta, torch::Tensor S,
                   torch::Tensor stk, torch::Tensor ctl, torch::Tensor out, int64_t rep, bool write,
                   c10::optional<torch::Tensor> pre, c10::optional<torch::Tensor> pg, c10::optional<torch::Tensor> pb,
@@ -524,6 +621,15 @@ void seq_ple_conv(torch::Tensor gvn, torch::Tensor gv, torch::Tensor ps, torch::
     launch(ple_conv_kernel, dim3((C + 255) / 256, M), dim3(256), st, (const __nv_bfloat16*)gvn.data_ptr(),
         (const __nv_bfloat16*)gv.data_ptr(), (const __nv_bfloat16*)ps.data_ptr(), slen, (const __nv_bfloat16*)w.data_ptr(),
         (const int*)src.data_ptr(), (__nv_bfloat16*)y.data_ptr(), C);
+}
+
+void seq_ple_conv_multi(torch::Tensor E, int64_t C, int64_t rows_max) {
+    const at::cuda::OptionalCUDAGuard guard(E.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(E.dtype() == torch::kLong && E.is_contiguous() && E.dim() == 2 && E.size(1) == 16, "entries int64 [n, 16]");
+    if (E.size(0) == 0 || rows_max <= 0) return;
+    launch(ple_conv_multi_kernel, dim3((unsigned)((C + 255) / 256), (unsigned)rows_max, (unsigned)E.size(0)), dim3(256), st,
+           (const long long*)E.data_ptr(), (int)C);
 }
 
 void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos,

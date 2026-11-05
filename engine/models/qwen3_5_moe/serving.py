@@ -81,12 +81,14 @@ class Qwen35MoeServing(FlashNextServing):
         head_dim x 2 bytes, twice, a token of context (32,768 B on Ornith), over the floor of a
         4,096-row chunk's activations. Flash-Next's line (76,309 B a token, capped at 10.75 GiB) priced
         Ornith's 148,184-token prefill at 11.5 GB, which the measured one never took (3.8 GB at
-        104,807 tokens, live 2026-10-21), and refused it for memory twice."""
+        104,807 tokens, live 2026-10-21), and refused it for memory twice. SRV-773: nor Flash-Next's
+        workspace by forwarded rows, measured on Flash-Next's own kernels: this trunk's line for every
+        prefill, a resumed one too, until its own rows are measured."""
         c, base = self.cfg, super().cost()
         per = int(c.num_attention_heads) * int(c.head_dim) * 2 * 2
         floor = int(2.75 * (1 << 30))
         return replace(base, workspace_floor=floor, workspace_per_token=per,
-                       workspace_cap=floor + per * int(self.max_len))
+                       workspace_cap=floor + per * int(self.max_len), workspace_rows=None)
 
     def capture_cost(self, n: int) -> float:
         """0: a turn is not sent to the plain step for the graphs its class lacks. The idle captures take the

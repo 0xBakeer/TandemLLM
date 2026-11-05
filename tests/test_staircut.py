@@ -493,6 +493,34 @@ def test_no_price_constant_in_the_flashnext_package():
     return "no V0 / STEP in engine/models/flashnext/, spec.py gone"
 
 
+def test_a_frozen_drafter_keeps_its_start_state():
+    """SPD-249: a drafter made with freeze=True: the cut learns nothing from rounds, plain or drafted steps, the
+    warm-up leaves it frozen, and the usual answer length stays; without it, the drafter learns as before."""
+    from types import SimpleNamespace
+
+    from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
+    eng = SimpleNamespace()
+    d = MTPTreeDrafter(eng, NoHead(), StairCut(PriceModel.load(FN_PRICES, log=lambda s: None)), freeze=True)
+    assert d.freeze and d.cut.frozen
+    before = (json.dumps(d.cut.cal.cal), dict(d.cut.plain), dict(d.cut.spec), dict(d.cut.draft))
+    d.cut.last = ("chain", [("spine", 0), ("spine", 1)], [(0.9, 0.05), (0.8, 0.1)], 2, 0)
+    d.cut.observe([0, 1], 40.0, 5.0)
+    d.cut.observe_plain(30.0)
+    d.cut.observe_spec(50.0, 0, 2)
+    with d.warming():
+        pass
+    assert d.cut.frozen
+    d.req["tokens"] = 900
+    d.reset()
+    assert d.answer == 256.0
+    assert (json.dumps(d.cut.cal.cal), dict(d.cut.plain), dict(d.cut.spec), dict(d.cut.draft)) == before
+    live = MTPTreeDrafter(eng, NoHead(), StairCut(PriceModel()))
+    assert not live.freeze
+    live.req["tokens"] = 900
+    live.reset()
+    assert live.answer > 256.0 and not live.cut.frozen
+    return "frozen: calibration, prices and answer length unchanged"
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

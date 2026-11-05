@@ -1049,8 +1049,11 @@ SETTINGS: dict = {"default_profile": "chat",
 # question "does this message ask to remember, forget or recall" attaching the `memory` skill
 # (shadow: journaled only). `provisional`: provisional notes are read back (marked) as well as
 # ratified ones. The settings document's `memory.notes` over these (absent: these)
-NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "bodies": 3,
-               "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
+# SPD-249: `index_order` "recent" (the scopes in turn, each pinned, ratified, newest first) or "ranked"
+# (every note by its BM25 score against the turn's message, pinned first, one cap for all scopes): with a
+# smaller `index_tokens` the lines kept are the ones the message is about
+NOTES: dict = {"index_tokens": 1500, "index_order": "recent", "body_tokens": 600, "pinned_tokens": 300,
+               "bodies": 3, "min_score": 0.0, "min_words": 2, "dedupe_threshold": 0.6, "intent": "shadow",
                "provisional": True, "digest_chars": 2000,
                # P-M2: the background writer (server/conductor/memwriter.py)
                "writer": {"mode": "off", "idle_s": 180.0, "due_idle_s": 3.0,
@@ -1236,7 +1239,12 @@ SHIPPED_PROFILES["chat-app"].update(
     clients=["chat-app"], ui={"states": "off", "states_channel": "content"},
     # SRV-471: the memory notes, set here and not inherited (absent is off, and the Chat tab ran
     # without them while Open WebUI and opencode had them)
-    memory="on")
+    memory="on",
+    # SRV-763: a new chat whose class nobody decided (the server could not answer in time, a burst
+    # of chats; or every answer below the bar, a build class not on top) is a plain chat
+    # (router.FAIL_OPEN), not coding's code_edit at xhigh with its coding packages; a missing
+    # classifier still takes the default class (SRV-534)
+    undecided_class="chat")
 # SRV-621: a plain API client that offers tools (an SDK agent loop, curl, a benchmark;
 # router.resolve's rule). `general` with nothing added to the prompt and nothing asked on the
 # side: no class question (its micro-call cost the bench 1.23x raw's time and moved a near-tie
@@ -1262,7 +1270,7 @@ del _n, _tid, _t
 # gains cannot miss the derived profile again. `general` is no derived profile: it serves scripts
 # and SDK clients, whose requests stay the release's (memory absent, off)
 DERIVED_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "chat-app": ("coding", ("description", "clients", "ui", "memory")),
+    "chat-app": ("coding", ("description", "clients", "ui", "memory", "undecided_class")),
     "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui", "sampling",
                           "prompt", "transcripts", "secret_mask")),
 }
@@ -1627,6 +1635,7 @@ SCHEMAS: dict[str, dict] = {
                           # 2026-10-05: the memory notes' reads and write rules (NOTES)
                           "notes": _obj({
                               "index_tokens": {"type": "integer", "minimum": 0, "maximum": 8000},
+                              "index_order": {"enum": ["recent", "ranked"]},
                               "body_tokens": {"type": "integer", "minimum": 0, "maximum": 4000},
                               "pinned_tokens": {"type": "integer", "minimum": 0, "maximum": 2000},
                               "bodies": {"type": "integer", "minimum": 0, "maximum": 10},
@@ -1824,6 +1833,11 @@ SCHEMAS: dict[str, dict] = {
         "mode": {"enum": list(PROFILE_MODES)},
         "clients": {"type": "array", "items": {"enum": list(CLIENT_KINDS)}, "maxItems": 8},
         "default_class": _ID,
+        # SRV-763: a new session's class when nobody decided its first message: the server could
+        # not answer in time, or every answer stayed below its bar and the top one's class does
+        # not build (router.FAIL_OPEN; absent: `default_class`, which a missing classifier always
+        # takes, and the busy fallback keeps that class's whole policy)
+        "undecided_class": _ID,
         "decisions": _obj({d: {"enum": list(MODES3)} for d in DECISIONS}),
         "routing": {"type": "object", "additionalProperties": POLICY},
         "thinking": _obj({"default": {"enum": list(EFFORTS)}, "hints": {"type": "boolean"},
@@ -2090,6 +2104,8 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
         cls = {c["id"] for c in (router or ROUTER)["classes"]}
         if doc["default_class"] not in cls:
             errs.append(f"$.default_class: no class {doc['default_class']!r}")
+        if "undecided_class" in doc and doc["undecided_class"] not in cls:
+            errs.append(f"$.undecided_class: no class {doc['undecided_class']!r}")
         for cid, pol in doc["routing"].items():
             if cid not in cls:
                 errs.append(f"$.routing: no class {cid!r}")

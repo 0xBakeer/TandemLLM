@@ -366,6 +366,9 @@
           "what": {
             "maxLength": 2000,
             "type": "string"
+          },
+          "with_parent": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -1307,6 +1310,9 @@
               "setup": {
                 "additionalProperties": false,
                 "properties": {
+                  "corrector_loaded": {
+                    "type": "boolean"
+                  },
                   "env": {
                     "maxLength": 2000,
                     "type": "string"

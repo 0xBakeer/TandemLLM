@@ -63,6 +63,7 @@ import sys
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
@@ -112,13 +113,13 @@ _MOD = None
 def _module():
     global _MOD
     if _MOD is None:
-        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL)}\n" + _CUDA
+        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL and _gpu.profile().pdl())}\n" + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon",
                                   "exl3_rot_in_silu", "exl3_mlp_bridge"],
                        extra_cuda_cflags=["-O3", "-lineinfo",
-                                          "-gencode=arch=compute_121a,code=sm_121a"],
+                                          *_gpu.arch_flags("exl3_linear")],
                        verbose=False)
     return _MOD
 

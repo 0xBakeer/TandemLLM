@@ -48,6 +48,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in __import__
     # run as a script from tools/: the repo root, appended (lowest priority), for engine.settings
     __import__("sys").path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 import sys
 
@@ -123,7 +124,7 @@ def _build(ldw: int):
                    # the e2m1 converter is an arch-specific instruction: sm_121a and
                    # nothing else (an explicit arch flag also stops torch adding its own)
                    extra_cuda_cflags=["-O3", "-lineinfo",
-                                      "-gencode=arch=compute_121a,code=sm_121a"],
+                                      *_gpu.arch_flags("nvfp4_skinny")],
                    verbose=False)
 
 
@@ -303,8 +304,19 @@ def scale_runs(s: torch.Tensor) -> torch.Tensor:
     return u.view(n16 // 16, 16, C // 8, 8).permute(0, 2, 1, 3).contiguous().view(-1)
 
 
+_ROWS = None
+
+
+def _rows() -> int:
+    """Rows the GPU lets this kernel take (tools/gpu `skinny_rows`), asked once."""
+    global _ROWS
+    if _ROWS is None:
+        _ROWS = _gpu.profile().skinny_rows()
+    return _ROWS
+
+
 def use_skinny(M: int) -> bool:
-    return SKINNY and 1 <= M <= SKINNY_MAX
+    return SKINNY and 1 <= M <= SKINNY_MAX and M <= _rows()
 
 
 # ------------------------------------------------------------------ gate and bench

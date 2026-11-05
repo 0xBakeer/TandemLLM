@@ -361,18 +361,23 @@ def test_the_engine_does_not_inherit_the_box_lock():
     finally:
         subprocess.run(["pkill", "-f", engine])
 
-def _start_with_fake_engine(drop: str, extra: str = "",
-                           procs=()) -> tuple[subprocess.CompletedProcess, str]:
+def _start_with_fake_engine(drop: str, extra: str = "", procs=(), env=None,
+                           roles_probe: bool = False) -> tuple[subprocess.CompletedProcess, str]:
     repo = _box(["start.sh"])
     for pid, argv, exe in procs:
         _proc(repo, pid, argv, exe)
     env_file = os.path.join(repo, "ops", "serve.env")
     engine = os.path.join(repo, "fake-engine.sh")
-    # the same python runs the engine and the page-cache tool: the tool's call is recorded
+    # the same python runs the engine and the page-cache tool: the tool's call is recorded, and the engine's
+    # allocator setting (SPD-257)
     with open(engine, "w") as fh:
         fh.write(f"#!/bin/bash\ncase \"$1\" in *drop_page_cache.py) echo \"drop $*\" >> {repo}/markers; "
                  f"echo '[dropcache] 1 files'; exit 0;; esac\necho \"engine $*\" >> {repo}/markers\n"
+                 f"echo \"alloc ${{PYTORCH_CUDA_ALLOC_CONF-unset}}\" >> {repo}/markers\n"
                  f"touch {repo}/up\nsleep 30\n")
+    if roles_probe:                                       # what the roles start with (after the engine)
+        with open(os.path.join(repo, "ops", "roles.sh"), "w") as fh:
+            fh.write(f"#!/bin/bash\necho \"roles ${{PYTORCH_CUDA_ALLOC_CONF-unset}}\" >> {repo}/markers\n")
     os.chmod(engine, 0o755)
     with open(env_file) as fh:
         body = fh.read()
@@ -388,11 +393,36 @@ def _start_with_fake_engine(drop: str, extra: str = "",
     os.chmod(os.path.join(repo, "bin", "curl"), 0o755)
     try:
         r = subprocess.run(["bash", os.path.join(repo, "ops", "start.sh")], capture_output=True,
-                           text=True, env=_env(repo), timeout=120)
+                           text=True, env=_env(repo, **(env or {})), timeout=120)
     finally:
         subprocess.run(["pkill", "-f", engine])
     marks = os.path.join(repo, "markers")
     return r, (open(marks).read() if os.path.exists(marks) else "")
+
+
+def test_the_profiles_allocator_setting_reaches_the_engine_only():
+    """SPD-257: a weight profile's QSE_ENGINE_ALLOC_CONF (Flash-Next's: expandable segments) becomes the engine's
+    PYTORCH_CUDA_ALLOC_CONF and nothing else's: the roles start without it. An operator's own value wins; without
+    the key the engine starts with none. Only the Flash-Next profile names it, serve.env does not."""
+    def marks_of(extra="", env=None):
+        r, marks = _start_with_fake_engine("0", extra, env=env, roles_probe=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return [line for line in marks.splitlines() if line.split()[0] in ("alloc", "roles")]
+    keep = os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    try:
+        assert marks_of("QSE_ENGINE_ALLOC_CONF=expandable_segments:True\n") == \
+            ["alloc expandable_segments:True", "roles unset"]
+        assert marks_of("QSE_ENGINE_ALLOC_CONF=expandable_segments:True\n",
+                        env={"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512"})[0] == "alloc max_split_size_mb:512"
+        assert marks_of() == ["alloc unset", "roles unset"]
+    finally:
+        if keep is not None:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = keep
+    named = sorted(f for f in os.listdir(os.path.join(OPS, "profiles"))
+                   if "QSE_ENGINE_ALLOC_CONF" in open(os.path.join(OPS, "profiles", f)).read())
+    assert named == ["_flashnext.env"], named
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in open(os.path.join(OPS, "serve.env")).read()
+    return "the engine has it, the roles do not; an operator's value wins"
 
 
 def test_the_service_drops_the_weights_page_cache_once_healthy():

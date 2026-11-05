@@ -157,6 +157,13 @@ class Conductor:
                 self.transcripts.submit(plan, rec)          # queued; written off this thread
             if plan.judge:
                 self.judge.submit(plan)                     # asked off this thread (J1)
+            if plan.deferred:
+                # VIS-119: the shadow questions, after the turn when the server is idle; a turn
+                # that ends in tool calls goes on, and a question then lands between its steps
+                if getattr(rec, "finish_reason", None) == "tool_calls":
+                    self.router.deferred.drop(plan, "tool_calls")
+                else:
+                    self.router.deferred.submit(plan)
 
     # ------------------------------------------------------------------ roles
     def _defaults_row(self, kind, name, version: int, applied: list[str]) -> None:

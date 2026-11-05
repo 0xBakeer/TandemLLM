@@ -56,7 +56,7 @@ except Exception:          # noqa: BLE001
 
 QK = 256
 BLOCK_BYTES = 66
-#: rows up to which a packed weight multiplies on its row-invariant kernel (the engine's ROWS_MAX)
+#: the engine's ROWS_MAX; up to ROWS_MAX + 1 rows (a verify block) multiply on a packed weight's row kernel
 ROWS_MAX = 32
 # the format's IQ2_XXS grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
 # little-endian u16s): the packing gguf-py uses
@@ -348,7 +348,7 @@ class IQ2Linear:
     def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
         x2 = x.reshape(-1, self.K).contiguous()
         M = x2.shape[0]
-        if M > ROWS_MAX:
+        if M > ROWS_MAX + 1:
             # a prompt chunk: the weight decoded to bf16 for one cuBLAS call (the rows' bits are not kept)
             w = dequant_bf16(self.d, self.qs, self._g8, self._ks) if x2.is_cuda else \
                 dequant_blocks(self.d, self.qs).to(torch.bfloat16)
@@ -447,9 +447,11 @@ class NVFP4Linear:
         if self.blk is not None:
             if f32:
                 raise ValueError("NVFP4Linear writes bf16 rows on the GPU")
+            from tools import gpu as _gpu
             from tools.nvfp4_linear import nvfp4_matmul
             from tools.nvfp4_skinny import SKINNY_MAX, nvfp4_matmul_skinny
-            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if M <= SKINNY_MAX else nvfp4_matmul(x2, self.blk, out=out)
+            skinny = M <= SKINNY_MAX and M <= _gpu.profile(x2.device).skinny_rows()
+            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if skinny else nvfp4_matmul(x2, self.blk, out=out)
             return y.view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
@@ -463,7 +465,7 @@ class NVFP4Linear:
 if HAVE_TRITON:
 
     @triton.jit
-    def _q8_gemm(X, s_x, D, Q, Y, s_y, M, N, K, BN: tl.constexpr, SB: tl.constexpr, F32: tl.constexpr):
+    def _q8_gemm(X, s_x, D, Q, Y, s_y, M, N, K: tl.constexpr, BN: tl.constexpr, SB: tl.constexpr, F32: tl.constexpr):
         # 16-row tiles of x, BN outputs, SB blocks of 32 a step: each block one bf16 tensor-core product
         # (the int8 codes are exact in bf16, x is bf16: every product exact, summed in fp32) times the
         # block's d, K in order; a row's sum does not depend on the other rows of its tile
@@ -476,17 +478,20 @@ if HAVE_TRITON:
         acc = tl.zeros([16, BN], dtype=tl.float32)
         for kb in range(0, K // 32, SB):
             for j in tl.static_range(SB):
-                k = (kb + j) * 32 + k32
-                q = tl.load(Q + cols[:, None] * K + k[None, :], mask=cm[:, None], other=0).to(tl.bfloat16)
-                d = tl.load(D + cols * (K // 32) + kb + j, mask=cm, other=0.0).to(tl.float32)
-                x = tl.load(X + rows[:, None] * s_x + k[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(q)) * d[None, :]
+                # the step is SB blocks wide; a K that is not a whole step guards its tail (the
+                # aligned case folds the constexpr away and stays guard-free)
+                if K % (32 * SB) == 0 or kb + j < K // 32:
+                    k = (kb + j) * 32 + k32
+                    q = tl.load(Q + cols[:, None] * K + k[None, :], mask=cm[:, None], other=0).to(tl.bfloat16)
+                    d = tl.load(D + cols * (K // 32) + kb + j, mask=cm, other=0.0).to(tl.float32)
+                    x = tl.load(X + rows[:, None] * s_x + k[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(q)) * d[None, :]
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
 
 class Q8Linear:
-    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX on
+    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX + 1 on
     the tile kernel (row-invariant; Bolt's head: 3.8 ms for 1 to 32 rows on GB10, the bf16 head 4.7), a
     prompt chunk on cuBLAS over the twin in bf16."""
 
@@ -504,7 +509,7 @@ class Q8Linear:
     def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
         x2 = x.reshape(-1, self.K).contiguous()
         M = x2.shape[0]
-        if M > ROWS_MAX:
+        if M > ROWS_MAX + 1:
             y = torch.nn.functional.linear(x2, self.dequant().to(torch.bfloat16))
             y = y.float() if f32 else y
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)

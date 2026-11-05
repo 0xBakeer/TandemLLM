@@ -28,7 +28,8 @@ Definitions (also in docs/contract/dashboard-v1, live.schema.json):
     stop.reason      stop, length, tool_calls, timeout, abandoned, error, refused, rejected,
                      cancelled; `detail` refines it (eos, stop_string, pattern_guard; the error
                      type; queue_full, queue_timeout; left_while_queued, left_during_prefill,
-                     write_failed; shutting_down; prompt_too_long, bad_request)
+                     left_while_waiting_memory, write_failed; shutting_down; prompt_too_long,
+                     bad_request)
     silent_ms        end (or now) minus the last token, or minus the lock with no token
     client_gone_ms   end minus the moment the server first saw the socket closed (the sampler
                      at its tick, or the handler at a prefill chunk, in the queue or on a write)
@@ -572,6 +573,9 @@ def sentence(stop: dict, rec=None, end_p: float | None = None) -> str:
     elapsed = _ms(rec.t_arrival, end_p) if rec is not None and end_p is not None else None
     tokens = f"{_n(sent)} token{'s' if sent != 1 else ''} sent"
     if reason == "abandoned":
+        if detail == "left_while_waiting_memory":
+            # SRV-777: it left before its prefill, while the engine's memory admission held it
+            return f"abandoned by the client after {_dur(elapsed)} waiting for memory, {tokens}"
         if state == "queued":
             return f"abandoned by the client after {_dur(elapsed)} in the queue, {tokens}"
         if state == "prefilling":

@@ -400,6 +400,29 @@ def test_stop_keeps_the_partial_answer_and_closes_the_engine_stream():
         c.close()
 
 
+def test_srv777_stop_before_the_engines_headers_closes_the_connection():
+    """SRV-777: the engine sends no headers while a request waits for memory; Stop then had no call to close, and the
+    run waited for chatd's read timeout (15 minutes) while the engine's request kept waiting. Stop now shuts the
+    connection the call is opening on: the message ends "stopped" within 2 s and the engine sees the close."""
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "FAKE_WAIT 30 a long chat")
+        c.wait(lambda: any("FAKE_WAIT" in json.dumps(b) for _, b in c.fake.calls), 5)
+        time.sleep(0.5)                                  # the call waits for the engine's headers
+        assert c.fake.closed_early == 0 and c.snap(cid)["run"] is not None
+        t0 = time.monotonic()
+        c.ok("POST", f"/conversations/{cid}/stop")
+        s = c.wait_idle(cid, 5)
+        took = time.monotonic() - t0
+        a = s["messages"][-1]
+        assert took < 2.0 and a["status"] == "stopped", (took, a["status"])
+        c.wait(lambda: c.fake.closed_early >= 1, 2)      # the engine saw the socket close
+        assert s["status"] == "idle"
+    finally:
+        c.close()
+
+
 def test_a_queued_message_goes_in_after_the_answer():
     c = Chat()
     try:

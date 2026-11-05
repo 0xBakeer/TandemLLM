@@ -1,5 +1,7 @@
 # The Chat tab and chatd
 
+The Chat tab and chatd are in beta.
+
 The dashboard's Chat tab (`#/chat`) is a chat with history whose runs live on the server: close the
 browser in the middle of an answer, open the chat on a phone, and it shows the answer at the token
 the engine is writing now and keeps streaming. The wire contract is
@@ -34,7 +36,10 @@ its Retry-After, then the chat is compacted and the smaller prompt sent; from th
 compacts at 80 % of the refused size, not only of the window. A 400 that says the request is over
 the model's context window (a tool result grew it past the guard's estimate) compacts the chat
 and sends the call once more when the compaction made it smaller; when it cut nothing, or the
-smaller call is refused too, the run fails with the engine's message.
+smaller call is refused too, the run fails with the engine's message. Stop also ends a call whose
+response has not started, such as one the engine holds while it waits for memory and sends no
+headers: chatd shuts the connection, the message ends `stopped`, and the engine books the request
+abandoned (SRV-777).
 
 One step's tool results share the room the model has left (#18): half of what is left under the
 compaction line, 2,000 tokens at least, never past the window less twice the answer's room, and
@@ -45,8 +50,10 @@ A file over 4 MiB is read 4 MiB at a time from the line `offset` names, numbered
 and the marker names the bytes after the page ("[lines 80000-80002 shown of a 6,749,998-byte
 file, 749,845 more bytes after them; read on with offset=80003]"), so no part of it is out of
 reach (SRV-651).
-`grep` takes a folder or one file: a file named by its path is searched whole, and a folder's
-files over 2 MiB are named as not searched instead of counted as no match (SRV-649).
+`grep` takes a folder or one file and reads every file the same way, a MiB at a time: it searches
+a line's first 64 K characters and a file's first 16 MiB, and says when the rest of a file is
+unread; one call gets 10 s across all its files and ends with "partial results" when that runs out.
+Its line numbers are the ones `read_file` shows (SRV-649).
 Other results keep their first and last quarter and the whole output under `.tandem/outputs/`. A
 request's estimate carries a margin for the text the engine has not counted yet (15 % of it): at
 the edge our engine counts the request exactly (`POST /v1/tokenize`) and a request over the window
@@ -82,7 +89,9 @@ restarts the engine for it. A chatd that cannot start is a warning; the engine s
 ```
 
 `tandem status` has one chatd line. `QSE_CHATD=off` in `run/local.env` keeps the engine's start
-from starting chatd. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
+from starting chatd. A box in engine-only mode (`QSE_MODE=engine`, a new install's default, OPS-260)
+starts no chatd either and stops one this checkout started (`ops/chatd.sh stop --this-tree`), and its Chat tab says the chat is off and how to turn it on, without asking a
+chat route; `QSE_MODE=chat` (`install.sh --with-chat`, the Setup Guide's Chat (beta) switch) turns it on. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
 ops/chatd.sh start|stop|restart|status` in a checkout); `start` exits 1 with the log's last lines
 when chatd does not answer `/health`. It runs chatd under the first of: `CHATD_PY`, serve.env's
 `PY`, the install's venv (`~/TandemLLM/venv`), `./venv`, `$VIRTUAL_ENV`, `python3` (said so, with a
@@ -311,7 +320,7 @@ The Chat tab is in beta in this release, and a Beta pill beside it says so. We k
 - A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
 - When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
 - Images only: there is no video input (VIS-97).
-- The 5.05 Flash-Next pack does not load yet.
+- The 5.05 Flash-Next pack's full-pack load and generation are not yet verified.
 - Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
 - The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
 

@@ -16,7 +16,8 @@ The test matrix:
                                                         test_caps
   5  secrets: redacted on disk and counted; a body that is mostly a secret is refused
                                                         test_secrets
-  6  a rule about the user from a tool turn is refused; update/archive of an unknown or foreign
+  6  a rule about the user from a tool turn is kept at session scope, refused without a
+     session; update/archive of an unknown or foreign
      id is refused; a model revision of a ratified note sends it back to provisional; pinning
      needs a ratified rule                              test_rules_in_code
   7  search: the request's own scopes only, session over project over user at equal score,
@@ -45,7 +46,7 @@ The test matrix:
      export, user delete with confirmation              test_admin_routes
  17  SRV-277: an Open WebUI chat (no working directory) writes a project-scoped block: the note
      lands at user scope (rescoped, journaled), no markup reaches the answer; a block the store
-     refuses (schema, a rule from a tool turn) is hidden with its reason journaled; the hidden
+     refuses (schema, a rule from a tool turn without a session) is hidden with its reason journaled; the hidden
      blocks' tokens are found as spans for the next turn's end alignment
                                                         test_srv277_owui_block_never_shown
  16  P-M3: a `propose` block becomes a proposal (never applied), Apply is a new packages version
@@ -191,7 +192,11 @@ def test_secrets():
 
 def test_rules_in_code():
     st = store()
-    refused(lambda: add(st, "always use tabs", kind="rule", from_user=False), "rule_from_tool")
+    # a rule about the user from a tool turn: kept for the session only, refused without one
+    r = add(st, "always use tabs", kind="rule", from_user=False)
+    assert r["scope"] == "session" and r["demoted"] == "rule_from_tool", r
+    refused(lambda: add(st, "always use spaces", kind="rule", from_user=False, session=None),
+            "rule_from_tool")
     add(st, "the project uses tabs", kind="rule", scope="project", from_user=False)  # project ok
     refused(lambda: st.write("owner", {"op": "update", "id": "ffffffffffff", "title": "x",
                                        "body": "y y y"}, writer="qwen-inline"), "unknown_id")
@@ -619,7 +624,8 @@ def test_model_routes():
     h = Handler("/v1/memory", stok="tok", sess=key)
     memory_api.handle(h, cond, "POST", {"op": "add", "scope": "user", "kind": "rule",
                                         "title": "x rule", "body": "a rule from a script"})
-    assert h.status == 422 and h.out["error"]["type"] == "rule_from_tool", h.out
+    assert h.status == 200 and h.out["scope"] == "session", h.out          # 2026-11-04
+    assert h.out["demoted"] == "rule_from_tool", h.out
     h = Handler("/v1/memory", stok="tok", sess=key)
     memory_api.handle(h, cond, "GET", None)
     assert h.status == 200 and h.out["scopes"][0]["scope"] == "project", h.out
@@ -750,7 +756,8 @@ def test_srv277_owui_block_never_shown():
     # refused blocks: hidden, the reason in the journal
     rule_from_tool = note.replace('scope="project" kind="reference"', 'scope="user" kind="rule"')
     for raw, why, ctx in ((note.replace('kind="reference"', 'kind="poem"'), "schema", owui),
-                          (rule_from_tool, "rule_from_tool", dict(owui, from_user=False))):
+                          (rule_from_tool, "rule_from_tool",
+                           dict(owui, from_user=False, session=None))):
         f = mem.filter(dict(ctx, written=[]), ui)
         assert feed_all(f, "Done.\n" + raw + "\nBye.", 5) == "Done.\n\nBye.", why
         assert f.failed == [why] and f.hidden == [raw], (why, f.failed)

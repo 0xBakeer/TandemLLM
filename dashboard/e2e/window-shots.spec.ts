@@ -17,6 +17,7 @@ async function open(page: Page, theme: 'dark' | 'light'): Promise<void> {
   await page.addInitScript((t) => {
     localStorage.setItem('qse.theme', t);
     localStorage.removeItem('tandem.setup.v1');
+    localStorage.setItem('tandem.setup.simple', '0'); // the advanced flow: the field is on its own step
   }, theme);
   await login(page, HASH, `?t=${Date.now()}`);
   await page.locator('#pf-win-in').waitFor();

@@ -30,7 +30,7 @@ A prompt chunk is not verified against anything, so its kernels have no twin con
 - `qsa_scores_rows`: a chunk's QSA block scores as one GEMM, the reference's arithmetic.
 - Attention, the GDN conv and gates, the PLE gate and conv reuse the decode path's sequence kernels with M rows (`attn_rows`, `gdn_pre`, `ple_gate`, `ple_conv`); the delta rule is `tools/gdn_prefill_kernels.py` with the key heads as they are.
 
-`QWEN38_FN_PREFILL=ref` keeps the reference's batched forward; `QWEN38_FN_PREFILL_CHUNK` is the chunk length (4,096).
+`QWEN38_FN_PREFILL=ref` keeps the reference's batched forward; `QWEN38_FN_PREFILL_CHUNK` is the chunk length (4,096). `QWEN38_FN_GROUP_ROWS` is the rows an item of the MoE group GEMM takes (64; 32 is the earlier tile, any other value refuses at import).
 
 ## NVFP4 matrix products
 

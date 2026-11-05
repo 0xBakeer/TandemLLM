@@ -9,6 +9,8 @@ now `Handler.timeout` seconds per socket op (60 s in production; the tests set i
   an idle keep-alive peer -> the stdlib's own timeout path: one log line, closed, no traceback
   a client that keeps
     sending               -> served, keep-alive and all -- the clock restarts at every op
+  a reader that stops
+    reading the answer    -> the write times out: abandoned, closed, no traceback
 
 Run: python tests/test_handler_timeout.py
 """
@@ -196,6 +198,96 @@ def test_a_forward_that_lifts_the_timeout_leaves_the_next_request_guarded():
         fake.shutdown()
         os.environ.pop("QSE_CHAT_URL", None)
         os.environ.pop("QSE_CHAT_FORWARD_KEY", None)
+
+
+class _Stalled:
+    """A socket writer whose reader stopped reading: every write times out."""
+
+    def __init__(self):
+        self.writes = 0
+
+    def write(self, data):
+        self.writes += 1
+        raise TimeoutError("timed out")
+
+    def flush(self):
+        pass
+
+
+def test_a_write_that_times_out_is_a_client_gone_and_closes_the_connection():
+    from test_app_loop import Req
+    req = Req("/health", {})
+    raw = _Stalled()
+    req.wfile = app._GoneOnTimeout(raw, req)
+    req.close_connection = False
+    # _send_bytes treats it as a reader that left: no exception out, the connection closes
+    req._send_bytes(200, b"{}")
+    assert req.close_connection is True
+    assert raw.writes == 1
+    # a later write fails at once instead of waiting out a second timeout
+    try:
+        req.wfile.write(b"data: [DONE]\n\n")
+    except app.ClientGone:
+        pass
+    else:
+        raise AssertionError("a write after the timeout went through")
+    assert raw.writes == 1, "the second write waited on the socket again"
+    req.wfile.flush()                   # the stdlib's flush after the handler: no error
+
+
+class _SmallSendBuf(app.Handler):
+    """The server side of the connection with a small send buffer: a reader that stops reading
+    fills it, and the write that follows waits out the timeout."""
+
+    def setup(self):
+        self.request.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        super().setup()
+
+
+def test_a_reader_that_stops_reading_mid_stream_is_abandoned():
+    import time
+    from test_app_loop import serve
+    serve(max_len=4096)
+    app.Handler.timeout = TIMEOUT_S
+    tracebacks = []
+    real_gen, real_exc = app.generate_stream, app.logbuf.print_exc
+
+    class Server(app.EngineServer):
+        def handle_error(self, request, client_address):
+            tracebacks.append("handle_error")
+
+    app.generate_stream = lambda *a, **k: iter([ord("a")] * 4000)
+    app.logbuf.print_exc = lambda *a, **k: tracebacks.append("print_exc")
+    server = Server(("127.0.0.1", 0), _SmallSendBuf)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    before = dict(app.INFLIGHT)
+    s = socket.socket()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        s.settimeout(WAIT_S)
+        s.connect(("127.0.0.1", server.server_address[1]))
+        body = b'{"prompt": "ab", "max_tokens": 4000, "stream": true}'
+        s.sendall(b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: "
+                  b"application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        # and then nothing is read: the buffers fill, the stream's next write times out
+        t0 = time.monotonic()
+        while app.INFLIGHT["abandoned"] == before["abandoned"]:
+            assert time.monotonic() - t0 < WAIT_S, f"never abandoned: {dict(app.INFLIGHT)}"
+            time.sleep(0.02)
+        got = b""
+        while True:                                 # what reached the buffers, then the close
+            part = s.recv(65536)
+            if not part:
+                break
+            got += part
+        assert got.startswith(b"HTTP/1.1 200"), got[:80]
+        assert b"[DONE]" not in got and b'"error"' not in got, got[-300:]
+        assert app.INFLIGHT["errors"] == before["errors"], "a reader that left is not an error"
+        assert tracebacks == [], tracebacks
+    finally:
+        s.close()
+        server.shutdown()
+        app.generate_stream, app.logbuf.print_exc = real_gen, real_exc
 
 
 if __name__ == "__main__":

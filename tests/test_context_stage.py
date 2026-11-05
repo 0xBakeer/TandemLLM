@@ -176,6 +176,31 @@ def test_the_runner_answers_a_cold_prefills_letter_logits():
     assert eng.kv.length == 70 and sorted(res.anchors) == list(range(16, 70, 16))
 
 
+def test_srv775_the_turns_workspace_stays_in_flight_across_the_stage():
+    """SRV-775: a parallel server charges a turn's workspace at its admission, before the in-context stage runs on
+    the same thread; the stage's own gate and prefill (its `Budget.prefilled`) leave that charge in the memory
+    policy's prefills in flight (`ws_now`, which a cache's growth must leave room for), as the turn's prefill is still
+    to run. Without it the policy lost the charge for the turn's whole prefill whenever the stage ran."""
+    g = 1 << 30
+    mem = cache.Budget(70 * g, 77 * g, 2 * g, probe=lambda: (60 * g, 60 * g), empty=lambda: None,
+                       peak_probe=lambda reset=False: 0, ws_rows=lambda n, r: g if r < n else 3 * g)
+    app.STATE.clear()
+    app.STATE.update(engine=fresh(), drafter=None, resident=resident(), state_store=None, prefix_chunk=CH,
+                     device=DEV, model="tiny", mem=mem)
+    try:
+        mem.gate(200, rows=21)                        # the turn's admission (`_par_admit`): 21 rows, 1 GiB
+        assert mem.ws_now == g
+        app.context_choice(tokens(70, seed=31), [3, 9], 60, "ses")
+        assert mem.ws_now == g and mem.stats["gates"] == 2, (mem.ws_now, mem.stats["gates"])
+        mem.prefill_done()                            # the turn's prefill has run
+        assert mem.ws_now == 0
+        app.context_choice(tokens(70, seed=32), [3, 9], 60, "ses")
+        assert mem.ws_now == 0, "a stage with no turn charged before it leaves nothing behind"
+    finally:
+        app.STATE.clear()
+    return "1 GiB in flight before and after the stage's 3 GiB gate and prefill"
+
+
 def test_an_image_in_history_goes_through_the_stage_bit_for_bit():
     """opencode's photo3d and spiral sessions carry screenshots in their history. The stage
     expands the images as the turn does (the same rows, rotary coordinates and `key_ids`), so the

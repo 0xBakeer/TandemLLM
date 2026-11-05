@@ -38,6 +38,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
@@ -57,14 +58,18 @@ def _module():
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_prefill_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_prefill_kernels")],
                        verbose=False)
     return _MOD
 
 
 # rows an item of the group GEMM takes (16 MT; 32 or 64): 32 measured faster at 2k and 4k rows a chunk
-# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer)
-GROUP_ROWS = 32
+# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer); 64 measures
+# faster at every chunk rows now (2026-10-30, same bench on a DGX Spark: 11.04 vs 11.98 ms at 2k,
+# 17.42 vs 19.79 at 4k, 32.20 vs 36.91 at 8k) -- QWEN38_FN_GROUP_ROWS=32 switches it back
+GROUP_ROWS = int(_S.get("FN_GROUP_ROWS") or 64)
+if GROUP_ROWS not in (32, 64):
+    raise ValueError(f"QWEN38_FN_GROUP_ROWS={GROUP_ROWS}: the group GEMM's items take 32 or 64 rows")
 
 
 def group_plan(ids_flat: torch.Tensor, groups: int, rows: int = GROUP_ROWS) -> dict:
@@ -187,6 +192,39 @@ def mm_i8_tc(x: torch.Tensor, w) -> torch.Tensor:
     return y
 
 
+# SPD-249: while it is on, `mm_rows`' fp32 weight forms are kept from a weight's first call to `wf_cache_clear`, so
+# the prompts of a joint prefill (engine/models/flashnext/joint_prefill.py) that pass one layer's weights convert each
+# weight once instead of once a prompt. The fp32 form is the same tensor either way and every GEMM keeps its shape:
+# bit for bit the uncached calls. Holds one layer's mixers, router, GDN a|b and PLE projections between clears.
+_WF_CACHE: dict | None = None
+
+
+def wf_cache_on() -> None:
+    global _WF_CACHE
+    _WF_CACHE = {}
+
+
+def wf_cache_clear() -> None:
+    if _WF_CACHE is not None:
+        _WF_CACHE.clear()
+
+
+def wf_cache_off() -> None:
+    global _WF_CACHE
+    _WF_CACHE = None
+
+
+def _wf(w) -> torch.Tensor:
+    """The fp32 form of an int8-rows or fp16 weight (`mm_rows`' exact weights); cached while the cache is on."""
+    c = _WF_CACHE
+    if c is None:
+        return w.dequant() if hasattr(w, "q") else w.float()
+    got = c.get(id(w))
+    if got is None or got[0] is not w:
+        got = c[id(w)] = (w, w.dequant() if hasattr(w, "q") else w.float())
+    return got[1]
+
+
 def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
     group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
@@ -195,7 +233,7 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
         return mm_i8_tc(x.contiguous(), w)
     if MM in ("fp32", "tc"):
-        wf = w.dequant() if hasattr(w, "q") else w.float()
+        wf = _wf(w)
         return x.float() @ wf.T
     if hasattr(w, "q"):
         N = w.q.shape[0]

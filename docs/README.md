@@ -1,6 +1,6 @@
 # Documentation
 
-Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others. To install, start with [setup.md](setup.md). The manual, [`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), puts these pages and the reference tables in one book.
+TandemLLM is an inference engine, and we measure its speed on raw `/v1/completions` ([measurement.md](measurement.md), the rows in [CHANGELOG.md](../CHANGELOG.md)). The built-in chat (the Chat tab, chatd and the conductor's chat profiles) is in beta. Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others. To install, start with [setup.md](setup.md). The manual, [`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), puts these pages and the reference tables in one book.
 
 | page | what it covers |
 |-|-|
@@ -11,12 +11,14 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
-| [conductor.md](conductor.md) | the conductor in one page: modes and headers, profiles, the router, effort, packages, the note, side requests, sessions, the monitor and loop guards, the journal, raw mode, measured effect |
+| [conductor.md](conductor.md) | the conductor in one page (its chat profiles in beta): modes and headers, profiles, the router, effort, packages, the note, side requests, sessions, the monitor and loop guards, the journal, raw mode, measured effect |
 | [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text, Flash-Next |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
+| [benchmark-report.md](benchmark-report.md) | the benchmark report of a running server, on your GPU: how to run it, how long it takes, what each section measures |
+| [quality-gate.md](quality-gate.md) | the report a pull request carries: the command, what a diff needs, the suites, the verdicts, the check |
 | [benchmarks.md](benchmarks.md) | tool-eval-bench against TandemLLM: the raw and conductor paths, the settings a score must name, results on a DGX Spark |
 | [tool-eval-bench.md](tool-eval-bench.md) | tool-eval-bench results of 2026-10-19: the raw path at five thinking settings, four conductor profiles, hard mode |
 | [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |

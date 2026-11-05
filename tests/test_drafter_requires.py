@@ -3,8 +3,9 @@
 A drafter built for another target (other hidden width, taps past the last layer, a head or an
 embedding that is not loaded) must be refused at load with the dependency named, not discovered as
 an acceptance rate of zero. A suffix store holds token ids only; one recorded for another tokenizer
-must be refused, and the stores written before this (the served ones, no fingerprint) are read with
-one warning.
+is refused where it would be written and skipped, with a log line, where it is only read (#105: a
+corpus of the last model's tokenizer must not stop the next model's engine). The stores written
+before this (the served ones, no fingerprint) are read with one warning.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.cache import PersistentSuffixStore  # noqa: E402
 from engine.drafters import Drafter, check_target  # noqa: E402
-from engine.drafters.ngram import CorpusSuffixStore  # noqa: E402
+from engine.drafters.ngram import CorpusSuffixStore, NgramDrafter  # noqa: E402
 from engine.tokfp import KEY, fingerprint  # noqa: E402
 
 
@@ -99,18 +100,22 @@ def _corpus(meta):
 def test_corpus_store_checked():
     fp = "a" * 64
     assert CorpusSuffixStore.load(_corpus({KEY: fp}), tokenizer_sha=fp) is not None
-    try:
-        CorpusSuffixStore.load(_corpus({KEY: "b" * 64}), tokenizer_sha=fp)
-    except ValueError as e:
-        assert "another tokenizer" in str(e)
-    else:
-        raise AssertionError("a store from another tokenizer was read")
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        assert CorpusSuffixStore.load(_corpus({KEY: "b" * 64}), tokenizer_sha=fp) is None
+    line = buf.getvalue()
+    assert "another tokenizer" in line and "b" * 12 in line and "a" * 12 in line
     buf = io.StringIO()
     with redirect_stderr(buf):
         assert CorpusSuffixStore.load(_corpus({}), tokenizer_sha=fp) is not None
     assert "no tokenizer_sha256" in buf.getvalue()
     assert CorpusSuffixStore.load(_corpus({KEY: "b" * 64})) is not None   # no fingerprint asked: as before
-    return "same: read; other: refused; legacy: read with a warning"
+    # the drafter the server builds comes up without the corpus, its lookup on the conversation
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        ng = NgramDrafter(corpus_path=_corpus({KEY: "b" * 64}), tokenizer_sha=fp)
+    assert ng.corpus is None and "another tokenizer" in buf.getvalue()
+    return "same: read; other: skipped with a log line; legacy: read with a warning"
 
 
 def test_persistent_store_records_and_checks():

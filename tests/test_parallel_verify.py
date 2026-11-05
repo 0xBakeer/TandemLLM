@@ -14,13 +14,15 @@ rounds of the served loop, held to what each request writes alone.
      and writes like the plain dict it was, and the engine lock has no turn.
 
 The CPU's matrix products are row-invariant on the box (aarch64, OpenBLAS); on a platform where
-they are not, (1) and (3) fall back to an argmax check with a tolerance on the logits.
+they are not, (1) and (3) fall back to an argmax check with a tolerance on the logits. SPD-153's
+bit-for-bit check takes every product one row a call instead (`_row_products`, SPD-253).
 
 Run: python tests/test_parallel_verify.py
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import threading
@@ -32,6 +34,7 @@ os.environ.setdefault("QWEN38_TREE_CHAIN_DELEGATE", "0")
 os.environ.setdefault("QSE_ROUND_RUNNER", "0")
 
 import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 if not torch.cuda.is_available():
     torch.cuda.synchronize = lambda *a, **k: None
@@ -66,6 +69,32 @@ def _same(a, b, what):
         return
     EXACT = False
     assert torch.allclose(a, b, atol=1e-5, rtol=1e-5), f"{what}: max diff {(a - b).abs().max()}"
+
+
+@contextlib.contextmanager
+def _row_products():
+    """SPD-253: every `F.linear` one row a call, on a fresh copy of the row. The engine's kernels fix a
+    row's reduction order by the weight, never by the rows beside it (`forward_tree_multi`); a CPU BLAS
+    promises no such thing. x86 MKL 2022.2 gives layers.0.mlp.gate_proj [64, 32] other bits for the
+    chain's 5 rows inside the joint pass's 11 rows than for the 5 alone (up to 7.2e-7, 6.4e-6 at the
+    logits); the CPU suite failed the check in 3 of 4 runs on main with no change to the code. One
+    row a call makes a row's product depend on that row alone on any BLAS, so the check still holds
+    the joint pass's own work to the bit: the rows joined and split back, the chain on the tree path,
+    the commit."""
+    lin = F.linear
+
+    def rows(x, w, b=None):
+        x2 = x.reshape(-1, x.shape[-1])
+        if x2.shape[0] == 0:
+            return lin(x, w, b)
+        y = torch.cat([lin(x2[i:i + 1].clone(), w, b) for i in range(x2.shape[0])])
+        return y.view(*x.shape[:-1], y.shape[-1])
+
+    F.linear = rows
+    try:
+        yield
+    finally:
+        F.linear = lin
 
 
 def _tree(seed, n_main, n_side, anchor):
@@ -196,30 +225,32 @@ def test_spd153_a_chain_joins_the_joint_pass():
 
 def test_spd153_a_chain_in_the_joint_pass_is_its_tree_verify_bit_for_bit():
     """In the joint pass a chain is verified on the tree path: its logits and its committed state are
-    the bits of its own tree-path verify alone (the chain kernel's delegation off), beside a tree."""
+    the bits of its own tree-path verify alone (the chain kernel's delegation off), beside a tree. The
+    products run one row a call (`_row_products`), as row-invariant as the engine's kernels."""
     import engine.model as m
     cfg = tiny_config()
     w = FakeWeights(cfg, seed=5)
-    alone = [_engine(cfg, w), _engine(cfg, w)]
-    joint = [_engine(cfg, w), _engine(cfg, w)]
-    n0 = [_prefill(e, 21, 12) for e in (alone[0], joint[0])][0]
-    n1 = [_prefill(e, 22, 9) for e in (alone[1], joint[1])][0]
-    pos = [len(n0), len(n1)]
-    trees = [DraftTree.chain(5, [11, 12, 13, 14]), _tree(300, 3, 2, 7)]
-    blocks = [torch.tensor(t.tokens) for t in trees]
     saved = m.TREE_CHAIN_DELEGATE
     try:
-        m.TREE_CHAIN_DELEGATE = False        # the lone reference on the tree path, as the joint pass
-        with torch.no_grad():
-            lone = [alone[i].forward_tree(blocks[i], trees[i].parents, start=pos[i]) for i in (0, 1)]
-            multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i]) for i in (0, 1)])
-        for i in (0, 1):
-            assert torch.equal(multi[i], lone[i]), f"slot {i}: max diff {(multi[i] - lone[i]).abs().max()}"
-            path = [0, 1, 2]
-            alone[i].commit_tree(path)
-            joint[i].commit_tree(path)
-            for a, b in zip(_state(alone[i]), _state(joint[i])):
-                assert (a == b) if not torch.is_tensor(a) else torch.equal(a, b)
+        with _row_products():
+            alone = [_engine(cfg, w), _engine(cfg, w)]
+            joint = [_engine(cfg, w), _engine(cfg, w)]
+            n0 = [_prefill(e, 21, 12) for e in (alone[0], joint[0])][0]
+            n1 = [_prefill(e, 22, 9) for e in (alone[1], joint[1])][0]
+            pos = [len(n0), len(n1)]
+            trees = [DraftTree.chain(5, [11, 12, 13, 14]), _tree(300, 3, 2, 7)]
+            blocks = [torch.tensor(t.tokens) for t in trees]
+            m.TREE_CHAIN_DELEGATE = False        # the lone reference on the tree path, as the joint pass
+            with torch.no_grad():
+                lone = [alone[i].forward_tree(blocks[i], trees[i].parents, start=pos[i]) for i in (0, 1)]
+                multi = forward_tree_multi([(joint[i], blocks[i], trees[i].parents, pos[i]) for i in (0, 1)])
+            for i in (0, 1):
+                assert torch.equal(multi[i], lone[i]), f"slot {i}: max diff {(multi[i] - lone[i]).abs().max()}"
+                path = [0, 1, 2]
+                alone[i].commit_tree(path)
+                joint[i].commit_tree(path)
+                for a, b in zip(_state(alone[i]), _state(joint[i])):
+                    assert (a == b) if not torch.is_tensor(a) else torch.equal(a, b)
     finally:
         m.TREE_CHAIN_DELEGATE = saved
 

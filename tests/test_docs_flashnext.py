@@ -2,9 +2,10 @@
 
   * the manual has a Flash-Next chapter and includes it (manual/chapters/flashnext.tex,
     manual/tandemllm-manual.tex);
-  * the pack table in docs/quantisation.md and in the chapter (Table "The Flash-Next packs") matches
+  * the pack table in README.md, docs/quantisation.md and the chapter (Table "The Flash-Next
+    packs") matches
     models/qwen3.8-flash-next/model.yaml and ops/profiles/flashnext-<bpw>.env row by row: the branch,
-    the disk size, the weights, the n-gram table and its policy, the largest window (or that the pack
+    the disk size, the weights, the n-gram table and its policy, the largest window (or that load/generation is unverified, the pack
     does not load yet, or fits none);
   * docs/architecture.md marks the layering pieces not built yet (ENG-251, 253, 255, 259) as planned;
   * docs/adding-a-model.md names every adapter verb: the ones engine/models/adapter.py lists and the
@@ -43,6 +44,8 @@ def _env(profile_id: str) -> dict:
 
 def _window(p: dict) -> str:
     """The largest-window cell a profile's row must carry."""
+    if "load/generation unverified" in (p.get("badges") or []):
+        return "load/generation unverified"
     if "does not load yet" in (p.get("badges") or []):
         return "does not load yet"
     if p.get("max_window") is None:
@@ -72,6 +75,7 @@ def test_the_pack_tables_match_the_registry_and_profiles():
     profiles = _profiles()
     assert len(profiles) == 5, [p["id"] for p in profiles]
     md_rows = [ln for ln in _read("docs", "quantisation.md").splitlines() if ln.startswith("| `flashnext-")]
+    rd_rows = [ln for ln in _read("README.md").splitlines() if ln.startswith("| `flashnext-")]
     tex_rows = [ln for ln in _read("manual", "chapters", "flashnext.tex").splitlines()
                 if ln.startswith("\\code{flashnext-")]
     for p in profiles:
@@ -87,6 +91,11 @@ def test_the_pack_tables_match_the_registry_and_profiles():
         assert c[3].startswith(f"{p['weights_gib']} GiB"), (pid, c[3])
         assert c[4] == want_table, (pid, c[4])
         assert _window(p) in c[5], (pid, c[5])
+        # README: profile | branch | download | window
+        r = _cells(rd_rows, pid, "|")
+        assert r[1] == f"`{p['hf_revision']}`", (pid, r[1])
+        assert r[2] == f"{p['disk_gb']} GB", (pid, r[2])
+        assert _window(p) in r[3], (pid, r[3])
         # manual: profile & disk & weights & table & window
         t = [x.replace("~", " ") for x in _cells(tex_rows, pid, "&")]
         assert t[1] == f"{p['disk_gb']} GB", (pid, t[1])
@@ -94,7 +103,7 @@ def test_the_pack_tables_match_the_registry_and_profiles():
         assert t[3] == want_table, (pid, t[3])
         assert _window(p) in t[4], (pid, t[4])
         assert ("recommended" in t[4]) == bool(p.get("recommended")), (pid, t[4])
-    return f"{len(profiles)} profiles in docs/quantisation.md and manual/chapters/flashnext.tex"
+    return f"{len(profiles)} profiles in README.md, docs/quantisation.md and manual/chapters/flashnext.tex"
 
 
 def test_architecture_marks_the_unbuilt_layers_planned():
@@ -129,6 +138,34 @@ def test_adding_a_model_names_every_adapter_verb():
                      if not any(re.fullmatch(rf"(eng\.)?{re.escape(v)}(\([^)]*\))?(\.\w+)?", sp) for sp in spans))
     assert not missing, f"docs/adding-a-model.md names no {missing}"
     return f"{len(verbs)} verbs: {', '.join(sorted(verbs))}"
+
+
+def test_unverified_status_is_not_a_validated_window():
+    """The 5.05 badge reads 'load/generation unverified': not 'does not load yet', and the estimate
+    is not a measured window."""
+    assert _window({"badges": ["load/generation unverified"], "max_window": 53248}) == "load/generation unverified"
+    assert _window({"badges": [], "max_window": 53248}) == "53,248"
+    assert _window({"badges": [], "max_window": None}) == "does not fit"
+    assert _window({"badges": ["does not load yet"], "max_window": 53248}) == "does not load yet"
+    assert "Two packs do not run." not in _read("manual", "chapters", "flashnext.tex")
+    p = next(pr for pr in _profiles() if pr["id"] == "flashnext-5.05")
+    assert "load/generation unverified" in p["badges"] and "does not load yet" not in p["badges"]
+    for needle in ("7-bit dense projections", "unverified", "estimate"):
+        assert needle in p["note"], needle
+
+
+def test_readme_explains_unverified_dense_dispatch():
+    """The unverified-status explanation names the real blocker -- 7-bit dense projections -- in
+    the README and on the quantisation page, which must not hedge the window as '(not achieved)'."""
+    why = ("The 5.05 pack's earlier blocker was its 7-bit dense projections. The dense dispatch now "
+           "covers K 2..8; the MoE kernels already supported 7-bit experts. Full-pack load and "
+           "generation are still unverified.")
+    assert why in _read("README.md")
+    assert why in _read("docs", "quantisation.md")
+    assert "(not achieved)" not in _read("docs", "quantisation.md")
+    stale = ("The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels "
+             "take 2 to 6 and 8.")
+    assert stale not in _read("README.md")
 
 
 if __name__ == "__main__":

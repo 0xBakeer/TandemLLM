@@ -188,6 +188,18 @@
               },
               "stage_ms": {
                 "type": "number"
+              },
+              "eta_ms": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "timeout_ms": {
+                "type": "number"
+              },
+              "skipped": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -568,6 +580,18 @@
           "type": "boolean"
         },
         "cached": {
+          "type": "boolean"
+        },
+        "eta_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "timeout_ms": {
+          "type": "number"
+        },
+        "skipped": {
           "type": "boolean"
         }
       },

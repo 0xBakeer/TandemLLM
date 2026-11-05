@@ -29,6 +29,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
 #: rows a tall chunk takes
@@ -48,7 +49,7 @@ def _module():
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"qwen38_exl3_tall_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["exl3_gemm_tall"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                        verbose=False)
     return _MOD
 
@@ -75,7 +76,7 @@ def _t64_module():
         tag = nb.tag(_T64_CPP, src)
         _T64_MOD = nb.load(f"qwen38_exl3_t64_{tag}", cpp_sources=[_T64_CPP], cuda_sources=[src],
                            functions=["exl3_gemm_t64"],
-                           extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                           extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                            verbose=False)
     return _T64_MOD
 
@@ -156,7 +157,7 @@ def _p2_module():
         tag = nb.tag(_P2_CPP, src)
         _P2_MOD = nb.load(f"qwen38_exl3_p2_{tag}", cpp_sources=[_P2_CPP], cuda_sources=[src],
                           functions=["exl3_gemm_p2"],
-                          extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                          extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                           verbose=False)
     return _P2_MOD
 
@@ -226,7 +227,7 @@ def _p2c_module():
         tag = nb.tag(_P2C_CPP, src)
         _P2C_MOD = nb.load(f"qwen38_exl3_p2c_{tag}", cpp_sources=[_P2C_CPP], cuda_sources=[src],
                            functions=["exl3_gemm_p2c"],
-                           extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                           extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                            verbose=False)
     return _P2C_MOD
 
@@ -302,7 +303,7 @@ def _h64_module():
         _H64_MOD = nb.load(f"qwen38_exl3_h64_{tag}", cpp_sources=[_H64_CPP], cuda_sources=[src],
                            functions=["exl3_gemm_h64"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-Xptxas=-v",
-                                              "-gencode=arch=compute_121a,code=sm_121a"],
+                                              *_gpu.arch_flags("exl3_tall")],
                            verbose=False)
     return _H64_MOD
 
@@ -381,7 +382,7 @@ def _frag_module():
         tag = nb.tag(X._CPP, src)
         _FRAG_MOD = nb.load(f"qwen38_exl3_frag_{tag}", cpp_sources=[X._CPP], cuda_sources=[src],
                             functions=["exl3_gemm"],
-                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                            extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                             verbose=False)
     return _FRAG_MOD
 
@@ -453,7 +454,7 @@ def _h64f_module():
         tag = nb.tag(_H64_CPP, src)
         _H64F_MOD = nb.load(f"qwen38_exl3_h64f_{tag}", cpp_sources=[_H64_CPP], cuda_sources=[src],
                             functions=["exl3_gemm_h64"],
-                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                            extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")],
                             verbose=False)
     return _H64F_MOD
 
@@ -516,7 +517,7 @@ def variant(name: str):
         tag = nb.tag(X._CPP, src)
         mod = _VARIANTS[name] = nb.load(
             f"qwen38_exl3_{name}_{tag}", cpp_sources=[X._CPP], cuda_sources=[src], functions=["exl3_gemm"],
-            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"], verbose=False)
+            extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("exl3_tall")], verbose=False)
     return mod
 
 

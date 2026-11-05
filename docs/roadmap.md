@@ -6,7 +6,7 @@ TandemLLM runs several models (Qwen3.8-27B, Qwen3.8-Flash-Next and, from 0.9.0, 
 
 Qwen3.8-Flash-Next is served from turboderp's EXL3 packs through the same server, caches and ops scripts as the 27B ([architecture.md](architecture.md), [quantisation.md](quantisation.md)). The plan written here before it named the NVFP4 checkpoint; the published EXL3 packs replaced it. What is still open:
 
-- The 5.05 pack codes its experts at 5 and 7 bits; the MoE kernels take 2 to 6 and 8, so it does not load until a 7-bit expert kernel exists.
+- The 5.05 pack's earlier blocker was 7-bit dense projections. The dense dispatch now covers K 2..8, and the MoE kernels already supported 7-bit experts. A full 5.05 load and an answer still need validation.
 - Quality against the BF16 model, per pack. The BF16 release is 360 GB and does not fit the box, so the reference run that gives KL a pack is not done.
 - Parallel requests are on in its profiles (three slots). Three requests together take as long as one after the other and only the later first tokens come sooner; CUDA graphs for the joint pass are the next step ([parallel-requests.md](parallel-requests.md#on-flash-next)).
 
