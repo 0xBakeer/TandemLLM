@@ -268,9 +268,9 @@ class EXL3Block:
         wi = torch.empty(self.K, n1 - n0, dtype=torch.float16, device=self.t.device)
         if self.t.is_cuda and _gpu.profile(self.t.device).inline("exl3_linear"):
             _module().exl3_recon(self.t, wi, self.kb, n0)
-        elif self.t.is_cuda:
+        elif self.t.is_cuda and _gpu.profile(self.t.device).exl3_decode_ok(self.t.device, self.kb):
             from tools import exl3_ada
-            return exl3_ada.decode(self.t, n0 // 16, n1 // 16)
+            return exl3_ada.decode_trellis_triton(self.t, n0 // 16, n1 // 16)
         else:
             wi.copy_(decode_trellis(self.t, n0 // 16, n1 // 16))
         return wi
