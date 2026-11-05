@@ -11,7 +11,8 @@ Q8_0 / IQ2_XXS / NVFP4 set. Two tiers, chosen per tensor by `gguf_load`:
 The block layouts and decode order are ggml's (llama.cpp `ggml-quants.c`, MIT), cross-checked
 against gguf-py's `quants.py` (MIT); the IQ lattice grids live in `tools/gguf_grids.py`. NVFP4
 and Q8_0 keep their existing dedicated modules. Q1_0 (type 41) has no settled ggml decode and
-no known checkpoints — it stays a clean refusal.
+no known checkpoints — it stays a clean refusal, as does Q8_1 (an activation format, no
+reference decode to check one against).
 """
 
 from __future__ import annotations
@@ -174,12 +175,6 @@ def dq_q5_1(b):
 def dq_q8_0(b):
     d, q = np.hsplit(b, [2])
     return _f16(d) * q.view(np.int8).astype(np.float32)
-
-
-def dq_q8_1(b):
-    # block_q8_1: f32 pair (d, s); s = d * sum(q) is a dot-product auxiliary, not part of the weight.
-    ds, q = np.hsplit(b, [8])
-    return ds[:, :4].view(np.float32) * q.view(np.int8).astype(np.float32)
 
 
 def _q4k_scales(sc12):
@@ -448,7 +443,6 @@ TYPES = {
     6:  (32, 22, dq_q5_0),
     7:  (32, 24, dq_q5_1),
     8:  (32, 34, dq_q8_0),
-    9:  (32, 40, dq_q8_1),
     10: (256, 84, dq_q2_k),
     11: (256, 110, dq_q3_k),
     12: (256, 144, dq_q4_k),
