@@ -170,11 +170,20 @@ def test_the_three_views_render_from_records():
     # gate: the verdict table from two stores, the gate's own rules
     rows, md = views.render_gate(base, head)
     ids = {r["id"]: r for r in rows}
-    for rid in ("decode.c1", "decode.c1-1k", "decode.c8", "decode.c8.wall", "prefill.2k", "prefill.8k",
-                "prefill.burst4x1k", "lossless.card-code.greedy"):
+    gate_ids = ("decode.c1", "decode.c1-1k", "decode.c8", "decode.c8.wall", "prefill.2k", "prefill.8k",
+                "prefill.burst4x1k", "lossless.card-code.greedy")
+    for rid in gate_ids:
         assert rid in ids, (rid, sorted(ids))
-        assert ids[rid]["verdict"] in ("PASS", "SKIPPED"), (rid, ids[rid])
-    assert md.startswith("verdict PASS") and "| decode |" in md
+        assert ids[rid]["verdict"] in ("PASS", "SKIPPED", "WORSE"), (rid, ids[rid])
+    assert ids["lossless.card-code.greedy"]["verdict"] == "PASS", ids["lossless.card-code.greedy"]
+    assert md.startswith("verdict ") and "| decode |" in md
+    # the speed rows above are two fake-engine runs on a shared runner, so their verdict is timing
+    # (prefill.2k resolved 21.8 % worse once in CI); one store against itself passes every row
+    rows_same, md_same = views.render_gate(head, head)
+    same = {r["id"]: r for r in rows_same}
+    for rid in gate_ids:
+        assert same[rid]["verdict"] in ("PASS", "SKIPPED"), (rid, same[rid])
+    assert md_same.startswith("verdict PASS"), md_same[:200]
     # the gate's runner writes each arm's suites as records (tools/measure/gatearm.py): the same table
     import types
     from tools.measure import gatearm

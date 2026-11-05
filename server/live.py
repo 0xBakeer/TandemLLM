@@ -261,7 +261,6 @@ class LiveRegistry:
         self._last_prefill: tuple[float, float] | None = None   # (perf at first token, tok/s)
         self._prev: tuple[float, int, bool] | None = None   # (perf, tokens, something decoding)
         self._last_sample_p: float | None = None
-        self._was_fast = False
         self.samples_taken = 0
         # the event every open stream writes: (seq, bytes), made once a tick
         self.seq = 0
@@ -476,11 +475,10 @@ class LiveRegistry:
             live = list(self._live.values())
             fast = self._fast_now()
             # one history sample a second: every tick at 1 Hz, every fourth at 4 Hz, and no
-            # extra one on the tick where the cadence drops back
+            # extra one on the tick where the cadence drops back. The spacing alone decides: a
+            # short request that opens and ends between two ticks leaves both slow, 0.25 s apart
             due = (self._last_sample_p is None
-                   or now_p - self._last_sample_p >= 0.9 * self.interval
-                   or not (fast or self._was_fast))
-            self._was_fast = fast
+                   or now_p - self._last_sample_p >= 0.9 * self.interval)
             self._decode_marks(live, now_p)
             if self.activity:
                 bs = self.blocks_fn()
