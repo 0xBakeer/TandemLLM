@@ -149,6 +149,9 @@ class _StubHead:
     def reset(self):
         self.st.length = 0
 
+    def resume(self, n):
+        self.st.length = n
+
     def prime(self, rows, nexts):
         self.st.length += len(nexts)
 
@@ -374,6 +377,15 @@ def test_a_plain_turn_reads_nothing_and_the_next_resumes_past_it():
                                                                     "plain": {"1": 24.7}, "spec": {"1": 25.4},
                                                                     "prime": {"1": 0.28}}}), siblings=False))
     prompt = list(range(5000))
+    key, old = "QWEN38_MTP_BACKLOG_CAP", os.environ.get("QWEN38_MTP_BACKLOG_CAP")
+    os.environ[key] = "0"                                               # the whole backlog, as before the cap
+    try:
+        return _plain_turn_then_resume(d, head, resumed, prompt)
+    finally:
+        os.environ.pop(key, None) if old is None else os.environ.__setitem__(key, old)
+
+
+def _plain_turn_then_resume(d, head, resumed, prompt):
     d.reset()
     d.sync(prompt, _rows(0, 5000), 0)
     assert d.propose_tree(prompt, 8) is None and d.req["turn"] is False and d.plain_turn
@@ -390,6 +402,36 @@ def test_a_plain_turn_reads_nothing_and_the_next_resumes_past_it():
     tree = d.propose_tree(nxt, 8)
     assert resumed == [len(nxt) - 1 - 2] and tree is not None and d.req["turn"] is True, (resumed, tree)
     return "a plain turn drops and skips; the next drafting turn resumes the head at 5,001"
+
+
+def test_the_backlog_cap_makes_a_long_cold_turn_draft():
+    """QWEN38_MTP_BACKLOG_CAP: a 20,000-row cold prompt at 0.28 ms a primed row costs 5.6 s against 3.8 s of
+    saving over a 256-token answer, so the whole backlog makes a plain turn; with the cap (2,048) the head
+    resumes past the older rows, primes the last 2,048 less the chain's and the turn drafts."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 262_144)
+    prices = {"262144": {"chain": {"1": 60.0, "2": 70.0}, "plain": {"1": 24.7}, "spec": {"1": 10.0},
+                         "prime": {"1": 0.28}}}
+    prompt = list(range(20_000))
+    key, old = "QWEN38_MTP_BACKLOG_CAP", os.environ.get("QWEN38_MTP_BACKLOG_CAP")
+    try:
+        out = {}
+        for cap in ("0", "2048"):
+            os.environ[key] = cap
+            head = _StubHead()
+            resumed = []
+            head.resume = lambda n, head=head, resumed=resumed: (resumed.append(n), setattr(head.st, "length", n))
+            d = MTPTreeDrafter(eng, head, StairCut(PriceModel(prices), siblings=False))
+            d.reset()
+            d.sync(prompt, _rows(0, len(prompt)), 0)
+            tree = d.propose_tree(prompt, 8)
+            out[cap] = (d.req["turn"], tree, resumed, d.req["prime_rows"])
+    finally:
+        os.environ.pop(key, None) if old is None else os.environ.__setitem__(key, old)
+    assert out["0"][0] is False and out["0"][1] is None and out["0"][2] == [], out["0"]
+    turn, tree, resumed, primed = out["2048"]
+    assert turn is True and tree is not None and tree.n_draft > 0, out["2048"]
+    assert resumed == [len(prompt) - 1 - 2048] and primed == 2048 - (_StubHead.depth + 1), out["2048"]
+    return "20,000 cold rows: plain with the whole backlog, drafts with the cap (2,044 rows primed)"
 
 
 def test_the_price_classes():
