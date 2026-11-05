@@ -73,6 +73,7 @@ from engine.models import REGISTRY  # noqa: E402
 #: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 #: the GPU adapters (tools/gpu) count with the kernels that ask them, a tools/ package read whole
 #: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
+#: #159: the QWEN38_MTP_BACKLOG_CAP default in engine/settings.py (v2 counts its knobs; the drafts only, no text)
 GOLDEN_V2 = ("f2ff3f3387c8c3bec65db7d0781002fac0482382fd054267d2a6ad0ae86f73f3",
              "b6fcdc87ef40d2f01d8cfacf6aff990eab8536bf965ea8ca06d6a59151e5acef")
 GOLDEN_FP4 = {
