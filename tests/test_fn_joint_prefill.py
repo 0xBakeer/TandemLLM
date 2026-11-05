@@ -73,6 +73,7 @@ class _Eng:
     trunk = E.FlashNextEngine.trunk
     _mix_pre = E.FlashNextEngine._mix_pre
     _moe_pre = E.FlashNextEngine._moe_pre
+    moe_group_rows = None                # the grouped GEMM's default item rows, as FlashNextEngine
     prefill_path = "kernels"
     device, dtype = "cpu", torch.float32
 

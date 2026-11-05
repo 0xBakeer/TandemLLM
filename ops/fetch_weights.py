@@ -43,6 +43,22 @@ import shutil
 import sys
 import zlib
 
+# A download runs on a box that may already hold an engine, and the hub's Xet backend
+# alone wants ~2 GiB of buffers: on a loaded Spark the kernel's oom-killer takes the
+# fetch (and often the job's runner beside it) down, which the wizard can only report
+# as "interrupted: the job's process is gone". The plain HTTP path fits in ~100 MB,
+# so it is the default here; setdefault keeps an operator's own choice in charge.
+#
+# HF_HUB_DISABLE_XET is read by huggingface_hub ONCE, when huggingface_hub.constants is first
+# imported -- not when the download runs. `assets()` calls `plan()`, and `plan()` calls
+# `hub_files()`, which imports HfApi before `fetch()` is ever reached; the command-line
+# path runs `plan()` first too. Set inside fetch(), it would come too late: the hub
+# would already have read it as unset. It is set here, at import time, before
+# anything can import the hub.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# huggingface-hub is pinned to 1.30.0 (install.sh), which does not use hf_transfer at
+# all, so there is nothing to turn off.
+
 
 def _token() -> str | None:
     t = os.environ.get("HF_TOKEN")

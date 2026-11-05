@@ -190,7 +190,7 @@ profiles:
   hf_private: false
   made_by: {kind: community, name: turboderp, github: turboderp}
   recommended: false
-  badges: ['does not load yet']
+  badges: ['load/generation unverified']
   quality:
     kl_vs_bf16: null
     top1_pct: null
@@ -198,8 +198,7 @@ profiles:
     date: '2026-10-11'
     source: 'not measured: the BF16 reference run (ENG-159) is deferred'
   assets_required: []
-  note: 'Does not load on this engine yet: its experts are coded at 5 and 7 bits a weight, and the MoE kernels
-    take 2 to 6 and 8 (ENG-223; SPD-99, 2026-10-12). Its largest window is the estimate''s.'
+  note: 'Full-pack load and generation remain unverified. Its earlier blocker was 7-bit dense projections; the MoE kernels already supported 7-bit experts, and dense dispatch now covers K 2..8. The largest window is an estimate, not a validated run.'
   hf_revision: 5.05bpw_h6_ng6
   max_window: 53248
   table:

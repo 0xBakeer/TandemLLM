@@ -29,6 +29,7 @@ def scope() -> list[str]:
     fs = glob.glob(os.path.join(ROOT, "engine", "**", "*.py"), recursive=True)
     fs += glob.glob(os.path.join(ROOT, "server", "**", "*.py"), recursive=True)
     fs += [f for f in glob.glob(os.path.join(ROOT, "tools", "*.py")) if KERNEL.search(os.path.basename(f))]
+    fs += glob.glob(os.path.join(ROOT, "tools", "gpu", "*.py"))         # the GPU adapters' own knobs
     return sorted(f for f in fs if not f.endswith("engine/settings.py"))
 
 

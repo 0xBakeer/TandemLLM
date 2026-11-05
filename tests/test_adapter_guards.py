@@ -68,8 +68,13 @@ from engine.models import REGISTRY  # noqa: E402
 #: SRV-775: the policy's free default-pool bytes a prefill admitted over the peak takes first
 #: (`Budget.workspace_spare`, engine/cache.py): v2's second value again
 #: SRV-775: that credit only on a live pools reading (engine/cache.py): v2's second value again
-GOLDEN_V2 = ("3d696377e1dc5c95db67e498180f0287295ab0e69034ed32cb1e4b749cbc2af7",
-             "e7eb61e20ac0e8dcb8dd3fef0feff3458d5cf65ffcf5b1bb6dbb6e13fe23408e")
+#: the allocator's counters read off torch's nested dict, which leaves no cyclic garbage (`cache.cuda_stats`,
+#: engine/cache.py): v2's second value again
+#: the spill codec's import answer remembered (engine/spill.py): v2's second value again
+#: the GPU adapters (tools/gpu) count with the kernels that ask them, a tools/ package read whole
+#: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
+GOLDEN_V2 = ("b81a0af84a1f94c15fb8c5a1f6ab57bd781949d1e3738ab20e8a240b9c598592",
+             "e2ebfbd00670a3ee79eb2837bfae45eefb4178c54ac54dbdcfa34533d41da1a4")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -133,12 +138,21 @@ GOLDEN_FP4 = {
     # the joint prefill and the MTP lanes' lookup backoff (off), the round runner's host counters, busy work and
     # collector control (off; engine/methods/busy.py, mtp_drafter.py, staircut.py, the runner): every adapter but
     # qwen3_5 and nemotron_h
-    "qwen3_5": "445cd028ced11b62ce367778495aec746b56d77ff8f23e765f2a9801f961a2d4",
-    "qwen4_exp": "97db6053996643b5530b442bf2aba5b64c258ed557ce0cfbcd4c366bd1aa7941",
-    "nemotron_h": "e0e4b9c5a88dac18997664f592d55a7ae29d46093a3ecf526a0588df9d50a051",
-    "lfm2_moe": "cd8c37de23b3dab664bdaf603d2eb5dd2aa526a52e6375746444f64372649433",
-    "qwen3_5_moe": "c41b271d33350691fc97be300184e27355dfc4eb6ec3afb2ff1d90440ffb3c99",
-    "flint": "65b48c7202a82a922f41b118b56c2bc2b243c3dd561d213cd261f10f2cdf4367",
+    # the MTP catch-up's own prefill chunk cap (engine/models/flashnext/engine.py): qwen3_5_moe, qwen4_exp
+    # #142: IQ2, Q8 and FP8 weights keep a 33-row verify block on their row kernels (tools/iq2_linear.py,
+    # tools/nvfp4_relu2.py): nemotron_h (flint reads nvfp4_relu2.py and may move)
+    # #136: the dense kernels take 7-bit EXL3 tensors (tools/csrc/fn_kernels/kernels.cu, the LFM2.5, NemotronH and
+    # Flint engines' dense rates): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe (flint may move)
+    # 64-row items in the MoE group GEMM (tools/fn_prefill_kernels.py): qwen4_exp, flint; lfm2_moe and
+    # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
+    # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
+    # their files count; the GB10's answers are the ones before (no row changes): every adapter
+    "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
+    "qwen4_exp": "d20a881a5888f9ed52de3b8e0c35647d39b31a7aa59de0eb15b5e2fe9d80bd98",
+    "nemotron_h": "058fd3514b2db6a759f17975df527251694710e0b1e7ef82d43f7821f7964fba",
+    "lfm2_moe": "fd1fa1113f5c10ceea8fc13e3f282cc98480014c51c0419033cd2fb4453822f2",
+    "qwen3_5_moe": "b8dfa7ca1146adafdc5c68aeb88ed4aad7c4c796482d4d37109593e861fa7807",
+    "flint": "d007cece66261ef2f53d01057c056a53cbf6424e3c8692366debfd1299ac04b7",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

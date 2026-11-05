@@ -897,6 +897,13 @@ class Supervisor:
                 act.ids, act.visible = [], []
             act.ids, act.visible = act.ids + lift, act.visible + lift
             return True
+        if act.kind == CONTINUE_HIDDEN and act.detail.get("case") == "M":
+            # the note's result: a tool response after a `tandem_memory` call, a hidden user
+            # turn after a block (server/memblock.py)
+            tmpl = "regen_turn" if act.detail.get("call") else "hidden_turn"
+            act.ids = self.monitor.ids(self.policy.templates[tmpl].replace("{text}", act.text))
+            act.visible = []
+            return True
         if act.kind == CONTINUE_HIDDEN and act.detail.get("case") == "B":
             act.ids = self.monitor.ids(self.policy.templates["hidden_turn"]
                                        .replace("{text}", act.text))

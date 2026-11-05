@@ -47,7 +47,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from tools.cuda_arch import capability
+from tools import gpu as _gpu
 
 try:
     import triton
@@ -63,7 +63,7 @@ except Exception:          # noqa: BLE001
 
 QK = 256
 BLOCK_BYTES = 66
-#: rows up to which a packed weight multiplies on its row-invariant kernel (the engine's ROWS_MAX)
+#: the engine's ROWS_MAX; up to ROWS_MAX + 1 rows (a verify block) multiply on a packed weight's row kernel
 ROWS_MAX = 32
 # the format's IQ2_XXS grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
 # little-endian u16s): the packing gguf-py uses
@@ -113,7 +113,7 @@ def _ada89() -> bool:
     """True on Ada (sm_89): IQ2Linear's tl.dot path there; sm_121a keeps _iq2_gemm."""
     global _ADA89
     if _ADA89 is None:
-        _ADA89 = ld is not None and capability() == (8, 9)
+        _ADA89 = ld is not None and _gpu.profile().id == "ada"
     return _ADA89
 #: the grid with an entry's 8 magnitudes as the bytes of one int64 (byte j = magnitude j)
 GRID8 = (GRID.astype(np.int64) << (8 * np.arange(8, dtype=np.int64))[None, :]).sum(1)
@@ -529,9 +529,11 @@ class NVFP4Linear:
         if self.blk is not None:
             if f32:
                 raise ValueError("NVFP4Linear writes bf16 rows on the GPU")
+            from tools import gpu as _gpu
             from tools.nvfp4_linear import nvfp4_matmul
-            from tools.nvfp4_skinny import nvfp4_matmul_skinny, use_skinny
-            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if use_skinny(M) else nvfp4_matmul(x2, self.blk, out=out)
+            from tools.nvfp4_skinny import SKINNY_MAX, nvfp4_matmul_skinny
+            skinny = M <= SKINNY_MAX and M <= _gpu.profile(x2.device).skinny_rows()
+            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if skinny else nvfp4_matmul(x2, self.blk, out=out)
             return y.view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
@@ -571,7 +573,7 @@ if HAVE_TRITON:
 
 
 class Q8Linear:
-    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX on
+    """A packed Q8_0 weight [N, K] on the device: d fp16 [N, K / 32], q int8 [N, K]. Rows up to ROWS_MAX + 1 on
     the tile kernel (row-invariant; Bolt's head: 3.8 ms for 1 to 32 rows on GB10, the bf16 head 4.7), a
     prompt chunk on cuBLAS over the twin in bf16."""
 

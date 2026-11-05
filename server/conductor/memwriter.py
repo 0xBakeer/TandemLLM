@@ -86,25 +86,11 @@ RUNS_MAX = 100
 USER_TEXTS = 6
 
 
-_CALL = re.compile(r"<function=tandem_memory>([\s\S]*?)</function>")
-_PARAM = re.compile(r"<parameter=([a-z_]+)>\n?([\s\S]*?)\n?</parameter>")
-_ATTRS = ("op", "scope", "kind")
-_HEADS = ("title", "tags", "id", "reason", "verify_by")
-
-
 def tool_blocks(text: str) -> list[str]:
-    """The `<tool_call><function=tandem_memory><parameter=...>` calls in `text` (Qwen's tool
-    form, written with the session's tools in view), each as the `<tandem_memory>` block it
-    means: op, scope and kind in the opener; title, tags, id, reason, verify_by as head lines; the
-    `body` (or `content`, `text`) parameter as the body. memblock.parse checks the result."""
-    out = []
-    for m in _CALL.finditer(text):
-        p = {k: v.strip() for k, v in _PARAM.findall(m.group(1))}
-        attrs = " ".join(f'{k}="{p[k]}"' for k in _ATTRS if p.get(k) and '"' not in p[k])
-        heads = "".join(f"{k}: {' '.join(p[k].split())}\n" for k in _HEADS if p.get(k))
-        body = p.get("body") or p.get("content") or p.get("text") or ""
-        out.append(f"{memblock.OPEN} {attrs}>\n{heads}\n{body}\n{memblock.CLOSE}")
-    return out
+    """The `tandem_memory` tool calls in `text` (Qwen's tool form, written with the session's tools
+    in view), each as the `<tandem_memory>` block it means: server/memblock.py `tool_blocks`, the
+    parser the answer's own calls go through as well. memblock.parse checks the result."""
+    return memblock.tool_blocks(text)
 
 
 _FUNC = re.compile(r"<function=([^>\s]*)>")
@@ -308,7 +294,8 @@ class Writer:
                 res = self.memory.store.write(s["user"], op, writer="qwen-writer",
                                               project=s.get("project"), session=s.get("session"),
                                               request_id=None, from_user=False)
-                ops.append({k: res.get(k) for k in ("op", "id", "kind", "scope", "revised")
+                ops.append({k: res.get(k) for k in ("op", "id", "kind", "scope", "revised",
+                                                    "demoted")
                             if res.get(k) is not None})
             except memblock.BlockError as exc:
                 refused.append(exc.why)

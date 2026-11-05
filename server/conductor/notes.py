@@ -26,12 +26,13 @@ THE RULES, in code (refusals, never sentences in the prompt): a title of at most
 a body of at most 400 words, 20 notes a session, 500 live notes a user; a write over a cap is
 refused, never clipped. Every title and body passes `redact()`; a body that is mostly a secret
 (under 20 characters left) is refused. A `rule` or `ruling` about the user needs a user message in
-the turn (not a tool result). The model writes `provisional` notes only; ratify, pin and delete
-are the dashboard's. Before an `add` lands, the same scope is searched: the normalised title, then
-BM25's top 5 over title and body with a word-overlap similarity at or above `dedupe_threshold`;
-a hit turns the add into a revision of the hit (old body under `revisions/`, a changelog line). A
-model revision of a ratified note sends it back to provisional. Forgetting is `archive`; the
-nightly job deletes archives older than 30 days.
+the turn; one from a tool result is kept at session scope only (`demoted`), and refused without a
+session. The model writes `provisional` notes only; ratify, pin and delete are the dashboard's.
+Before an `add` lands, the same scope is searched: the normalised title, then BM25's top 5 over
+title and body with a word-overlap similarity at or above `dedupe_threshold`; a hit turns the add
+into a revision of the hit (old body under `revisions/`, a changelog line). A model revision of a
+ratified note sends it back to provisional. Forgetting is `archive`; the nightly job deletes
+archives older than 30 days.
 
 Standard library only, like the rest of the conductor. Thread-safe: one lock a store.
 """
@@ -262,7 +263,7 @@ class NoteStore:
         self._usage: dict[str, dict] = {}
         self._usage_dirty: set = set()
         self.stats = {"writes": 0, "refused": 0, "revised": 0, "archived": 0, "redactions": 0,
-                      "searches": 0, "doubted": 0}
+                      "searches": 0, "doubted": 0, "demoted": 0}
         if self.repo:
             print(f"[memory] REFUSING notes: {self.root} is inside the git work tree "
                   f"{self.repo}; memories never go into a repository", flush=True)
@@ -524,16 +525,18 @@ class NoteStore:
                 scope, rescoped = "user", "project"
             if scope == "session" and not session:
                 raise Refused("no_session", "no session for this request")
-            self._rule_check(kind, scope, from_user)
+            scope, demoted = self._rule_scope(kind, scope, from_user, session)
+            moved = {**({"rescoped": rescoped} if rescoped else {}),
+                     **({"demoted": demoted} if demoted else {})}
             hit = self._dedupe(user, scope, project, session, title, body)
             if hit is not None:
                 self._revise(user, hit, title, body, kind, tags or hit.tags, writer, request_id,
                              "revised (same fact written again)")
                 self.stats["revised"] += 1
+                self.stats["demoted"] += int(bool(demoted))
                 self._done(counts)
                 return {"op": "add", "id": hit.id, "title": hit.title, "scope": hit.scope,
-                        "kind": hit.kind, "revised": True, "redacted": counts,
-                        **({"rescoped": rescoped} if rescoped else {})}
+                        "kind": hit.kind, "revised": True, "redacted": counts, **moved}
             live = self.notes(user)
             if len(live) >= CAPS["user_notes"]:
                 raise Refused("cap", f"{CAPS['user_notes']} live notes: archive some first")
@@ -544,23 +547,23 @@ class NoteStore:
             n = Note(id=new_id(self.clock), title=title, kind=kind, scope=scope,
                      project=project if scope == "project" else None,
                      session=session if scope == "session" else None,
-                     status="ratified" if writer == "human" else "provisional", writer=writer,
+                     status="ratified" if writer == "human" and not demoted else "provisional",
+                     writer=writer,
                      tags=tags, created=_now_iso(now), updated=_now_iso(now),
                      verify_by=_date(op.get("verify_by")), body=body,
                      sources=[request_id] if request_id else [],
                      changelog=[f"{_now_iso(now)[:16].replace('T', ' ')} created by {writer}"
-                                + (f" (request {request_id})" if request_id else "")])
+                                + (f" (request {request_id})" if request_id else "")
+                                + (f" at session scope ({demoted})" if demoted else "")])
             d = self._scope_dir(user, scope, project, session)
             n.path = os.path.join(d, f"{kind}-{slug(title)}--{n.id}.md")
             _write_private(n.path, n.render())
             self._touch(user)
             self.stats["writes"] += 1
+            self.stats["demoted"] += int(bool(demoted))
             self._done(counts)
-            out = {"op": "add", "id": n.id, "title": n.title, "scope": scope, "kind": kind,
-                   "redacted": counts}
-            if rescoped:
-                out["rescoped"] = rescoped
-            return out
+            return {"op": "add", "id": n.id, "title": n.title, "scope": scope, "kind": kind,
+                    "redacted": counts, **moved}
 
     def _done(self, counts: dict) -> None:
         if counts:
@@ -586,6 +589,22 @@ class NoteStore:
             if len(left.strip()) < SECRET_LEFT:
                 raise Refused("secret", "the body is mostly a secret; secrets are never kept")
         return title, body, counts
+
+    @classmethod
+    def _rule_scope(cls, kind: str, scope: str, from_user: bool,
+                    session: str | None) -> tuple[str, str | None]:
+        """The scope an add lands in and why it moved. A rule or ruling about the user from a
+        tool turn (`rule_from_tool`) is kept for this conversation only: session scope,
+        provisional, `demoted: rule_from_tool`; it never becomes a user rule. Without a session
+        it is refused. Every writer (the block, the call form, the background writer, the
+        model's route) reaches it through `write`."""
+        try:
+            cls._rule_check(kind, scope, from_user)
+        except Refused:
+            if not session:
+                raise
+            return "session", "rule_from_tool"
+        return scope, None
 
     @staticmethod
     def _rule_check(kind: str, scope: str, from_user: bool) -> None:

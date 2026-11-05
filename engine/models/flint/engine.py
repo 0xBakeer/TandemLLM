@@ -57,7 +57,7 @@ CAPTURE_ROWS = 64
 #: over the experts on the host (each one's rows through cuBLAS)
 GROUPED = os.environ.get("QSE_FLINT_GROUPED", "1") != "0"
 #: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
-DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
+DENSE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 
 
 def ring_rows(window: int) -> int:

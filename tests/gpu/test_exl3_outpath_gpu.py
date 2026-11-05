@@ -17,7 +17,8 @@ import torch
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 from tools import exl3_linear as X, exl3_ada as A  # noqa: E402
-from tools import fn_kernels as FK  # noqa: E402
+from tools import fn_kernels as FK
+from tools import gpu as _gpu  # noqa: E402
 
 
 def _old_segments(x: torch.Tensor, w: X.EXL3Block) -> torch.Tensor:
@@ -117,7 +118,7 @@ def test_exl3_matmul_and_dense_pass_out_through():
                                   device="cuda")
                 # the inline kernels' bits are their own: out= must equal the same call's
                 # fresh output; the Triton oracle only holds where dense falls back to it
-                expect = ref if not FK._sm_supported(x.device) else FK.dense(x, w)
+                expect = ref if not _gpu.profile(x.device).inline("fn_kernels") else FK.dense(x, w)
                 assert _eq(FK.dense(x, w, out=out), expect), f"dense kb{kb} M{M}"
             cases += 1
     return f"{cases} matmul/dense cells: the out= bytes are the cat's"

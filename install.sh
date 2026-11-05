@@ -23,8 +23,9 @@
 # start (and a reboot) comes back in setup mode. It binds 127.0.0.1 unless --host says otherwise.
 #
 # The primary target is one NVIDIA DGX Spark (GB10, aarch64, sm_121). Other CUDA GPUs are best
-# effort: the served profile's skinny NVFP4 kernel is built for sm_121a only and is switched off
-# there, and StairCut's cost tables were measured on the Spark.
+# effort: the engine's GPU adapter (tools/gpu) builds the skinny NVFP4 kernel for sm_121a only and
+# keeps it off elsewhere, and StairCut's cost tables were measured on the Spark. The check below runs
+# before the repository is on disk, so it reads the capability itself.
 #
 # Nothing here needs root. The repository's own ops/serve.env is never modified.
 set -euo pipefail
@@ -33,7 +34,10 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.15.1 cuts the launches of Flash-Next's joint pass (every lane's attention,
+# The engine release. v0.15.2 charges a prefill admitted over the engine's peak only its new memory,
+# pauses idle graph captures at the peak, lets chatd's Stop end a request that waits for memory and
+# takes a tandem_memory tool call as the memory block;
+# v0.15.1 cuts the launches of Flash-Next's joint pass (every lane's attention,
 # PLE and GDN prep at once, streamed expert rows, CUDA graphs for a dense pass), drafts Flash-Next's
 # seeded sampled requests under the target's keyed noise with a learned corrector on 3.05 (its file
 # comes with ops/use-profile.sh flashnext-3.05) and fixes a fresh server's first raw request waiting
@@ -68,7 +72,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.15.1}"
+TANDEM_REF="${TANDEM_REF:-v0.15.2}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -91,6 +95,8 @@ PYPI_INDEX="https://pypi.org/simple"
 # build only. pillow decodes a request's images (server/images.py) and torchvision is the image
 # processor's pinned backend (`--image-backend`, server/images.py): without it transformers
 # picks the PIL backend, whose patches differ slightly, and the engine refuses to start.
+# zstandard is the session spill's configured codec (--session-spill-codec zstd): without it the
+# codec is off and spill.py's codec_ok() pays a failed import on every /health and /metrics.
 LOCK="$(cat <<'EOF'
 annotated-doc==0.0.5
 anyio==4.15.1
@@ -149,6 +155,7 @@ transformers==5.12.1
 triton==3.7.1
 typer==0.27.2
 typing-extensions==4.16.0
+zstandard==0.25.0
 EOF
 )"
 
@@ -827,9 +834,8 @@ setv QSE_SECRETS "$(q "$DIR/state/secrets.env")"
 [ "$PORT" -le 65526 ] && setv QSE_STATUS_PORT "$((PORT + 9))"
 if [ -n "$CUDA_HOME_FOUND" ]; then setv CUDA_HOME "$(q "$CUDA_HOME_FOUND")"; fi
 if [ "$SPARK" != 1 ]; then
-    # best effort off the Spark: the skinny kernel is sm_121a code; a smaller context below 100 GiB
-    setv QWEN38_NVFP4_SKINNY 0
-    setv QWEN38_SKINNY_SRUN 0
+    # best effort off the Spark: a smaller context below 100 GiB (the skinny kernel's switch is the
+    # GPU adapter's, tools/gpu)
     if [ "$GPU_MEM_GIB" -lt 100 ]; then setv MAX_LEN 65536; fi
 fi
 render_env() {

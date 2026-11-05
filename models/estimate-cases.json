@@ -992,6 +992,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 148.24 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 606,112 tokens of conversation fit in all, 75,764 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1098,6 +1099,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 149.67 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 591,728 tokens of conversation fit in all, 73,966 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1204,6 +1206,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 151.26 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 575,736 tokens of conversation fit in all, 71,967 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1310,6 +1313,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 152.85 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 559,743 tokens of conversation fit in all, 69,967 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1416,6 +1420,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1522,6 +1527,7 @@
     "lanes_full": 1,
     "notes": [
      "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 158.74 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 500,500 tokens of conversation fit in all, 62,562 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1628,6 +1634,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.01 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 538,017 tokens of conversation fit in all, 67,252 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1730,6 +1737,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.04 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 547,774 tokens of conversation fit in all, 68,471 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1841,6 +1849,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -1958,6 +1967,7 @@
     "lanes_full": 1,
     "notes": [
      "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 157.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 509,653 tokens of conversation fit in all, 63,706 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2074,6 +2084,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 529,769 tokens of conversation fit in all, 66,221 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2191,6 +2202,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 155.75 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 530,574 tokens of conversation fit in all, 66,321 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2292,6 +2304,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.37 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 554,513 tokens of conversation fit in all, 69,314 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2393,6 +2406,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.80 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 550,188 tokens of conversation fit in all, 68,773 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2494,6 +2508,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 153.74 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 550,791 tokens of conversation fit in all, 68,848 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2610,6 +2625,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.48 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 543,348 tokens of conversation fit in all, 67,918 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2719,6 +2735,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2827,6 +2844,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -2937,6 +2955,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -3248,6 +3267,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 3 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 17.97 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 605,709 tokens of conversation fit in all, 201,903 a lane when all 3 are full (the window is 262,144)."
     ]
    }
@@ -3354,6 +3374,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 4 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 45.22 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 593,740 tokens of conversation fit in all, 148,435 a lane when all 4 are full (the window is 262,144)."
     ]
    }
@@ -3460,6 +3481,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -3884,6 +3906,7 @@
     "lanes_full": 4,
     "notes": [
      "4 of 8 lanes can hold the full 131,072-token window at once (13.03 GiB each); every lane at it would need 49.98 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -3990,6 +4013,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -4097,6 +4121,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -4628,6 +4653,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 149.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 596,154 tokens of conversation fit in all, 74,519 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -4734,6 +4760,7 @@
     "lanes_full": 1,
     "notes": [
      "1 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 179.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 294,405 tokens of conversation fit in all, 36,800 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -5273,6 +5300,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -5738,6 +5766,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (26.06 GiB each); every lane at it would need 154.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 545,863 tokens of conversation fit in all, 68,232 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -5867,6 +5896,7 @@
     "lanes_full": 4,
     "notes": [
      "4 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 13.44 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 583,591 tokens of conversation fit in all, 72,948 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -5974,6 +6004,7 @@
     "lanes_full": 1,
     "notes": [
      "1 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 48.87 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 406,504 tokens of conversation fit in all, 50,813 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -6081,6 +6112,7 @@
     "lanes_full": 6,
     "notes": [
      "6 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 6.02 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 840,265 tokens of conversation fit in all, 105,033 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -6188,6 +6220,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }
@@ -6295,6 +6328,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 131,072-token window at once (3.79 GiB each); every lane at it would need 20.62 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 335,219 tokens of conversation fit in all, 41,902 a lane when all 8 are full (the window is 131,072)."
     ]
    }
@@ -6759,6 +6793,7 @@
     "lanes_full": 2,
     "notes": [
      "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
      "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
     ]
    }

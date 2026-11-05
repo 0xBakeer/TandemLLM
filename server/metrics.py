@@ -350,6 +350,23 @@ _SOURCES: dict = {"state": None, "inflight": None, "cache_stats": None, "info": 
                   "started": time.time()}
 
 
+def _scrape_stats() -> dict:
+    """The scrape's one `app.cache_stats()`: every family that reads a cache section shares the
+    answer rather than asking again. cache_stats() walks every cache's report under its locks, and
+    a scrape that asked once a family kept the disk tier's walk inside the decode path's locks for
+    the whole page (2026-10-24). The answer lives on the scrape's thread for that page only:
+    render() clears it before and after, so two scrapes on one keep-alive connection each get a
+    fresh answer and any caller outside a scrape always recomputes."""
+    fn = _SOURCES.get("cache_stats")
+    if not getattr(_REQ, "in_scrape", False):
+        return fn() if fn is not None else {}
+    rep = getattr(_REQ, "cache_stats", None)
+    if rep is None:
+        rep = fn() if fn is not None else {}
+        _REQ.cache_stats = rep
+    return rep
+
+
 def _inflight(field: str):
     def read():
         d = _SOURCES.get("inflight")
@@ -363,7 +380,7 @@ def _cache_field(section: str, field: str, scale: float = 1.0):
         fn = _SOURCES.get("cache_stats")
         if fn is None:
             return {}
-        rep = (fn() or {}).get(section)
+        rep = _scrape_stats().get(section)
         if not isinstance(rep, dict) or field not in rep:
             return {}
         return float(rep[field]) * scale
@@ -381,7 +398,7 @@ def _refused():
     d = _SOURCES.get("inflight")
     out = {("queue",): float(d.get("refused", 0))} if d else {}
     fn = _SOURCES.get("cache_stats")
-    mem = (fn() or {}).get("memory") if fn is not None else None
+    mem = _scrape_stats().get("memory") if fn is not None else None
     if isinstance(mem, dict):
         out[("memory",)] = float(mem.get("refused") or 0)        # OPS-47: the 503 before a wedge
     return out
@@ -393,7 +410,7 @@ def _cache_family(field: str, scale: float = 1.0):
         fn = _SOURCES.get("cache_stats")
         if fn is None:
             return {}
-        stats = fn() or {}
+        stats = _scrape_stats()
         out: dict[tuple[str, ...], float] = {}
         for label, section in (("state", "state_store"), ("response", "response_cache"),
                                ("resident", "resident")):
@@ -408,7 +425,7 @@ def _suffix_bytes():
     fn = _SOURCES.get("cache_stats")
     if fn is None:
         return {}
-    rep = (fn() or {}).get("suffix_store")
+    rep = _scrape_stats().get("suffix_store")
     if not isinstance(rep, dict) or "tokens" not in rep:
         return {}
     return {("suffix",): float(rep["tokens"]) * 4.0}        # int32 token ids on disk
@@ -420,18 +437,78 @@ def _cache_bytes():
     return out
 
 
+#: the n-gram table's own report is a list (one table per PLE family), and
+#: `cache_stats()` is not cheap: the scrape-time gauges call it several
+#: times, so one call per scrape is memoised for a second. The source
+#: function is part of the key: a new source means a new report.
+_TABLE_STATS: tuple = (None, 0.0, {})
+
+
+def _ngram_table_stats() -> dict:
+    """The n-gram table's report: its policy, its hot-row cache and the
+    counters that say how often that cache is enough (ENG-239)."""
+    global _TABLE_STATS
+    fn = _SOURCES.get("cache_stats")
+    now = time.time()
+    if fn is not None and _TABLE_STATS[0] is fn and now - _TABLE_STATS[1] < 1.0:
+        return _TABLE_STATS[2]
+    out: dict = {}
+    if fn is not None:
+        for rep in (_scrape_stats() or {}).get("resident_files") or []:
+            if isinstance(rep, dict) and rep.get("name") == "ngram_table":
+                out = rep
+                break
+    _TABLE_STATS = (fn, now, out)
+    return out
+
+
+def _ngram_table_field(field: str):
+    """One number out of the n-gram table's report, {} when the engine has
+    no table (a family without a PLE module) or the field is absent."""
+    def read():
+        rep = _ngram_table_stats()
+        if field not in rep:
+            return {}
+        return {(): float(rep[field])}
+    return read
+
+
+#: the engine's own work: the summary it prepares ahead of a request and the
+#: memory it writes after one. Both run generations on the engine, on the
+#: client's own context; these counters let an operator tell them from the
+#: requests a client sent.
+def _own_work_stats() -> dict:
+    fn = _SOURCES.get("own_work")
+    if fn is None:
+        return {}
+    try:
+        return fn() or {}
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _own_work_field(kind: str, field: str):
+    """One counter out of the engine's own work (`prepare` or `memory`)."""
+    def read():
+        got = _own_work_stats().get(kind)
+        if not isinstance(got, dict) or field not in got:
+            return {}
+        return {(): float(got[field])}
+    return read
+
+
 def _gpu_memory():
     try:
-        import torch
-        return float(torch.cuda.memory_allocated())
+        from engine.cache import cuda_stats
+        return float(cuda_stats("allocated_bytes.all.current")[0])
     except Exception:                                              # noqa: BLE001
         return {}
 
 
 def _gpu_reserved():
     try:
-        import torch
-        return float(torch.cuda.memory_reserved())
+        from engine.cache import cuda_stats
+        return float(cuda_stats("reserved_bytes.all.current")[0])
     except Exception:                                              # noqa: BLE001
         return {}
 
@@ -476,7 +553,7 @@ def _cache_hits():
     report the split keeps the one `cache="state"` row it always had."""
     out = _cache_family("hits")()
     fn = _SOURCES.get("cache_stats")
-    rep = ((fn() or {}).get("state_store") if fn is not None else None)
+    rep = (_scrape_stats().get("state_store") if fn is not None else None)
     if isinstance(rep, dict) and "hits_session" in rep:
         out.pop(("state",), None)
         for kind in ("session", "prefix"):
@@ -504,12 +581,58 @@ REGISTRY.add(Counter("qse_cache_evictions_total", "entries dropped to stay insid
 REGISTRY.add(Gauge("qse_cache_bytes", "bytes held by each cache",
                    ("cache",), collect=_cache_bytes))
 
+# The n-gram table (ENG-239). Under the cold policy the table is read past
+# the page cache with O_DIRECT, through a hot-row cache of
+# QWEN38_FN_TABLE_CACHE_GB: a miss is a synchronous disk read on the
+# decode/prefill path, so the miss rate IS the engine's disk latency: these
+# counters tell a disk-bound decode from a slow model (the engine's report
+# has them too, cache_stats -> resident_files).
+REGISTRY.add(Counter("qse_ngram_table_cache_hits_total",
+                     "n-gram table rows served from the hot-row cache",
+                     collect=_ngram_table_field("hits")))
+REGISTRY.add(Counter("qse_ngram_table_cache_misses_total",
+                     "n-gram table rows read from disk (O_DIRECT) for a hot-row cache miss",
+                     collect=_ngram_table_field("misses")))
+REGISTRY.add(Counter("qse_ngram_table_blocks_read_total",
+                     "4 KiB blocks read from disk for the n-gram table",
+                     collect=_ngram_table_field("blocks_read")))
+REGISTRY.add(Gauge("qse_ngram_table_cache_bytes",
+                   "the n-gram table's hot-row cache, in bytes",
+                   collect=_ngram_table_field("cache_bytes")))
+REGISTRY.add(Gauge("qse_ngram_table_file_bytes",
+                   "the n-gram table's file size, in bytes",
+                   collect=_ngram_table_field("file_bytes")))
+
+# The engine's own work: the summary it prepares ahead of a client's request
+# and the memory it writes after one. Both are generations on the engine, over
+# the client's own context: these counters show the engine busy with work no
+# client sent.
+REGISTRY.add(Counter("qse_prepare_runs_total",
+                     "summaries the engine prepared ahead of a request",
+                     collect=_own_work_field("prepare", "prepared")))
+REGISTRY.add(Counter("qse_prepare_served_total",
+                     "prepared summaries a request went on from",
+                     collect=_own_work_field("prepare", "served")))
+REGISTRY.add(Counter("qse_prepare_yielded_total",
+                     "prepare runs that gave the engine to a client request",
+                     collect=_own_work_field("prepare", "yielded")))
+REGISTRY.add(Counter("qse_prepare_too_long_total",
+                     "prepare runs skipped: the conversation and the summary "
+                     "would not fit the context",
+                     collect=_own_work_field("prepare", "too_long")))
+REGISTRY.add(Counter("qse_memory_writer_runs_total",
+                     "memory writer turns the engine ran",
+                     collect=_own_work_field("memory", "runs")))
+REGISTRY.add(Counter("qse_memory_writer_notes_total",
+                     "memory notes the writer stored",
+                     collect=_own_work_field("memory", "written")))
+
 
 def _memory_report() -> tuple | None:
     fn = _SOURCES.get("cache_stats")
     if fn is None:
         return None
-    stats = fn() or {}
+    stats = _scrape_stats()
     return stats.get("memory"), stats.get("resident"), stats.get("state_store")
 
 
@@ -552,7 +675,7 @@ REGISTRY.add(Gauge("qse_cache_entries", "entries held by each cache",
 def _disk():
     """The disk tier's report (C1) from `/v1/cache/stats`, or None with the tier off."""
     fn = _SOURCES.get("cache_stats")
-    rep = (fn() or {}).get("disk_cache") if fn is not None else None
+    rep = _scrape_stats().get("disk_cache") if fn is not None else None
     return rep if isinstance(rep, dict) else None
 
 
@@ -793,7 +916,13 @@ _REQ = threading.local()
 
 
 def render() -> str:
-    return REGISTRY.render()
+    _REQ.cache_stats = None                        # one page, one cache_stats() for every family
+    _REQ.in_scrape = True
+    try:
+        return REGISTRY.render()
+    finally:
+        _REQ.in_scrape = False                     # nothing outlives the page on this thread
+        _REQ.cache_stats = None
 
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -806,11 +935,14 @@ def serve(handler) -> None:
     body with neither framing hangs the scraper until its own timeout.
     """
     raw = render().encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", CONTENT_TYPE)
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", CONTENT_TYPE)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionResetError):
+        pass                                        # the scraper went away; the qse_up row's pattern
 
 
 def on_request(finish: str, n_prompt: int, n_out: int, seconds: float,
@@ -1088,7 +1220,7 @@ def instrument_drafter(drafter):
 
 
 def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
-         build: dict | None = None, suffix=None) -> None:
+         build: dict | None = None, suffix=None, own_work=None) -> None:
     """Point the scrape-time gauges at the server's own objects. Safe to call more than once."""
     if state is not None:
         _SOURCES["state"] = state
@@ -1103,6 +1235,8 @@ def bind(state=None, inflight=None, cache_stats=None, info: dict | None = None,
         _SOURCES["cache_stats"] = cache_stats
     if info is not None:
         _SOURCES["info"] = {k: str(info.get(k, "")) for k in INFO_LABELS}
+    if own_work is not None:
+        _SOURCES["own_work"] = own_work
 
 
 def flags_hash(args: dict, env: dict | None = None) -> str:
@@ -1137,6 +1271,21 @@ def install(app) -> None:
     instrument_drafter(state.get("drafter"))
     eng = state.get("engine")
     w = getattr(eng, "w", None)
+    # The engine's own work: the summary it prepares ahead of a request and the
+    # memory it writes after one. Both are generations on the engine that no
+    # client request accounts for.
+    def own_work() -> dict:
+        out: dict = {}
+        prep = state.get("prepared")
+        if prep is not None:
+            out["prepare"] = dict(getattr(prep, "stats", {}) or {})
+        cond = state.get("conductor")
+        mem = getattr(cond, "memory", None) if cond is not None else None
+        writer = getattr(mem, "writer", None)
+        if writer is not None:
+            out["memory"] = dict(getattr(writer, "stats", {}) or {})
+        return out
+    bind(own_work=own_work)
     bind(state, getattr(app, "INFLIGHT", None), getattr(app, "cache_stats", None), info={
         "version": VERSION,
         "model": state.get("model", ""),

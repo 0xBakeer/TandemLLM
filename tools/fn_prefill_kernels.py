@@ -38,9 +38,10 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
-from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 
 _HELPERS = X._CUDA[: X._CUDA.index("constexpr float RSQRT128")]
 
@@ -58,14 +59,18 @@ def _module():
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_prefill_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_prefill_kernels")],
                        verbose=False)
     return _MOD
 
 
 # rows an item of the group GEMM takes (16 MT; 32 or 64): 32 measured faster at 2k and 4k rows a chunk
-# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer)
-GROUP_ROWS = 32
+# (2026-10-11, tools/fn_moe_prefill_bench.py: 9.7 vs 10.7 ms, 15.8 vs 17.2 ms a layer); 64 measures
+# faster at every chunk rows now (2026-10-30, same bench on a DGX Spark: 11.04 vs 11.98 ms at 2k,
+# 17.42 vs 19.79 at 4k, 32.20 vs 36.91 at 8k) -- QWEN38_FN_GROUP_ROWS=32 switches it back
+GROUP_ROWS = int(_S.get("FN_GROUP_ROWS") or 64)
+if GROUP_ROWS not in (32, 64):
+    raise ValueError(f"QWEN38_FN_GROUP_ROWS={GROUP_ROWS}: the group GEMM's items take 32 or 64 rows")
 
 
 def group_plan(ids_flat: torch.Tensor, groups: int, rows: int = GROUP_ROWS) -> dict:
@@ -100,7 +105,7 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     input, as `fn_kernels.moe_experts` returns it)."""
     M, S = ids.shape
     P = M * S
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("fn_prefill_kernels"):
         # where the load probe passed, the batched kernels (their errors propagate); else the
         # torch reference's per-pair walk -- never an exception-driven mid-call switch
         if x.is_cuda:

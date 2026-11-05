@@ -61,7 +61,9 @@ class FinishEvent:
     `answer`: the text after the block, as written so far (the whole output with thinking off).
     `calls` (SRV-199): with tools offered and an empty answer, the complete `<tool_call>` blocks
     the output ends with (inside the reasoning, nothing but whitespace and the closer after them),
-    as text; "" otherwise. The supervisor holds their token ids (`Supervisor.lift_ids`)."""
+    as text; "" otherwise. The supervisor holds their token ids (`Supervisor.lift_ids`).
+    `notes`: the memory notes taken out of `answer` (server/memblock.py, the client never gets
+    them), `note_calls` of them written as a `tandem_memory` tool call."""
     kind: str
     inside: bool
     answer: str
@@ -69,6 +71,8 @@ class FinishEvent:
     output_tokens: int
     pos: int = 0                                   # where the end token would go
     calls: str = ""
+    notes: int = 0
+    note_calls: int = 0
 
 
 @dataclass

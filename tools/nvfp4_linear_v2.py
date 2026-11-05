@@ -49,7 +49,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tools.cuda_arch import capability
+from tools import gpu as _gpu
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -220,8 +220,7 @@ def _hw_v2() -> bool:
     # NVFP4_V2=1/all still turns it on.
     global _HW_V2
     if _HW_V2 is None:
-        cap = capability()
-        _HW_V2 = cap is not None and cap >= (12, 0)
+        _HW_V2 = _gpu.profile().e2m1()
     return _HW_V2
 
 

@@ -165,12 +165,32 @@ W4/W8 re-tune falsified on that ground); stages were the only free knob
 and are now split. The residual ~1ms is launch-bound micro-ops already
 fused or previously falsified.
 
+## Upstream merge (59d9d543, on `gauntlet-upstream`)
+
+Upstream/main moved 72 commits past our base; five files overlapped — all in the
+grouped-MoE machinery their SPD-249 work retooled in parallel (runtime GR cap,
+grid-row levers, a staged-rows XS path, streamed s_group/gud kernels, a
+1024-thread scanned group builder behind `FN_MOE_GPAR`).
+
+- Ordered `fn_moe_groups` calls keep upstream's exact semantics: the serial
+  walked-order kernel, or the scanned kernel under the lever — identical
+  groups either way, their parity test included.
+- Order-free calls (our grouped path never sorts now) take
+  `moe_groups_flat_kernel`: the one-warp histogram+match-any builder extended
+  with the runtime `GR` cap and expert bound — the same per-expert partition a
+  stable sort would walk to, at any P (their scanned kernel caps at 1024).
+- `MOE_PICK_GROUP_LV` applies our `g_moe_st_group` over their `LV` template;
+  smem sizes rows/red by `g_moe_gr` (theirs) and stages by `g_moe_st_group` (ours).
+- `relu2` reverted to upstream's `nh_relu2_groups` exactly; `fn_moe_groups`
+  carries the `E` bound only for the flat path's histogram smem.
+
 ## Verification
 
-- `Lfm2MoeEngine.self_check` on the real pack: `{'ok': True, 'rows': 8, 'first_diff': None}` — repeated across every iteration.
-- `tests/gpu/test_fn_kernels_gpu.py`: 16/16 — includes M=1..32 bit-equal vs one-row calls, forced S2/S4/S8, grouped, fp32 head, CUDA-graph capture/replay, ticket reuse, dense_rows dispatch gating.
+- `Lfm2MoeEngine.self_check` on the real pack: `{'ok': True, 'rows': 8, 'first_diff': None}` — repeated across every iteration and again on the merge.
+- `tests/gpu/test_fn_kernels_gpu.py`: 19/19 — upstream's scanned-groups, streamed-rows and grid-rows tests plus M=1..32 bit-equal vs one-row calls, forced S2/S4/S8, grouped, fp32 head, CUDA-graph capture/replay, ticket reuse, dense_rows dispatch gating.
 - `tests/gpu/test_lfm2_moe_gpu.py`: 7/7 — dense/experts at half rates, MoE bank row invariance, decode-step graph, oracle independence.
 - `tests/test_moe_gather.py`: 11/11 — adds grouped-vs-ungrouped bitwise, MOE_GR boundary runs, all-same-expert, companion-permutation invariance; EXL3 outpath/rate/layout/probe/tile/GEMV suites all green.
+- `tests/gpu/test_fn_joint_graph_gpu.py`: not buildable here — `fn_seq_kernels` targets `compute_121a` (GB10-only, pre-existing environment limit).
 - Bitwise row invariance is a hard contract: a row computed alone equals the same row in any batch; ticket-reduce preserves the exact partial-sum order.
 
 ## Test plan

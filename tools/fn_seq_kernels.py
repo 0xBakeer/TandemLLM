@@ -53,6 +53,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 
 try:
@@ -86,9 +87,9 @@ def _module():
         _MOD = nb.load(f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
                        functions=["seq_set_pdl", "seq_commit_multi", "seq_gdn_rows_multi", "seq_gdn_pre_multi", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv", "seq_ple_conv_multi",
                                   "seq_qsa_pool", "seq_qsa_pool_multi", "seq_qsa_scores", "seq_qsa_topk"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_seq_kernels")],
                        verbose=False)
-        _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1"))
+        _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1" and _gpu.profile().pdl()))
     return _MOD
 
 

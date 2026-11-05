@@ -1,13 +1,13 @@
 # The setup guide
 
-The dashboard's `#/setup` page walks through an install in eight steps, from picking a model and its weights to the tools beside it, the parallel requests and the memory they take. The last two steps show what will change and then install it. A small assistant called Wren answers questions on the side and can change the page when you ask. The server half lives in `server/setup/` and `server/setup_api.py` and answers under `/v1/setup/*`. None of it is on the serving path: a chat request never reaches it, and the engine imports it only when a `/v1/setup` route is called.
+The dashboard's `#/setup` page walks through an install. A new browser opens the simple guide, three pages: the model, its weights, and one page of folded settings. The switch at the top brings back all eight steps, from picking a model and its weights to the tools beside it, the parallel requests and the memory they take. The last two steps show what will change and then install it. A small assistant called Wren answers questions on the side and can change the page when you ask. The server half lives in `server/setup/` and `server/setup_api.py` and answers under `/v1/setup/*`. None of it is on the serving path: a chat request never reaches it, and the engine imports it only when a `/v1/setup` route is called.
 
 ## Setup mode
 
 A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.1/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.15.2/install.sh
 bash install.sh --setup --yes
 ```
 
@@ -46,7 +46,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.15.1`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.15.1'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.15.2`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.15.2'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 

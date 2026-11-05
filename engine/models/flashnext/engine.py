@@ -114,6 +114,10 @@ class ClassError(RuntimeError):
 
 class FlashNextEngine(FlashNextRef):
 
+    #: rows an item of the prefill MoE group GEMM takes; None = `fn_prefill_kernels.GROUP_ROWS`
+    #: (a family whose bits were not checked at 64 keeps 32)
+    moe_group_rows: int | None = None
+
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, tables, dtype=torch.bfloat16, device=device)
         self.banks = banks
@@ -555,7 +559,8 @@ class FlashNextEngine(FlashNextRef):
         ids, wts = K.router(PK.mm_rows(x, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
-        return K.moe_combine(PK.moe_grouped(x, ids, self.banks[li]), ids, wts)
+        rows = self.moe_group_rows or PK.GROUP_ROWS
+        return K.moe_combine(PK.moe_grouped(x, ids, self.banks[li], rows=rows), ids, wts)
 
     def _attn_pre(self, x, li, st):
         """Attention of a chunk: q|k|v and the indexer projection, the prep kernel (norms, rope, the
@@ -2880,7 +2885,10 @@ class FlashNextEngine(FlashNextRef):
         (`mtp_pre`) or the reference's `mtp_feed` with the pool built after."""
         path = path or self.prefill_path
         T = len(next_tokens)
-        chunk = PREFILL_CHUNK if path == "kernels" else 2048
+        # the trunk's chunk is QWEN38_FN_PREFILL_CHUNK, but the MTP layer reshapes its stack slice to
+        # T*hc rows for mtp.fc_hidden (a 16,384-row chunk crashes exl3_matmul with CUDA error:
+        # invalid argument, 2026-10-30): the catch-up caps its own chunk where that matmul holds
+        chunk = min(PREFILL_CHUNK, 8192) if path == "kernels" else 2048
         for i in range(0, T, chunk):
             j = min(i + chunk, T)
             nt = torch.tensor(next_tokens[i:j])

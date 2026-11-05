@@ -166,7 +166,7 @@ class Admission:
             try:
                 spare = max(0, min(int(self.spare()), need_ws))
             except Exception:                                      # noqa: BLE001
-                spare = 0                  # no reading: the whole workspace is new memory, as before
+                spare = 0                  # no reading: the whole workspace is new memory
         new_ws = need_ws - spare
         d = {"floor": self.floor, "grow_left": grow, "reserved": held_ws + held_kv,
              "need": int(need), "kv": int(kv), "kv_reserved": held_kv, "in_flight_ws": held_ws,
@@ -181,8 +181,8 @@ class Admission:
                 room = max(0, int(self.room()))
             except Exception:                                      # noqa: BLE001
                 room = None
-        # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's,
-        # as before: the gate bounds every prefill it admits under the peak to the room. One it admitted over
+        # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's:
+        # the gate bounds every prefill it admits under the peak to the room. One it admitted over
         # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first
         under = grow + held_ws + (0 if over_peak else need_ws)
         take = min(room, under) if room is not None else under

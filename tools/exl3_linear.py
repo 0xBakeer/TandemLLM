@@ -63,20 +63,10 @@ import sys
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
-
-from tools.cuda_arch import capability as _capability, inline_supported as _inline_supported  # noqa: E402
-
-# the GB10 set only for now: the sources build for sm_89 (PDL/cluster compiled out, S
-# clamped to 1 below sm_90), but the fused down-silu and slab paths are not proven
-# row-invariant there -- tools/fn_kernels covers Ada dense and MoE instead
-_ARCHES = frozenset({(12, 1)})
-
-
-def _sm_supported(device=None) -> bool:
-    return _inline_supported(device, _ARCHES)
 
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
@@ -120,24 +110,18 @@ _CPP = nb.source(__file__, "exl3.cpp")
 _MOD = None
 
 
-def _gencode() -> str:
-    cap = _capability()
-    if cap == (12, 1):
-        return "-gencode=arch=compute_121a,code=sm_121a"
-    return f"-gencode=arch=compute_{cap[0]}{cap[1]},code=sm_{cap[0]}{cap[1]}"
 
 
 def _module():
     global _MOD
     if _MOD is None:
-        cap = _capability() or (0, 0)
-        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL and cap >= (9, 0))}\n" + _CUDA
+        src = f"#define EXL3_ST {STAGES}\n#define EXL3_PDL {int(PDL and _gpu.profile().pdl())}\n" + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                        functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon",
                                   "exl3_rot_in_silu", "exl3_mlp_bridge"],
                        extra_cuda_cflags=["-O3", "-lineinfo",
-                                          _gencode()],
+                                          *_gpu.arch_flags("exl3_linear")],
                        verbose=False)
     return _MOD
 
@@ -233,7 +217,7 @@ class EXL3Block:
         self.tile_n = self.N
         # on archs the inline extensions do not cover, probe the Triton kernels this rate uses,
         # once: the dispatch below reads the recorded verdicts, never a mid-call exception
-        if self.t.is_cuda and not _sm_supported(self.t.device):
+        if self.t.is_cuda and not _gpu.profile(self.t.device).inline("exl3_linear"):
             from tools import exl3_ada
             exl3_ada.probe(self.t.device, self.kb)
 
@@ -283,7 +267,7 @@ class EXL3Block:
         """Wi[:, n0:n1] in fp16 (the rotated basis), decoded on the device."""
         n1 = self.N if n1 is None else n1
         wi = torch.empty(self.K, n1 - n0, dtype=torch.float16, device=self.t.device)
-        if self.t.is_cuda and _sm_supported(self.t.device):
+        if self.t.is_cuda and _gpu.profile(self.t.device).inline("exl3_linear"):
             _module().exl3_recon(self.t, wi, self.kb, n0)
         elif self.t.is_cuda:
             from tools import exl3_ada
@@ -535,7 +519,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block, out: torch.Tensor | None = No
 def rotate_in(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     G = w.suh.shape[0]
     xh = torch.empty(G, x.shape[0], w.K, dtype=torch.float16, device=x.device)
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("exl3_linear"):
         H = hadamard128(x.device)
         for g in range(G):
             xs = x.float() * w.suh[g].float()
@@ -559,7 +543,7 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     assert y.dtype == torch.bfloat16 and y.dim() == 2 and y.shape[1] == 2 * w.K and w.suh.shape[0] == 1
     if y.stride(1) != 1 or y.stride(0) % 4 or y.data_ptr() % 8:
         y = y.contiguous()
-    if not _sm_supported(y.device):
+    if not _gpu.profile(y.device).inline("exl3_linear"):
         from tools import exl3_ada
         if exl3_ada.rot_ok(y.device):
             gok = exl3_ada.gemv_ok(y.device, w.kb)
@@ -596,7 +580,7 @@ def exl3_mlp_slab(x: torch.Tensor, gu: EXL3Block, wd: EXL3Block) -> torch.Tensor
         return None
     if _mm_out_fp32() is False:
         return None
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("exl3_linear"):
         return None
     mod = _module()
     M = x.shape[0]
@@ -636,7 +620,7 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
     if out is None:
         out = torch.empty(M, w.N, dtype=odt, device=dev)
-    if not _sm_supported(dev):
+    if not _gpu.profile(dev).inline("exl3_linear"):
         if M > CHUNK_UNTIL:
             return _slab_matmul_ada(x, w, out, xh=xh)
         if xh is None:
@@ -649,7 +633,7 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
         return _slab_matmul(x, w, out, xh=xh)
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
-    if (_capability(dev) or (0, 0)) < (9, 0):
+    if not _gpu.profile(dev).cluster():
         S_ = 1
     wk_ = tile["wk"] if wk is None else wk
     if M > SKINNY_MAX and ROWGRID:

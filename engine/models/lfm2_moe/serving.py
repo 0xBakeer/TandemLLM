@@ -28,7 +28,7 @@ from engine.models.graph_lru import joint_graphs
 from engine.models.lfm2_moe import kernels as K
 from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
 from engine.models.state import SectionState
-from tools.cuda_arch import inline_supported as _sm_supported
+from tools import gpu as _gpu
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/lfm2_moe/__init__.py", "engine/models/lfm2_moe/config.py",
@@ -172,7 +172,7 @@ class Lfm2MoeServing:
         kernels' load probes returned True (every decode and MoE launch a device kernel), they
         can. Evaluated lazily: the probes ran at weight load, before capture."""
         if self._graphs is None:
-            ok = _sm_supported(self.fn.device)
+            ok = _gpu.profile(self.fn.device).inline("fn_prefill_kernels")
             if not ok and self.fn.device.type == "cuda":
                 # the eager fallbacks can be captured only where the load probes actually
                 # passed: the rotation probe, the gemv probe at every rate this model loads,

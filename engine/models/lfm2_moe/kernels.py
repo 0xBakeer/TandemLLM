@@ -441,7 +441,7 @@ def combine_add_rms(h: torch.Tensor, yd: torch.Tensor, ids: torch.Tensor, wts: t
     hn = torch.empty_like(h)
     nn = torch.empty_like(h)
     _combine_add_rms[(M,)](yd, ids.contiguous(), wts.contiguous(), h, hn, nn, w, eps, N=N, S=S,
-                           BLOCK=N, FMA=FK._sm_supported(h.device), num_warps=4)
+                           BLOCK=N, FMA=_gpu.profile(h.device).inline("fn_kernels"), num_warps=4)
     return hn, nn
 
 

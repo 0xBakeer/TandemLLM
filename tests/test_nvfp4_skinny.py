@@ -21,10 +21,19 @@ SHAPES = [(17408, 5120), (5120, 17408), (10240, 5120), (6144, 5120), (5120, 6144
           (12288, 5120), (1024, 5120), (34816, 5120), (14336, 5120), (16384, 5120)]
 
 
-def _reload(**env):
+def _on(cap=(12, 1), name="NVIDIA GB10"):
+    """This process's current device as the GPU of `cap` (tools/gpu answers the routing; the CPU
+    would get the base, which never takes this kernel)."""
+    from tools import gpu
+    gpu._reset_for_tests()
+    gpu._BY_DEV[None] = gpu.profile_for(cap, name)
+
+
+def _reload(cap=(12, 1), name="NVIDIA GB10", **env):
     old = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
     try:
+        _on(cap, name)
         from tools import nvfp4_skinny
         return importlib.reload(nvfp4_skinny)
     finally:
@@ -39,22 +48,22 @@ def test_off_by_default_and_the_switch_switches():
     sk = _reload()
     assert not any(sk.use_skinny(m) for m in (1, 8, 16, 32)), "on without the flag"
     sk = _reload(QWEN38_NVFP4_SKINNY="1")
-    from unittest import mock
-    import torch
-    from tools import cuda_arch
-    cuda_arch._reset_for_tests()
-    with mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 1)):
-        assert all(sk.use_skinny(m) for m in (1, 2, 8, 15, 16, 17, 32)), "flag on, a row count off"
+    assert all(sk.use_skinny(m) for m in (1, 2, 8, 15, 16, 17, 32)), "flag on, a row count off"
     assert not sk.use_skinny(33) and not sk.use_skinny(0), "outside 1..32"
-    cuda_arch._reset_for_tests()
-    with mock.patch.object(torch.cuda, "get_device_capability", return_value=(8, 9)):
-        assert not any(sk.use_skinny(m) for m in (1, 8, 32)), "Ada is not the skinny arch"
-    cuda_arch._reset_for_tests()
-    with mock.patch.object(torch.cuda, "get_device_capability", side_effect=RuntimeError("no device")):
-        assert not any(sk.use_skinny(m) for m in (1, 8, 32)), "no capability query, no skinny"
-    cuda_arch._reset_for_tests()
     _reload()
     return "off by default; on for 1..32 with QWEN38_NVFP4_SKINNY=1, never above"
+
+
+def test_a_gpu_without_the_kernel_never_takes_it():
+    """The kernel is sm_121a code: on the base (an unknown GPU, the CPU) and on Ada the switch routes
+    nothing, so every row count takes the Triton kernels."""
+    try:
+        for cap, name in (((8, 9), "NVIDIA GeForce RTX 4090"), ((9, 0), "NVIDIA H100"), (None, None)):
+            sk = _reload(cap=cap, name=name, QWEN38_NVFP4_SKINNY="1")
+            assert not any(sk.use_skinny(m) for m in (1, 8, 16, 32)), cap
+    finally:
+        _reload()
+    return "sm_89, sm_90 and the CPU: never, with the switch on"
 
 
 def test_programmatic_dependent_launch_is_off_by_default():
@@ -74,14 +83,8 @@ def test_one_row_and_a_verified_block_take_the_same_kernel():
     from tools import nvfp4_linear
     sk = _reload(QWEN38_NVFP4_SKINNY="1")
     try:
-        from unittest import mock
-        import torch
-        from tools import cuda_arch
-        cuda_arch._reset_for_tests()
-        with mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 1)):
-            routed = {m: nvfp4_linear.use_skinny(m) for m in (1, 2, 4, 8, 11, 14, 15, 16, 24, 32)}
+        routed = {m: nvfp4_linear.use_skinny(m) for m in (1, 2, 4, 8, 11, 14, 15, 16, 24, 32)}
         assert set(routed.values()) == {True}, routed
-        cuda_arch._reset_for_tests()
     finally:
         _reload()
     return "M in 1..32 all on the skinny kernel when it is on"
@@ -321,6 +324,11 @@ def test_the_scale_runs_are_a_permutation_of_the_scales():
         seen[idx.reshape(-1)] = True
         assert int(seen.sum()) == N * KQ * 8 and not run[~seen].any(), (N, K)
     return "5 shapes (odd N, one K step, the down shape): every byte where the kernel reads it"
+
+
+def teardown_module():
+    from tools import gpu
+    gpu._reset_for_tests()
 
 
 if __name__ == "__main__":

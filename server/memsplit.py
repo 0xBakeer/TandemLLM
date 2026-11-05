@@ -113,7 +113,8 @@ def _torch_probe() -> tuple[int | None, int | None]:
     try:
         import torch
         if torch.cuda.is_available():
-            return int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
+            from engine.cache import cuda_stats
+            return cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     except Exception:                                              # noqa: BLE001
         pass
     return None, None

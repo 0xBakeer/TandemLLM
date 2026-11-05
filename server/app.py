@@ -1827,7 +1827,7 @@ def _req_peak_start() -> None:
     alone = int(INFLIGHT.get("running", 0)) <= 1 and busy <= 1
     if alone:
         torch.cuda.reset_peak_memory_stats()
-    _REQ_PEAK_AT[threading.get_ident()] = (int(torch.cuda.memory_allocated()), alone)
+    _REQ_PEAK_AT[threading.get_ident()] = (cache.cuda_stats("allocated_bytes.all.current")[0], alone)
 
 
 def _req_peak_field() -> str:
@@ -1837,7 +1837,7 @@ def _req_peak_field() -> str:
     if a0 is None or not alone:
         return " peak_gib=-"
     try:
-        return f" peak_gib={(torch.cuda.max_memory_allocated() - a0) / 2**30:.2f}"
+        return f" peak_gib={(cache.cuda_stats('allocated_bytes.all.peak')[0] - a0) / 2**30:.2f}"
     except Exception:                                              # noqa: BLE001
         return " peak_gib=-"
 
@@ -3486,13 +3486,19 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     nothing."""
     inside = think is not None and think.inside and not think.closes_in(extra)
     answer = "" if inside else _answer(ctx, start, extra, think)
+    notes = note_calls = 0
+    takes = getattr(sup, "memory_notes", None)
+    if takes is not None and answer:
+        # the memory notes the client never gets (server/memblock.py): not the answer's calls,
+        # and an answer of notes alone is empty (E1 case M continues it after a hidden result)
+        answer, notes, note_calls = memblock.without_notes(answer, calls=bool(takes))
     fmt = _tool_format()
     # the checks read the model's own call format as the stream and the final parse do: an
     # arg-key or Pythonic call is a call here too, not a block that does not parse
     answer = rewrite_native(answer, fmt, eos=True)
     calls = ""
     sup.lift_ids = None
-    if (not answer.strip() and getattr(sup.req, "tools_offered", False)
+    if (not answer.strip() and not notes and getattr(sup.req, "tools_offered", False)
             and getattr(sup.req, "n", 1) == 1):
         # SRV-199: the calls a turn wrote inside its reasoning and then stopped (E1's case C)
         try:
@@ -3513,7 +3519,8 @@ def _sp2(sup, think, ctx, start: int, n_out: int, room: int, extra=(), end=None)
     try:
         act = sup.at_finish(conductor.FinishEvent(
             "eos", inside, answer, think.n if think is not None else 0, n_out,
-            len(ctx) + len(extra), calls=calls), room)
+            len(ctx) + len(extra), calls=calls, notes=notes + note_calls,
+            note_calls=note_calls), room)
     finally:
         if extra and real is not None:
             sup.on_event = real
@@ -3764,6 +3771,18 @@ def _answer(ctx, start: int, extra, think) -> str:
     text = STATE["tok"].decode(gen[k + 1:], skip_special_tokens=True)
     i = text.rfind("</think>") if k < 0 else -1
     return text[i + len("</think>"):] if i >= 0 else text
+
+
+def _disk_session_id(client_kind: str | None, plan, conv_id: str | None) -> str | None:
+    """The session the disk tier files a request under. A request's own id wins. Hermes sends
+    none, so under an active plan its main requests take the router's head key (`h:`, the messages
+    through the first user message) and a new session's head is saved on its first request. A side
+    request (Hermes' title call) shares `Session("side")` and keeps no name, as does a raw request."""
+    if conv_id is not None or client_kind != "hermes" or plan is None:
+        return conv_id
+    if not plan.active or plan.side is not None or plan.session is None:
+        return None
+    return plan.session.key
 
 
 def _remember(*args, **kw) -> None:
@@ -6163,7 +6182,9 @@ def _par_window_cap() -> int | None:
     if pool is None:
         return None
     me = _par_index()
-    return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
+    # SPD-201: a slot the round runner decodes (phase "runner") is decoding too
+    return PAR_WINDOW_ROWS if any(s.index != me and s.phase in ("decode", "runner")
+                                  for s in pool.slots) else None
 
 
 def _roles_idle() -> bool:
@@ -7143,10 +7164,10 @@ def _system() -> dict:
     try:
         if torch.cuda.is_available():
             budget = STATE.get("mem")
-            mem = {"gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
-                   "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+            mem = {"gpu_allocated_bytes": alloc, "gpu_reserved_bytes": res,
                    "gpu_max_allocated_bytes": int(budget.lifetime() if budget is not None
-                                                  else torch.cuda.max_memory_allocated())}
+                                                  else cache.cuda_stats("allocated_bytes.all.peak")[0])}
     except Exception:                                              # noqa: BLE001
         pass
     mem.update(dashboard_api.meminfo())
@@ -9075,6 +9096,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        # the name the prefix capture and the session snapshot (the disk tier) file this request
+        # under; conv_id itself, which compaction, the preparer and the memory writer key on, stays
+        disk_id = _disk_session_id(rec.client_kind, plan, conv_id)
         # SRV-241: a regenerate (server/regenerate.py) samples with a fresh seed; every other
         # request keeps the sampler it had (greedy unless the client asked). Under an active plan
         # only: raw requests (benchmarks) and side requests are never looked at.
@@ -9826,6 +9850,9 @@ class Handler(BaseHTTPRequestHandler):
                     and plan.session is not None else None)
                 if ui is not None:
                     sup.on_event = ui.monitor
+                # SP2 reads the answer as the client gets it: without the memory notes the
+                # filter takes out (an answer of notes alone is an empty answer)
+                sup.memory_notes = _memory_takes(plan, chat, n_choices, tool_names)
                 if plan is not None and plan.acts:
                     sup.adopt(plan.acts)            # the router's outcome note (J1)
                 if plan is not None and plan.outcome is not None and \
@@ -10138,10 +10165,10 @@ class Handler(BaseHTTPRequestHandler):
                     # SRV-709: a lane the pool refuses gives way and goes on (`_recomputing`)
                     return rec.track(self._recomputing(
                         par, cid, rec, stream, prompt, max_new, budget_state,
-                        lambda p, n: generate_stream(p, n, eos, budget_state, conv_id, deadline,
+                        lambda p, n: generate_stream(p, n, eos, budget_state, disk_id, deadline,
                                                      pen=pen, pstop=guard, sampler=samp,
                                                      on_prefill=watch, **kw)))
-                return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
+                return rec.track(generate_stream(prompt, max_new, eos, budget_state, disk_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
 
@@ -10283,9 +10310,9 @@ class Handler(BaseHTTPRequestHandler):
                         _finishing(rec, "saving_state")
                     # 2026-10-05: the answer's memory blocks, written and taken out of the text
                     mem_taken = _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt,
-                                             comp is None and mm is None)
+                                             comp is None and mm is None, tool_names)
                     if (cached_ids is None or ci) and not micro:
-                        _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                        _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
                                   served_hidden=(rec.hidden_at if rec.hidden_at is not None
@@ -10477,7 +10504,7 @@ class Handler(BaseHTTPRequestHandler):
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
-            mf = [_memory_filter(plan, chat, n_choices, ui)]
+            mf = [_memory_filter(plan, chat, n_choices, ui, tool_names)]
             # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
             # client (a conductor plan only: the raw path is the release's, byte for byte)
             stray = [StrayClose() if chat and plan is not None and plan.active else None]
@@ -10935,7 +10962,7 @@ class Handler(BaseHTTPRequestHandler):
                                       comp is None and mm is None)
             if cached_ids is None and failed is None and not micro:
                 _finishing(rec, "saving_state")
-                _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
+                _remember(client_ids or prompt_ids, ids, disk_id, mm=mm,
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
                           served_hidden=(rec.hidden_at if rec.hidden_at is not None
@@ -11089,10 +11116,10 @@ def _memory() -> dict:
     out = {}
     mem = STATE.get("mem")
     try:
-        out["allocated_gb"] = round(torch.cuda.memory_allocated() / 2**30, 3)
-        out["reserved_gb"] = round(torch.cuda.memory_reserved() / 2**30, 3)
+        out["allocated_gb"] = round(cache.cuda_stats("allocated_bytes.all.current")[0] / 2**30, 3)
+        out["reserved_gb"] = round(cache.cuda_stats("reserved_bytes.all.current")[0] / 2**30, 3)
         out["max_allocated_gb"] = round((mem.lifetime() if mem is not None
-                                         else torch.cuda.max_memory_allocated()) / 2**30, 3)
+                                         else cache.cuda_stats("allocated_bytes.all.peak")[0]) / 2**30, 3)
     except Exception as exc:                                      # noqa: BLE001
         out["error"] = str(exc)
     if mem is not None and mem.on:
@@ -11174,7 +11201,7 @@ def _mem_load_mark(stages=None) -> None:
             mem.empty("load")
             alloc, res = mem.memory()
         else:
-            alloc, res = int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
+            alloc, res = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     except Exception:                                              # noqa: BLE001
         return
     by = _caches_by_owner()
@@ -11223,7 +11250,7 @@ def memory_owners(pools: bool = False) -> dict:
     mem = dict.get(STATE, "mem")
     try:
         alloc, res = (mem.memory() if mem is not None
-                      else (int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())))
+                      else (cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")))
     except Exception as exc:                                       # noqa: BLE001
         return {"error": str(exc)}
     by = _caches_by_owner()
@@ -11360,14 +11387,25 @@ def _text_chunk(cid, model, created, piece, finish=None, extra: dict | None = No
     return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
 
 
-def _memory_filter(plan, chat: bool, n_choices: int, ui):
-    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
-    choice of a chat request; None otherwise (the stream is the release's)."""
+def _memory_takes(plan, chat: bool, n_choices: int, tool_names=()) -> bool | None:
+    """What the memory filter takes out of this request's answer: None (no filter: the stream
+    is the release's), False (the blocks), True (the blocks and the `tandem_memory` calls,
+    unless the client offers a tool of that name: then the calls are its own)."""
     cond = STATE.get("conductor")
     if (cond is None or plan is None or not plan.active or not chat or n_choices != 1
-            or getattr(plan, "memory", None) is None):
+            or not getattr(plan, "memory", None)
+            or plan.memory.get("mode") not in ("on", "shadow")):
         return None
-    return cond.memory.filter(plan.memory, ui)
+    return memblock.TOOL not in (tool_names or ())
+
+
+def _memory_filter(plan, chat: bool, n_choices: int, ui, tool_names=()):
+    """The stream's memory filter (server/memblock.py) for a plan whose memory is not off: one
+    choice of a chat request; None otherwise (the stream is the release's)."""
+    takes = _memory_takes(plan, chat, n_choices, tool_names)
+    if takes is None:
+        return None
+    return STATE["conductor"].memory.filter(plan.memory, ui, calls=takes)
 
 
 def _answer_mask(plan, chat: bool, body: dict):
@@ -11441,10 +11479,12 @@ def _memory_close(plan, mfilter, ids: list[int], n_prompt: int, spans_ok: bool) 
     return hidden, (_memory_spans(hidden, ids, n_prompt) if spans_ok else [])
 
 
-def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -> tuple:
+def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok,
+                 tool_names=()) -> tuple:
     """The non-streamed answer's memory blocks: each closed block of the answer written, every
-    closed one returned with its hidden span (the text drops them later)."""
-    f = _memory_filter(plan, chat, n_choices, ui)
+    closed one returned with its hidden span (the text drops them later, a call form before
+    the calls are read)."""
+    f = _memory_filter(plan, chat, n_choices, ui, tool_names)
     if f is None:
         return [], []
     text = STATE["tok"].decode(ids, skip_special_tokens=True)
@@ -11462,6 +11502,11 @@ def _memory_row(plan, failed: list[str], shown=()) -> None:
     if ctx.get("written"):
         info["written"] = [{k: v for k, v in w.items() if k != "chars"}
                            for w in ctx["written"]]
+        moved = [w["demoted"] for w in ctx["written"] if w.get("demoted")]
+        if moved:
+            # a rule about the user from a tool turn: kept for this session only (notes.py)
+            print(f"[memory] {plan.row.get('request_id') or '-'}: {len(moved)} rule(s) kept at "
+                  f"session scope ({', '.join(f'{w} -> session' for w in moved)})", flush=True)
     if failed:
         info["failed"] = list(failed)
         hid = [w for w in failed if w not in shown]
@@ -12789,7 +12834,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]
-    a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    a0, r0 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
     depth0 = a.depth
     paged = kvpool.POOL is not None and kvpool.Driver.get() is not None
     not_built = None
@@ -12806,7 +12851,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
             print(f"[parallel] {not_built}", flush=True)
             break
         mi0 = slots_mod.read_meminfo() or {}
-        a1 = torch.cuda.memory_allocated()
+        a1 = cache.cuda_stats("allocated_bytes.all.current")[0]
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
         e2, d2 = make(L, drafter0) if make is not None else hooks["make"](L, drafter0)
@@ -12850,15 +12895,15 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         torch.cuda.synchronize()
         mi1 = slots_mod.read_meminfo() or {}
         print(f"[parallel] slot {i}: window {L:,}, built in {time.time() - t0:.1f}s, "
-              f"+{_gib(torch.cuda.memory_allocated() - a1)} GiB allocated, MemAvailable "
+              f"+{_gib(cache.cuda_stats('allocated_bytes.all.current')[0] - a1)} GiB allocated, MemAvailable "
               f"{_gib(mi0.get('MemAvailable'))} -> {_gib(mi1.get('MemAvailable'))} GiB "
               f"(estimate {_gib(need)})", flush=True)
     if len(slots) < 2:
         print(f"[parallel] no side slot fits under the {a.parallel_floor_gb:g} GiB floor: one "
               f"sequence, as without --parallel", flush=True)
         return
-    added_a = torch.cuda.memory_allocated() - a0
-    added_r = torch.cuda.memory_reserved() - r0
+    a1, r1 = cache.cuda_stats("allocated_bytes.all.current", "reserved_bytes.all.current")
+    added_a, added_r = a1 - a0, r1 - r0
     mem = dict.get(STATE, "mem")
     if mem is not None and mem.on:
         side = max(added_a, added_r)

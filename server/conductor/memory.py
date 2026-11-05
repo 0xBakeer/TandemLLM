@@ -39,8 +39,10 @@ block is parsed and written (server/conductor/notes.py) with the request's user,
 session, and its `from_user` (a tool turn cannot write a rule about the user). A refused block is
 hidden from the client like a written one (SRV-277): the reason goes to the journal and the log,
 never into the answer. A project-scoped add in a conversation without a working directory (an
-Open WebUI chat) is written at user scope (`rescoped: project`). A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
-kind, why, the redaction counts. Never a title or a body: they stay in the files.
+Open WebUI chat) is written at user scope (`rescoped: project`). A rule about the user from a tool
+turn is kept at session scope (`demoted: rule_from_tool`, 2026-11-04), never a user rule. A write
+is one journal row (`kind: memory_notes`, task `write`): op, id, scope, kind, why, the redaction
+counts. Never a title or a body: they stay in the files.
 
 A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (a design decision,
 2026-10-06: every client is the user `owner`), so a "remember ..." from any client goes into that user's
@@ -50,6 +52,12 @@ notes, as it should. A test or a script that must not touch them sends `X-Tandem
 journaled `read_only`). Every other value, and none, is the profile's switch. A write the model made
 is visible as the `› remembered: ...` line and in the Notes screen (its writer and request), where
 it is archived or deleted.
+
+THE CALL FORM. With the tools of a chat in view the model may write its note as a
+`tandem_memory` tool call; no client offers that tool, so a client that got the call would
+answer that the tool is not available. Where the block is taken, the call is taken as the same
+block (server/memblock.py): written, hidden, never a call the client gets. The switches above
+apply to it as to the block; a client that offers its own `tandem_memory` tool gets its calls.
 
 THE USER. `owner` on the engine; a request the proxy relayed names the proxy user (the proxy's key
 label in process, `X-Tandem-User` from a trusted proxy address). None: nothing is read or written.
@@ -221,7 +229,7 @@ class Memory:
                   "chars": len(raw)}
         if res is not None:
             detail.update({k: res.get(k) for k in ("id", "scope", "kind", "revised", "redacted",
-                                                    "name", "n", "kept", "rescoped")
+                                                    "name", "n", "kept", "rescoped", "demoted")
                            if res.get(k)})
         ctx.setdefault("written", []).append(detail)
         if why is None:
@@ -250,11 +258,12 @@ class Memory:
             return []
         return [r["id"] for r in rows if r.get("decision") in ("low_quality", "stuck")][:8]
 
-    def filter(self, ctx: dict | None, ui=None) -> memblock.MemFilter | None:
-        """The stream's filter for a request whose memory is not off."""
+    def filter(self, ctx: dict | None, ui=None, calls: bool = True) -> memblock.MemFilter | None:
+        """The stream's filter for a request whose memory is not off; `calls`: a `tandem_memory`
+        tool call is a block too (server/memblock.py, THE CALL FORM)."""
         if not ctx or ctx.get("mode") not in ("on", "shadow"):
             return None
-        return memblock.MemFilter(lambda raw: self.take(ctx, raw, ui))
+        return memblock.MemFilter(lambda raw: self.take(ctx, raw, ui), calls=calls)
 
 
 def _line(title: str) -> str:

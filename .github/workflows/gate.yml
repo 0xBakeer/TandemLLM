@@ -1,0 +1,100 @@
+# The `gate` status check (docs/quality-gate.md): a pull request whose diff needs a GPU report must
+# carry one (tools/gate/check.py): measured on its head, at the level its paths need, with no FAIL or
+# INVALID row and a written reason for every WORSE or CHANGED_TEXT row. Docs and dashboard changes
+# need none. The check runs the gate code of the base commit, so a pull request cannot change the
+# rules it is checked by. It reads the pull request and git only; it writes nothing and uses no
+# secret. Editing the description re-runs it; a report in a comment counts from the next run.
+# `gate-verified` is a maintainer's label after the re-run on the reference box. `gate-maintainer` says a
+# maintainer runs the gate for this pull request (an author without a fitting GPU): the check passes and waits
+# for nothing from the author.
+name: gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out (full history, for the diff and the report's commit)
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: python -m pip install pyyaml==6.0.1
+
+      - name: A maintainer runs the gate
+        if: contains(github.event.pull_request.labels.*.name, 'gate-maintainer')
+        run: |
+          echo "gate-maintainer: a maintainer runs the gate for this pull request" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "GATE_SKIP=1" >> "$GITHUB_ENV"
+
+      - name: The gate code of the base commit
+        if: env.GATE_SKIP != '1'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! git cat-file -e "$BASE_SHA:tools/gate/check.py" 2>/dev/null; then
+            echo "the base has no gate yet: nothing to check"; echo "GATE_SKIP=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/trusted"
+          git archive "$BASE_SHA" tools/gate tools/row3.py tools/rowlog.py | tar -x -C "$RUNNER_TEMP/trusted"
+
+      - name: The pull request's body and comments
+        if: env.GATE_SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          ev = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          out = subprocess.run(["gh", "api", "--paginate",
+                                f"repos/{os.environ['REPO']}/issues/{os.environ['NUMBER']}/comments"],
+                               capture_output=True, text=True, check=True).stdout
+          comments = []
+          dec = json.JSONDecoder()
+          i = 0
+          while i < len(out):
+              while i < len(out) and out[i].isspace():
+                  i += 1
+              if i >= len(out):
+                  break
+              page, i = dec.raw_decode(out, i)
+              comments += [c.get("body") or "" for c in page]
+          body = (ev.get("pull_request") or {}).get("body") or ""
+          path = os.path.join(os.environ["RUNNER_TEMP"], "texts.json")
+          json.dump({"body": body, "comments": comments}, open(path, "w"))
+          print(f"body {len(body)} characters, {len(comments)} comments")
+          PY
+
+      - name: Check the report
+        if: env.GATE_SKIP != '1'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cd "$RUNNER_TEMP/trusted"
+          python -m tools.gate check --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+            --texts "$RUNNER_TEMP/texts.json" --repo "$GITHUB_WORKSPACE" \
+            --summary "$GITHUB_STEP_SUMMARY"

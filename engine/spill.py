@@ -243,11 +243,25 @@ def _zd(args) -> int:
 
 
 def codec_ok() -> bool:
-    try:
-        import zstandard  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Whether the zstd codec is usable. Asked once per /metrics and /health request, and a
+    FAILED import is never cached by Python: the import machinery walks sys.path and re-raises
+    every single time, each attempt taking the global import lock. With a few hundred handler
+    threads polling /metrics (2026-10-24: 1,800+ threads, 33,416 of 34,000 samples blocked in
+    importlib._bootstrap:120), that one missing package turned the whole server into a lock
+    convoy — every request queued behind the import lock, and the sockets left in CLOSE_WAIT.
+    So the answer is computed once and remembered."""
+    global _CODEC_OK
+    if _CODEC_OK is None:
+        try:
+            import zstandard  # noqa: F401
+            _CODEC_OK = True
+        except ImportError:
+            _CODEC_OK = False
+    return _CODEC_OK
+
+
+#: None until the first answer: the zstd codec's availability, remembered (see codec_ok).
+_CODEC_OK: bool | None = None
 
 
 class _Yielded(Exception):

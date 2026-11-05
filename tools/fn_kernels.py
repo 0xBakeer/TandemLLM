@@ -53,13 +53,9 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 import torch  # noqa: E402
 
 from engine import native_build as nb  # noqa: E402
+from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
-from tools.cuda_arch import capability as _capability, inline_supported as _inline_supported  # noqa: E402
-
-# this module covers the GB10 set and Ada (sm_89): the kernels build there with the PDL
-# and cluster paths compiled out; a cluster-free launch keeps a weight its one order
-_ARCHES = frozenset({(12, 1), (8, 9)})
 
 # a non-GB10 arch counts only when the toolchain actually builds the module (a box without
 # a matching nvcc falls back to the Triton paths instead of raising at first use)
@@ -67,19 +63,20 @@ _BUILD_OK: dict = {}
 
 
 def _sm_supported(device=None) -> bool:
-    if not _inline_supported(device, _ARCHES):
+    prof = _gpu.profile(device)
+    if not prof.inline("fn_kernels"):
         return False
-    cap = _capability(device)
-    if cap == (12, 1):
+    if prof.id == "gb10":
         return True
-    if cap not in _BUILD_OK:
+    if prof.id not in _BUILD_OK:
         try:
             _module()
-            _BUILD_OK[cap] = True
+            _BUILD_OK[prof.id] = True
         except Exception as e:
-            _BUILD_OK[cap] = False
-            print(f"[fn-kernels] inline build failed for sm_{cap[0]}{cap[1]} "                  f"({type(e).__name__}): the Triton paths serve", flush=True)
-    return _BUILD_OK[cap]
+            _BUILD_OK[prof.id] = False
+            print(f"[fn-kernels] inline build failed for {prof.label()} "
+                  f"({type(e).__name__}): the Triton paths serve", flush=True)
+    return _BUILD_OK[prof.id]
 
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
 # cp.async and the 128-point Hadamard; it ends inside the anonymous namespace
@@ -90,13 +87,6 @@ _CUDA = nb.source(__file__, "kernels.cu")
 _CPP = nb.source(__file__, "kernels.cpp")
 
 _MOD = None
-
-
-def _gencode() -> str:
-    cap = _capability()
-    if cap == (12, 1):
-        return "-gencode=arch=compute_121a,code=sm_121a"
-    return f"-gencode=arch=compute_{cap[0]}{cap[1]},code=sm_{cap[0]}{cap[1]}"
 
 
 def _module():
@@ -111,19 +101,21 @@ def _module():
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_st_group", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm", "fn_set_dense_st", "fn_set_dense_st_rows"],
-                       extra_cuda_cflags=["-O3", "-lineinfo", _gencode()],
+                       extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_kernels")],
                        verbose=False)
-        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1" and (_capability() or (0, 0)) >= (9, 0)))
+        gpu = _gpu.profile()
+        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1" and gpu.pdl()))
         _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
-        _ada = (_capability() or (0, 0)) == (8, 9)
+        _ada = gpu.id == "ada"
         _MOD.fn_set_dense_st(int(_S.get("FN_DENSE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_dense_st_rows(int(_S.get("FN_DENSE_ST_ROWS") or ("3" if _ada else _S.get("FN_DENSE_ST") or "3")))
-        _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST") or ("4" if _ada else "3")))
         _MOD.fn_set_moe_st_group(int(_S.get("FN_MOE_ST_GROUP") or ("2" if _ada else _S.get("FN_MOE_ST") or "3")))
-        _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS") or ("8" if _ada else "4")))
+        stages, warps = gpu.moe_launch()
+        _MOD.fn_set_moe_st(stages)
+        _MOD.fn_set_moe_warps(warps)
         _MOD.fn_set_moe_gy(int(_S.get("FN_MOE_GY") or 0))
         _MOD.fn_set_moe_gr(int(_S.get("FN_MOE_GR") or MOE_GR))
         _MOD.fn_set_moe_gpar(int(_S.get("FN_MOE_GPAR") == "1"))
@@ -164,7 +156,7 @@ class MoEBank:
         if not set(self.ks) <= set(MOE_K):
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
         dev = torch.device(device)
-        if dev.type == "cuda" and (not _sm_supported(dev) or not _inline_supported(dev)):
+        if dev.type == "cuda" and (not _sm_supported(dev) or not _gpu.profile(dev).inline("fn_prefill_kernels")):
             from tools import moe_ada
             moe_ada.probe(dev)                # once a device: the verdict every dispatch reads
                                               # (the prefill path's arch set is narrower than ours)
@@ -236,42 +228,9 @@ DENSE_SPLIT: dict = {}
 
 
 def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
-    """The split of an EXL3 projection for `dense`: a cluster of S CTAs over K when the output has
-    few 128-column blocks (keeping >= ~96 CTAs), 4 warps a CTA. Keyed by the shape only: one order
-    for every row count."""
-    got = DENSE_SPLIT.get((N, Kin, kb))
-    if got is None:
-        S = 1
-        while (N // 128) * S < 96 and S < 8 and (Kin // 16) % (8 * S * 2) == 0:
-            S *= 2
-        got = (S, 4)
-    if (_capability() or (0, 0)) < (9, 0):
-        if _S.get("FN_DENSE_SPLIT_FORCE") == "1" and (N, Kin, kb) in DENSE_SPLIT:
-            return got                           # tools/fn_tiles sweeps: the table entry verbatim
-        # no distributed shared memory among the CTAs: a split launches plain CTAs whose last-arriving
-        # rank reduces the partials in place (a ticket, one launch). The exchange is nearly free, so a
-        # split pays off wherever a rank still holds a real K slice -- and stops paying once the work
-        # is already spread thin: 2048+ elems of K below it (a verify-width grid is already saturated
-        # there and splitting can lose), the column grid under ~5 waves of CTAs to begin with, 32+
-        # K-tiles a rank, the rank slice whole 128 blocks, a grid not already past ~2K CTAs. On a
-        # column grid already past half a wave the deeper splits want ~1024 K elems a rank to keep
-        # paying (a wide projection's verify rows go through `dense` at M up to 32, where an over-deep
-        # split costs more than it buys); past a 4-way split the deeper split also wants a grid still
-        # short of a couple of waves or ~2048 K elems a rank
-        KT, S = Kin // 16, 1
-        if KT >= 128 and N // 128 <= 384:
-            while (S < 8 and KT % (16 * S) == 0 and KT // (2 * S) >= 32
-                   and (N // 128) * S * 2 <= 2048
-                   and (S < 2 or N // 128 <= 64 or KT // (2 * S) >= 64)
-                   and (S < 4 or (N // 128) * S * 2 <= 192 or KT // (2 * S) >= 128)):
-                S *= 2
-        return S, got[1]
-    return got
-
-
-#: `dense` routes M in [DENSE_ROWS_MIN_M, 32] bf16-contiguous calls to `dense_rows` (the row-group
-#: kernel; same bits a row, amortized tile decode). Set to 33+ to keep the per-row kernel always.
-DENSE_ROWS_MIN_M = 4
+    """The split of an EXL3 projection for `dense`: the GPU's answer (tools/gpu `dense_split`), from
+    the measured table, else its rule. Keyed by the shape only: one order for every row count."""
+    return _gpu.profile().dense_split(N, Kin, kb, DENSE_SPLIT)
 
 
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -294,7 +253,7 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
         return dense_rows(x, w, out=out)
     S, warps = dense_split(w.tile_n, w.K, w.kb)
     part = None
-    if S > 1 and (_capability() or (0, 0)) < (9, 0):
+    if S > 1 and not _gpu.profile().cluster():
         part = torch.empty((w.N // 128) * x.shape[0] * S * warps * 128,
                            dtype=torch.float32, device=x.device)
     _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps, part)
@@ -311,7 +270,7 @@ def dense_rows(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Ten
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     xh = torch.empty(w.suh.shape[0], x.shape[0], w.K, dtype=torch.float16, device=x.device)
     part = None
-    if S > 1 and (_capability() or (0, 0)) < (9, 0):
+    if S > 1 and not _gpu.profile().cluster():
         part = torch.empty((w.N // 128) * ((x.shape[0] + 15) // 16) * S * warps * 16 * 128,
                            dtype=torch.float32, device=x.device)
     _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps, part)
