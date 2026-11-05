@@ -590,7 +590,8 @@ class FlashNextEngine(FlashNextRef):
             SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], P["cos"],
                         P["sin"], c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
         if cls:
-            sc = PK.qsa_scores_rows(iq, st.pool[li], P["nblk"], cls)
+            pool = st.pool[li][:P["pool"][1]] if _S.get("FN_QSA_LIVE") == "1" else st.pool[li]
+            sc = PK.qsa_scores_rows(iq, pool, P["nblk"], cls)
             SK.qsa_select(sc, P["tail"], P["sel"])
             del sc
         o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
