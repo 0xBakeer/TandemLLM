@@ -138,6 +138,24 @@ def test_ada_answers_like_the_base_on_main():
     return "sm_89: the base's answers, bf16"
 
 
+def test_ada_owns_the_triton_probe_verdicts():
+    """sm_89 runs no inline extension, so its kernels are the Triton ones in tools/exl3_ada.py
+    and tools/moe_ada.py, reached through the adapter's probe and verdict answers. Off a real
+    probe -- the CPU profile_for -- every verdict says no kernel, so the reference serves."""
+    p = gpu.profile_for(*ADA)
+    dev = "cpu"
+    assert not p.e2m1() and not p.moe_ok(dev)              # no probe ever ran -> False, not a raise
+    for q in (p.exl3_rot_ok, lambda d: p.exl3_decode_ok(d, 5), lambda d: p.exl3_gemv_ok(d, 5)):
+        try:
+            q(dev)
+            raise AssertionError("an unprobed exl3 verdict did not raise")
+        except RuntimeError:
+            pass                                         # the dispatch's raise-unprobed contract
+    p.exl3_probe(dev, 5)
+    p.moe_probe(dev)                                     # cpu devices take no probe
+    return "exl3 verdicts raise unprobed; moe_ok falls back; e2m1 False"
+
+
 # ------------------------------------------------------------------ 4: once
 def test_profile_asks_the_driver_once_a_device():
     import torch

@@ -25,7 +25,7 @@ import sys
 
 import torch
 
-from tools.cuda_arch import capability
+from tools import gpu as _gpu
 
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -49,7 +49,7 @@ def _sm89() -> bool:
     """True on Ada sm_89: the wide row tile and the tuned launch table there; other builds keep 16."""
     global _SM89
     if _SM89 is None:
-        _SM89 = capability() == (8, 9)
+        _SM89 = _gpu.profile().id == "ada"
     return _SM89
 
 

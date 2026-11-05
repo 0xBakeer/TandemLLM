@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from engine import capture_lock
 from engine.models.lfm2_moe import kernels as K
 import tools.exl3_linear as _x3
-from tools.cuda_arch import inline_supported as _sm_supported
+from tools import gpu as _gpu
 from engine.models.lfm2_moe.ref import Lfm2MoeRef, LfmState
 from engine.settings import SETTINGS as _S
 
@@ -205,7 +205,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         from tools import fn_kernels as FK
         c = self.cfg
         g16 = self._gate16.get(li)
-        logits = (FK.gemv(n, g16) if g16 is not None and FK._sm_supported(self.device)
+        logits = (FK.gemv(n, g16) if g16 is not None and _gpu.profile(self.device).inline("fn_kernels")
                   else K.linear_rows(n, self._gate[li], f32=True))
         ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.routed_scaling_factor)
         if li in self.banks:
@@ -380,7 +380,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 # the fused silu+rotate+down kernels only where the inline extensions do not
                 # cover the arch: on GB10 the two torch ops and the linear keep their bits
                 m = (_x3.exl3_down_silu(gu, w2) if type(w2) is _x3.EXL3Block
-                     and not _sm_supported(gu.device)
+                     and not _gpu.profile(gu.device).inline("exl3_linear")
                      else self.lin(F.silu(gu[:, :I]) * gu[:, I:], w2))
             nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["embedding_norm.weight"]
@@ -608,7 +608,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 # the fused silu+rotate+down kernels only where the inline extensions do not
                 # cover the arch: on GB10 the two torch ops and the linear keep their bits
                 m = (_x3.exl3_down_silu(gu, w2) if type(w2) is _x3.EXL3Block
-                     and not _sm_supported(gu.device)
+                     and not _gpu.profile(gu.device).inline("exl3_linear")
                      else self.lin(F.silu(gu[:, :I]) * gu[:, I:], w2))
             nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["embedding_norm.weight"]

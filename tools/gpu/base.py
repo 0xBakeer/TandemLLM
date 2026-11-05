@@ -107,6 +107,36 @@ class GpuProfile:
         """bf16 autocast for the small CUDA models (engine/decision/laya); fp16 below sm_80."""
         return self.cap is not None and self.cap[0] >= 8
 
+    # -- load-time probes and verdicts ------------------------------------------------------
+    # An adapter that ships Triton kernels (tools/exl3_ada.py, tools/moe_ada.py) owns their
+    # probes: the probe runs once per device at weight load, the verdicts gate every dispatch.
+    # The base answers no kernels: a False verdict always selects the reference path.
+    def exl3_probe(self, device, kb: int) -> None:
+        """Probe this adapter's EXL3 kernels at rate `kb`; records the verdicts the dispatch reads."""
+
+    def exl3_rot_ok(self, device) -> bool:
+        """The rotation-kernel verdict on `device`."""
+        return False
+
+    def exl3_decode_ok(self, device, kb: int) -> bool:
+        """The standalone decode-kernel verdict on `device` at rate `kb`."""
+        return False
+
+    def exl3_gemv_ok(self, device, kb: int) -> bool:
+        """The projection-kernel verdict on `device` at rate `kb`."""
+        return False
+
+    def moe_probe(self, device) -> None:
+        """Probe this adapter's MoE kernels once per device."""
+
+    def moe_ok(self, device) -> bool:
+        """The MoE-kernel verdict on `device`; False where no probe ever ran."""
+        return False
+
+    def e2m1(self) -> bool:
+        """The NVFP4 e2m1 hardware converter (sm_120 and later); software e2m1 decode elsewhere."""
+        return False
+
 
 def _known(kind: str) -> None:
     if kind not in INLINE:

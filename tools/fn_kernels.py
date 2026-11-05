@@ -56,7 +56,6 @@ from engine import native_build as nb  # noqa: E402
 from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
-from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
 
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
 # cp.async and the 128-point Hadamard; it ends inside the anonymous namespace
@@ -132,9 +131,9 @@ class MoEBank:
         if not set(self.ks) <= set(MOE_K):
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
         dev = torch.device(device)
-        if dev.type == "cuda" and not _sm_supported(dev):
+        if dev.type == "cuda" and not _gpu.profile(dev).inline("fn_kernels"):
             from tools import moe_ada
-            moe_ada.probe(dev)                # once a device: the verdict the dispatch reads
+            _gpu.profile(dev).moe_probe(dev)                # once a device: the verdict the dispatch reads
 
     @property
     def nbytes(self) -> int:
@@ -155,7 +154,7 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
         q, s = w, None
     if out is None:
         out = torch.empty(x.shape[0], q.shape[0], dtype=torch.float32, device=x.device)
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("fn_kernels"):
         wd = w.dequant() if s is not None else q.float()
         for m in range(x.shape[0]):
             out[m:m + 1] = x[m:m + 1].float() @ wd.t()
@@ -214,7 +213,7 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     M-row call's rows are its one-row calls' bits."""
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("fn_kernels"):
         out.copy_(X._reference_rows(x.to(torch.bfloat16), w).view(out.shape))
         return out
     S, warps = dense_split(w.tile_n, w.K, w.kb)
@@ -377,12 +376,12 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     """`moe` without its combine: every pair's down-projection output yd [M S, H] fp32 (unweighted),
     for `combine_inject_norm`."""
     M, S = ids.shape
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("fn_kernels"):
         # the batched Triton kernels where the load probe passed (one launch a stage, a pair's
         # bits its own); else the torch reference's per-pair walk. A kernel error after the
         # verdict propagates -- it is a bug, not a reason to change algorithms mid-call.
         from tools import moe_ada
-        if x.is_cuda and moe_ada.ok(x.device):
+        if x.is_cuda and _gpu.profile(x.device).moe_ok(x.device):
             return moe_ada.moe_experts(x, ids, bank)
         from tools import fn_prefill_kernels as PK
         return PK.moe_grouped_reference(x, ids, bank)
@@ -452,12 +451,12 @@ def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: tor
     M = ids.shape[0]
     if out is None:
         out = torch.empty(M, yd.shape[1], dtype=torch.bfloat16, device=yd.device)
-    if not _sm_supported(yd.device):
+    if not _gpu.profile(yd.device).inline("fn_kernels"):
         S = ids.shape[1]
         # the fused Ada kernel where the load probe passed and its shapes fit: one launch, the
         # same arithmetic
         from tools import moe_ada
-        if yd.is_cuda and moe_ada.ok(yd.device):
+        if yd.is_cuda and _gpu.profile(yd.device).moe_ok(yd.device):
             got = moe_ada.try_moe_combine(yd, ids, wts, out=out)
             if got is not None:
                 return out

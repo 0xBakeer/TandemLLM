@@ -650,13 +650,21 @@ def probe(device) -> None:
         ids8 = torch.randint(0, bank.n, (8, 2), generator=g).to(dev)
         x4 = torch.randn(4, 128, dtype=torch.bfloat16, generator=g).to(dev)
         ids4 = torch.randint(0, bank.n, (4, 2), generator=g).to(dev)
+        yd = torch.randn(8, 128, dtype=torch.float32, generator=g).to(dev)
+        w4 = torch.rand(4, 2, dtype=torch.float32, generator=g).to(dev)
+        order = ids4.argsort(dim=1, stable=True)
+        rows = torch.arange(4, device=dev)[:, None]
+        ref = (yd.view(4, 2, 128)[rows, order]
+               * w4[rows, order][..., None]).sum(1).to(torch.bfloat16)
+        got = try_moe_combine(yd, ids4, w4)
         _OK[dk] = bool(
             torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
                            moe_experts(x8, ids8, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x4, ids4, bank),
                                moe_experts(x4, ids4, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
-                               moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2))
+                               moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2)
+            and got is not None and torch.allclose(ref, got, atol=1e-2, rtol=1e-2))
     except Exception as e:
         _OK[dk] = False
         _say(f"probe failed on {dev}: {e!r}")
@@ -700,8 +708,8 @@ def try_moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor,
     """ on the Ada kernels; None when yd/ids shapes do not fit."""
     M, S = ids.shape
     H = yd.shape[1]
-    if yd.shape[0] != M * S or H % 128 or yd.dtype != torch.float32:
-        return None
+    if S & (S - 1) or yd.shape[0] != M * S or H % 128 or yd.dtype != torch.float32:
+        return None                       # tl.arange(0, S) takes a power-of-two slot count
     if out is None:
         out = torch.empty(M, H, dtype=torch.bfloat16, device=yd.device)
     _moe_combine_ada[(M, H // 128)](yd, ids.contiguous(), wts.contiguous(), out, H,

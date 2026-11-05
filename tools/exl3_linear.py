@@ -68,7 +68,6 @@ from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
 
-from tools.cuda_arch import inline_supported as _sm_supported  # noqa: E402
 
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
@@ -217,9 +216,9 @@ class EXL3Block:
         self.tile_n = self.N
         # on archs the inline extensions do not cover, probe the Triton kernels this rate uses,
         # once: the dispatch below reads the recorded verdicts, never a mid-call exception
-        if self.t.is_cuda and not _sm_supported(self.t.device):
+        if self.t.is_cuda and not _gpu.profile(self.t.device).inline("exl3_linear"):
             from tools import exl3_ada
-            exl3_ada.probe(self.t.device, self.kb)
+            _gpu.profile(self.t.device).exl3_probe(self.t.device, self.kb)
 
     @classmethod
     def group(cls, blocks: list["EXL3Block"], names: list[str]) -> "EXL3Block":
@@ -267,7 +266,7 @@ class EXL3Block:
         """Wi[:, n0:n1] in fp16 (the rotated basis), decoded on the device."""
         n1 = self.N if n1 is None else n1
         wi = torch.empty(self.K, n1 - n0, dtype=torch.float16, device=self.t.device)
-        if self.t.is_cuda and _sm_supported(self.t.device):
+        if self.t.is_cuda and _gpu.profile(self.t.device).inline("exl3_linear"):
             _module().exl3_recon(self.t, wi, self.kb, n0)
         elif self.t.is_cuda:
             from tools import exl3_ada
@@ -402,8 +401,8 @@ def _fallback_matmul(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     """The product the kernels mean, in fp32 except for the two roundings the kernels make on
     purpose (the rotated input to fp16, the output to bf16/fp32): the correctness gate's yardstick."""
     from tools import exl3_ada
-    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
-    gok = x.is_cuda and exl3_ada.gemv_ok(x.device, w.kb)
+    ada = x.is_cuda and _gpu.profile(x.device).exl3_rot_ok(x.device)
+    gok = x.is_cuda and _gpu.profile(x.device).exl3_gemv_ok(x.device, w.kb)
     H = hadamard128(x.device)
     M = x.shape[0]
     outs = []
@@ -445,8 +444,8 @@ def _reference_xh(xh: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     """reference_matmul's tail for an input already rotated (`rotate_in`'s [G, M, K] fp16):
     the products, the output rotation, svh."""
     from tools import exl3_ada
-    ada = xh.is_cuda and exl3_ada.rot_ok(xh.device)
-    gok = xh.is_cuda and exl3_ada.gemv_ok(xh.device, w.kb)
+    ada = xh.is_cuda and _gpu.profile(xh.device).exl3_rot_ok(xh.device)
+    gok = xh.is_cuda and _gpu.profile(xh.device).exl3_gemv_ok(xh.device, w.kb)
     H = hadamard128(xh.device)
     M = xh.shape[1]
     outs = []
@@ -476,7 +475,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     from tools import exl3_ada
     if x.shape[0] == 1:
         return _fallback_matmul(x, w)
-    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
+    ada = x.is_cuda and _gpu.profile(x.device).exl3_rot_ok(x.device)
     H = hadamard128(x.device)
     M = x.shape[0]
     outs = []
@@ -488,7 +487,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
             for m in range(M):
                 xs = x[m:m + 1].float() * w.suh[g].float()
                 xhs[m] = (xs.view(1, -1, 128) @ H).view(w.K).to(torch.float16)
-        gok = x.is_cuda and exl3_ada.gemv_ok(x.device, w.kb)
+        gok = x.is_cuda and _gpu.profile(x.device).exl3_gemv_ok(x.device, w.kb)
         if ada and gok:
             y = exl3_ada.gemv_rot(xhs, w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1], w.out_fp32)
         else:
@@ -509,7 +508,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
 def rotate_in(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     G = w.suh.shape[0]
     xh = torch.empty(G, x.shape[0], w.K, dtype=torch.float16, device=x.device)
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("exl3_linear"):
         H = hadamard128(x.device)
         for g in range(G):
             xs = x.float() * w.suh[g].float()
@@ -533,10 +532,10 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     assert y.dtype == torch.bfloat16 and y.dim() == 2 and y.shape[1] == 2 * w.K and w.suh.shape[0] == 1
     if y.stride(1) != 1 or y.stride(0) % 4 or y.data_ptr() % 8:
         y = y.contiguous()
-    if not _sm_supported(y.device):
+    if not _gpu.profile(y.device).inline("exl3_linear"):
         from tools import exl3_ada
-        if exl3_ada.rot_ok(y.device):
-            gok = exl3_ada.gemv_ok(y.device, w.kb)
+        if _gpu.profile(y.device).exl3_rot_ok(y.device):
+            gok = _gpu.profile(y.device).exl3_gemv_ok(y.device, w.kb)
             xh = exl3_ada.rot_in_silu(y, w.suh[0])
             outs = []
             for g, n0, n1 in segments(w):
@@ -571,7 +570,7 @@ def exl3_mlp_slab(x: torch.Tensor, gu: EXL3Block, wd: EXL3Block) -> torch.Tensor
         return None
     if _mm_out_fp32() is False:
         return None
-    if not _sm_supported(x.device):
+    if not _gpu.profile(x.device).inline("exl3_linear"):
         return None
     mod = _module()
     M = x.shape[0]
@@ -611,7 +610,7 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
     if out is None:
         out = torch.empty(M, w.N, dtype=odt, device=dev)
-    if not _sm_supported(dev):
+    if not _gpu.profile(dev).inline("exl3_linear"):
         if M > CHUNK_UNTIL:
             return _slab_matmul_ada(x, w, out, xh=xh)
         r = _reference_rows(x, w) if xh is None else _reference_xh(xh, w)
@@ -705,7 +704,7 @@ def _slab_matmul_ada(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
     the library GEMM keeps the fp32 product (`_mm_fp32`), `_exl3_rot_out_kernel` rotates the
     output. Decode+GEMM amortizes the weight read over M rows -- the right shape for prefill."""
     from tools import exl3_ada
-    rot = exl3_ada.rot_ok(x.device)
+    rot = _gpu.profile(x.device).exl3_rot_ok(x.device)
     if xh is None:
         if rot:
             G = w.suh.shape[0]

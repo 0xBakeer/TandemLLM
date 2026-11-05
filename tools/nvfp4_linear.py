@@ -43,7 +43,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tools.cuda_arch import capability
+from tools import gpu as _gpu
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -86,8 +86,7 @@ def _e2m1_hw_ok(device) -> bool:
     """Set the kernels' _E2M1_HW once, from the cached capability, and return it."""
     global _E2M1_SET
     if not _E2M1_SET:
-        cap = capability(device)
-        _E2M1_HW.value = cap is not None and cap >= (12, 0)
+        _E2M1_HW.value = _gpu.profile(device).e2m1()
         _E2M1_SET = True
     return _E2M1_HW.value
 
@@ -501,8 +500,7 @@ def _hw_block() -> bool:
     # there; NVFP4_BLOCK_TILES=all/splitk opts back in.
     global _HW_BLOCK
     if _HW_BLOCK is None:
-        cap = capability()
-        _HW_BLOCK = cap is not None and cap >= (12, 0)
+        _HW_BLOCK = _gpu.profile().e2m1()
     return _HW_BLOCK
 
 # Above this row count a projection is unpacked to bf16 once and handed to the library GEMM instead

@@ -81,6 +81,9 @@ def test_moe_probe_and_error_propagation():
     """MoEBank's load probes the device; a True verdict then lets a kernel error out."""
     if not _gpu():
         return "skipped: no CUDA device"
+    from tools.gpu import profile
+    if profile().id != "ada":
+        return "skipped: this device takes its own adapter's MoE kernels"
     from tools import moe_ada
     from tools import fn_kernels as FK
     dev = torch.device("cuda", torch.cuda.current_device())
