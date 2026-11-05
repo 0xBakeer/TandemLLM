@@ -73,6 +73,8 @@ export class QseDev extends LightElement {
     void this.loadSystem();
   }
   disconnectedCallback(): void {
+    if (this.grepTimer) clearTimeout(this.grepTimer);
+    this.grepTimer = null;
     this.stream?.close();
     this.reqPoll?.stop();
     this.testCtrl?.abort();
