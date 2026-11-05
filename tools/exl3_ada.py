@@ -656,6 +656,8 @@ _GEMV_OK: dict = {}
 def _devkey(device) -> str:
     """The verdict-table key: 'cuda' and 'cuda:0' are the same device to a probe."""
     d = torch.device(device)
+    if d.type != "cuda":
+        return str(d)
     i = d.index if d.index is not None else torch.cuda.current_device()
     return f"{d.type}:{i}"
 
