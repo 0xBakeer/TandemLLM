@@ -440,16 +440,20 @@ class MTPTreeDrafter:
         """The turn's first round (context n tokens): the head is put at the position of the first row
         it has not read (past rows a plain turn skipped), then StairCut decides whether the turn drafts;
         a plain turn drops the backlog."""
-        cap = int(_S.get("MTP_BACKLOG_CAP"))
-        if cap > 0 and self.head.depth:
-            self._trim_backlog(cap)
         unfed = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0)
-        at = max(0, n - 1 - unfed)
-        if self.head.st.length < at:
-            self.head.resume(at)
         # the graphs this class lacks: captured by the engine while the server is idle, so a turn that
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
+        # MTP_BACKLOG_CAP: trimmed only where the whole backlog would make the turn plain; a turn that drafts
+        # with it keeps it
+        cap = int(_S.get("MTP_BACKLOG_CAP"))
+        if (cap > 0 and self.head.depth and self.lanes <= 1 and unfed > cap
+                and not self.cut.pays(self.cls, unfed, self.answer, extra)):
+            self._trim_backlog(cap)
+            unfed = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0)
+        at = max(0, n - 1 - unfed)
+        if self.head.st.length < at:
+            self.head.resume(at)
         # no draft head: no backlog to read into it, and each round's match decides (above)
         # the decision's inputs, for the request's line (a plain turn whose reason is not seen cannot be argued)
         c = self.cut

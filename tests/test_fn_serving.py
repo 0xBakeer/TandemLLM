@@ -434,6 +434,57 @@ def test_the_backlog_cap_makes_a_long_cold_turn_draft():
     return "20,000 cold rows: plain with the whole backlog, drafts with the cap (2,044 rows primed)"
 
 
+def _capped_turn(n, chunk):
+    """A cold n-row prompt synced in `chunk`-row prefill chunks (the server syncs once a chunk), its first turn
+    with the default cap: (turn, resumes, what `head.prime` got as (row positions, next tokens) a call)."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 262_144)
+    prices = {"262144": {"chain": {"1": 60.0, "2": 70.0}, "plain": {"1": 24.7}, "spec": {"1": 10.0},
+                         "prime": {"1": 0.28}}}
+    head, resumed, primed = _StubHead(), [], []
+    head.resume = lambda at: (resumed.append(at), setattr(head.st, "length", at))
+    head.prime = lambda rows, nexts: (primed.append((rows[:, 0].long().tolist(), list(nexts))),
+                                      setattr(head.st, "length", head.st.length + len(nexts)))
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(prices), siblings=False))
+    prompt = list(range(n))
+    key, old = "QWEN38_MTP_BACKLOG_CAP", os.environ.pop("QWEN38_MTP_BACKLOG_CAP", None)
+    try:
+        d.reset()
+        for p in range(0, n, chunk):
+            d.sync(prompt[p:p + chunk], _rows(p, min(chunk, n - p)), p)
+        tree = d.propose_tree(prompt, 8)
+    finally:
+        if old is not None:
+            os.environ[key] = old
+    assert d.req["turn"] is True and tree is not None and tree.n_draft > 0, d.req
+    return resumed, primed, d.req["prime_rows"]
+
+
+def test_the_backlog_cap_cuts_a_prompt_synced_in_chunks():
+    """The server syncs a prompt once a prefill chunk, so the cut runs through the queue of synced chunks: whole
+    chunks dropped, then one sliced (17,000 rows: the cut lands in a queued chunk) or the held last chunk sliced
+    (20,000 rows). Either way the head resumes past the older rows, primes the last 2,048 less the chain's,
+    and every primed row goes with its own next token."""
+    for n in (20_000, 17_000):
+        resumed, primed, rows = _capped_turn(n, 4096)
+        assert resumed == [n - 1 - 2048], (n, resumed)
+        assert rows == 2048 - (_StubHead.depth + 1), (n, rows)
+        pos = [p for r, _ in primed for p in r]
+        nexts = [x for _, ts in primed for x in ts]
+        assert pos == list(range(n - 2048, n - _StubHead.depth - 1)), (n, pos[:3], pos[-3:])
+        assert nexts == [p + 1 for p in pos], n                     # row p with token p + 1
+    return "20,000 and 17,000 rows in 4,096-row chunks: resumed at n - 2,049, 2,044 rows primed, each with its next"
+
+
+def test_a_turn_that_drafts_with_its_whole_backlog_keeps_it():
+    """The cap trims only where the whole backlog would make the turn plain: a 4,000-row cold prompt pays for
+    its backlog (1.1 s against 3.8 s of saving), so the head reads every row and resumes nowhere."""
+    resumed, primed, rows = _capped_turn(4000, 4096)
+    assert resumed == [] and rows == 4000 - (_StubHead.depth + 1), (resumed, rows)
+    pos = [p for r, _ in primed for p in r]
+    assert pos == list(range(0, 4000 - _StubHead.depth - 1)), (pos[:3], pos[-3:])
+    return "4,000 cold rows draft with the whole backlog: nothing trimmed"
+
+
 def test_the_price_classes():
     """Dense contexts are class 0; past that the classes run 4,096, 6,144, 8,192, 12,288 ... 262,144 (a
     verify's cost grows with the context inside the sparse attention's own classes)."""
