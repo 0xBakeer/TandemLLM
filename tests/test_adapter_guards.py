@@ -147,9 +147,11 @@ GOLDEN_FP4 = {
     # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
     # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
     # their files count; the GB10's answers are the ones before (no row changes): every adapter
+    # #143: the ggml/GGUF quant types on NemotronH's GGUF loader (engine/models/nemotron_h/gguf*.py,
+    # tools/gguf_quants.py, tools/gguf_grids.py): nemotron_h
     "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
     "qwen4_exp": "d20a881a5888f9ed52de3b8e0c35647d39b31a7aa59de0eb15b5e2fe9d80bd98",
-    "nemotron_h": "058fd3514b2db6a759f17975df527251694710e0b1e7ef82d43f7821f7964fba",
+    "nemotron_h": "0aea5b0638d8faf2ef8a1a7c270df503d12f81a6d30296cc2556685b5a2f27d5",
     "lfm2_moe": "fd1fa1113f5c10ceea8fc13e3f282cc98480014c51c0419033cd2fb4453822f2",
     "qwen3_5_moe": "b8dfa7ca1146adafdc5c68aeb88ed4aad7c4c796482d4d37109593e861fa7807",
     "flint": "d007cece66261ef2f53d01057c056a53cbf6424e3c8692366debfd1299ac04b7",
