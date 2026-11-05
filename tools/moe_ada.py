@@ -43,14 +43,14 @@ def _fwht(v):
 def _moe_rot_in(X, IDS, SU, XH, S, K, J: tl.constexpr):
     p = tl.program_id(0)
     j = tl.program_id(1)
-    kb128 = tl.program_id(2)
     e = tl.load(IDS + p)
     su = tl.load(SU + e * 3 + j).to(tl.pointer_type(tl.float16))
     off = tl.arange(0, 128)
-    x = tl.load(X + (p // S) * K + kb128 * 128 + off).to(tl.float32)
-    suh = tl.load(su + kb128 * 128 + off).to(tl.float32)
-    xh = (_fwht(x * suh) * RSQRT128).to(tl.float16)
-    tl.store(XH + (p * J + j) * K + kb128 * 128 + off, xh)
+    for kb128 in range(K // 128):
+        x = tl.load(X + (p // S) * K + kb128 * 128 + off).to(tl.float32)
+        suh = tl.load(su + kb128 * 128 + off).to(tl.float32)
+        xh = (_fwht(x * suh) * RSQRT128).to(tl.float16)
+        tl.store(XH + (p * J + j) * K + kb128 * 128 + off, xh)
 
 
 @triton.jit
@@ -184,14 +184,16 @@ def _moe_gtrellis(XH, ORDER, STARTS, COUNTS, TR, KBt, PINV, YP,
                   K, KT, NT, NBS, XSTR, XJSTR, YSTR, YJSTR,
                   J: tl.constexpr, TJ: tl.constexpr, BM: tl.constexpr,
                   K_INV, K_BIAS):
-    """Grouped trellis GEMM for prefill: grid (E, ceil(P/BM), J*NBS). Program (e, mb, j*NBS+nb)
+    """Grouped trellis GEMM for prefill: grid (J*NBS, ceil(P/BM), E). Program (nb, mb, e)
     decodes the [16k, 128n] trellis slice of projection (e, tj) once per kt and tl.dots it with
     the BM pairs of expert e that block mb covers (order/starts/counts group pairs by expert).
     No fp16 weight slab is materialised; a pair-block belongs to one expert, so the decode is
-    shared BM-fold. Output in the pairs' own order (YP[pair])."""
-    e = tl.program_id(0)
+    shared BM-fold. Output in the pairs' own order (YP[pair]). n-blocks lead the grid: the
+    col-tiles of one (e, mb) then land on the SMs together and share the same gathered pair
+    rows and adjacent trellis slices through L2, instead of 64 experts streaming at once."""
+    nbj = tl.program_id(0)
     mb = tl.program_id(1)
-    nbj = tl.program_id(2)
+    e = tl.program_id(2)
     j = nbj // NBS
     nb = nbj % NBS
     c0 = tl.load(STARTS + e)
@@ -262,21 +264,21 @@ def _moe_rot_out_down(YGU_P, IDS, SV, SU, XD, I):
     """`_moe_rot_out` on the (g, u) partials + `_moe_down_in`: the bf16-rounded g/u feed silu,
     the product rotates with the down suh -- all in registers, identical rounding chain."""
     p = tl.program_id(0)
-    nb = tl.program_id(1)
     e = tl.load(IDS + p)
     svg = tl.load(SV + e * 3 + 0).to(tl.pointer_type(tl.float16))
     svu = tl.load(SV + e * 3 + 1).to(tl.pointer_type(tl.float16))
     sud = tl.load(SU + e * 3 + 2).to(tl.pointer_type(tl.float16))
     off = tl.arange(0, 128)
-    yg = (_fwht(tl.load(YGU_P + (p * 2 + 0) * I + nb * 128 + off)) * RSQRT128
-          * tl.load(svg + nb * 128 + off).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
-    yu = (_fwht(tl.load(YGU_P + (p * 2 + 1) * I + nb * 128 + off)) * RSQRT128
-          * tl.load(svu + nb * 128 + off).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
-    a = (yg / (1 + tl.exp(-yg))).to(tl.bfloat16).to(tl.float32) * yu
-    a = a.to(tl.bfloat16).to(tl.float32)
-    suh = tl.load(sud + nb * 128 + off).to(tl.float32)
-    xd = (_fwht(a * suh) * RSQRT128).to(tl.float16)
-    tl.store(XD + p * I + nb * 128 + off, xd)
+    for nb in range(I // 128):
+        yg = (_fwht(tl.load(YGU_P + (p * 2 + 0) * I + nb * 128 + off)) * RSQRT128
+              * tl.load(svg + nb * 128 + off).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
+        yu = (_fwht(tl.load(YGU_P + (p * 2 + 1) * I + nb * 128 + off)) * RSQRT128
+              * tl.load(svu + nb * 128 + off).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
+        a = (yg / (1 + tl.exp(-yg))).to(tl.bfloat16).to(tl.float32) * yu
+        a = a.to(tl.bfloat16).to(tl.float32)
+        suh = tl.load(sud + nb * 128 + off).to(tl.float32)
+        xd = (_fwht(a * suh) * RSQRT128).to(tl.float16)
+        tl.store(XD + p * I + nb * 128 + off, xd)
 
 
 
@@ -325,18 +327,18 @@ def _moe_combine_rot(YPP, IDS, SV, YD, N_OUT, KS: tl.constexpr, TJ: tl.constexpr
 def _moe_rot_out(YP, IDS, SV, Y, N_OUT, J: tl.constexpr, TJ: tl.constexpr, BF16: tl.constexpr):
     p = tl.program_id(0)
     j = tl.program_id(1)
-    nb = tl.program_id(2)
     e = tl.load(IDS + p)
     tj = j if TJ < 0 else TJ
     sv = tl.load(SV + e * 3 + tj).to(tl.pointer_type(tl.float16))
     off = tl.arange(0, 128)
-    yp = tl.load(YP + (p * J + j) * N_OUT + nb * 128 + off)
-    svh = tl.load(sv + nb * 128 + off).to(tl.float32)
-    y = _fwht(yp) * RSQRT128 * svh
-    if BF16:
-        tl.store(Y + (p * J + j) * N_OUT + nb * 128 + off, y.to(tl.bfloat16))
-    else:
-        tl.store(Y + (p * J + j) * N_OUT + nb * 128 + off, y)
+    for nb in range(N_OUT // 128):
+        yp = tl.load(YP + (p * J + j) * N_OUT + nb * 128 + off)
+        svh = tl.load(sv + nb * 128 + off).to(tl.float32)
+        y = _fwht(yp) * RSQRT128 * svh
+        if BF16:
+            tl.store(Y + (p * J + j) * N_OUT + nb * 128 + off, y.to(tl.bfloat16))
+        else:
+            tl.store(Y + (p * J + j) * N_OUT + nb * 128 + off, y)
 
 
 _PINV: dict = {}
@@ -370,7 +372,7 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     if not x.is_contiguous():
         x = x.contiguous()
     xh = torch.empty(P, 2, H, dtype=torch.float16, device=dev)
-    _moe_rot_in[(P, 2, H // 128)](x, flat, bank.su, xh, S, H, J=2, num_warps=4)
+    _moe_rot_in[(P, 2)](x, flat, bank.su, xh, S, H, J=2, num_warps=2)
 
     # K splits until ~768 programs exist for one pair; a function of the projections' shapes
     # only, so a pair's summation order (and bits) never depends on M (ENG-287)
@@ -405,7 +407,7 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
                                       H, H // 16, I // 16, J=2, TJ=-1,
                                       K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=2, num_stages=1)
         xd = torch.empty(P, I, dtype=torch.float16, device=dev)
-        _moe_rot_out_down[(P, I // 128)](ygu_p, flat, bank.sv, bank.su, xd, I, num_warps=4)
+        _moe_rot_out_down[(P,)](ygu_p, flat, bank.sv, bank.su, xd, I, num_warps=2)
         del ygu_p
     del xh
 
@@ -432,8 +434,8 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
         _moe_trellis[(P, 1, H // 128)](xd, flat, bank.tr, bank.kb, pinv, yd_p,
                                       I, I // 16, H // 16, J=1, TJ=2,
                                       K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=2, num_stages=1)
-        _moe_rot_out[(P, 1, H // 128)](yd_p, flat, bank.sv, yd.view(P, 1, H), H,
-                                      J=1, TJ=2, BF16=False, num_warps=4)
+        _moe_rot_out[(P, 1)](yd_p, flat, bank.sv, yd.view(P, 1, H), H,
+                             J=1, TJ=2, BF16=False, num_warps=2)
     del xd
     return yd
 
@@ -450,23 +452,26 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
     H, I = bank.H, bank.I
     flat = ids.reshape(-1).to(torch.int32).contiguous()
     pinv = _pinv(dev)
-    BM = 32
+    BM = 64     # measured on sm_89: 64 pairs share each decode, ~8% faster than 32 at 2k rows
 
     # every pair's rotated input, batched (same kernel as the decode path)
     if not x.is_contiguous():
         x = x.contiguous()
     xh = torch.empty(P, 2, H, dtype=torch.float16, device=dev)
-    _moe_rot_in[(P, 2, H // 128)](x, flat, bank.su, xh, S, H, J=2, num_warps=4)
+    _moe_rot_in[(P, 2)](x, flat, bank.su, xh, S, H, J=2, num_warps=2)
 
     # pairs grouped by expert: each (expert, pair-block, n-block) program decodes the trellis
-    # once for its BM pairs (in-kernel decode + tl.dot, no fp16 slab materialised)
+    # once for its BM pairs (in-kernel decode + tl.dot, no fp16 slab materialised). The grid's
+    # m axis is the busiest expert's block count, not ceil(P/BM): sizing by the total launches
+    # ~E-fold empty CTAs that load STARTS/COUNTS and exit, and that waste scales with P (it was
+    # the superlinear term at 4,096-row chunks -- ~800k empty launches vs ~500 active).
     order = torch.argsort(flat, stable=True).to(torch.int32).contiguous()
-    counts = torch.bincount(flat[order.long()].to(torch.long), minlength=bank.n).to(torch.int32).contiguous()
+    counts = torch.bincount(flat.to(torch.long), minlength=bank.n).to(torch.int32).contiguous()
     starts = (counts.cumsum(0) - counts).to(torch.int32).contiguous()
-    mbs = (P + BM - 1) // BM
+    mbs = int(counts.max().item() + BM - 1) // BM
 
     ygu_p = torch.empty(P, 2, I, dtype=torch.float32, device=dev)
-    _moe_gtrellis[(bank.n, mbs, 2 * (I // 128))](
+    _moe_gtrellis[(2 * (I // 128), mbs, bank.n)](
         xh, order, starts, counts, bank.tr, bank.kb, pinv, ygu_p,
         H, H // 16, I // 16, I // 128, 2 * H, H, 2 * I, I, J=2, TJ=-1, BM=BM,
         K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
@@ -474,19 +479,19 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
 
     # silu(g)*u + the down input rotation, batched (the decode path's fused kernel)
     xd = torch.empty(P, I, dtype=torch.float16, device=dev)
-    _moe_rot_out_down[(P, I // 128)](ygu_p, flat, bank.sv, bank.su, xd, I, num_warps=4)
+    _moe_rot_out_down[(P,)](ygu_p, flat, bank.sv, bank.su, xd, I, num_warps=2)
     del ygu_p
 
     yd_p = torch.empty(P, H, dtype=torch.float32, device=dev)
-    _moe_gtrellis[(bank.n, mbs, H // 128)](
+    _moe_gtrellis[(H // 128, mbs, bank.n)](
         xd, order, starts, counts, bank.tr, bank.kb, pinv, yd_p,
         I, I // 16, H // 16, H // 128, I, 0, H, 0, J=1, TJ=2, BM=BM,
         K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=8, num_stages=1)
     del xd
 
     yd = torch.empty(P, H, dtype=torch.float32, device=dev)
-    _moe_rot_out[(P, 1, H // 128)](yd_p, flat, bank.sv, yd.view(P, 1, H), H,
-                                  J=1, TJ=2, BF16=False, num_warps=4)
+    _moe_rot_out[(P, 1)](yd_p, flat, bank.sv, yd.view(P, 1, H), H,
+                         J=1, TJ=2, BF16=False, num_warps=2)
     return yd
 
 
