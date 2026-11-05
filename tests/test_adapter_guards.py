@@ -152,12 +152,14 @@ GOLDEN_FP4 = {
     # nvfp4_relu2.py, exl3_linear.py, fn_kernels.py); the GB10's answers unchanged: every adapter
     # #143: the ggml/GGUF quant types on NemotronH's GGUF loader (engine/models/nemotron_h/gguf*.py,
     # tools/gguf_quants.py, tools/gguf_grids.py): nemotron_h
+    # #158: the indexer's radix select past 8,192 blocks, its fused score epilogue and live pool slice (the bits
+    # the same; tools/fn_seq_kernels, tools/fn_prefill_kernels.py, knobs): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe, flint
     "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
-    "qwen4_exp": "3a880c73da69072042a5f09c62d2eae57290b677c94a785f1814af14d4fcdfed",
-    "nemotron_h": "054ace16bd4fc50540099c27d9107b252e3bbfb01d0c92529a9317d96a0d9268",
-    "lfm2_moe": "0597f7ad08e47ce3a84db7c284cb73ad9ca5695ae5208a62651e671b3c66ce6b",
-    "qwen3_5_moe": "f8782488fc15a211ce61a8b21809bbf6f2af1f67caa69b47728d82f02c23d62c",
-    "flint": "3798bde86f59c4b535d5192509a1ec6fe02376544fbeabfe5e2612ac37779ffd",
+    "qwen4_exp": "b3226d00b2a5e4b2804f0bb91907db90f61864eadd78f6dd11aaeb5c18e4fd6d",
+    "nemotron_h": "7e42cc390f3fff2b373e47d1dc7e46bc3b26d7948a13ea3dc53adc1dca718c6b",
+    "lfm2_moe": "73d224baccec5ff53847027176a38c9a72aeee3665e82178a426f6a341688904",
+    "qwen3_5_moe": "875113f7da33bf9d4f8a90c6f7ad85aab2e80434d007439fcc4992e8bac4052a",
+    "flint": "b3d2ef12774d32e91fdf1ec5a43743d6bc12a312853f2dd9e8a4615c3e85d224",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
