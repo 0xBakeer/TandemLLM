@@ -96,11 +96,22 @@ NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
 
 def cached_of(u: dict) -> int:
     """The prompt tokens a provider served from its cache: DeepSeek's `prompt_cache_hit_tokens`
-    when it sends one, else the OpenAI field (our engine's)."""
+    when it sends one, else the OpenAI field (our engine's). Engine usage mode counts the occupied
+    context's cached rows there; `client_cached_tokens` keeps the share of `client_tokens`."""
     hit = u.get("prompt_cache_hit_tokens")
     if isinstance(hit, int) and not isinstance(hit, bool):
         return hit
-    return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    details = u.get("prompt_tokens_details") or {}
+    client = details.get("client_cached_tokens")
+    return int(client if client is not None else details.get("cached_tokens") or 0)
+
+
+def client_prompt_of(u: dict) -> int:
+    """The prompt tokens chatd sent. Engine usage mode also reports the larger occupied context in
+    `prompt_tokens`; when that differs, its details preserve chatd's count in `client_tokens`."""
+    details = u.get("prompt_tokens_details")
+    client = details.get("client_tokens") if isinstance(details, dict) else None
+    return int(client if client is not None else u.get("prompt_tokens") or 0)
 
 
 #: SRV-709: the Now line while a chat waits because the engine's memory is full
@@ -666,8 +677,9 @@ class Run:
                          "predicted_n": comp,
                          "predicted_ms": round((self.call_last - self.call_first) * 1000, 1)}
                     self.usage["timings"] = dict(t, cache_source="provider")
+                prompt_tokens = client_prompt_of(u)
                 self.step_usage.append({"step": self.step,
-                                        "prompt_tokens": int(u.get("prompt_tokens") or 0),
+                                        "prompt_tokens": prompt_tokens,
                                         "cached_tokens": cached_of(u),
                                         "cache_source": t.get("cache_source") or (
                                             "provider" if self.backend != "engine" else None),
@@ -679,8 +691,8 @@ class Run:
                 if comp:                             # the call's exact counts
                     self.tokens = self.call_base[0] + comp
                     self.thinking_tokens = self.call_base[1] + reas
-                self.svc.learn_ratio(self.conv, int(u.get("prompt_tokens") or 0),
-                                     self.request_chars, self.request_images)
+                self.svc.learn_ratio(self.conv, prompt_tokens, self.request_chars,
+                                     self.request_images)
             for ch in obj.get("choices") or []:
                 if not isinstance(ch, dict):
                     continue
@@ -895,7 +907,7 @@ class Run:
             "ttft_ms": ttft,
             "decode_tps": turn["decode_tps"] or t.get("predicted_per_second") or None,
             "total_ms": total,
-            "prompt_tokens": int(u.get("prompt_tokens") or 0),
+            "prompt_tokens": client_prompt_of(u),
             "completion_tokens": int(self.acc["completion"] or u.get("completion_tokens") or
                                      self.tokens),
             "reasoning_tokens": int(self.acc["reasoning"] or ctd.get("reasoning_tokens") or

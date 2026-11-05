@@ -10,13 +10,19 @@ the metadata.
 Tensors, by type:
 
   IQ2_XXS 2-D        an `IQ2Linear` (tools/iq2_linear.py): decoded on the fly by its own kernel
-  IQ2_XXS experts    an `IQ2Bank` when both the up and the down stack are IQ2_XXS
+  IQ2_XXS experts    an `IQ2Bank` when both the up and the down stack are IQ2_XXS; any other pair of
+                     stacks loads as BF16 (`ExpertsRelu2`)
   NVFP4 2-D          an `NVFP4Linear` with the tensor's scale (`<name>.scale`, Bolt's Mamba2 in_proj and
                      out_proj) applied to the fp32 sum of the matmul
   F32 / F16 / BF16   as bf16 (fp32 for the router's bias, A, dt_bias, D)
   Q8_0 2-D           a `Q8Linear` (the head, the attention and latent projections) on its tile kernel; the
                      embedding dequantised to bf16 at load (the twin, bit for bit with gguf-py), a row a token
-  any other type     refused by name (GGUFFile.open): one kernel per type found in a release
+  packed quants      the ggml types of tools/gguf_quants.py `PACKED_LINEAR` (Q4_0..Q6_K, the IQ
+  on a projection    lattices), a packed linear on the projections only -- embeddings, routers,
+                     norms and conv taps come back dense via `_dense` whichever type they are in
+  TQ*, MXFP4         load-time dequant to bf16 (dense), whatever the role; an NVFP4 weight that is
+                     not packed takes its tensor scale there too
+  any other type     refused by name (GGUFFile.open or `_dense`): one kernel per type found in a release
 
 The GGUF format stores some Mamba2 tensors in its own forms: `ssm_a` is A itself (-exp(A_log)), `ssm_d` and
 `ssm_a` are [heads, 1], `ssm_norm` is [groups, group size], `ssm_conv1d` is [conv_dim, K]; they are put
@@ -99,6 +105,19 @@ def config_from_gguf(g: GGUFFile, path: str = "") -> NemotronHConfig:
         raise ValueError("expert_group_count != 1: this engine implements one group")
     validate(cfg)
     return cfg
+
+
+#: canonical roles a packed linear serves (its API is `matmul`/`dequant` only): the lm head and the
+#: layer projections. Every other consumer -- the embeddings' index_select, the routers' .float()/
+#: strides, norms, conv taps -- reads a plain tensor, so a quantized weight in any of those roles is
+#: dequantised at load by `_dense` instead of packing.
+_PACKED_ROLES = (".in_proj.weight", ".out_proj.weight", ".q_proj.weight", ".k_proj.weight",
+                 ".v_proj.weight", ".o_proj.weight", ".fc1_latent_proj.weight", ".fc2_latent_proj.weight",
+                 ".up_proj.weight", ".down_proj.weight", ".eh_proj.weight")
+
+
+def _packed_projection(canon: str) -> bool:
+    return canon == "lm_head.weight" or canon.endswith(_PACKED_ROLES)
 
 
 def _names(cfg: NemotronHConfig) -> dict:
@@ -202,7 +221,24 @@ def _dense(g: GGUFFile, name: str, device, want) -> torch.Tensor:
         return x.reshape(t.shape).to(device=device, dtype=want)
     if t.type_name == "Q8_0":
         return Q.dequant_q8_0(np.array(raw), N, K).reshape(t.shape).to(device=device, dtype=want)
+    from tools import gguf_quants as GQ
+    if t.type in GQ.TYPES:
+        x = GQ.dequant(t.type, np.array(raw), t.shape)
+        if t.type_name == "NVFP4":
+            x = x * _nvfp4_scale(g, name)
+        return x.to(device=device, dtype=want)
     raise ValueError(f"{name}: {t.type_name} has no reader here")
+
+
+def _nvfp4_scale(g: GGUFFile, name: str) -> float:
+    """The tensor scale of NVFP4 weight `name` (`<name>.scale`, one F32 value), 1.0 without one."""
+    sc = g.tensors.get(name[:-len(".weight")] + ".scale") if name.endswith(".weight") else None
+    if sc is None:
+        return 1.0
+    if sc.type_name != "F32" or int(np.prod(sc.shape)) != 1:
+        raise ValueError(f"{sc.name}: a {sc.type_name} {list(sc.shape)} tensor scale; "
+                         "this engine applies one F32 value a tensor")
+    return float(np.array(g.raw(sc.name)).view(np.float32)[0])
 
 
 def load_gguf(path: str, device="cuda", mtp: bool = True, log=print, config_dir: str | None = None):
@@ -241,18 +277,24 @@ def load_gguf(path: str, device="cuda", mtp: bool = True, log=print, config_dir:
                 raise ValueError(f"{stored}: a tensor scale on a {w.type_name if w else 'missing'} weight; "
                                  "this engine applies one to NVFP4 only")
             continue
-        if t.type_name == "IQ2_XXS" and len(t.shape) == 2:
+        if t.type_name == "IQ2_XXS" and len(t.shape) == 2 and _packed_projection(canon):
             W[canon] = Q.IQ2Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
             packed += 1
             continue
-        if t.type_name == "Q8_0" and len(t.shape) == 2 and canon != "embeddings.weight":
+        if t.type_name == "Q8_0" and len(t.shape) == 2 and _packed_projection(canon):
             W[canon] = Q.Q8Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
             packed += 1
             continue
-        if t.type_name == "NVFP4" and len(t.shape) == 2:
+        if t.type_name == "NVFP4" and len(t.shape) == 2 and _packed_projection(canon):
             sc = g.tensors.get(stored[:-len(".weight")] + ".scale")
             scale = float(np.array(g.raw(sc.name)).view(np.float32)[0]) if sc is not None else 1.0
             W[canon] = Q.NVFP4Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], scale=scale, device=device)
+            packed += 1
+            continue
+        from tools import gguf_quants as GQ
+        if (t.type in GQ.PACKED_LINEAR and len(t.shape) == 2 and _packed_projection(canon)
+                and t.shape[1] % GQ.TYPES[t.type][0] == 0):
+            W[canon] = GQ.PACKED_LINEAR[t.type](np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
             packed += 1
             continue
         want = torch.float32 if canon.endswith(F32_NAMES) else torch.bfloat16

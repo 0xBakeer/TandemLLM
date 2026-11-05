@@ -25,6 +25,8 @@ import sys
 
 import torch
 
+from tools import gpu as _gpu
+
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -100,15 +102,15 @@ if HAVE_TRITON:
 
     @triton.jit
     def _fp8_rows(X, s_x, W, scale, Y, s_y, M, N, K: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                  F32: tl.constexpr):
+                  F32: tl.constexpr, BM: tl.constexpr):
         pm = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
+        rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         rm = rows < M
         cm = cols < N
         kk = tl.arange(0, BK)
-        acc = tl.zeros([16, BN], dtype=tl.float32)
+        acc = tl.zeros([BM, BN], dtype=tl.float32)
         for k0 in range(0, K, BK):
             x = tl.load(X + rows[:, None] * s_x + k0 + kk[None, :], mask=rm[:, None], other=0.0)
             w = tl.load(W + cols[:, None] * K + k0 + kk[None, :], mask=cm[:, None], other=0.0)
@@ -212,9 +214,9 @@ class FP8Linear:
         self.N, self.K = self.w.shape
         self.shape = (self.N, self.K)
         self.scale = torch.tensor([float(scale)], dtype=torch.float32, device=self.w.device)
-        self.bk = 128 if self.K % 128 == 0 else 64
-        # the N tile, fixed by the shape (never by the row count): narrow enough to fill the board at one row
-        self.bn = bn or (32 if self.N <= 8192 else 64)
+        # the launch is the GPU adapter's answer (tools/gpu `fp8_rows`, `fp8_row_tile`)
+        self._prof = _gpu.profile()
+        self.bn, self.bk, self.warps, self.stages = self._prof.fp8_rows(self.N, self.K, bn)
 
     @property
     def nbytes(self) -> int:
@@ -236,9 +238,13 @@ class FP8Linear:
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        _fp8_rows[(triton.cdiv(M, 16), triton.cdiv(self.N, self.bn))](x2, x2.stride(0), self.w, self.scale, out,
-                                                                      out.stride(0), M, self.N, K=self.K, BN=self.bn,
-                                                                      BK=self.bk, F32=f32, num_warps=4)
+        bm = self._prof.fp8_row_tile(M)
+        kw = dict(num_warps=self.warps)
+        if self.stages is not None:
+            kw["num_stages"] = self.stages
+        _fp8_rows[(triton.cdiv(M, bm), triton.cdiv(self.N, self.bn))](
+            x2, x2.stride(0), self.w, self.scale, out, out.stride(0), M, self.N, K=self.K,
+            BN=self.bn, BK=self.bk, F32=f32, BM=bm, **kw)
         return out.view(*x.shape[:-1], self.N)
 
 
