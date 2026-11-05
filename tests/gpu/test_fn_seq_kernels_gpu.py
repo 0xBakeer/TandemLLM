@@ -416,12 +416,15 @@ def test_attn_prep_indexer_query():
 
 
 def test_qsa_topk_kernel_equals_torch():
-    """The one-kernel selection = the torch selection (stable top-512 with ties, ascending, tail)."""
+    """The one-kernel selection = the torch selection (stable top-512 with ties, ascending, tail). Past 8,192
+    blocks, and at any size that is not a power of two, the radix-select kernel runs; row 0 of each size has
+    fewer than 512 finite scores (the rest of its 512 are -inf ties)."""
     g = _g(13)
     out = []
-    for NB, M in ((1024, 3), (2048, 2), (8192, 4)):
+    for NB, M in ((1024, 3), (2048, 2), (8192, 4), (5000, 3), (12288, 3), (16384, 3), (65536, 2)):
         sc = (torch.randn(M, NB, generator=g, device=DEV) * 4).round()            # many exact ties
         nblk = torch.randint(513, NB + 1, (M,), generator=g, device=DEV)
+        nblk[0] = 300
         sc[torch.arange(NB, device=DEV)[None, :] >= nblk[:, None]] = float("-inf")
         tail = (nblk[:, None] * 4 + torch.arange(3, device=DEV)[None, :]).int().contiguous()
         a = torch.zeros(M, SK.NSEL, dtype=torch.int32, device=DEV)

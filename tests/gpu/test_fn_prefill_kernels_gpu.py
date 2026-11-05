@@ -191,6 +191,20 @@ def test_qsa_scores_rows():
             " a pool shorter than the score width")
 
 
+
+def test_qsa_scores_rows_fused_epilogue_is_bitwise():
+    g = torch.Generator(device=DEV).manual_seed(11)
+    out = []
+    for M, NB, pool_n, block in ((300, 2048, 2058, 128), (1100, 4096, 4096, 1024), (64, 9000, 8000, 1024)):
+        iq = (torch.randn(M, 4, 128, generator=g, device=DEV) * 0.3).to(torch.bfloat16)
+        pool = (torch.randn(pool_n, 128, generator=g, device=DEV) * 0.3).to(torch.bfloat16)
+        nblk = torch.randint(0, min(NB, pool_n) + 1, (M,), generator=g, device=DEV)
+        got = PK.qsa_scores_rows(iq, pool, nblk, NB, block=block)
+        want = PK.qsa_scores_rows_torch(iq, pool, nblk, NB, block=block)
+        assert torch.equal(got.view(torch.int32), want.view(torch.int32)), (M, NB)
+        out.append(f"{M}x{NB}")
+    return "bit for bit vs the torch ops: " + ", ".join(out)
+
 if __name__ == "__main__":
     passed = failed = 0
     for name, fn in sorted(globals().items()):

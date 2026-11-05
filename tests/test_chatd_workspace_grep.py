@@ -1,0 +1,338 @@
+"""Grep tells the truth: a file path is searchable, and size is not a mute button.
+
+Reproduced live on a 256K conversation: the model grepped `^#{1,2} ` at the manual's .md —
+the tool answered "no matches" while the file's very first line is `## TandemLLM`.
+
+Also here: grep is bounded (a newline-less multi-MB file cannot OOM the thread — GREP_LINE_MAX
+truncates the line, GREP_FILE_MAX caps the file), line numbers follow the SAME boundaries
+read_file's splitlines() uses (a form feed advances both tools by one), and the line pass
+runs per 1 MiB chunk instead of re-copying the buffer per line.
+
+Run: python tests/test_chatd_workspace_grep.py   (script mode; pytest-collectable too)
+"""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from chatd import workspace as W  # noqa: E402
+from chatd.workspace import Workspace
+
+
+def make_ws(root):
+    d = str(root)
+    os.makedirs(d + "/uploads", exist_ok=True)
+    with open(d + "/uploads/notes.md", "w") as f:
+        f.write("# Notes\nsome prose\n## Section A\n")
+    # a file past the old MAX_READ cliff (2 MB): the needle sits at the end
+    with open(d + "/uploads/big.txt", "w") as f:
+        while os.path.getsize(d + "/uploads/big.txt") < 2_200_000:
+            f.write("filler " + "x" * 60 + "\n")
+        f.write("NEEDLE-PAST-CLIFF\n")
+    # a newline-less 3 MB file (a request dump): the needle sits inside the first 64 KiB of
+    # the one giant line, so it is found; the point is that the scan terminates bounded
+    with open(d + "/uploads/dump.bin", "wb") as f:
+        f.write(b"junk " + b"x" * 4096)
+        f.write(b"NEEDLE-IN-DUMP")
+        f.write(b"y" * (3_000_000 - f.tell()))
+    # a form-feed file: grep must number lines exactly where read's splitlines() puts them
+    with open(d + "/uploads/ff.md", "wb") as f:
+        f.write(b"one\ntwo\x0cthree\x0cfox HITME\nseven\n")
+    return Workspace(d)
+
+
+
+def test_a_file_path_is_searchable(tmp_path):
+    WS = make_ws(tmp_path)
+    h = WS.grep("^## ", "/workspace/uploads/notes.md")
+    assert len(h) == 1 and h[0].endswith("## Section A")        # was: PathError -> 'no matches'
+
+
+def test_anchor_works_per_line_on_a_single_file_grep(tmp_path):
+    WS = make_ws(tmp_path)
+    h = WS.grep("^# ", "/workspace/uploads/notes.md")
+    assert len(h) == 1 and "Notes" in h[0]
+
+
+def test_a_file_past_the_old_cliff_is_scanned_not_skipped(tmp_path):
+    WS = make_ws(tmp_path)
+    assert len(WS.grep("NEEDLE-PAST-CLIFF", "/workspace")) == 1
+
+
+def test_the_big_file_answers_to_its_own_path(tmp_path):
+    WS = make_ws(tmp_path)
+    assert len(WS.grep("NEEDLE-PAST-CLIFF", "/workspace/uploads/big.txt")) == 1
+
+
+def test_directory_walk_still_greps_siblings(tmp_path):
+    WS = make_ws(tmp_path)
+    assert len(WS.grep("Section", "/workspace")) == 1
+
+
+def test_a_genuine_no_match_still_says_so(tmp_path):
+    WS = make_ws(tmp_path)
+    assert WS.grep("no-such-thing-xyz", "/workspace") == []
+
+
+def test_the_walk_is_lazy_so_a_limit_stops_it(tmp_path):
+    # `list(self.walk(start))` walked the whole tree before the first file was opened, so
+    # a grep that stopped at `limit` had already paid for the entire tree. Count the paths
+    # grep takes from walk(): a lazy walk hands over one file for `limit=1`, a list 2000.
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads", exist_ok=True)
+    for i in range(2000):
+        with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
+            f.write("LAZYNEEDLE\n")
+    ws = Workspace(d)
+    taken = [0]
+    walk = ws.walk
+
+    def counting(*a, **kw):
+        for p in walk(*a, **kw):
+            taken[0] += 1
+            yield p
+    ws.walk = counting
+    h = ws.grep("LAZYNEEDLE", "/workspace/uploads", limit=1)
+    assert len(h) == 1, h
+    assert taken[0] <= 2, f"grep took {taken[0]} paths from the walk for limit=1"
+
+
+def test_the_budget_covers_the_walk_too(tmp_path, monkeypatch):
+    # the deadline is checked at the top of the file loop, so files that `include` filters
+    # out count against the budget: with the budget spent, grep says so
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads", exist_ok=True)
+    for i in range(20):
+        with open(f"{d}/uploads/f{i:05d}.txt", "w") as f:
+            f.write("nothing to see here\n")
+    monkeypatch.setattr(W, "GREP_BUDGET_S", -1)
+    h = Workspace(d).grep("ABSENT", "/workspace/uploads", include="*.none")
+    assert len(h) == 1 and "budget" in h[0], h
+
+
+def test_line_numbers_follow_reads_splitlines(tmp_path):
+    # a form feed ends a line for read(); grep must count it the same: one, two | three | hit
+    WS = make_ws(tmp_path)
+    h = WS.grep("HITME", "/workspace/uploads/ff.md")
+    assert len(h) == 1 and ":4:" in h[0], h
+
+
+def test_the_newline_less_dump_is_scanned_in_bounds(tmp_path):
+    WS = make_ws(tmp_path)
+    t0 = time.monotonic()
+    h = WS.grep("NEEDLE-IN-DUMP", "/workspace/uploads/dump.bin")
+    took = time.monotonic() - t0
+    assert len(h) == 1 and took < 5.0
+
+
+def test_long_lines_in_bulk_keep_every_number(tmp_path):
+    # the skip of an over-window line ends at the FIRST boundary in the buffer: a
+    # skip that ran to the buffer's LAST boundary swallowed whole lines sitting
+    # between the long line and the chunk end — 60 lines of 200 KB answered 28
+    # of 60 and numbered the rest wrong
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads", exist_ok=True)
+    with open(d + "/uploads/longlines.txt", "w") as f:
+        for i in range(1, 61):
+            f.write("needle%d " % i + "x" * (200_000 - 9) + "\n")
+    ws = Workspace(d)
+    h = ws.grep("^needle", "/workspace/uploads/longlines.txt")
+    nums = sorted(int(line.split(":")[1]) for line in h)
+    assert nums == list(range(1, 61)), "expected all 60 lines with their true numbers, got %r" % nums[:10]
+
+
+def test_the_giant_line_keeps_line_number_1(tmp_path):
+    WS = make_ws(tmp_path)
+    h = WS.grep("NEEDLE-IN-DUMP", "/workspace/uploads/dump.bin")
+    assert len(h) == 1 and ":1:" in h[0]
+
+
+def test_a_giant_line_past_the_window_ends_the_scan_no_hang(tmp_path):
+    WS = make_ws(tmp_path)
+    t0 = time.monotonic()
+    assert WS.grep("no newline here either", "/workspace/uploads/dump.bin") == []
+    assert time.monotonic() - t0 < 10.0
+
+
+def test_a_crlf_split_across_the_chunk_seam_counts_once(tmp_path):
+    # GREP_CHUNK is 1 MiB: park the \r as the last byte of chunk 1 and the \n as the
+    # first of chunk 2. An eager per-chunk split would count that pair twice and
+    # report SEAMHIT one line late.
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/seam.txt", "wb") as f:
+        f.write(b"x\n" * 524287)          # 1_048_574 bytes: 524287 complete lines
+        f.write(b"Q")                     # byte 1_048_574
+        f.write(b"\r\n")                  # 1_048_575 = '\r' (last of chunk 1), 1_048_576 = '\n'
+        f.write(b"SEAMHIT\n")
+    h = Workspace(d).grep("SEAMHIT", "/workspace/uploads/seam.txt")
+    assert len(h) == 1, h
+    assert int(h[0].split(":")[1]) == 524289, h
+
+
+def test_a_multibyte_char_cut_by_the_seam_still_matches(tmp_path):
+    # '\xc3' lands as the last byte of chunk 1, '\xa9' opens chunk 2: a per-chunk
+    # decode would mint two U+FFFD where the file holds an 'é', and the grep would
+    # call the line absent while read() shows it.
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/seam.md", "wb") as f:
+        f.write(b"y\n" * 524287)           # 1_048_574 bytes: 524287 complete lines
+        f.write(b"w")                     # byte 1_048_574, opens line 524288
+        f.write(b"\xc3")                  # 1_048_575: last byte of chunk 1
+        f.write(b"\xa9HITSPLIT\n")        # chunk 2 opens with the continuation byte
+    h = Workspace(d).grep("HITSPLIT", "/workspace/uploads/seam.md")
+    assert len(h) == 1 and int(h[0].split(":")[1]) == 524288, h
+    # the é itself is intact for a grep — not two replacement chars:
+    h2 = Workspace(d).grep("wéHITSPLIT", "/workspace/uploads/seam.md")
+    assert len(h2) == 1, h2
+
+
+def test_a_file_at_the_cliff_searches_its_last_chunk_and_says_nothing_more(tmp_path):
+    # the reported repro: a file of exactly 16,777,216 bytes with the match in
+    # the last 20. The loop used to drop that chunk before searching it -- no
+    # match, nothing said. A cliff chunk gets searched; and a file that ENDS
+    # at the cap has no rest, so it gets no "unread" line either (peek first).
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/big.txt", "wb") as f:
+        f.write(b"x\n" * 8388598)             # 16,777,196 bytes of filler lines
+        f.write(b"NEEDLE-AT-THE-CLIFF\n")     # the last 20: chunk 16
+    h = Workspace(d).grep("NEEDLE-AT-THE-CLIFF", "/workspace/uploads/big.txt")
+    assert len(h) == 1, h
+    assert ":8388599:" in h[0], h
+
+
+def test_a_file_past_the_cliff_says_where_it_stopped(tmp_path):
+    # one byte more than the cap: the note belongs to files that DO have a rest
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/big.txt", "wb") as f:
+        f.write(b"x\n" * 8388598)             # 16,777,196 bytes of filler lines
+        f.write(b"NEEDLE-AT-THE-CLIFF\n")     # the last 20: chunk 16
+        f.write(b"and the rest\n")            # one byte over is enough to say it
+    h = Workspace(d).grep("NEEDLE-AT-THE-CLIFF", "/workspace/uploads/big.txt")
+    assert len(h) == 2, h
+    assert ":8388599:" in h[0], h
+    assert "16 MiB" in h[1] and "unread" in h[1], h
+
+
+def test_unicode_line_boundaries_count_lines_where_splitlines_does(tmp_path):
+    # the reviewer's case: a chunk of pure-'\n' among the ASCII controls takes the
+    # str.split fast path -- but _GREP_EOL (and splitlines) also break on U+0085,
+    # U+2028 and U+2029, so the fast path under-counted and the needle landed one
+    # line early. The decoded head is probed for them before the fast path may run.
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/u.txt", "w", encoding="utf-8") as f:
+        f.write("line one\u2028line two\nline three NEEDLE")
+    h = Workspace(d).grep("NEEDLE", "/workspace/uploads/u.txt")
+    assert len(h) == 1 and h[0].endswith("line three NEEDLE") and ":3: " in h[0], h
+
+
+def test_a_fuzz_of_unicode_separators_only_agrees_with_splitlines(tmp_path):
+    # 100 files whose lines are separated by '\n' and the three Unicode boundaries
+    # only -- no ASCII control byte anywhere, so every chunk asks for the fast path.
+    # The fuzz that mixed in ASCII separators hid the bug: those files took the
+    # general path anyway.
+    import random
+    rng = random.Random(20261023)
+    seps = ["\n", "\u0085", "\u2028", "\u2029"]
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    want = {}
+    for i in range(100):
+        lines = [f"pad {i} {j}" for j in range(rng.randrange(20, 200))]
+        hit = rng.randrange(len(lines))
+        lines[hit] = f"FUZZNEEDLE-{i}-MARK"
+        text = "".join(ln + rng.choice(seps) for ln in lines)
+        with open(d + f"/uploads/f{i}.txt", "w", encoding="utf-8") as f:
+            f.write(text)
+        want[f"f{i}.txt"] = len(text.splitlines()[:hit]) + 1
+    h = Workspace(d).grep("FUZZNEEDLE-", "/workspace/uploads")
+    got = {}
+    for line in h:
+        path, num, _rest = line.split(":", 2)
+        got[path.rsplit("/", 1)[1]] = int(num)
+    assert sorted(got) == sorted(want), f"{len(got)} hits, expected 100"
+    for name in want:
+        assert got[name] == want[name], f"{name}: grep line {got[name]}, splitlines {want[name]}"
+
+
+def _numbers(root, path, data):
+    # grep's numbers for every line that starts with a marker, against splitlines()'
+    d = str(root)
+    os.makedirs(d + "/uploads", exist_ok=True)
+    with open(d + "/uploads/" + path, "wb") as f:
+        f.write(data)
+    h = Workspace(d).grep(r"^M\d+:", "/workspace/uploads/" + path, limit=10**6)
+    os.remove(d + "/uploads/" + path)
+    got = {int(x.split(": ", 1)[1].split(":")[0][1:]): int(x.split(":")[1]) for x in h
+           if ": M" in x}
+    want = {int(ln.split(":")[0][1:]): i + 1
+            for i, ln in enumerate(data.decode().splitlines()) if ln.startswith("M")}
+    return got, want
+
+
+def test_a_newline_less_file_over_16_mib_stops_at_the_cap(tmp_path):
+    # the skip of a line past its window went on to the end of the file: the cap holds there too
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/dump.bin", "wb") as f:
+        f.write(b"x" * (20 * 1024 * 1024))
+    h = Workspace(d).grep("ABSENT", "/workspace/uploads/dump.bin")
+    assert len(h) == 1 and "16 MiB" in h[0] and "unread" in h[0], h
+
+
+def test_a_lone_cr_ending_a_long_line_at_the_seam_keeps_the_next_line(tmp_path):
+    # the long line's \r is the last byte of chunk 1: the next line is its own, number 2
+    data = b"M0:" + b"a" * (W.GREP_CHUNK - 4) + b"\rM1: NEXT\nM2: last\n"
+    got, want = _numbers(tmp_path, "cr.txt", data)
+    assert got == want == {0: 1, 1: 2, 2: 3}, (got, want)
+
+
+def test_a_crlf_across_the_seam_after_a_line_over_a_mib_counts_once(tmp_path):
+    data = b"M0:" + b"a" * (2 * W.GREP_CHUNK - 4) + b"\r\nM1: NEXT\nM2: last\n"
+    got, want = _numbers(tmp_path, "crlf.txt", data)
+    assert got == want == {0: 1, 1: 2, 2: 3}, (got, want)
+
+
+def test_a_file_ending_in_a_lone_cr_matches_an_end_anchor(tmp_path):
+    d = str(tmp_path)
+    os.makedirs(d + "/uploads")
+    with open(d + "/uploads/end.txt", "wb") as f:
+        f.write(b"one\ntwo END\r")
+    h = Workspace(d).grep("END$", "/workspace/uploads/end.txt")
+    assert len(h) == 1 and ":2:" in h[0], h
+
+
+def test_a_fuzz_of_long_lines_and_cr_on_the_seams_agrees_with_splitlines(tmp_path):
+    # long lines (past the window, past a chunk) whose \r, \r\n or \n lands on a seam
+    import random
+    rng = random.Random(65)
+    C = W.GREP_CHUNK
+    for k in range(40):
+        out, i = bytearray(), 0
+        while len(out) < 2_600_000:
+            sep = rng.choice([b"\n", b"\r", b"\r\n"])
+            head = b"M%d:" % i
+            mode = rng.random()
+            if mode < 0.4:                    # the separator's first byte ends a chunk
+                nxt = (len(out) // C + 1) * C
+                n = nxt - len(out) - len(head) - 1
+                if n < 0:
+                    n += C
+            elif mode < 0.7:
+                n = rng.randint(W.GREP_LINE_MAX, W.GREP_LINE_MAX + 4096)
+            else:
+                n = rng.randint(0, 80)
+            out += head + b"b" * n + sep
+            i += 1
+        got, want = _numbers(tmp_path, f"fz{k}.txt", bytes(out))
+        assert got == want, (k, sorted(set(want.items()) ^ set(got.items()))[:5])
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())
