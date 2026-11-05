@@ -453,6 +453,8 @@ KNOBS: dict[str, tuple] = {
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =
     # weights rounded to fp16 on the tensor cores
     'FN_PREFILL_MM': ('fp32', 'tools/fn_prefill_kernels.py'),
+    # unread prompt rows a drafting turn reads into the MTP head at most (0: all); older rows stay unread
+    'MTP_BACKLOG_CAP': ('2048', 'engine/methods/mtp_drafter.py'),
     # GEMVs of few output rows (mixer down, router, GDN a/b) with each row's K split over the warps of a
     # CTA (more loads in flight); sets their summation order, so a build keeps one value
     'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),

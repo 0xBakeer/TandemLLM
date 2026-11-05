@@ -73,8 +73,8 @@ from engine.models import REGISTRY  # noqa: E402
 #: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 #: the GPU adapters (tools/gpu) count with the kernels that ask them, a tools/ package read whole
 #: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
-GOLDEN_V2 = ("b81a0af84a1f94c15fb8c5a1f6ab57bd781949d1e3738ab20e8a240b9c598592",
-             "e2ebfbd00670a3ee79eb2837bfae45eefb4178c54ac54dbdcfa34533d41da1a4")
+GOLDEN_V2 = ("f2ff3f3387c8c3bec65db7d0781002fac0482382fd054267d2a6ad0ae86f73f3",
+             "b6fcdc87ef40d2f01d8cfacf6aff990eab8536bf965ea8ca06d6a59151e5acef")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
