@@ -516,6 +516,8 @@ __global__ void __launch_bounds__(1024) qsa_topk_big_kernel(const float* __restr
     __shared__ unsigned hist[256];
     __shared__ unsigned s_prefix, s_mask, s_need, s_cnt;
     __shared__ unsigned wsum[32];
+    pdl_wait();
+    pdl_trigger();
     const int t = blockIdx.x, tid = threadIdx.x;
     const float* row = SC + (size_t)t * NB;
     if (tid == 0) { s_prefix = 0; s_mask = 0; s_need = TOPK; s_cnt = 0; }

@@ -148,10 +148,10 @@ GOLDEN_FP4 = {
     # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
     # their files count; the GB10's answers are the ones before (no row changes): every adapter
     "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
-    "qwen4_exp": "c0d43aafda091de0e470ed220bdb4c14e1d42bdd60829f67058ade101e86b4bc",
+    "qwen4_exp": "b9883c39622848ac1681e3c9c91568cf72df8cac446549a8744746243f33e7e7",
     "nemotron_h": "058fd3514b2db6a759f17975df527251694710e0b1e7ef82d43f7821f7964fba",
     "lfm2_moe": "624aa143e9ada32b7336aec945ddc3fa2d6a8a9f0364be3a9d641f54cb342aa4",
-    "qwen3_5_moe": "2aa070e7559d2df7bb20bbceef0c6018197f28c7d7d1d1148a7a3b5c2b5c445e",
+    "qwen3_5_moe": "8e5802d73e6151ebecc6a7c7b3aa4f0499a3be55059054fdb58eb440e11b5873",
     "flint": "7e06eb53ad1b1ab6e9038bd38b6b43eaf91cd5d5b9e02a5b2df421d891502400",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
