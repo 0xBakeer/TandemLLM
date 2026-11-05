@@ -96,11 +96,14 @@ NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
 
 def cached_of(u: dict) -> int:
     """The prompt tokens a provider served from its cache: DeepSeek's `prompt_cache_hit_tokens`
-    when it sends one, else the OpenAI field (our engine's)."""
+    when it sends one, else the OpenAI field (our engine's). Engine usage mode counts the occupied
+    context's cached rows there; `client_cached_tokens` keeps the share of `client_tokens`."""
     hit = u.get("prompt_cache_hit_tokens")
     if isinstance(hit, int) and not isinstance(hit, bool):
         return hit
-    return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    details = u.get("prompt_tokens_details") or {}
+    client = details.get("client_cached_tokens")
+    return int(client if client is not None else details.get("cached_tokens") or 0)
 
 
 def client_prompt_of(u: dict) -> int:

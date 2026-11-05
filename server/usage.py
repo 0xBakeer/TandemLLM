@@ -377,6 +377,7 @@ class RequestRecord:
             details["cached_tokens"] = max(0, min(cached, p))
             if p != int(self.prompt_tokens or 0):
                 details["client_tokens"] = int(self.prompt_tokens or 0)
+                details["client_cached_tokens"] = self.client_cached
         if self.hidden_prompt:
             details["hidden_tokens"] = int(self.hidden_prompt)
         out = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,
