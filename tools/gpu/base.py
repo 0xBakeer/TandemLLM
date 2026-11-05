@@ -13,6 +13,9 @@ first build, naming the GPU, instead of building for an architecture the GPU can
     dense_split(N, Kin, kb, table)   (K split S, warps) of an EXL3 projection in the dense kernels
     skinny_rows()           rows the NVFP4 register-fed kernel takes (0: never)
     bf16()                  bf16 autocast for the small CUDA models (else fp16)
+    e2m1()                  the NVFP4 kernels' e2m1 hardware converter (else a software decode)
+    fp8_rows(N, K, bn)      (N tile, K tile, warps, stages) of the FP8 row kernel
+    fp8_row_tile(M)         rows one program of the FP8 row kernel covers
     device_key()            the key of the per-device files measured on this GPU (price tables)
     unified_memory          the GPU shares the host's memory
 """
@@ -106,6 +109,47 @@ class GpuProfile:
     def bf16(self) -> bool:
         """bf16 autocast for the small CUDA models (engine/decision/laya); fp16 below sm_80."""
         return self.cap is not None and self.cap[0] >= 8
+
+    # -- load-time probes and verdicts ------------------------------------------------------
+    # An adapter that ships Triton kernels (tools/exl3_ada.py, tools/moe_ada.py) owns their
+    # probes: the probe runs once per device at weight load, the verdicts gate every dispatch.
+    # The base answers no kernels: a False verdict always selects the reference path.
+    def exl3_probe(self, device, kb: int) -> None:
+        """Probe this adapter's EXL3 kernels at rate `kb`; records the verdicts the dispatch reads."""
+
+    def exl3_rot_ok(self, device) -> bool:
+        """The rotation-kernel verdict on `device`."""
+        return False
+
+    def exl3_decode_ok(self, device, kb: int) -> bool:
+        """The standalone decode-kernel verdict on `device` at rate `kb`."""
+        return False
+
+    def exl3_gemv_ok(self, device, kb: int) -> bool:
+        """The projection-kernel verdict on `device` at rate `kb`."""
+        return False
+
+    def moe_probe(self, device) -> None:
+        """Probe this adapter's MoE kernels once per device."""
+
+    def moe_ok(self, device) -> bool:
+        """The MoE-kernel verdict on `device`; False where no probe ever ran."""
+        return False
+
+    def e2m1(self) -> bool:
+        """The NVFP4 e2m1 hardware converter (sm_100 and later); software e2m1 decode elsewhere."""
+        return self.cap is not None and self.cap[0] >= 10
+
+    # -- the FP8 row kernel (tools/nvfp4_relu2.py `_fp8_rows`) ---------------------------------
+    def fp8_rows(self, N: int, K: int, bn: int | None = None) -> tuple:
+        """(N tile, K tile, warps, stages) of the FP8 row kernel on a projection [N, K]; `bn` is the
+        caller's N tile, stages None leaves Triton's default. The N tile is fixed by the shape, never
+        by the row count: narrow enough to fill the board at one row."""
+        return bn or (32 if N <= 8192 else 64), 128 if K % 128 == 0 else 64, 4, None
+
+    def fp8_row_tile(self, M: int) -> int:
+        """Rows one program of the FP8 row kernel covers in a call of M rows."""
+        return 16
 
 
 def _known(kind: str) -> None:

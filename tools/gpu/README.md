@@ -45,6 +45,10 @@ its launch shape.
 | `dense_split(N, Kin, kb, table)` | `fn_kernels.dense_split` | the table, else a cluster of up to 8 CTAs below 96 column blocks, 4 warps | `NoInlineBuild` |
 | `skinny_rows()` | `nvfp4_skinny.use_skinny`, the GGUF NVFP4 linear | 32 | 0 |
 | `bf16()` | the small CUDA models (`engine/decision/laya`) | yes | from `sm_80` |
+| `e2m1()` | the NVFP4 kernels' hardware-converter claim (`nvfp4_linear`, `nvfp4_linear_v2`) | yes | from `sm_100` |
+| `fp8_rows(N, K, bn)`, `fp8_row_tile(M)` | the FP8 row kernel's launch (`nvfp4_relu2.FP8Linear`) | the base's | 32 or 64 columns by N, 128 or 64 by K, 4 warps; 16 rows |
+| `exl3_probe(device, kb)`, `exl3_rot_ok`, `exl3_decode_ok`, `exl3_gemv_ok` | the Triton EXL3 kernels' load probes and verdicts (`tools/exl3_ada.py`) | -- | none / raise unprobed |
+| `moe_probe(device)`, `moe_ok(device)` | the Triton MoE kernels' load probe and verdict (`tools/moe_ada.py`) | -- | none / False unprobed |
 | `device_key()` | per-device files (`engine/methods/device.py`, price tables) | `dgx-spark` | the GPU's name with dashes, `cpu` |
 | `unified_memory` | readers of the memory model | yes | no |
 

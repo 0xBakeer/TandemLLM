@@ -20,8 +20,59 @@ from __future__ import annotations
 
 from tools.gpu.base import GpuProfile
 
+#: the FP8 row kernel's launch on sm_89, (N, K) -> (N tile, K tile, warps, stages); each entry
+#: measured >= 1.03x on its shape with no M=33 regression. Other shapes take the base's rule.
+_FP8_ROWS = {
+    (17408, 5120): (32, 256, 4, 2),
+}
+
+
+def _bm(M: int) -> int:
+    # verify-width row tile: one program covers all of the call's rows (M <= 33)
+    return 16 if M <= 16 else 32 if M <= 32 else 64
+
 
 class Ada(GpuProfile):
     id = "ada"
-    about = "NVIDIA Ada (sm_89), discrete memory: the base's paths until its kernels land"
+    about = "NVIDIA Ada (sm_89), discrete memory: Triton EXL3 and MoE kernels with load-time verdicts"
     arches = ((8, 9),)
+
+    # The Ada kernels are Triton, so this adapter builds no inline extension (arch_flags keeps
+    # the base's NoInlineBuild). It answers the FP8 row kernel's launch, and owns the load-time
+    # probes and verdicts of tools/exl3_ada.py and tools/moe_ada.py -- the dispatch reaches
+    # those kernels only through these answers, so a False verdict always selects reference.
+    def fp8_rows(self, N: int, K: int, bn: int | None = None) -> tuple:
+        got = _FP8_ROWS.get((N, K)) if bn is None else None
+        return got or super().fp8_rows(N, K, bn)
+
+    def fp8_row_tile(self, M: int) -> int:
+        return _bm(M)
+
+    def exl3_probe(self, device, kb: int) -> None:
+        from tools import exl3_ada
+        exl3_ada.probe(device, kb)
+
+    def exl3_rot_ok(self, device) -> bool:
+        from tools import exl3_ada
+        return exl3_ada.rot_ok(device)
+
+    def exl3_decode_ok(self, device, kb: int) -> bool:
+        from tools import exl3_ada
+        return exl3_ada.decode_ok(device, kb)
+
+    def exl3_gemv_ok(self, device, kb: int) -> bool:
+        from tools import exl3_ada
+        return exl3_ada.gemv_ok(device, kb)
+
+    def moe_probe(self, device) -> None:
+        from tools import moe_ada
+        moe_ada.probe(device)
+
+    def moe_ok(self, device) -> bool:
+        # A False verdict -- or no probe at all, e.g. a BF16-expert model that never loaded a
+        # MoEBank -- selects the torch path; it is not a load-order error here.
+        try:
+            from tools import moe_ada
+            return moe_ada.ok(device)
+        except RuntimeError:
+            return False

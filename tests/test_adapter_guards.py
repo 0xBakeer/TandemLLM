@@ -73,8 +73,9 @@ from engine.models import REGISTRY  # noqa: E402
 #: the spill codec's import answer remembered (engine/spill.py): v2's second value again
 #: the GPU adapters (tools/gpu) count with the kernels that ask them, a tools/ package read whole
 #: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
-GOLDEN_V2 = ("b81a0af84a1f94c15fb8c5a1f6ab57bd781949d1e3738ab20e8a240b9c598592",
-             "e2ebfbd00670a3ee79eb2837bfae45eefb4178c54ac54dbdcfa34533d41da1a4")
+#: #144: the Ada (sm_89) Triton kernels behind the tools/gpu adapter; no row changes on the GB10: v2 again
+GOLDEN_V2 = ("4e93d5d265117ba9ad2b656c010b86582eea98d3685cc548d2e00d00f25fb390",
+             "4bed1675b1719a2182881b576e24b15dfbf7376debc9d9119b646d794d3ef4e0")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -147,14 +148,16 @@ GOLDEN_FP4 = {
     # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
     # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
     # their files count; the GB10's answers are the ones before (no row changes): every adapter
+    # #144: the Ada (sm_89) Triton kernels behind the tools/gpu adapter (tools/gpu, nvfp4_linear*.py,
+    # nvfp4_relu2.py, exl3_linear.py, fn_kernels.py); the GB10's answers unchanged: every adapter
     # #143: the ggml/GGUF quant types on NemotronH's GGUF loader (engine/models/nemotron_h/gguf*.py,
     # tools/gguf_quants.py, tools/gguf_grids.py): nemotron_h
-    "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
-    "qwen4_exp": "d20a881a5888f9ed52de3b8e0c35647d39b31a7aa59de0eb15b5e2fe9d80bd98",
-    "nemotron_h": "0aea5b0638d8faf2ef8a1a7c270df503d12f81a6d30296cc2556685b5a2f27d5",
-    "lfm2_moe": "fd1fa1113f5c10ceea8fc13e3f282cc98480014c51c0419033cd2fb4453822f2",
-    "qwen3_5_moe": "b8dfa7ca1146adafdc5c68aeb88ed4aad7c4c796482d4d37109593e861fa7807",
-    "flint": "d007cece66261ef2f53d01057c056a53cbf6424e3c8692366debfd1299ac04b7",
+    "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
+    "qwen4_exp": "3a880c73da69072042a5f09c62d2eae57290b677c94a785f1814af14d4fcdfed",
+    "nemotron_h": "054ace16bd4fc50540099c27d9107b252e3bbfb01d0c92529a9317d96a0d9268",
+    "lfm2_moe": "0597f7ad08e47ce3a84db7c284cb73ad9ca5695ae5208a62651e671b3c66ce6b",
+    "qwen3_5_moe": "f8782488fc15a211ce61a8b21809bbf6f2af1f67caa69b47728d82f02c23d62c",
+    "flint": "3798bde86f59c4b535d5192509a1ec6fe02376544fbeabfe5e2612ac37779ffd",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
