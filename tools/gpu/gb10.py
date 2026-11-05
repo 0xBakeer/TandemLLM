@@ -50,8 +50,6 @@ class GB10(GpuProfile):
 
     def skinny_rows(self) -> int:
         return 32
-    def e2m1(self) -> bool:
-        return True
 
     def bf16(self) -> bool:
         return True

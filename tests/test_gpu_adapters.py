@@ -62,7 +62,11 @@ def test_gb10_gives_mains_answers():
     for kind in INLINE:
         assert p.arch_flags(kind) == ["-gencode=arch=compute_121a,code=sm_121a"], kind
         assert p.inline(kind), kind
-    assert p.pdl() and p.skinny_rows() == 32 and p.bf16() and p.unified_memory
+    assert p.pdl() and p.skinny_rows() == 32 and p.bf16() and p.unified_memory and p.e2m1()
+    for N, K in ((2688, 1856), (8192, 4096), (17408, 5120), (151936, 2688)):
+        main = (32 if N <= 8192 else 64, 128 if K % 128 == 0 else 64, 4, None)
+        assert p.fp8_rows(N, K) == main and p.fp8_rows(N, K, 128) == (128,) + main[1:], (N, K)
+    assert all(p.fp8_row_tile(M) == 16 for M in range(1, 34))
     assert p.device_key() == "dgx-spark"
     try:
         p.arch_flags("no_such_extension")
@@ -126,6 +130,7 @@ def test_an_unknown_gpu_and_the_cpu_get_the_base():
         p = gpu.profile_for(cap, name)
         _base_like(p)
         assert p.bf16() == (cap is not None and cap[0] >= 8), cap
+        assert p.e2m1() == (cap is not None and cap[0] >= 10), cap
     assert gpu.profile_for(None, None).device_key() == "cpu"
     assert gpu.by_name("NVIDIA RTX PRO 6000 Blackwell").device_key() == "nvidia-rtx-pro-6000-blackwell"
     return "no inline build, no skinny rows, no PDL; bf16 from sm_80; the name as the device key"
@@ -135,6 +140,11 @@ def test_ada_answers_like_the_base_on_main():
     p = gpu.profile_for(*ADA)
     _base_like(p)
     assert p.bf16() and p.device_key() == "nvidia-geforce-rtx-4090"
+    base = gpu.profile_for(*OTHERS[0])
+    assert p.fp8_rows(17408, 5120) == (32, 256, 4, 2), "its own launch table"
+    assert p.fp8_rows(17408, 5120, 64) == base.fp8_rows(17408, 5120, 64)
+    assert p.fp8_rows(2688, 1856) == base.fp8_rows(2688, 1856)
+    assert [p.fp8_row_tile(M) for M in (1, 16, 17, 32, 33)] == [16, 16, 32, 32, 64]
     return "sm_89: the base's answers, bf16"
 
 
@@ -225,7 +235,8 @@ def test_the_fingerprints_read_the_adapters():
 #: what a per-GPU choice looks like in Python or shell
 PATTERNS = [r"get_device_capability\s*\(", r"-gencode", r"arch=compute_\d", r"TORCH_CUDA_ARCH_LIST",
             r"__CUDA_ARCH__", r"\(\s*12\s*,\s*1\s*\)", r"\(\s*8\s*,\s*9\s*\)", r"[\"']12\.1[\"']",
-            r"[\"']8\.9[\"']", r"[\"']GB10[\"']\s+in\b", r"\.major\s*[<>=]", r"\bcc\s*=="]
+            r"[\"']8\.9[\"']", r"[\"']GB10[\"']\s+in\b", r"\.major\s*[<>=]", r"\bcc\s*==",
+            r"\b(?:profile|profile_for|by_name)\([^)]*\)\.id\s*[!=]="]
 #: files under the scan that may keep a GPU check, each with its reason
 ALLOWED = {
     # the installer checks the GPU before the repository is on disk, to size the install
