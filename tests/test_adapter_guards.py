@@ -147,12 +147,14 @@ GOLDEN_FP4 = {
     # qwen3_5_moe stay on 32 rows and move only because their engine files pin the 32
     # the GPU adapters (tools/gpu): every kernel module asks them for its arch flags and launch shapes, so
     # their files count; the GB10's answers are the ones before (no row changes): every adapter
+    # #158: the indexer's radix select past 8,192 blocks, its fused score epilogue and live pool slice (the bits
+    # the same; tools/fn_seq_kernels, tools/fn_prefill_kernels.py, knobs): qwen4_exp, lfm2_moe, qwen3_5_moe, flint
     "qwen3_5": "c7fec769922a38ff7658e6f534e64ded896ac652f820c174458952750474369a",
-    "qwen4_exp": "a4e324cfc60a0ed596291026dfe999575822f4c60d6179fcc06b8a7fd5b8cdec",
+    "qwen4_exp": "77296eedc36c9b3a769e3de991bfd0e4b06edb1d62318fbe8756da1913fc63ea",
     "nemotron_h": "058fd3514b2db6a759f17975df527251694710e0b1e7ef82d43f7821f7964fba",
-    "lfm2_moe": "624aa143e9ada32b7336aec945ddc3fa2d6a8a9f0364be3a9d641f54cb342aa4",
-    "qwen3_5_moe": "f4b422d916bca9872120d92d742e20a2639dca767c50606300331cc6a7ad4d0e",
-    "flint": "7e06eb53ad1b1ab6e9038bd38b6b43eaf91cd5d5b9e02a5b2df421d891502400",
+    "lfm2_moe": "0220a04fa0e8085e728fbf4f3c6242246120bcd18f2b5c006c628800a8bd817e",
+    "qwen3_5_moe": "045f55480e31076ab4f951bd1086bab85b5cd280a52a2bbdc583e88835fc6783",
+    "flint": "66ae9574a839e8b55f3f2b1d67be906c172cd95567ba74344335b413cd772318",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
