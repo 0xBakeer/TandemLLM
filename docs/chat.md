@@ -50,8 +50,10 @@ A file over 4 MiB is read 4 MiB at a time from the line `offset` names, numbered
 and the marker names the bytes after the page ("[lines 80000-80002 shown of a 6,749,998-byte
 file, 749,845 more bytes after them; read on with offset=80003]"), so no part of it is out of
 reach (SRV-651).
-`grep` takes a folder or one file: a file named by its path is searched whole, and a folder's
-files over 2 MiB are named as not searched instead of counted as no match (SRV-649).
+`grep` takes a folder or one file and reads every file the same way, a MiB at a time: it searches
+a line's first 64 K characters and a file's first 16 MiB, and says when the rest of a file is
+unread; one call gets 10 s across all its files and ends with "partial results" when that runs out.
+Its line numbers are the ones `read_file` shows (SRV-649).
 Other results keep their first and last quarter and the whole output under `.tandem/outputs/`. A
 request's estimate carries a margin for the text the engine has not counted yet (15 % of it): at
 the edge our engine counts the request exactly (`POST /v1/tokenize`) and a request over the window
