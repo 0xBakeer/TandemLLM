@@ -30,6 +30,7 @@ with that source). Built on first use for sm_121a.
 from __future__ import annotations
 
 import os
+import struct
 import sys
 
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
@@ -255,7 +256,7 @@ def _qsa_epi_kernel():
         import triton.language as tl
 
         @triton.jit(do_not_specialize=["nb", "NB", "r0"])
-        def qsa_epi_kernel(SC, OUT, NBLK, nb, NB, r0, DIV, NH: tl.constexpr, BN: tl.constexpr):
+        def qsa_epi_kernel(SC, OUT, NBLK, nb, NB, r0, INV, NH: tl.constexpr, BN: tl.constexpr):
             r = tl.program_id(0)
             cols = tl.program_id(1) * BN + tl.arange(0, BN)
             m = cols < nb
@@ -263,7 +264,7 @@ def _qsa_epi_kernel():
             acc = tl.maximum(tl.load(base + cols, mask=m, other=0.0), 0.0)
             for h in tl.static_range(1, NH):
                 acc = acc + tl.maximum(tl.load(base + h * nb + cols, mask=m, other=0.0), 0.0)
-            acc = acc / DIV
+            acc = acc * INV
             acc = tl.where(cols >= tl.load(NBLK + r0 + r), float("-inf"), acc)
             tl.store(OUT + (r0 + r).to(tl.int64) * NB + cols, acc, mask=m)
 
@@ -285,11 +286,14 @@ def qsa_scores_rows(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB
     if nb == 0:
         return out
     nbl = nblk.to(torch.int32).contiguous()
+    # torch divides by a scalar as a multiply by its fp32 reciprocal: the same single rounding here
+    f32 = lambda v: struct.unpack("f", struct.pack("f", v))[0]   # noqa: E731
+    inv = f32(1.0 / f32(D ** 0.5))
     k = _qsa_epi_kernel()
     for r0 in range(0, M, block):
         r1 = min(M, r0 + block)
         sc = iq[r0:r1].reshape(-1, D).float() @ pk
-        k[(r1 - r0, triton.cdiv(nb, 1024))](sc, out, nbl, nb, NB, r0, D ** 0.5, NH=NH, BN=1024, num_warps=4)
+        k[(r1 - r0, triton.cdiv(nb, 1024))](sc, out, nbl, nb, NB, r0, inv, NH=NH, BN=1024, num_warps=4)
     return out
 
 

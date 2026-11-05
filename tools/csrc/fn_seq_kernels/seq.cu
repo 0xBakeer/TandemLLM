@@ -524,7 +524,7 @@ __global__ void __launch_bounds__(1024) qsa_topk_big_kernel(const float* __restr
     for (int shift = 24; shift >= 0; shift -= 8) {
         for (int i = tid; i < 256; i += blockDim.x) hist[i] = 0;
         __syncthreads();
-        const unsigned prefix = s_prefix, mask = s_mask;
+        const unsigned prefix = s_prefix, mask = s_mask, need = s_need;   // read before warp 0 writes them
         for (int i = tid; i < NB; i += blockDim.x) {
             const unsigned k = ~ord_f(row[i]);
             if ((k & mask) == prefix) atomicAdd(&hist[(k >> shift) & 255u], 1u);
@@ -535,7 +535,7 @@ __global__ void __launch_bounds__(1024) qsa_topk_big_kernel(const float* __restr
             for (int j = 0; j < 8; ++j) { h[j] = hist[tid * 8 + j]; s += h[j]; }
             unsigned inc = s;
             for (int o = 1; o < 32; o <<= 1) { const unsigned v = __shfl_up_sync(0xffffffffu, inc, o); if (tid >= o) inc += v; }
-            const unsigned before = inc - s, need = s_need;
+            const unsigned before = inc - s;
             if (before < need && need <= inc) {
                 unsigned c = before; int b = 0;
                 for (int j = 0; j < 8; ++j) { if (c + h[j] >= need) { b = j; break; } c += h[j]; }
