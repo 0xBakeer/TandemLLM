@@ -47,7 +47,11 @@ def test_one_row_and_a_verified_block_take_the_same_kernel():
     routed = {m: v2.use_v2(m) for m in widths}
     assert len(set(routed.values())) == 1, (
         f"M = 1 and the block widths are routed to different kernels: {routed}")
-    assert routed[1] is True, "the shipped default has to be v2 at every decode-side row count"
+    from tools import gpu as _gpu
+    expected = _gpu.profile().e2m1()
+    assert routed[1] is expected, (
+        "the shipped default is v2 at every decode-side row count where the e2m1 converter is "
+        "hardware, and v1 where it is not (the software decode is slower there)")
     _reload()
     return f"M in {widths} all on one kernel"
 
@@ -80,13 +84,16 @@ def test_no_measured_tile_carries_split_k():
 
 
 def test_the_switch_switches_and_the_range_is_honoured():
+    from tools import gpu as _gpu
+    hw = _gpu.profile().e2m1()
     assert _reload(QWEN38_NVFP4_V2="0").use_v2(14) is False, "'0' did not turn v2 off"
     assert _reload(QWEN38_NVFP4_V2="all").use_v2(4096) is True, "'all' did not mean all"
     win = _reload(QWEN38_NVFP4_V2="1", QWEN38_NVFP4_V2_MIN="4", QWEN38_NVFP4_V2_MAX="8")
-    assert [win.use_v2(m) for m in (3, 4, 8, 9)] == [False, True, True, False], "range ignored"
+    want = [False, True, True, False] if hw else [False, False, False, False]
+    assert [win.use_v2(m) for m in (3, 4, 8, 9)] == want, "range ignored"
     v2 = _reload()
-    assert v2.use_v2(14) is True, "the default did not come back"
-    return "off, all, an explicit range, and the default restored"
+    assert v2.use_v2(14) is hw, "the default did not come back"
+    return "off, all, an explicit range, and the default restored (v2 only on e2m1 hardware)"
 
 
 def test_a_whole_table_override_reaches_every_shape():

@@ -104,6 +104,14 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     input, as `fn_kernels.moe_experts` returns it)."""
     M, S = ids.shape
     P = M * S
+    if not _gpu.profile(x.device).inline("fn_prefill_kernels"):
+        # where the load probe passed, the batched kernels (their errors propagate); else the
+        # torch reference's per-pair walk -- never an exception-driven mid-call switch
+        if x.is_cuda:
+            from tools import moe_ada
+            if _gpu.profile(x.device).moe_ok(x.device):
+                return moe_ada.moe_grouped_ada(x, ids, bank)
+        return moe_grouped_reference(x, ids, bank)
     mod = _module()
     g = group_plan(ids.reshape(-1), bank.n, rows)
     R, prow = g["R"], g["prow"]
