@@ -150,9 +150,11 @@ GOLDEN_FP4 = {
     # their files count; the GB10's answers are the ones before (no row changes): every adapter
     # #144: the Ada (sm_89) Triton kernels behind the tools/gpu adapter (tools/gpu, nvfp4_linear*.py,
     # nvfp4_relu2.py, exl3_linear.py, fn_kernels.py); the GB10's answers unchanged: every adapter
+    # #143: the ggml/GGUF quant types on NemotronH's GGUF loader (engine/models/nemotron_h/gguf*.py,
+    # tools/gguf_quants.py, tools/gguf_grids.py): nemotron_h
     "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
     "qwen4_exp": "3a880c73da69072042a5f09c62d2eae57290b677c94a785f1814af14d4fcdfed",
-    "nemotron_h": "5ea8502438f9a639727441ae47433deb5ea59d704f2df2aea5fb7fc00b8fb659",
+    "nemotron_h": "054ace16bd4fc50540099c27d9107b252e3bbfb01d0c92529a9317d96a0d9268",
     "lfm2_moe": "0597f7ad08e47ce3a84db7c284cb73ad9ca5695ae5208a62651e671b3c66ce6b",
     "qwen3_5_moe": "f8782488fc15a211ce61a8b21809bbf6f2af1f67caa69b47728d82f02c23d62c",
     "flint": "3798bde86f59c4b535d5192509a1ec6fe02376544fbeabfe5e2612ac37779ffd",
