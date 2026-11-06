@@ -4766,27 +4766,33 @@ def _write_rows(res, eng, drafter, reason: str, wait_s: float = KEEP_IO_WAIT_S):
     (the save's info, None) or (None, why not): `short` under `drain_min_tokens`, `busy` when the
     spill's own I/O stayed held `wait_s` (0: not waited for; the thread that holds it may be this
     one, inside a restore's page gate), else the spill's own refusal (`write_budget`, `room`,
-    `reading`, `failed`). Any thread, the slot's lock held or its slot idle."""
+    `reading`, `failed`). Any thread, the slot's lock held or its slot idle.
+
+    SRV-E6: a conversation the idle backfill wrote and nothing changed since (`SessionSpill.current`)
+    is not written again: its entry's info with `current` and 0 ms."""
     sp = dict.get(STATE, "spill")
     if sp is None:
         return None, "no_spill"
     if res.valid < int(sp.cfg.get("drain_min_tokens", 4096)):
         return None, "short"
-    if sp._own_io.locked():
-        # slot 0's save or restore holds the spill's own I/O: the write waits for it (this
-        # thread holds no lock it needs), at most `wait_s`, then the rows are not written
-        if wait_s <= 0 or not sp._own_io.acquire(timeout=wait_s):
-            return None, "busy"
-        sp._own_io.release()
+    e = sp.current(res)
+    if e is not None:
+        return {"eid": e.eid, "tokens": e.valid, "ms": 0.0, "current": True}, None
     refused = dict(sp.stats["refused"])
     failed = dict(sp.stats["failed"])
-    # outside the engine lock: no CUDA call inside slot 0's graph capture (engine/capture_lock.py;
-    # live 2026-10-18 01:16 a side slot's save broke a verify graph's capture on slot 0, and its
-    # request ended in an error)
-    with capture_lock.GUARD, torch.no_grad():
-        if res._stash is not None:
-            res.settle_guest(eng)
-        info = sp.save_resident(res, eng, drafter, reason)
+    # slot 0's save or restore may hold the spill's own I/O: the write waits for it, at most
+    # `wait_s`, then the rows are not written. That lock first, then the capture guard, as the idle
+    # backfill takes them; the guard only around the save's device steps (no CUDA call inside a
+    # graph capture: live 2026-10-18 01:16 a side slot's save broke a verify graph's capture on
+    # slot 0, and its request ended in an error)
+    with sp.io(wait_s) as ok:
+        if not ok:
+            return None, "busy"
+        with torch.no_grad():
+            if res._stash is not None:
+                with capture_lock.GUARD:
+                    res.settle_guest(eng)
+            info = sp.save_resident(res, eng, drafter, reason, guard=capture_lock.GUARD)
     if info:
         return info, None
     why = next((k for k, v in sp.stats["refused"].items() if v > refused.get(k, 0)), None)
@@ -12266,6 +12272,14 @@ def parser() -> argparse.ArgumentParser:
                          "writes stop (the tier's, and the spill's but a drain and evictions of "
                          "32k+ tokens; past 1.5x only the drain); 0 = no budget; "
                          "settings.memory.disk_writes.budget_gb overrides it live")
+    ap.add_argument("--session-spill-idle", default="on", choices=("on", "off"),
+                    help="write every slot's conversation of 4,096+ tokens to the NVMe once it is "
+                         "idle (its rows stay in RAM), so a later reclaim under memory pressure "
+                         "only trims it; optional under the day's write budget (SRV-E6)")
+    ap.add_argument("--session-spill-idle-s", type=float, default=20.0,
+                    help="how long a conversation is idle before the idle backfill writes it")
+    ap.add_argument("--session-spill-idle-every-s", type=float, default=60.0,
+                    help="the least time between two idle writes of one conversation")
     ap.add_argument("--session-spill-min-tokens", type=int, default=16384,
                     help="the shortest resident conversation an eviction writes to the NVMe "
                          "(shorter ones are the RAM park's)")
@@ -13146,8 +13160,11 @@ class _SideSpill:
     place from the NVMe (`maybe_restore` into the side engine's buffers, as `SideReader` reads the
     disk tier), and another session's prefill writes the slot's long conversation there first, as
     slot 0's does. Its saves and reads run on the side slot's thread outside the engine lock, so
-    they hold `capture_lock.GUARD` (no CUDA call inside slot 0's graph capture, as `_keep_parent`).
-    Everything else is the spill's own."""
+    their device work holds `capture_lock.GUARD` (no CUDA call inside slot 0's graph capture, as
+    `_keep_parent`). SRV-E6: the spill takes the guard inside its own I/O lock (`guard=`): a save
+    around each device step only, a read throughout; never the guard while that lock is waited
+    for, as the idle backfill holds the lock and then waits for the guard. Everything else is the
+    spill's own."""
 
     def __init__(self, sp):
         self.sp = sp
@@ -13156,16 +13173,13 @@ class _SideSpill:
         return getattr(self.sp, k)
 
     def save_resident(self, *a, **kw):
-        with capture_lock.GUARD:
-            return self.sp.save_resident(*a, **kw)
+        return self.sp.save_resident(*a, guard=capture_lock.GUARD, **kw)
 
     def maybe_restore(self, *a, **kw):
-        with capture_lock.GUARD:
-            return self.sp.maybe_restore(*a, **kw)
+        return self.sp.maybe_restore(*a, guard=capture_lock.GUARD, **kw)
 
     def restore(self, *a, **kw):
-        with capture_lock.GUARD:
-            return self.sp.restore(*a, **kw)
+        return self.sp.restore(*a, guard=capture_lock.GUARD, **kw)
 
 
 def _side_spills(sp) -> int:
@@ -13188,6 +13202,36 @@ def _side_spills(sp) -> int:
         r.spiller = _SideSpill(sp)
         n += 1
     return n
+
+
+def _slot_residents() -> list:
+    """SRV-E6: every slot's resident prefix (slot 0's, then each side slot's): the session spill's
+    sweeps never evict the entry of a conversation still in RAM (`SessionSpill.residents`)."""
+    pool = dict.get(STATE, "pool")
+    return [dict.get(STATE, "resident")] + [(s.values or {}).get("resident")
+                                             for s in (pool.side() if pool is not None else ())]
+
+
+def _spill_idle_slots() -> list:
+    """SRV-E6: the idle backfill's view of every slot (engine/spill.py `SessionSpill.backfill`):
+    its conversation, engine and drafter, and how to hold it without waiting. Slot 0 by the
+    engine lock's own lock, without the GPU turn, as the KV pool's reclaim takes it (its next
+    request waits at most the save); a side slot by its lock (`take_slot` finds it busy meanwhile).
+    None while a planned stop drains."""
+    if STATE.get("draining"):
+        return []
+    lk = LOCK._lk
+    out = [types.SimpleNamespace(key=0, res=dict.get(STATE, "resident"),
+                                 eng=dict.get(STATE, "engine"), drafter=dict.get(STATE, "drafter"),
+                                 take=lambda: lk.acquire(blocking=False), give=lk.release)]
+    pool = dict.get(STATE, "pool")
+    for s in (pool.side() if pool is not None else ()):
+        v = s.values or {}
+        out.append(types.SimpleNamespace(key=s.index, res=v.get("resident"), eng=v.get("engine"),
+                                         drafter=v.get("drafter"),
+                                         take=lambda s=s: s.lock.acquire(blocking=False),
+                                         give=s.lock.release))
+    return out
 
 
 def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
@@ -13575,6 +13619,13 @@ def _serve(a, led) -> None:
     if _side_spills(STATE["spill"]):
         print("[spill] side slots read and write it: a conversation reclaimed on its slot comes "
               "back there", flush=True)
+    if STATE["spill"] is not None:
+        sp = STATE["spill"]
+        sp.residents = _slot_residents
+        if sp.start_idle(_spill_idle_slots) is not None:
+            print(f"[spill] idle backfill on: a conversation of {sp.cfg['drain_min_tokens']}+ tokens "
+                  f"idle {sp.cfg['idle_s']:g} s is written (at most every {sp.cfg['idle_every_s']:g} s), "
+                  f"its rows stay; a reclaim then only trims it", flush=True)
     spill_startup()
     # Compaction as a continuation, and the summary prepared ahead
     STATE["compaction"] = dict(compaction_mod.SETTINGS, mode=a.compaction,

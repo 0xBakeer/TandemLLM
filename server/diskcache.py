@@ -350,6 +350,10 @@ def start_spill(state, a, tier, journal=None):
                                       "min_tokens": int(getattr(a, "session_spill_min_tokens",
                                                                 16384)),
                                       "codec": str(getattr(a, "session_spill_codec", "zstd")),
+                                      "idle": str(getattr(a, "session_spill_idle", "on")),
+                                      "idle_s": float(getattr(a, "session_spill_idle_s", 20.0)),
+                                      "idle_every_s": float(getattr(a, "session_spill_idle_every_s",
+                                                                    60.0)),
                                       **spill_of(_settings_doc(state)[1])}).open()
     spill.guard = getattr(tier, "guard", None)
     if al is not None:

@@ -36,6 +36,10 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      (the end not reached and the alignment refused, no end, the read cost, a line too short)
   12 SRV-779: a side slot's chat whose pages the KV pool reclaims is written first and comes back
      on its own slot from that entry, bit for bit, prefilling only its tail
+  13 SRV-E6, the idle backfill: an idle chat is written once (not while busy, not within the
+     interval, only the changed blocks after its next turn), the capture guard only around device
+     steps, idle saves skipped past the write budget while pressure saves go, and a resident chat's
+     entry never evicted
 
 Run: python tests/test_session_spill.py
 """
@@ -1060,6 +1064,195 @@ def test_a_side_restore_prefills_only_the_tail():
         eid = side.written["eid"]
         assert side_res.valid >= CH and app._spill_home(app.STATE["pool"], eid, len(ids2), CH) is None
         return f"{len(ids2)} tokens, {pre2['forwarded']} forwarded after the line at {line}"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 13. the idle backfill (SRV-E6)
+
+class _Slot:
+    """A slot as the idle backfill sees it (server/app.py `_spill_idle_slots`): its conversation and a lock it takes
+    without waiting; `hold()` makes it busy as a request would."""
+
+    def __init__(self, key, res, eng, drafter=None):
+        import threading
+        self.key, self.res, self.eng, self.drafter = key, res, eng, drafter
+        self.lock = threading.Lock()
+
+    def take(self):
+        return self.lock.acquire(blocking=False)
+
+    def give(self):
+        self.lock.release()
+
+
+def test_idle_backfill_writes_an_idle_chat_once_not_while_busy_nor_within_the_interval():
+    """SRV-E6 (01a0e2d7's backfill, applied to the spill): a conversation idle `idle_s` is written with reason `idle`
+    while its rows stay; not before, not while its slot is busy, not again within `idle_every_s` (nor at all while
+    nothing changed); after its next turn and the interval, only the blocks that changed are written, and a read
+    over the rows in place reads nothing."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        eng = app.STATE["engine"]
+        prompt = tokens(200, seed=74)
+        out1, _, _ = turn(prompt, 30, session="A")
+        n1 = res.valid
+        rows1 = _rows(eng, n1)
+        slot = _Slot(0, res, eng)
+        t1 = res.t_used
+        assert sp.backfill([slot], now=t1 + 5) == [] and sp.stats["saves"] == 0, "idle 5 s: not yet"
+        slot.lock.acquire()
+        assert sp.backfill([slot], now=t1 + 25) == [] and sp.stats["idle"]["busy"] == 1, "busy: skipped"
+        slot.lock.release()
+        first = sp.backfill([slot], now=t1 + 25)
+        assert len(first) == 1 and first[0]["reason"] == "idle" and first[0]["key"] == 0, first
+        e = sp.entries[first[0]["eid"]]
+        assert e.valid == n1 and e.man["reason"] == "idle" and e.man["owner"] == "A"
+        assert res.valid == n1 and not slot.lock.locked(), "the rows stay, the slot is free again"
+        _same_rows(_rows(eng, n1), rows1)
+        assert sp.current(res) is e
+        assert "guard_ms" in first[0] and first[0]["guard_max_ms"] <= first[0]["ms"], first[0]
+        assert sp.backfill([slot], now=t1 + 30) == [] and sp.backfill([slot], now=t1 + 40) == [], \
+            "current on the disk: nothing to write, however long it stays idle"
+        # its next turn, at t1 + 45 on the fake clock: the rows moved, the entry is not current any more
+        out2, _, _ = turn(prompt + out1 + TOOL, 20, session="A")
+        assert sp.current(res) is None
+        res.t_used = t1 + 45
+        assert sp.backfill([slot], now=t1 + 50) == [], "idle 5 s since its last turn: not yet"
+        assert sp.backfill([slot], now=t1 + 84) == [], "idle 39 s, but 59 s after its last idle save"
+        second = sp.backfill([slot], now=t1 + 86)
+        assert len(second) == 1 and second[0]["eid"] == first[0]["eid"], second
+        assert second[0]["blocks_kept"] >= (len(prompt) + len(out1)) // CH - 2, second
+        assert second[0]["blocks_written"] < first[0]["blocks_written"], (first, second)
+        assert sp.stats["saves"] == 2 and sp.stats["idle"]["saves"] == 2
+        info = sp.restore(res, eng, None, sp.entries[second[0]["eid"]])
+        assert info["blocks_read"] == 0, info
+        assert sp.current(res) is sp.entries[second[0]["eid"]], "read back, it is current again"
+        t.close()
+        return (f"{first[0]['blocks_written']} blocks after 20 s idle, then {second[0]['blocks_written']} written "
+                f"and {second[0]['blocks_kept']} kept a turn and a minute later")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_idle_backfill_holds_the_capture_guard_for_device_steps_only():
+    """SRV-E6: the backfill's save holds `capture_lock.GUARD` around each block's device work, never around a write;
+    it takes the spill's own I/O lock first and skips the pass while another holds it (a pressure save, a read), and
+    a reclaim inside a thread that holds that lock is told `busy` (`io`), never deadlocked."""
+    import threading
+    from engine import capture_lock
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        eng = app.STATE["engine"]
+        turn(tokens(200, seed=75), 30, session="B")
+        slot = _Slot(0, res, eng)
+        seen, real = [], disk_cache.write_file
+        me = threading.get_ident()
+
+        def spy(*a, **k):
+            if threading.get_ident() == me:
+                seen.append(capture_lock.held())
+            return real(*a, **k)
+        # the spill's I/O held by another thread: the pass waits for nothing and writes nothing
+        got = threading.Event()
+        free = threading.Event()
+
+        def holder():
+            with sp.io() as ok:
+                assert ok
+                got.set()
+                free.wait(10)
+        th = threading.Thread(target=holder)
+        th.start()
+        got.wait(10)
+        assert sp.backfill([slot], now=res.t_used + 25) == [] and sp.stats["idle"]["spill_busy"] == 1
+        free.set()
+        th.join()
+        assert not slot.lock.locked()
+        spill.dc.write_file = spy
+        try:
+            out = sp.backfill([slot], now=res.t_used + 25)
+        finally:
+            spill.dc.write_file = real
+        assert len(out) == 1 and seen and not any(seen), seen     # the anchors' writes on the saver's own thread
+        assert not capture_lock.held()
+        # inside the spill's I/O (a restore's page gate): a pressure save is `busy`, no deadlock
+        app.STATE["spill"] = sp
+        res2 = cache.ResidentPrefix(BIG, CH, end=True)
+        res2.valid, res2.owner, res2._stash = 10 ** 6, "x", None
+        with sp.io() as ok:
+            assert ok
+            with sp.io(0) as again:
+                assert again is False
+            assert app._write_rows(res2, eng, None, "kv_pool", 0.0) == (None, "busy")
+        t.close()
+        return f"{len(seen)} writes on the saver's thread, none under the guard; a held spill skips the pass"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_past_the_write_budget_idle_saves_are_skipped_and_counted_pressure_saves_still_go():
+    """SRV-E6 under SRV-273's guard: past the day's budget an idle save is refused (`refused.write_budget`, the
+    guard's `spill:idle` skip, the backfill's own count) and asked again only after `idle_every_s`; a pressure save
+    of the same conversation (`kv_pool`, the KV pool's reclaim) still goes, as an eviction of a long one does."""
+    d = tempfile.mkdtemp(prefix="qse-guard-")
+    old_big = disk_cache.GUARD_BIG_TOKENS
+    try:
+        os.makedirs(os.path.join(d, "g"), exist_ok=True)
+        g = disk_cache.WriteGuard(os.path.join(d, "g"), budget_gb=1.0)
+        g.add(int(1.2 * disk_cache.GB), "tier")
+        res = _state()
+        sp, t = _spill(d, res)
+        sp.guard = g
+        eng = app.STATE["engine"]
+        turn(tokens(200, seed=76), 30, session="C")
+        disk_cache.GUARD_BIG_TOKENS = 128                     # the random model's chat counts as a long one
+        slot = _Slot(3, res, eng)
+        now = res.t_used + 25
+        assert sp.backfill([slot], now=now) == []
+        assert sp.stats["idle"]["refused"] == {"write_budget": 1}, sp.stats["idle"]
+        assert sp.stats["refused"]["write_budget"] == 1 and g.report()["skipped_today"] == {"spill:idle": 1}
+        assert sp.backfill([slot], now=now + 30) == [] and sp.stats["idle"]["refused"]["write_budget"] == 1, \
+            "asked again only after the interval"
+        assert sp.backfill([slot], now=now + 61) == [] and sp.stats["idle"]["refused"]["write_budget"] == 2
+        assert not sp.entries
+        info, why = app._write_rows(res, eng, None, "kv_pool")
+        assert why is None and info["blocks_written"] > 0 and info["reason"] == "kv_pool", (info, why)
+        assert sp.current(res) is not None
+        assert g.allow("spill", "kv_pool", 128) and not g.allow("spill", "kv_pool", 127)
+        g.add(int(0.4 * disk_cache.GB), "spill")              # past 1.5 budgets: only the drain
+        assert not g.allow("spill", "kv_pool", 10 ** 6) and g.allow("spill", "drain", 10)
+        t.close()
+        return "idle refused twice in 61 s (counted), the kv_pool save of the same chat written"
+    finally:
+        disk_cache.GUARD_BIG_TOKENS = old_big
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_save_never_evicts_the_entry_of_a_chat_still_in_ram():
+    """SRV-271's minimum slice: with every idle chat on the disk, least recently used alone would evict the entry of a
+    chat a slot still holds. A save's sweep keeps every resident conversation's entry (`residents`): the new save is
+    refused for room instead; once that chat leaves the slot, its entry may go."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        sp, t, al0, pool, side, side_res = _side_pool(d)
+        res0, eng0 = app.STATE["resident"], app.STATE["engine"]
+        turn(tokens(150, seed=77), 30, session="A")             # chat A on slot 0
+        a = sp.save_resident(res0, eng0, None, "idle")
+        _on_side(pool, side, S_PROMPT, 40, "S")                   # chat S on side slot 1
+        sp.cfg["budget_gb"] = (a["bytes"] * 1.5) / disk_cache.GB  # room for one of them
+        sp.residents = lambda: [res0, side_res]
+        assert sp.save_resident(side_res, side.values["engine"], None, "idle") is None
+        assert sp.stats["refused"].get("room") == 1 and a["eid"] in sp.entries, "A's entry stays while A is in RAM"
+        res0.clear()                                              # A leaves slot 0
+        s = sp.save_resident(side_res, side.values["engine"], None, "idle")
+        assert s is not None and a["eid"] not in sp.entries and sp.stats["evicted"].get("budget") == 1
+        t.close()
+        return "S refused while A was resident; written, evicting A's entry, once A left"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

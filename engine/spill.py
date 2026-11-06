@@ -26,7 +26,12 @@ WHEN IT IS WRITTEN (engine/cache.py `ResidentPrefix.begin`, server/app.py):
   * an eviction: a request of another conversation that is not a guest is about to write over
     a resident prompt of at least `min_tokens` whose rows above the shared head the RAM park
     cannot hold; and a session snapshot from the state store, which clears the resident prefix.
-    The rows go to the disk before the new prefill writes a row (the request waits for it).
+    The rows go to the disk before the new prefill writes a row (the request waits for it);
+  * while idle (SRV-E6, the backfill the 2026-09-27 design left unbuilt): every slot's conversation
+    of at least `drain_min_tokens` idle `idle_s` (20 s), at most every `idle_every_s` (60 s), never
+    while its slot is busy, under the day's write budget (`idle` is optional there). The rows stay
+    in RAM; a later pressure reclaim finds the entry current (`current`) and only trims, instead
+    of a save on a waiting request's path. Only the blocks that changed are written.
 
 WHEN IT IS READ: a request whose prompt shares more with an entry than with every cache in RAM
 (the rows in place, the end anchor, the pin, the park) by more than the read costs: before the
@@ -64,6 +69,7 @@ Token ids and engine state only, never text.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -79,7 +85,12 @@ MAGIC = b"QSESPIL1"
 GB = dc.GB
 ALIGN = dc.ALIGN
 SETTINGS = {"budget_gb": 64.0, "ttl_hours": 48.0, "min_tokens": 16384,
-            "drain_min_tokens": 4096, "anchors": 4, "codec": "zstd", "codec_threads": 8}
+            "drain_min_tokens": 4096, "anchors": 4, "codec": "zstd", "codec_threads": 8,
+            # SRV-E6: the idle backfill (`backfill`): on/off, the idle time before a conversation
+            # is written, and the least time between two of its idle saves (s)
+            "idle": "on", "idle_s": 20.0, "idle_every_s": 60.0}
+#: SRV-E6: how often the idle backfill's thread looks at the slots (s)
+IDLE_LOOK_S = 5.0
 #: a compressed block's frames: each section's byte planes cut into pieces of this size, one zstd
 #: frame each, so a block's frames compress and decompress on `codec_threads` threads at once
 CODEC_FRAME = 8 << 20
@@ -264,6 +275,28 @@ def codec_ok() -> bool:
 _CODEC_OK: bool | None = None
 
 
+class _Held:
+    """A lock held around one step at a time (`SessionSpill._save`'s `guard`), or nothing for None:
+    the longest single hold and the sum, for the save's `info`."""
+
+    def __init__(self, lock):
+        self.lock, self.total, self.most, self._t = lock, 0.0, 0.0, 0.0
+
+    def __enter__(self):
+        if self.lock is not None:
+            self.lock.acquire()
+            self._t = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        if self.lock is not None:
+            d = time.perf_counter() - self._t
+            self.lock.release()
+            self.total += d
+            self.most = max(self.most, d)
+        return False
+
+
 class _Yielded(Exception):
     """A prewarm's save or restore stopped between two blocks: a request is waiting (`stop`)."""
 
@@ -361,6 +394,9 @@ class SessionSpill:
         self.entries: dict[str, Entry] = {}
         self.lock = threading.RLock()
         self._own_io = threading.Lock()
+        # who holds `_own_io` (a thread id) and whether a save or a restore of that thread is inside it (`io`, `_io`)
+        self._io_by: int | None = None
+        self._io_in = False
         self._bufs: list = []
         self._hbufs: list = []
         self._abuf = None
@@ -385,12 +421,21 @@ class SessionSpill:
         # SRV-269: the entry a restore is about to read; no sweep evicts it (the switch save of
         # the resident conversation before the read used to, at a full budget)
         self._keep: set[str] = set()
+        # SRV-271's minimum slice (SRV-E6): () -> the resident prefixes of every slot; a save's sweep
+        # never evicts the entry of a conversation still in RAM (`_resident_eids`)
+        self.residents = None
+        # SRV-E6: the idle backfill: its last save of each slot's conversation (time.monotonic())
+        self.idle_last: dict = {}
+        self._idle_stop = threading.Event()
+        self._idle_thread = None
         self.stats = {"saves": 0, "save_ms": 0.0, "blocks_written": 0, "blocks_kept": 0,
                       "bytes_written": 0, "restores": 0, "restore_ms": 0.0, "blocks_read": 0,
                       "blocks_in_place": 0, "bytes_read": 0, "tokens_restored": 0,
                       "failed": {}, "refused": {}, "evicted": {}, "last_save": None,
                       "bytes_raw_written": 0, "blocks_compressed": 0,
-                      "last_restore": None, "swept": 0}
+                      "last_restore": None, "swept": 0,
+                      "idle": {"saves": 0, "bytes_written": 0, "busy": 0, "spill_busy": 0,
+                               "refused": {}, "errors": 0}}
         self.events: list[dict] = []
 
     # --- settings and the directory ----------------------------------------------------------
@@ -480,7 +525,7 @@ class SessionSpill:
         the floor free. False when they cannot."""
         now = self.clock()
         ttl = float(self.cfg["ttl_hours"]) * 3600.0
-        keep = {protect} | self._keep
+        keep = {protect} | self._keep | self._resident_eids()
         for eid, e in list(self.entries.items()):
             if eid not in keep and now - float(e.man.get("used", 0)) > ttl:
                 self._drop(eid, "ttl")
@@ -495,6 +540,26 @@ class SessionSpill:
                 return False
             self._drop(olds[0][1], "budget" if over else "floor")
 
+    def _resident_eids(self) -> set:
+        """The entries of the conversations the slots hold now (`residents`): the one their owner
+        has, else the one their rows continue (`_eid_for`'s rule). With the idle backfill every
+        idle chat has an entry, so least recently used alone would evict a chat still in RAM."""
+        if self.residents is None:
+            return set()
+        try:
+            got = list(self.residents())
+        except Exception:                                          # noqa: BLE001
+            return set()
+        out = set()
+        for res in got:
+            n = int(getattr(res, "valid", 0) or 0) if res is not None else 0
+            if n <= 0:
+                continue
+            eid = self._eid_for(res.owner, res.tokens[:n])
+            if eid in self.entries:
+                out.add(eid)
+        return out
+
     def clear(self) -> int:
         n = 0
         for eid in list(self.entries):
@@ -502,9 +567,48 @@ class SessionSpill:
         return n
 
     # --- the staging buffers ------------------------------------------------------------------
+    @contextlib.contextmanager
     def _io(self):
-        """This object's own lock: a save or a restore never waits for the tier."""
-        return self._own_io
+        """This object's own lock: a save or a restore never waits for the tier. Taken already
+        when the calling thread holds it through `io` (once: a save inside a restore still waits)."""
+        me = threading.get_ident()
+        if self._io_by == me and not self._io_in:
+            self._io_in = True
+            try:
+                yield
+            finally:
+                self._io_in = False
+            return
+        with self._own_io:
+            self._io_by, self._io_in = me, True
+            try:
+                yield
+            finally:
+                self._io_by, self._io_in = None, False
+
+    @contextlib.contextmanager
+    def io(self, wait_s: float | None = None):
+        """The spill's own I/O for a caller that takes `capture_lock.GUARD` inside it (a side slot's
+        save or read, the KV pool's save of an idle chat): this lock first, then the guard, the
+        order the idle backfill takes them in, so neither holds what the other waits for. Yields
+        whether it got it: within `wait_s` (0: without waiting, None: as long as it takes); never
+        when this thread holds it already (a reclaim inside a restore's page gate)."""
+        me = threading.get_ident()
+        if self._io_by == me:
+            yield False
+            return
+        got = (self._own_io.acquire() if wait_s is None else
+               self._own_io.acquire(timeout=wait_s) if wait_s > 0 else
+               self._own_io.acquire(blocking=False))
+        if not got:
+            yield False
+            return
+        self._io_by, self._io_in = me, False
+        try:
+            yield True
+        finally:
+            self._io_by, self._io_in = None, False
+            self._own_io.release()
 
     def _tier_hold(self, d: int) -> None:
         """While a save runs the tier's writer waits between two of its files."""
@@ -631,6 +735,10 @@ class SessionSpill:
         return n, meta
 
     def close(self) -> None:
+        self._idle_stop.set()
+        t = self._idle_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=30.0)
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -699,10 +807,14 @@ class SessionSpill:
         h = hashlib.sha256(f"{owner}|{self.clock()}|{tokens[:64]}".encode()).hexdigest()
         return h[:16]
 
-    def save_resident(self, res, eng, drafter, reason: str, stop=None) -> dict | None:
+    def save_resident(self, res, eng, drafter, reason: str, stop=None, guard=None,
+                      used: float | None = None) -> dict | None:
         """The resident conversation: rows [0, valid), the end anchor and the newest anchors.
         `stop()`: checked between blocks; true, the save stops there and its incomplete entry
-        goes (a prewarm yielding to a request; the conversation stays in RAM)."""
+        goes (a prewarm yielding to a request; the conversation stays in RAM). `guard`: held
+        around each step that runs on the device only, not around the writes (`_save`). `used`:
+        the entry's last use (`clock()` time), now when None. A save records what it wrote on
+        the prefix (`spill_mark`, read by `current`)."""
         if res.valid <= 0 or res._stash is not None:
             return None
         n = int(res.valid)
@@ -718,10 +830,39 @@ class SessionSpill:
                 end.update(delta=int(res.end.get("delta") or 0), mm=bool(res.end.get("mm")))
         if end is None and not anchors:
             return None
-        return self._save(eng, drafter, tokens=res.tokens[:n], n=n, rows_from=None,
+        gen = getattr(res, "rows_gen", None)
+        info = self._save(eng, drafter, tokens=res.tokens[:n], n=n, rows_from=None,
                           anchors=anchors, end=end, taint=res.taint, owner=res.owner,
                           reason=reason, extra=self._extra(res) if end is not None else None,
-                          resident=True, stop=stop)
+                          resident=True, stop=stop, guard=guard, used=used)
+        if info is not None:
+            self._mark(res, self.entries.get(info["eid"]), gen)
+        return info
+
+    @staticmethod
+    def _mark(res, e, gen) -> None:
+        """SRV-E6: `res` holds what entry `e` holds, as of its rows' generation `gen`."""
+        if e is not None and gen is not None:
+            res.spill_mark = (e.eid, e.man.get("created"), gen, e.valid)
+
+    def current(self, res, deep: bool = True) -> Entry | None:
+        """SRV-E6: the entry that holds the conversation in `res` as it is now, or None: the save that
+        wrote it was the last thing to see these rows (no prefill, generation or clear since,
+        `ResidentPrefix.rows_gen`), the entry is that save's (its `created`) with the same rows
+        and, with `deep`, the same tokens, and no guest's rows lie over them. A reclaim of such a
+        conversation only trims: everything a restore needs is on the disk already. The idle
+        backfill asks without `deep` every few seconds (a 128k-token compare is milliseconds under
+        the interpreter lock); a wrong yes there costs a skipped idle save, never rows."""
+        m = getattr(res, "spill_mark", None)
+        if m is None or res._stash is not None:
+            return None
+        eid, created, gen, n = m
+        with self.lock:
+            e = self.entries.get(eid)
+        if (e is None or e.man.get("created") != created or gen != getattr(res, "rows_gen", None)
+                or n != int(res.valid) or e.valid != n or (deep and e.tokens != res.tokens[:n])):
+            return None
+        return e
 
     def save_park(self, res, eng, drafter, reason: str) -> dict | None:
         """The parked conversation: its head is the rows in place (the resident prompt shares it),
@@ -773,10 +914,14 @@ class SessionSpill:
             return None
 
     def _save(self, eng, drafter, *, tokens, n, rows_from, anchors, end, taint, owner, reason,
-              extra, resident, stop=None) -> dict | None:
+              extra, resident, stop=None, guard=None, used=None) -> dict | None:
         import torch
         from engine.cache import _kv_views, state_now
         t0 = time.perf_counter()
+        # SRV-E6: `guard` (capture_lock.GUARD) is held around each device step alone (a block's sums,
+        # its copy to the staging buffer, an anchor's), never around a write: the idle backfill's save
+        # then holds a graph capture off for one block's device work, not for the disk
+        cu = _Held(guard)
         C = self.chunk
         tokens = [int(x) for x in tokens[:n]]
         views = _kv_views(eng, drafter)
@@ -865,9 +1010,10 @@ class SessionSpill:
                         sums = None
                         q = time.perf_counter()
                         if not split:
-                            sums = (block_sums_views(views, b, r) if pieces is None else
-                                    block_sums_views([(pieces[i][0][1], ax) for i, (t, ax)
-                                                      in enumerate(views)], 0, r))
+                            with cu:
+                                sums = (block_sums_views(views, b, r) if pieces is None else
+                                        block_sums_views([(pieces[i][0][1], ax) for i, (t, ax)
+                                                          in enumerate(views)], 0, r))
                         tm["sums"] += (time.perf_counter() - q) * 1e3
                         ob = old_blocks.get(b)
                         if (sums is not None and ob is not None and ob["rows"] == r
@@ -879,7 +1025,8 @@ class SessionSpill:
                             continue
                         if bufs is None:
                             q = time.perf_counter()
-                            bufs = self._staging(views)
+                            with cu:
+                                bufs = self._staging(views)
                             tm["alloc"] += (time.perf_counter() - q) * 1e3
                         slot = written % 2
                         f = pending.pop(slot, None)
@@ -891,26 +1038,27 @@ class SessionSpill:
                         secs, payload = dc._sections([dc._row_bytes(t, ax) * r for t, ax in views])
                         buf = bufs[slot]
                         dsts = []
-                        for i, ((t, ax), (off, nb)) in enumerate(zip(views, secs)):
-                            if codec:
-                                # byte planes, cut on the device; the sums of a block in two
-                                # pieces from the joined rows there
-                                src = (t.narrow(ax, b, r) if pieces is None
-                                       else _join(pieces[i], ax, t.device))
-                                _planes_to_host(src, buf.tensor()[off:off + nb],
-                                                cuda and buf.pinned)
-                                dsts.append((src, ax))
-                                continue
-                            dst = buf.typed(off, t.dtype, dc._row_shape(t, ax, r))
-                            if pieces is None:
-                                dst.copy_(t.narrow(ax, b, r), non_blocking=cuda and buf.pinned)
-                            else:
-                                for at, x in pieces[i]:
-                                    dst.narrow(ax, at, x.shape[ax]).copy_(
-                                        x, non_blocking=cuda and buf.pinned)
-                            dsts.append((dst, ax))
-                        if cuda:
-                            torch.cuda.current_stream().synchronize()
+                        with cu:
+                            for i, ((t, ax), (off, nb)) in enumerate(zip(views, secs)):
+                                if codec:
+                                    # byte planes, cut on the device; the sums of a block in two
+                                    # pieces from the joined rows there
+                                    src = (t.narrow(ax, b, r) if pieces is None
+                                           else _join(pieces[i], ax, t.device))
+                                    _planes_to_host(src, buf.tensor()[off:off + nb],
+                                                    cuda and buf.pinned)
+                                    dsts.append((src, ax))
+                                    continue
+                                dst = buf.typed(off, t.dtype, dc._row_shape(t, ax, r))
+                                if pieces is None:
+                                    dst.copy_(t.narrow(ax, b, r), non_blocking=cuda and buf.pinned)
+                                else:
+                                    for at, x in pieces[i]:
+                                        dst.narrow(ax, at, x.shape[ax]).copy_(
+                                            x, non_blocking=cuda and buf.pinned)
+                                dsts.append((dst, ax))
+                            if cuda:
+                                torch.cuda.current_stream().synchronize()
                         tm["copy"] += (time.perf_counter() - q) * 1e3
                         if sums is None:
                             # a block in two pieces: its sums are the whole block's, as a restore
@@ -952,7 +1100,8 @@ class SessionSpill:
                     self._tier_hold(-1)
                 # the anchors: the newest grid lines' and the end's, one file each
                 q = time.perf_counter()
-                abuf = self._anchor_buf(eng)
+                with cu:
+                    abuf = self._anchor_buf(eng)
                 files = []
                 pairs = [(f"a{b:07d}.anc", b, anchors[b]) for b in keep]
                 if end is not None:
@@ -975,17 +1124,19 @@ class SessionSpill:
                 for fname, b, anc in pairs:
                     if stop is not None and stop():
                         raise _Yielded()
-                    sums = [state_sums(x) for x in anc]
+                    with cu:
+                        sums = [state_sums(x) for x in anc]
                     of = old_files.get(fname)
                     if (of is not None and of["b"] == b and of["sums"] == sums
                             and os.path.exists(os.path.join(path, fname))):
                         files.append(of)           # An anchor already on the disk
                         nbytes += anc_size
                         continue
-                    for (o, _), t, x in zip(offs, state, anc):
-                        abuf.typed(o, t.dtype, t.shape).copy_(x, non_blocking=cuda and abuf.pinned)
-                    if cuda:
-                        torch.cuda.current_stream().synchronize()
+                    with cu:
+                        for (o, _), t, x in zip(offs, state, anc):
+                            abuf.typed(o, t.dtype, t.shape).copy_(x, non_blocking=cuda and abuf.pinned)
+                        if cuda:
+                            torch.cuda.current_stream().synchronize()
                     hdr = self._header_for(0, {"b": b, "sums": sums})
                     dc.write_file(os.path.join(path, fname), [hdr, abuf.view(0, anc_payload)], fsync=False)
                     files.append({"file": fname, "b": b, "sums": sums,
@@ -1006,7 +1157,8 @@ class SessionSpill:
             now = self.clock()
             man = {"format": FORMAT, "eid": eid, "fp": self.fp, "chunk": C, "valid": n,
                    "tsha": _tsha(tokens), "owner": owner, "reason": reason, "resident": resident,
-                   "created": round(now, 3), "used": round(now, 3), "taint": taint,
+                   "created": round(now, 3), "used": round(now if used is None else min(now, used), 3),
+                   "taint": taint,
                    "layout": layout,
                    "state": [[str(t.dtype), list(t.shape)] for t in state],
                    "anchors": [int(b) for b in keep], "anchor_files": files,
@@ -1040,7 +1192,9 @@ class SessionSpill:
                 "anchors": len(keep), **({"end_carried": True} if carried is not None else {}),
                 **({"codec": codec, "blocks_raw_bytes": zraw, "blocks_disk_bytes": zdisk}
                    if zrecs else {}),
-                "parts": {k: round(v, 1) for k, v in tm.items()}, "writer_ms": round(tw[0] * 1e3, 1)}
+                "parts": {k: round(v, 1) for k, v in tm.items()}, "writer_ms": round(tw[0] * 1e3, 1),
+                **({"guard_ms": round(cu.total * 1e3, 1), "guard_max_ms": round(cu.most * 1e3, 1)}
+                   if guard is not None else {})}
         self.stats["saves"] += 1
         self.stats["save_ms"] += s * 1e3
         self.stats["blocks_written"] += written
@@ -1133,19 +1287,22 @@ class SessionSpill:
         return best
 
     def maybe_restore(self, res, eng, drafter, keys, max_len: int, replay: bool = False,
-                      disk=None, mm_ok: bool = False, stop=None) -> dict | None:
+                      disk=None, mm_ok: bool = False, stop=None, guard=None) -> dict | None:
         """Serve `keys` from an entry when one beats the caches in RAM: the resident conversation
         written first when it is worth keeping, then the entry's rows read in place. With
         `replay` (the server's call before its replay), when no entry does: the parked
         conversation back in place when the copy continues it to its end anchor
         (engine/cache.py `unpark_end`), and one line when an entry that shares a long head with
-        the prompt serves none of it (`unserved`)."""
+        the prompt serves none of it (`unserved`). `guard` (a side slot's thread: capture_lock.GUARD):
+        held around the device work, inside the spill's own I/O lock where both are taken, never
+        while that lock is waited for (the idle backfill holds it, then waits for the guard)."""
         if res is None or (not self.entries and getattr(res, "park_end", None) is None):
             return None
         if res._stash is not None:
             if disk is not None:
                 cache_fence(disk, 0)
-            res.settle_guest(eng)
+            with _Held(guard):
+                res.settle_guest(eng)
         miss = {} if replay and len(keys) >= self.min_tokens else None
         got = self.candidate(res, keys, max_len, replay, mm_ok=mm_ok, miss=miss)
         if got is None:
@@ -1154,7 +1311,8 @@ class SessionSpill:
             if replay and res.park_end is not None:
                 if disk is not None:
                     cache_fence(disk, 0)       # the swap writes rows a disk job may be copying
-                res.unpark_end(eng, drafter, keys, max_len, mm_ok=mm_ok)
+                with _Held(guard):
+                    res.unpark_end(eng, drafter, keys, max_len, mm_ok=mm_ok)
             return None
         e, line, here = got
         if (res.valid >= self.min_tokens and (res.owner is None or res.owner != e.man.get("owner"))
@@ -1163,7 +1321,7 @@ class SessionSpill:
             # resident conversation is then not written (`refused.room`), the one asked for is read
             self._keep.add(e.eid)
             try:
-                self.save_resident(res, eng, drafter, "switch", stop=stop)
+                self.save_resident(res, eng, drafter, "switch", stop=stop, guard=guard)
             finally:
                 self._keep.discard(e.eid)
             if stop is not None and stop():
@@ -1178,10 +1336,13 @@ class SessionSpill:
             if res.valid - keep >= res.chunk:
                 self._keep.add(e.eid)              # the park's write must not take the entry
                 try:
-                    res._park(eng, drafter, keep)
+                    # with a guard, the spill's lock first: the park's write of an older park takes it again
+                    with self.io() if guard is not None else contextlib.nullcontext(), _Held(guard):
+                        res._park(eng, drafter, keep)
                 finally:
                     self._keep.discard(e.eid)
-        return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here, stop=stop)
+        return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here, stop=stop,
+                            guard=guard)
 
     def _unserved(self, m: dict) -> None:
         """A long prompt no entry served although one shares a long head with it: one line, so a
@@ -1200,10 +1361,11 @@ class SessionSpill:
             del self.events[:-30]
 
     def restore(self, res, eng, drafter, e: Entry, disk=None, line: int = 0,
-                here: int = 0, stop=None) -> dict | None:
+                here: int = 0, stop=None, guard=None) -> dict | None:
         """Read entry `e` into the engine's buffers and make it the resident prompt (its anchors,
         its end anchor, its line and its session). None, with the resident prefix cut below the
-        first row written, when a file fails its check or a buffer is refused."""
+        first row written, when a file fails its check or a buffer is refused. `guard`: held
+        around the device work, inside the spill's own I/O lock (`maybe_restore`)."""
         import torch
         from engine.cache import _kv_views, drafter_resume, state_now
         t0 = time.perf_counter()
@@ -1212,7 +1374,8 @@ class SessionSpill:
         state = state_now(eng)
         if man["state"] != [[str(t.dtype), list(t.shape)] for t in state]:
             return self._failed(e, "layout", res, None)
-        drafter_resume(eng, drafter, n)        # builds a draft cache that does not exist yet
+        with _Held(guard):
+            drafter_resume(eng, drafter, n)    # builds a draft cache that does not exist yet
         views = _kv_views(eng, drafter)
         if _layout(views) != man["layout"] or n > min(t.shape[ax] for t, ax in views):
             return self._failed(e, "layout", res, None)
@@ -1223,7 +1386,7 @@ class SessionSpill:
         nread = in_place = 0
         cuda = any(t.is_cuda for t, _ in views)
         try:
-            with self._io():
+            with self._io(), _Held(guard):
                 todo = []
                 for bl in man["blocks"]:
                     b, r = int(bl["b"]), int(bl["rows"])
@@ -1316,14 +1479,16 @@ class SessionSpill:
         except Exception as exc:                                   # noqa: BLE001
             self._event("failed", what="restore", error=f"{type(exc).__name__}: {exc}"[:200])
             return self._failed(e, "error", res, low)
-        if drafter is not None and hasattr(drafter, "state_resume"):
-            drafter.state_resume(n)            # again, over the rows read back (`drafter_resume`)
-        if res.end is not None and self.on_adopt is not None and man.get("extra"):
-            try:
-                self.on_adopt(res, man["extra"])
-            except Exception:                                      # noqa: BLE001
-                pass
+        with _Held(guard):
+            if drafter is not None and hasattr(drafter, "state_resume"):
+                drafter.state_resume(n)        # again, over the rows read back (`drafter_resume`)
+            if res.end is not None and self.on_adopt is not None and man.get("extra"):
+                try:
+                    self.on_adopt(res, man["extra"])
+                except Exception:                                  # noqa: BLE001
+                    pass
         man["used"] = round(self.clock(), 3)
+        self._mark(res, e, getattr(res, "rows_gen", None))    # SRV-E6: the rows hold the entry now
         s = time.perf_counter() - t0
         info = {"eid": e.eid, "tokens": n, "line": line, "before": here,
                 "blocks_read": len(man["blocks"]) - in_place, "blocks_in_place": in_place,
@@ -1358,6 +1523,90 @@ class SessionSpill:
             self._drop(e.eid, "corrupt")
         self._event("restore_failed", why=why, tokens=e.valid)
         return None
+
+    # --- the idle backfill (SRV-E6) -------------------------------------------------------------
+    def backfill(self, slots, now: float | None = None) -> list[dict]:
+        """One pass of the idle backfill (the 2026-09-27 design's "backfill while idle", applied to
+        the spill): each slot's conversation idle `idle_s` (`ResidentPrefix.t_used`) with at least
+        `drain_min_tokens` rows, not already current on the disk (`current`) and not written in
+        the last `idle_every_s`, is written (reason `idle`) while its rows stay where they are.
+        `slots`: objects with `key`, `res`, `eng`, `drafter`, `take()` (the slot held without
+        waiting: False while a request has it) and `give()`. A busy slot is skipped, and so is
+        every slot while the spill's own I/O is held (a pressure save or a restore goes first).
+        The spill's lock is taken before `capture_lock.GUARD`, which is held around each device
+        step only (`_save`'s `guard`); the slot stays held for the save. A save the day's write
+        budget refuses is counted (`stats["idle"]["refused"]`, and by the guard) and asked again
+        after `idle_every_s`; a pressure save is not optional there (engine/disk_cache.py
+        `WriteGuard`). The saves' infos, each with the slot's `key`."""
+        if str(self.cfg.get("idle", "on")) == "off":
+            return []
+        import torch
+        from engine import capture_lock
+        now = time.monotonic() if now is None else float(now)
+        idle_s, every = float(self.cfg["idle_s"]), float(self.cfg["idle_every_s"])
+        low = int(self.cfg["drain_min_tokens"])
+        st, out = self.stats["idle"], []
+
+        def due(res, key) -> bool:
+            used = float(getattr(res, "t_used", 0.0) or 0.0)
+            return (res is not None and int(res.valid) >= low and res._stash is None and used > 0
+                    and now - used >= idle_s and now - self.idle_last.get(key, -1e18) >= every
+                    and self.current(res, deep=False) is None)
+        for c in slots:
+            key = (c.key, getattr(c.res, "owner", None))
+            if not due(c.res, key):
+                continue
+            if not c.take():
+                st["busy"] += 1
+                continue
+            try:
+                if not due(c.res, key):            # a turn ran between the look and the hold
+                    continue
+                with self.io(0) as ok:
+                    if not ok:
+                        st["spill_busy"] += 1
+                        break
+                    res = c.res
+                    refused = dict(self.stats["refused"])
+                    used = self.clock() - max(0.0, now - float(res.t_used))
+                    try:
+                        with torch.no_grad():
+                            info = self.save_resident(res, c.eng, c.drafter, "idle",
+                                                      guard=capture_lock.GUARD, used=used)
+                    except Exception:                              # noqa: BLE001
+                        st["errors"] += 1
+                        info = None
+                self.idle_last[key] = now
+                if info is None:
+                    why = next((k for k, v in self.stats["refused"].items()
+                                if v > refused.get(k, 0)), "nothing")
+                    st["refused"][why] = st["refused"].get(why, 0) + 1
+                    continue
+                st["saves"] += 1
+                st["bytes_written"] += int(info["bytes_written"])
+                out.append(dict(info, key=c.key))
+            finally:
+                c.give()
+        for k in [k for k, t in self.idle_last.items() if now - t > 4 * every]:
+            self.idle_last.pop(k, None)
+        return out
+
+    def start_idle(self, slots_of, every_s: float = IDLE_LOOK_S):
+        """The idle backfill's thread (`spill-idle`): every `every_s`, a pass over `slots_of()`
+        (`backfill`); it stops at `close`. Nothing with `idle` off."""
+        if str(self.cfg.get("idle", "on")) == "off" or self._idle_thread is not None:
+            return None
+
+        def run():
+            while not self._idle_stop.wait(every_s):
+                try:
+                    self.backfill(slots_of())
+                except Exception as exc:                           # noqa: BLE001
+                    self.stats["idle"]["errors"] += 1
+                    self._event("failed", what="idle", error=f"{type(exc).__name__}: {exc}"[:200])
+        self._idle_thread = threading.Thread(target=run, name="spill-idle", daemon=True)
+        self._idle_thread.start()
+        return self._idle_thread
 
     def drained(self) -> Entry | None:
         """The resident conversation a planned stop wrote, when the stop was recent."""

@@ -1783,6 +1783,9 @@ class ResidentPrefix:
         # SPD-257: when this prefix last served a conversation (time.monotonic(): a kept end, a prompt that
         # replaced the rows, a promoted guest); 0.0 for never (the server's slot order, `promote_guest`)
         self.t_used = 0.0
+        # SRV-E6: counts what may write the rows in place (a prefill's `begin`, a generation's `keep_end`, a
+        # `clear`); a save records it (engine/spill.py `spill_mark`), so an entry is known current without its sums
+        self.rows_gen = 0
         # SPD-215: the end of the last prompt the prefill read (`keep_prompt_end`): its line `at` and its
         # tokens; its state in `_pend_bufs`. An agent's next turn shares the conversation up to there
         # and parts at the answer the client sends back in its own words: it resumes here instead of at
@@ -1924,6 +1927,7 @@ class ResidentPrefix:
         rotary offset every row after them takes. Such an end is offered only to a request that
         says so (`end_offer(mm_ok=True)`: a compaction served as this conversation's continuation,
         server/compaction.py); every other request resumes at the anchors in place, as before."""
+        self.rows_gen += 1
         if not self.end_on or self.chunk <= 0 or not resident_capable(drafter):
             return "off"
         if self._stash is not None:
@@ -2193,6 +2197,7 @@ class ResidentPrefix:
         many as the stash budget holds (FX5). `stay`: the session comes back (ENG-371), so this
         request is never a guest.
         """
+        self.rows_gen += 1
         self.capturing = False
         if kind == "session":
             # rows written by verify blocks: nothing anchored after them is a cold prefill's state.
@@ -3106,6 +3111,7 @@ class ResidentPrefix:
 
     # --- bookkeeping -----------------------------------------------------------------------
     def clear(self) -> None:
+        self.rows_gen += 1
         for b in list(self.anchors):
             self._free.append(self.anchors.pop(b))
         self.tokens, self.valid = [], 0
