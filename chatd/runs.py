@@ -117,6 +117,15 @@ def client_prompt_of(u: dict) -> int:
     return int(client if client is not None else u.get("prompt_tokens") or 0)
 
 
+def _span(s: float) -> str:
+    """"45 s", "12 min", "2 h 5 min": a wait in the Now line (server/activity.py `_span`'s words, whole minutes)."""
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s} s"
+    h, m = divmod(s // 60, 60)
+    return f"{m} min" if not h else f"{h} h" if not m else f"{h} h {m} min"
+
+
 #: SRV-709: the Now line while a chat waits because the engine's memory is full
 MEMORY_PAUSE = ("Memory is full: this chat pauses until a running chat frees memory, then "
                 "continues (next try in {s} s)")
@@ -258,6 +267,7 @@ class Run:
         self.result_cap: int | None = None      # one tool result's characters, this step (SRV-639)
         self.compacted = 0                      # the step a compaction last ran before
         self.compact_next = False               # the next request compacts first (memory, window)
+        self.memory_compacted = False           # the wait's end compacted this run once (`_memory_compact`)
         self.compact_cut = False                # the last request_for compacted the chat
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
@@ -558,6 +568,8 @@ class Run:
                     self.error = exc.args[0]
                     return "failed"
                 if memory_refused(exc):
+                    if self._memory_compact(exc.args[0]):
+                        continue
                     return self._memory_refused(exc.args[0])
                 if memory_full(exc):
                     # SRV-709: refused for memory before the stream: wait and send it again
@@ -607,6 +619,9 @@ class Run:
             outcome = self._consume()
             self.call = None
             if outcome == "memory_refused":
+                if self._memory_compact(self.error):
+                    self.error = None
+                    continue
                 return self._memory_refused(self.error)
             if outcome in ("completed", "failed"):
                 self.continue_final = False
@@ -655,8 +670,10 @@ class Run:
                 if m:
                     # SRV-787: the call waits for memory on the engine; each comment is the keepalive
                     short, waited, left = float(m.group(2)), int(m.group(3)), int(m.group(4))
-                    self.set_phase("queued", f"Waiting for memory: {short:.1f} GiB short, {waited} s so far; "
-                                             f"refused in {left} s unless memory frees")
+                    # 2026-11-06: paused, not stopped; the engine gives up only after its bound (3 h)
+                    self.set_phase("queued", f"Memory is tight: this chat waits for {short:.1f} GiB to free "
+                                             f"({_span(waited)} so far) and continues by itself. Stop cancels; "
+                                             f"it gives up after {_span(waited + left)} without memory")
                     continue
                 m = _WAITING.search(obj or "")
                 if m:
@@ -757,6 +774,22 @@ class Run:
 
     def _stopped(self) -> str:
         return "interrupted" if self.stop_mode == "shutdown" else "cancelled"
+
+    def _memory_compact(self, msg: str | None) -> bool:
+        """2026-11-06: the engine's wait for memory ended without memory (its bound, 3 h). The first time in a run
+        the chat gets a lower compaction line (`Conv.memory_limit`, the refused request's estimate) and the call
+        goes once more, compacted; True. Already done in this run: False, the run ends `interrupted` (live 15:38
+        and 15:49: each Continue sent the same 208k prompt and waited its whole bound again)."""
+        if self.memory_compacted:
+            return False
+        self.memory_compacted = True
+        lim = self.conv.memory_limit
+        est = int(self.request_est or 0)
+        if est:
+            self.conv.memory_limit = min(lim, est) if lim else est
+        self.compact_next = True
+        self.set_phase("queued", "Memory stayed full: compacting this chat to fit, then trying again")
+        return True
 
     def _memory_refused(self, msg: str | None) -> str:
         """SRV-787: the engine waited the longest it may for memory and refused the call: no retry (it would

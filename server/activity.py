@@ -705,8 +705,11 @@ def _gb(b) -> str:
 
 
 def _span(s: float) -> str:
-    """"45 s", "1 m 20 s", "2 min"."""
+    """"45 s", "1 m 20 s", "2 min"; from an hour "3 h", "2 h 15 min" (whole minutes)."""
     s = max(0, int(round(s)))
+    if s >= 3600:
+        h, m = divmod(s // 60, 60)
+        return f"{h} h" if m == 0 else f"{h} h {m} min"
     return f"{s} s" if s < 60 else f"{s // 60} min" if s % 60 == 0 else f"{s // 60} m {s % 60} s"
 
 
@@ -751,7 +754,9 @@ def memory_lines(m: dict, waited: float, left: float, way: dict | None = None) -
         now = f"Freeing idle cache ({_gb(m['freed'])} GiB given back)"
     else:
         now = f"Waiting for memory to free (re-checked every second, {_span(waited)} so far)"
-    end = f"Starts automatically; Stop cancels. Will be refused in {_span(left)} unless memory frees"
+    # 2026-11-06: the chat is paused, not stopped: it continues by itself; the bound (3 h) is the last resort
+    end = (f"Memory is tight: this chat waits and continues by itself as soon as memory frees. "
+           f"Stop cancels; it gives up only after {_span(m['bound_s'])} without memory ({_span(left)} left)")
     return [why, now, end]
 
 
@@ -763,8 +768,8 @@ def refusal_words(m: dict) -> str:
     else:
         what = (f"needed {_gb(m['need'])} GiB, "
                 f"{_gb(max(0, (m.get('free') or 0) - (m.get('guard') or 0)))} free above the guard")
-    return (f"Not enough memory for this turn right now ({what}). Try again when the other chat finishes, "
-            f"or start a shorter conversation.")
+    return (f"Memory stayed full for {_span(m.get('bound_s') or 0)}, so this turn did not start ({what}). "
+            f"Continue tries again; a shorter conversation or fewer chats at once needs less.")
 
 
 def waiting_label(w: dict) -> str:

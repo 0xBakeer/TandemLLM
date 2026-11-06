@@ -107,8 +107,14 @@ def test_the_wait_shows_and_the_bound_ends_the_run_with_the_engines_reason():
              "error": {"message": REFUSAL, "type": "server_busy", "code": "memory_wait_timeout", "status": 503}}
     r = _bare([("comment", comment), ("data", frame), ("done", None)])
     assert r._consume() == "memory_refused" and r.error == REFUSAL, (r.error,)
-    assert r.phases == [("queued", "Waiting for memory: 7.7 GiB short, 120 s so far; refused in 480 s unless "
-                                   "memory frees")], r.phases
+    assert r.phases == [("queued", "Memory is tight: this chat waits for 7.7 GiB to free (2 min so far) and continues "
+                                   "by itself. Stop cancels; it gives up after 10 min without memory")], r.phases
+    # 2026-11-06: the first end of the wait in a run compacts the chat (a lower compaction line) and sends it again
+    r.memory_compacted, r.request_est, r.compact_next = False, 208_326, False
+    r.conv = type("Cv", (), {"memory_limit": None})()
+    assert r._memory_compact(r.error) and r.compact_next and r.conv.memory_limit == 208_326, vars(r.conv)
+    assert r.phases[-1] == ("queued", "Memory stayed full: compacting this chat to fit, then trying again")
+    assert not r._memory_compact(r.error), "once a run: the second end of the wait ends the run"
     assert r._memory_refused(r.error) == "interrupted"
     assert r.notice == REFUSAL[:-1] + ". Continue goes on from here.", r.notice
     # a 503 before the stream (an engine that never opened it) is the same refusal, not a retry
