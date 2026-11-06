@@ -1046,13 +1046,16 @@ class AgentMixin:
         if info.get("backend") == "engine":
             body["tandem"] = {"compaction": True}
         if cont:
+            # the chat's own request as it is (its `tandem` field with `compaction` false, its thinking setting),
+            # plus the instruction. Two things made the prompt part from the conversation the engine holds at its
+            # third token (live 2026-11-06, 192,454 and 73,023 tokens read again): marked a compaction, the engine
+            # leaves out the router's notes at the head; with thinking off, the template writes another system
+            # block. So the summary may reason: a short budget, which no prompt token carries
             body = {k: v for k, v in req.items() if k not in (
-                "stream_options", "continue_final_message", "add_generation_prompt", "reasoning_effort",
-                "max_reasoning_tokens")}
+                "stream_options", "continue_final_message", "add_generation_prompt", "max_reasoning_tokens")}
             body.update(messages=list(req["messages"]) + [{"role": "user", "content": comp.INSTRUCTIONS}],
-                        stream=False, max_tokens=comp.SUMMARY_TOKENS,
-                        chat_template_kwargs={**(req.get("chat_template_kwargs") or {}), "enable_thinking": False},
-                        tandem={**(req.get("tandem") or {}), "compaction": True})
+                        stream=False, max_tokens=comp.SUMMARY_TOKENS + comp.SUMMARY_REASONING,
+                        max_reasoning_tokens=comp.SUMMARY_REASONING)
         if run is not None:
             run.set_phase("prefill", "Compacting the conversation")
         t0 = time.monotonic()
