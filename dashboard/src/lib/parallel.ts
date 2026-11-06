@@ -292,11 +292,9 @@ export function stateTone(l: Lane): 'wait' | 'prefill' | 'think' | 'tool' | 'wri
 export function stateLine(l: Lane): string {
   if (l.state === 'tool_call') return l.tool ? `Tool call: ${l.tool}` : 'Tool call';
   if (l.state === 'prefilling' && l.prefill?.pct != null) return `Prefilling ${Math.round(l.prefill.pct)} %`;
-  if (l.state === 'waiting_memory' && l.memory?.ends_in_ms != null) {
-    // SRV-787: when the wait ends, in the server's words ("8 m 40 s")
-    const s = Math.round(l.memory.ends_in_ms / 1000);
-    const left = s < 60 ? `${s} s` : s % 60 === 0 ? `${s / 60} min` : `${Math.floor(s / 60)} m ${s % 60} s`;
-    return `Waiting for memory, refused in ${left} unless memory frees`;
+  if (l.state === 'waiting_memory') {
+    // 2026-11-06: paused, not stopped: the turn starts by itself when memory frees (it gives up after 3 h)
+    return 'Waiting for free memory: continues by itself';
   }
   if (l.state === 'done') return l.finish && l.finish !== 'stop' ? `Done: ${l.finish.replace('_', ' ')}` : 'Done';
   return STATE_WORD[l.state] ?? l.state;

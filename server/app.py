@@ -739,7 +739,8 @@ PLAN_MARGIN = 8192
 #: SRV-305: a request waiting for memory gets its line again this often (s)
 MEM_LINE_EVERY_S = 15.0
 #: SRV-787: the longest a request waits for memory before it is refused with the reason (s), streamed or not
-MEM_WAIT_S = float(os.environ.get("QSE_MEM_WAIT_S", "600") or 600)
+# 2026-11-06: a chat that cannot get memory waits and continues by itself; it gives up after 3 h only
+MEM_WAIT_S = float(os.environ.get("QSE_MEM_WAIT_S", "10800") or 10800)
 #: SRV-785: what the guard keeps free under the largest step the engine can take between two checks (GiB); 5.0 is
 #: the lowest MemAvailable the box was read at without freezing (2026-11-02), where it freezes was never measured
 GUARD_MARGIN_GB = float(os.environ.get("QSE_GUARD_MARGIN_GB", "5") or 5)
@@ -8527,6 +8528,15 @@ class Handler(BaseHTTPRequestHandler):
         said = -1e9
         try:
             while time.monotonic() < until:
+                if STATE.get("draining"):
+                    # a planned stop: the wait ends now with a retryable 503 (the client sends it again after
+                    # the restart), not at the stop's grace and its SIGKILL (2026-11-06 13:05: 120 s, then killed)
+                    print(f"[parallel] {cid} stops waiting for memory: the engine is stopping", flush=True)
+                    if rec is not None:
+                        rec.stop_detail = "draining"
+                    if respond:
+                        self._busy(503, "The engine is restarting; send the request again in a moment.", retry=30)
+                    return False
                 if rec is not None:
                     # SRV-787: what the live view says while it waits (server/activity.py `memory_of`)
                     rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid), freed)

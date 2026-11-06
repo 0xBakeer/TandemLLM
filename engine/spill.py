@@ -435,7 +435,7 @@ class SessionSpill:
                       "bytes_raw_written": 0, "blocks_compressed": 0,
                       "last_restore": None, "swept": 0,
                       "idle": {"saves": 0, "bytes_written": 0, "busy": 0, "spill_busy": 0,
-                               "refused": {}, "errors": 0}}
+                               "refused": {}, "errors": 0, "older_copy": 0}}
         self.events: list[dict] = []
 
     # --- settings and the directory ----------------------------------------------------------
@@ -1546,6 +1546,17 @@ class SessionSpill:
         idle_s, every = float(self.cfg["idle_s"]), float(self.cfg["idle_every_s"])
         low = int(self.cfg["drain_min_tokens"])
         st, out = self.stats["idle"], []
+        # one chat on several slots (its home and the copies a compaction or a move left behind): only its newest
+        # copy is written. Each copy saved into the chat's one entry made the others stale, and they wrote over
+        # it in turn every `idle_every_s` (2026-11-06: 202,962, 218,703 and 25,527 rows of one chat, 4.4 to
+        # 4.9 GB a save, the day's 200 GB budget gone in 90 minutes)
+        newest: dict = {}
+        for c in slots:
+            o = getattr(c.res, "owner", None) if c.res is not None else None
+            if o is not None:
+                t = float(getattr(c.res, "t_used", 0.0) or 0.0)
+                if o not in newest or t > newest[o][0]:
+                    newest[o] = (t, c.key)
 
         def due(res, key) -> bool:
             used = float(getattr(res, "t_used", 0.0) or 0.0)
@@ -1554,6 +1565,10 @@ class SessionSpill:
                     and self.current(res, deep=False) is None)
         for c in slots:
             key = (c.key, getattr(c.res, "owner", None))
+            if key[1] is not None and newest[key[1]][1] != c.key:
+                if due(c.res, key):
+                    st["older_copy"] = st.get("older_copy", 0) + 1
+                continue
             if not due(c.res, key):
                 continue
             if not c.take():

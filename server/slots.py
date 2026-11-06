@@ -244,6 +244,20 @@ class Admission:
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
+        if gin and need_ws > 0:
+            # the guard's chunk is the most one prefill allocates between two checks. This request's workspace is
+            # that allocation and is charged below: in full over the peak, under it inside the room, which bounds
+            # all the engine may still allocate. The floor holds only what is left of the chunk (2026-11-06: a 142k
+            # turn's 10.8 GiB counted as its workspace and again as the floor's chunk waited 17 s at MemAvailable
+            # 19.9 GiB; under the peak, four chats' turns waited 10 to 65 s on a 3.9 GiB chunk counted twice)
+            # the chunk's class is this request's own rows unless a longer prefill is in flight: then its workspace
+            # is the chunk, all of it (the guard's estimate of a full chunk at its class ran 3.2 GiB above the
+            # request's own and held a 177k turn 176 s at 0.1 GiB short, 2026-11-06 15:14)
+            own = int(gin["step"]) if int(rows) >= self.ctx_rows() else min(int(gin["step"]), need_ws)
+            if own:
+                gin = dict(gin, step=int(gin["step"]) - own, own=own)
+                gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
+                floor = min(self.cap, gin["guard"])
         spare = 0
         if over_peak and self.spare is not None:
             try:
@@ -408,7 +422,8 @@ class Admission:
         if not gin:
             return ""
         g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731
-        return (f" = chunk {g(gin['step'])} + KV commit {g(gin['kv'])} + sandbox {g(gin['sandbox'])} + margin "
+        own = f" (this request's {g(gin['own'])} counted above)" if gin.get("own") else ""
+        return (f" = chunk {g(gin['step'])}{own} + KV commit {g(gin['kv'])} + sandbox {g(gin['sandbox'])} + margin "
                 f"{g(gin['margin'])}, at most {g(gin['cap'])}")
 
     def report(self) -> dict:

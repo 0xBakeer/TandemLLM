@@ -1153,6 +1153,32 @@ def test_idle_backfill_writes_an_idle_chat_once_not_while_busy_nor_within_the_in
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_idle_backfill_writes_only_the_newest_copy_of_a_chat_on_several_slots():
+    """2026-11-06 live: one chat on three slots (its home and copies from before a compaction) was written from each
+    in turn into its one entry, every save making the others stale: 4.4 to 4.9 GB a save until the day's write budget
+    was gone. Only the copy used last is written; the older ones are counted (`older_copy`), and another chat on
+    another slot is still written."""
+    import types
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        saved = []
+        sp.save_resident = lambda r, *a, **k: saved.append(r) or {"bytes_written": 1, "eid": "x"}
+        mk = lambda owner, used: types.SimpleNamespace(valid=50_000, _stash=None, t_used=used, owner=owner,  # noqa: E731
+                                                       tokens=list(range(50_000)))
+        old, new, other = mk("chat-A", 100.0), mk("chat-A", 200.0), mk("chat-B", 150.0)
+        slots = [_Slot(1, old, None), _Slot(3, new, None), _Slot(5, other, None)]
+        sp.current = lambda r, deep=False: None
+        got = sp.backfill(slots, now=300.0)
+        assert [s for s in saved] == [new, other], saved
+        assert sorted(g["key"] for g in got) == [3, 5] and sp.stats["idle"]["older_copy"] == 1, (got, sp.stats["idle"])
+        t.close()
+        return "the newest copy and the other chat written, the older copy skipped"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_idle_backfill_holds_the_capture_guard_for_device_steps_only():
     """SRV-E6: the backfill's save holds `capture_lock.GUARD` around each block's device work, never around a write;
     it takes the spill's own I/O lock first and skips the pass while another holds it (a pressure save, a read), and

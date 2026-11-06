@@ -322,8 +322,10 @@ def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
     assert m["lines"][0] == ("This turn needs about 9.3 GiB to read 70,520 new tokens; 25 GiB is free and 10 must "
                              "stay free for the system"), m["lines"]
     assert m["lines"][1] == "A 131k turn on another chat is reading (no estimate yet)", m["lines"]
-    assert m["lines"][2].startswith("Starts automatically; Stop cancels. Will be refused in 8 m "), m["lines"]
-    assert m["lines"][2].endswith(" s unless memory frees"), m["lines"]
+    assert m["lines"][2].startswith("Memory is tight: this chat waits and continues by itself as soon as memory "
+                                    "frees. Stop cancels; it gives up only after 10 min without memory (8 m "), m["lines"]
+    assert m["lines"][2].endswith(" s left)"), m["lines"]
+    assert activity._span(10_800) == "3 h" and activity._span(8_100) == "2 h 15 min", "hours from an hour up"
     rec.mem_wait["freed"] = int(1.2 * G)
     lines = activity.memory_of(rec.mem_wait, time.perf_counter())["lines"]
     assert lines[1] == "Freeing idle cache (1.2 GiB given back)", lines
@@ -355,8 +357,8 @@ def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
     assert (s["reason"], s["detail"], s["state"]) == ("refused", "memory_wait_timeout", "waiting_memory"), s
     assert s["sentence"] == "refused: not enough memory after 600 s of waiting", s["sentence"]
     words = activity.refusal_words(late.mem_wait)
-    assert words == ("Not enough memory for this turn right now (needed 9.3 GiB, 15 free above the guard). Try "
-                     "again when the other chat finishes, or start a shorter conversation."), words
+    assert words == ("Memory stayed full for 10 min, so this turn did not start (needed 9.3 GiB, 15 free above the "
+                     "guard). Continue tries again; a shorter conversation or fewer chats at once needs less."), words
     return " / ".join(m["lines"])
 
 

@@ -176,9 +176,10 @@ def test_a_non_streamed_wait_ends_in_a_readable_503():
     code, body, hdr = h.sent
     assert code == 503 and body["error"]["code"] == "memory_wait_timeout", body
     # SRV-787: the reason in words (it said "memory is almost full; 1 request(s) are running")
-    assert body["error"]["message"].startswith("Not enough memory for this turn right now (needed "), body
-    assert body["error"]["message"].endswith(" free above the guard). Try again when the other chat finishes, or "
-                                             "start a shorter conversation.") and hdr.get("Retry-After") == "30"
+    assert body["error"]["message"].startswith("Memory stayed full for "), body
+    assert " so this turn did not start (needed " in body["error"]["message"], body
+    assert body["error"]["message"].endswith(" free above the guard). Continue tries again; a shorter conversation "
+                                             "or fewer chats at once needs less.") and hdr.get("Retry-After") == "30"
     assert rec.wait_reason == "memory" and rec.waiting_memory is False
     assert said and said[0][1] == 1, said              # the line, with its place in line
     assert adm.stats["timeouts"] == 1 and adm.report()["waiting_memory"] == 0
@@ -1475,14 +1476,43 @@ def test_srv787_a_streamed_chat_wait_opens_its_stream_keeps_it_alive_and_ends_wi
     events = [json.loads(ln[6:]) for ln in raw.split("\n") if ln.startswith("data: {")]
     err = events[-1].get("error") or {}
     assert err.get("code") == "memory_wait_timeout" and err.get("status") == 503, events[-1]
-    assert err["message"].startswith("Not enough memory for this turn right now (needed "), err
+    assert err["message"].startswith("Memory stayed full for 2 s, so this turn did not start (needed "), err
     assert raw.rstrip().endswith("data: [DONE]") and raw.index(pings[0]) < raw.index('"memory_wait_timeout"'), raw
     assert seen and seen[0]["label"] == "Waiting for memory" and seen[0]["prefill"] is None, seen[:1]
     m = seen[-1]["memory"]
     assert m["bound_s"] == 2.5 and m["lines"][0].startswith("This turn needs about ") and \
-        m["lines"][2].startswith("Starts automatically; Stop cancels. Will be refused in "), m
+        m["lines"][2].startswith("Memory is tight: this chat waits and continues by itself as soon as memory "
+                                 "frees. Stop cancels; it gives up only after 2 s without memory ("), m
     assert pool.admission.stats["timeouts"] == 1 and pool.admission.report()["waiting_memory"] == 0
     return f"{len(pings)} keepalives in {took:.1f} s, then: {err['message']}"
+
+
+def test_srv787_a_planned_stop_ends_a_wait_for_memory_at_once_with_a_retryable_503():
+    """2026-11-06: a stop (`draining`) while a streamed chat waits for memory ends the wait within a second with an
+    error the client retries after the restart, instead of holding the stop to its grace and SIGKILL (13:05 live:
+    120 s, then killed, the turns lost)."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 30.0
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    try:
+        th.start()
+        time.sleep(1.5)
+        t0 = time.monotonic()
+        app.STATE["draining"] = True
+        th.join(10)
+        took = time.monotonic() - t0
+    finally:
+        app.STATE.pop("draining", None)
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive() and took < 3.0, took
+    raw = out["raw"]
+    assert "The engine is restarting; send the request again in a moment." in raw, raw[-400:]
+    assert pool.admission.stats["timeouts"] == 0 and pool.admission.report()["waiting_memory"] == 0
+    return f"ended {took:.1f} s after the stop"
 
 
 def test_srv787_a_streamed_chat_wait_that_ends_in_time_is_served():
