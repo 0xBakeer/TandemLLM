@@ -1487,7 +1487,7 @@ def test_srv787_a_streamed_chat_wait_opens_its_stream_keeps_it_alive_and_ends_wi
     return f"{len(pings)} keepalives in {took:.1f} s, then: {err['message']}"
 
 
-def test_a_planned_stop_ends_a_wait_for_memory_at_once_with_a_retryable_503():
+def test_srv787_a_planned_stop_ends_a_wait_for_memory_at_once_with_a_retryable_503():
     """2026-11-06: a stop (`draining`) while a streamed chat waits for memory ends the wait within a second with an
     error the client retries after the restart, instead of holding the stop to its grace and SIGKILL (13:05 live:
     120 s, then killed, the turns lost)."""
