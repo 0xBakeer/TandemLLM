@@ -1538,7 +1538,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         why["slot0_first"] = True
         return need
     if home is not None:
-        why["home"] = home[0]
+        # SRV-787: and the tokens of the prompt it holds, which the admission does not charge (`_par_admit`'s `home`)
+        why.update(home=home[0], home_share=home[1])
     elif (SIDE_NEW_FIRST == "on" and res is not None
           and not why.get("guest") and not why.get("wait")):
         # FX16: a new conversation beside a resident one a side slot could never hold takes an
@@ -8006,7 +8007,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
                    stream: bool = False, rows: int | None = None, respond: bool = True,
-                   cold: bool = False) -> bool:
+                   cold: bool = False, home: int = 0) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8055,7 +8056,14 @@ class Handler(BaseHTTPRequestHandler):
 
         SRV-709: the KV pages are reserved for at most `KV_ADMIT_ROWS` of `max_new` while lanes
         that outgrow it give way (`KV_RECOMPUTE`), so more lanes start; `respond=False` (a lane
-        resuming inside its own answer) sends nothing on a refusal."""
+        resuming inside its own answer) sends nothing on a refusal.
+
+        SRV-787: `home`, on the side slot that holds this conversation (`_side_home`), the tokens of the
+        prompt its rows hold: the rows from there, at most from the slot's valid rows, are what is
+        charged, not the whole prompt. This gate runs on the client's tokens, which part from the slot's
+        rows at the first router note the prefill puts back (`_end_replay`), so where it resumes in place
+        said nothing there: 35 side-slot turns of 2026-11-05 were charged the whole prompt (5.2-8.5 GiB)
+        and forwarded 23-5,331 rows."""
         self._mem_wait = False
         adm = pool.admission
         if adm is None:
@@ -8080,6 +8088,11 @@ class Handler(BaseHTTPRequestHandler):
             moves the resume point down, and the charge priced before it is the smaller one."""
             start, kind = ((0, None) if full or res_ is None or cold
                            else res_.resume_estimate(keys, n, mm_ok))
+            if home and not full and not cold and res_ is not None:
+                # SRV-787: its home side slot's rows, read again at every pass (a reclaim empties them)
+                held = min(int(home), int(getattr(res_, "valid", 0) or 0))
+                if held > int(start):
+                    start, kind = held, "home"
             fwd = max(1, n - int(start))
             ws = mem.workspace_rows(n, fwd) if mem is not None else max(
                 cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
@@ -9812,7 +9825,9 @@ class Handler(BaseHTTPRequestHandler):
                     "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
-                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold):
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold,
+                    home=(int(par_why.get("home_share") or 0)
+                          if side is not None and par_why.get("home") == side.index else 0)):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt

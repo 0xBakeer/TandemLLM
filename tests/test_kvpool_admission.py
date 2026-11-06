@@ -961,6 +961,101 @@ def test_srv787_the_caches_growth_is_what_the_policy_still_admits():
     return f"budgets 13.6 GiB -> {room / GiB:.2f} under the ceiling; 0 with an over-peak prefill in flight"
 
 
+class _HomeRes:
+    """A side slot's resident prefix holding `valid` rows of the conversation, with no end anchor or anchor the
+    client's tokens reach (live: they part from the rows at the first router note the prefill puts back)."""
+
+    def __init__(self, valid):
+        self.valid, self.end, self.end_hold, self.asked = valid, None, False, 0
+
+    def resume_estimate(self, keys, n, mm_ok=False):
+        self.asked += 1
+        return 0, None
+
+
+class _FNMem(_Mem):
+    """`_Mem` with Flash-Next's workspace model (`FlashNextServing._workspace_rows`)."""
+
+    def __init__(self, *a, **kw):
+        import types
+        from engine.models.flashnext import serving as FS
+        from test_fn_serving import _qsa_class
+        super().__init__(*a, **kw)
+        stub = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=_qsa_class))
+        self.model = lambda n, r, line=True: FS.FlashNextServing._workspace_rows(stub, n, r, line=line)  # noqa: E731
+
+    def workspace_rows(self, n, rows=None, line=True):
+        return self.model(n, n if rows is None else rows, line)
+
+
+def _home_admit(app, res, n, home, cid="home"):
+    """`_par_admit` of an `n`-row prompt on side slot 1 whose resident is `res`, at home there with `home` tokens."""
+    import types
+    import torch
+    from server import usage
+    mem = _FNMem(peak=int(75.82 * GiB), ws=0, res=res)
+    app.STATE.clear()
+    app.STATE.update(mem=mem, mem_load={"allocated": int(54.4 * GiB)}, queue_timeout=1.0, request_timeout=30.0)
+    adm = _adm(100, floor_gib=10)
+    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+    rec = usage.RequestRecord(f"chatcmpl-{cid}", "chat", True)
+    slots.bind(slots.Slot(1, 262_144, values={"resident": res}))
+    try:
+        ok = app.Handler._par_admit(_H(), pool, cid, torch.zeros(n, dtype=torch.long), rec=rec, stream=True,
+                                    home=home)
+    finally:
+        slots.bind(None)
+        app.STATE.clear()
+    assert ok is True
+    return rec, mem, adm.held[cid]
+
+
+def test_srv787_a_turn_at_home_on_a_side_slot_is_charged_the_rows_the_slot_lacks():
+    """SRV-787: a turn at home on its side slot (`_side_home`'s share) is charged the rows past what the slot holds, at
+    the gate and the floor, not a cold prefill of the whole prompt. A slot of 57,823 valid rows under a 128,343-row
+    prompt: 70,520 rows, 8.21 GiB by Flash-Next's model at the floor instead of 9.47 for all 128,343; a share past the
+    slot's rows counts the rows only; a slot emptied since (a reclaim) or a turn not at home is cold, as before. The
+    workspaces measured on 2026-11-02 (28 continuations, `FN_RESUMED`), replayed as turns at home on a slot holding
+    all but their forwarded rows: each charged its forwarded rows and at least what it took."""
+    app = _app()
+    from test_budget import FN_RESUMED
+    n = 128_343
+    res = _HomeRes(57_823)
+    rec, mem, held = _home_admit(app, res, n, home=57_823)
+    assert rec.ws_rows == 70_520 and rec.ws_kind == "home", vars(rec)
+    assert [g["rows"] for g in mem.gates] == [70_520] and mem.gates[0]["ceiling"] is False, mem.gates
+    assert held == mem.model(n, 70_520, line=False) and abs(held / GiB - 8.21) < 0.01, held / GiB
+    cold, home_ws = mem.model(n, n, line=False), held
+    assert abs(cold / GiB - 9.47) < 0.01 and home_ws < cold
+    assert _home_admit(app, _HomeRes(57_823), n, home=128_000)[0].ws_rows == 70_520, "at most the slot's rows"
+    for r, home in ((_HomeRes(0), 57_823), (_HomeRes(57_823), 0)):
+        rec, _, held = _home_admit(app, r, n, home=home)
+        assert rec.ws_rows == n and rec.ws_kind is None and held == cold, (home, vars(rec))
+    least = None
+    assert len(FN_RESUMED) == 28
+    for i, (m, rows, took) in enumerate(FN_RESUMED):
+        rec, mem, held = _home_admit(app, _HomeRes(m - rows), m, home=m - rows, cid=f"r{i}")
+        gate = mem.model(m, rows)
+        assert rec.ws_rows == rows and held >= took * GiB and gate >= took * GiB, (m, rows, took, held / GiB)
+        least = held / GiB - took if least is None else min(least, held / GiB - took)
+    return (f"70,520 rows: {home_ws / GiB:.2f} GiB vs cold {cold / GiB:.2f}; {len(FN_RESUMED)} continuations covered "
+            f"(+{least:.2f} GiB the least)")
+
+
+def test_srv787_the_handler_passes_the_home_share_to_the_admission():
+    """The `[parallel]` line's pick keeps the share of the side slot that holds the conversation (`_side_home`) also
+    when nothing waits, and the handler passes it to `_par_admit` only on that slot."""
+    import inspect
+    app = _app()
+    src = inspect.getsource(app._par_side_need)
+    assert "why.update(home=home[0], home_share=home[1])" in src
+    handler = inspect.getsource(app.Handler)
+    call = handler[handler.index("not self._par_admit(\n"):]
+    call = call[:call.index("return")]
+    assert 'home=(int(par_why.get("home_share") or 0)' in call, call
+    assert 'if side is not None and par_why.get("home") == side.index else 0)' in call, call
+
+
 def test_the_release_route_answers_trusted_local_and_the_admin_only():
     import contextlib
     import io
