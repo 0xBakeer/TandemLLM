@@ -279,6 +279,84 @@ def test_the_client_leaving_mid_prefill_is_seen_within_one_tick():
     reg.unsubscribe()
 
 
+def _waiting(rec, t0, **m):
+    """`rec` as the admission leaves it while it waits for memory (server/app.py `_mem_wait_of`): the 22:41 128k turn
+    of 2026-11-05 by default, 25.0 GiB free, a guard of 10, 70,520 rows to read, 600 s of bound."""
+    G = 1 << 30
+    rec.waiting_memory, rec.wait_reason = True, "memory"
+    rec.mem_wait = dict({"need": int(9.3 * G), "rows": 70_520, "free": 25 * G, "guard": 10 * G, "short": 0,
+                         "peak_wait": False, "guard_inputs": {"step": int(6.25 * G), "kv": int(0.3 * G), "sandbox": 0,
+                                                              "margin": 5 * G, "cap": 10 * G, "guard": 10 * G},
+                         "freed": 0, "t0": t0, "bound_s": 600.0, "place": 1}, **m)
+
+
+def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
+    """SRV-787 (2026-11-05): the live view and the Chat tab said "Prefilling" for 870 s while the admission held a
+    128k turn and nothing ran. Held, it is `waiting_memory` with its own label, no prefill block (no rate), and the
+    three lines of its reason and its end; the prefill in its way is named; admitted, it prefills; its timeline has
+    the wait; a refusal at the bound says so in its stop."""
+    G = 1 << 30
+    rec, other = _rec("w", prompt=128_343), _rec("o", prompt=131_073)
+    reg = _reg()
+    reg.register(other)
+    other.lock_acquired()
+    reg.register(rec)
+    rec.lock_acquired()
+    assert activity.state_of(rec) == "prefilling"
+    t0 = time.perf_counter() - 80.0
+    rec.t_arrival, rec.t_lock = t0 - 2.0, t0 - 1.0
+    _waiting(rec, t0)
+    assert activity.state_of(rec) == "waiting_memory" and "waiting_memory" in activity.STATES
+    assert activity.prefill_of(rec, time.perf_counter()) is None, "nothing prefills: no rate"
+    snap = reg.snapshot()
+    row = {r["request_id"]: r for r in snap["requests"]}["w"]
+    a = row["activity"]
+    assert a["state"] == "waiting_memory" and a["label"] == "Waiting for memory", a
+    assert a["prefill"] is None and a["decode"] is None, a
+    assert snap["counts"]["waiting_memory"] == 1 and snap["counts"]["prefilling"] == 1, snap["counts"]
+    m = a["memory"]
+    assert m["need_gib"] == 9.3 and m["rows"] == 70_520 and m["free_gib"] == 25.0 and m["guard_gib"] == 10.0, m
+    assert m["guard"] == {"step": 6.25, "kv": 0.3, "sandbox": 0.0, "margin": 5.0, "cap": 10.0}, m["guard"]
+    assert 79_000 < m["waited_ms"] < 82_000 and 518_000 < m["ends_in_ms"] < 521_000 and m["bound_s"] == 600.0, m
+    assert m["in_the_way"]["request_id"] == "o" and m["in_the_way"]["tokens"] == 131_073, m["in_the_way"]
+    assert m["lines"][0] == ("This turn needs about 9.3 GiB to read 70,520 new tokens; 25 GiB is free and 10 must "
+                             "stay free for the system"), m["lines"]
+    assert m["lines"][1] == "A 131k turn on another chat is reading (no estimate yet)", m["lines"]
+    assert m["lines"][2].startswith("Starts automatically; Stop cancels. Will be refused in 8 m "), m["lines"]
+    assert m["lines"][2].endswith(" s unless memory frees"), m["lines"]
+    rec.mem_wait["freed"] = int(1.2 * G)
+    lines = activity.memory_of(rec.mem_wait, time.perf_counter())["lines"]
+    assert lines[1] == "Freeing idle cache (1.2 GiB given back)", lines
+    rec.mem_wait["freed"] = 0
+    assert activity.memory_of(rec.mem_wait, t0 + 80)["lines"][1] == ("Waiting for memory to free (re-checked every "
+                                                                     "second, 1 m 20 s so far)")
+    peak = dict(rec.mem_wait, peak_wait=True, need=int(9.47 * G), rows=128_343, free=None, guard=None,
+                short=int(0.27 * G))
+    assert activity.memory_of(peak, t0 + 1)["lines"][0] == ("This turn needs about 9.5 GiB to read 128,343 new "
+                                                            "tokens, 0.3 GiB more than the engine's peak allows "
+                                                            "while another turn reads")
+    # admitted after 120 s: it prefills, and its timeline has the wait
+    rec.waiting_memory, rec.wait_mem_ms = False, 120_000.0
+    rec.t_lock += 120.0
+    assert activity.state_of(rec) == "prefilling"
+    path = [e[1] for e in activity.events_of(rec)]
+    assert path == ["queued", "waiting_memory", "prefilling"], path
+    # refused at the bound: its stop says so, in the wait's state
+    late = _rec("late")
+    late.lock_acquired()
+    _waiting(late, time.perf_counter() - 600)
+    late.waiting_memory = False
+    late.status, late.stop_detail, late.wait_mem_ms = 503, "memory_wait_timeout", 600_000.0
+    late.end()
+    s = activity.stop_of(late, late.t_end)
+    assert (s["reason"], s["detail"], s["state"]) == ("refused", "memory_wait_timeout", "waiting_memory"), s
+    assert s["sentence"] == "refused: not enough memory after 600 s of waiting", s["sentence"]
+    words = activity.refusal_words(late.mem_wait)
+    assert words == ("Not enough memory for this turn right now (needed 9.3 GiB, 15 free above the guard). Try "
+                     "again when the other chat finishes, or start a shorter conversation."), words
+    return " / ".join(m["lines"])
+
+
 def test_refusals_and_rejections():
     full = _rec("r1")
     full.status, full.finish_reason, full.stop_detail = 503, "refused", "queue_full"

@@ -738,6 +738,14 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 #: SRV-305: a request waiting for memory gets its line again this often (s)
 MEM_LINE_EVERY_S = 15.0
+#: SRV-787: the longest a request waits for memory before it is refused with the reason (s), streamed or not
+MEM_WAIT_S = float(os.environ.get("QSE_MEM_WAIT_S", "600") or 600)
+#: SRV-785: what the guard keeps free under the largest step the engine can take between two checks (GiB); 5.0 is
+#: the lowest MemAvailable the box was read at without freezing (2026-11-02), where it freezes was never measured
+GUARD_MARGIN_GB = float(os.environ.get("QSE_GUARD_MARGIN_GB", "5") or 5)
+#: SRV-785: a chat sandbox's ask for memory (`_memory_release`) counts in the guard this long (s)
+SANDBOX_CLAIM_S = 60.0
+_SANDBOX_CLAIM = [0, -1e9]                 # (bytes, monotonic time) of the last sandbox ask
 #: SRV-709: a lane whose next pages the KV pool refuses while other lanes run gives its memory back
 #: and goes on as soon as memory is free: its prompt and the text it wrote are read again, as a
 #: continuation of the same answer (`Handler._recomputing`); off: it ends with `memory_full`
@@ -6407,6 +6415,8 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
     and what MemAvailable is now."""
     before = memsplit.mem_available()
     got, levels = 0, {}
+    if why == "sandbox":
+        _SANDBOX_CLAIM[:] = [max(0, int(want)), time.monotonic()]      # SRV-785: the guard counts it
     if want > 0 and _lock_when_idle():
         try:
             n = _kv_reclaim_caches(want, "release")
@@ -7208,7 +7218,9 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     """
     now = time.perf_counter()
     ms = (now - t0) * 1e3
-    rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
+    # SRV-787: a wait for memory is no part of the rate (a 460 s wait and 2 s of decode read 0.30 tok/s)
+    wait_mem = float(getattr(rec, "wait_mem_ms", None) or 0.0) if rec is not None else 0.0
+    rate = (n_out - 1) / ((ms - wait_mem) / 1e3) if n_out > 1 and ms > wait_mem else 0.0
     with QUEUE:
         if finish == "error":
             INFLIGHT["errors"] += 1
@@ -7250,6 +7262,8 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         ws_s = f" fwd={'-' if fwd is None else fwd} ws_rows={rec.ws_rows} ws_gib={rec.ws_gib:.2f}"
     if REQ_PEAK:
         ws_s += _req_peak_field()
+    if wait_mem:
+        ws_s += f" wait_mem_ms={wait_mem:.0f}"
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
           f"{slot_s}{tools_s}{blk_s}{ws_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
@@ -8341,9 +8355,13 @@ class Handler(BaseHTTPRequestHandler):
 
         SRV-305 (2026-10-10): a wait for memory is never a silent refusal. The request waits in
         state `waiting_memory` (the dashboard counts it, `rec.wait_reason` is "memory"), its line
-        says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
-        (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
-        `Retry-After` and the code `memory_wait_timeout`.
+        says so every `MEM_LINE_EVERY_S`, and after its bound it gets a 503 with `Retry-After` and
+        the code `memory_wait_timeout`. SRV-787: the bound is `MEM_WAIT_S`, streamed or not (at most
+        `--queue-timeout` without a stream; a streamed one waited `--request-timeout`, an hour live),
+        the refusal names what it needed and what was free above the guard, the log repeats why
+        every `MEM_LINE_EVERY_S`, and `rec.mem_wait` is what the live view says meanwhile; a stream
+        the wait opened (`say`: the handler's keepalive comment) ends with the refusal as an error
+        event.
 
         SRV-629: `rows`, the prompt's rows once its images are expanded (`_mm_rows`), where the
         text prompt has one placeholder an image: the workspace and the KV pages are reserved for
@@ -8469,15 +8487,19 @@ class Handler(BaseHTTPRequestHandler):
             """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
             workspace past the engine's room, in full less the allocator's free default-pool blocks
             (`Admission.check`)."""
-            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")))
+            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")),
+                               rows=n)
         d = gate()
         gate_again = d is not None
         if gate_again:
             adm.stats["peak_waits"] += 1
-        else:
+        freed = 0                     # SRV-787: what the reclaims gave back for it, for the live view
+        if not gate_again:
             ok, d = reserve()
-            if not ok and _kv_reclaim_idle(d, owner):
+            got = _kv_reclaim_idle(d, owner) if not ok else 0
+            if got:
                 # SRV-307: the pages idle conversations keep come back before anyone waits
+                freed += got
                 ok, d = reserve()
             if ok:
                 return True
@@ -8499,12 +8521,15 @@ class Handler(BaseHTTPRequestHandler):
         e0 = (int(st0.get("empties") or 0), float(st0.get("empty_ms") or 0.0)) if isinstance(st0, dict) else None
         # SRV-775: the prefills in flight and the time at the gate's last refusal (`PEAK_REGATE_S`)
         seen, t_gate = adm.ws_in_flight(), time.monotonic()
-        limit = (float(STATE.get("request_timeout") or 3600.0) if stream
-                 else float(STATE.get("queue_timeout", 120.0)))
+        # SRV-787: a wait has an end, streamed or not (a streamed one waited `--request-timeout`, an hour live)
+        limit = (MEM_WAIT_S if stream else min(MEM_WAIT_S, float(STATE.get("queue_timeout", 120.0))))
         until = time.monotonic() + limit
         said = -1e9
         try:
             while time.monotonic() < until:
+                if rec is not None:
+                    # SRV-787: what the live view says while it waits (server/activity.py `memory_of`)
+                    rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid), freed)
                 if self._client_gone():
                     if respond:
                         # SRV-777: no response has started, so nothing else books this end: abandoned, as the
@@ -8521,8 +8546,14 @@ class Handler(BaseHTTPRequestHandler):
                         print(f"[req] {cid} left while waiting for memory ({waited * 1e3:.0f} ms)", flush=True)
                     raise ClientGone("client left while waiting for memory")
                 place = adm.wait(cid)
-                if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
+                line = time.monotonic() - said >= MEM_LINE_EVERY_S
+                if line and said > 0:
+                    # SRV-787: the engine log says why every MEM_LINE_EVERY_S, the guard's inputs with it
+                    print(f"[parallel] {cid} still waits for memory ({time.perf_counter() - t0:.0f} s of "
+                          f"{limit:.0f}): {slots_mod.Admission.describe(d)}", flush=True)
+                if line:
                     said = time.monotonic()
+                if line and say is not None:
                     gap = ((d.get("over") or 0) if d.get("peak_wait")       # SRV-775: over the peak
                            else d.get("floor", 0) - (d.get("after") or 0))
                     short = max(0.0, gap / slots_mod.GiB)
@@ -8558,7 +8589,9 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     gate_again = False
                 ok, d = reserve()
-                if not ok and _kv_reclaim_idle(d, owner):
+                got = _kv_reclaim_idle(d, owner) if not ok else 0
+                if got:
+                    freed += got
                     ok, d = reserve()
                 if ok:
                     waited = time.perf_counter() - t0
@@ -8579,16 +8612,16 @@ class Handler(BaseHTTPRequestHandler):
                 rec.waiting_memory = False
         adm.stats["refused"] += 1
         adm.stats["timeouts"] += 1
-        running = pool.running()
         print(f"[parallel] {cid} REFUSED after {limit:.0f} s waiting for memory: "
               f"{slots_mod.Admission.describe(d)}", flush=True)
         if rec is not None:
             rec.stop_detail = "memory_wait_timeout"
+            rec.wait_mem_ms = round((time.perf_counter() - t0) * 1e3, 1)
         if not respond:
             return False
+        # SRV-787: the reason in words; a stream opened while it waited ends with it as an error event
         self._send_bytes(503, json.dumps({"error": {
-            "message": (f"memory is almost full; {running} request(s) are running; "
-                        f"try again in about 30 s"),
+            "message": activity_mod.refusal_words(_mem_wait_of(d, est["fwd"], t0, limit, 1, freed)),
             "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
             extra_headers=(("Retry-After", "30"),))
         return False
@@ -9801,7 +9834,20 @@ class Handler(BaseHTTPRequestHandler):
         def mem_wait(short: float, place: int = 1) -> None:
             """SRV-250/SRV-305: the waiting line while the parallel admission holds this request
             for memory. Shown on every stream with lines (not only with the progress lines on):
-            a wait for memory must never look like a hang."""
+            a wait for memory must never look like a hang. SRV-787: a streamed chat request opens
+            its stream at once and gets an SSE comment every call (`MEM_LINE_EVERY_S`), with lines
+            or not, so a client's read timeout never cuts the wait (`qwait.mem_comment`)."""
+            m = rec.mem_wait
+            if stream and chat and n_choices == 1 and m is not None:
+                waited = time.perf_counter() - m["t0"]
+                try:
+                    self._open_early(cid, model, created, plan)
+                    self.wfile.write(qwait.mem_comment(place, short, waited, m["bound_s"] - waited))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    if rec.client_gone_at is None:
+                        rec.client_gone_at = time.perf_counter()     # the wait's loop sees it next
+                    return
             if ui is None or not stream:
                 return
             ui.add("queue", reason=(f"memory is almost full, your request starts when a running "
@@ -12960,9 +13006,10 @@ def _kv_pool_open(a) -> None:
     allocates its window (a builder asks for it: the 27B's, and any other's through `ctx.kv_pool`)."""
     if getattr(a, "kv_pool", "off") != "on" or kvpool.POOL is not None:
         return
-    kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
-                                margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
-                                on_event=_kv_pool_event)
+    # SRV-785: its hard floor reads the admission's live guard once the side slots are built (`_build_side_slots`)
+    kvpool.POOL = slots_mod.GuardedPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
+                                        margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
+                                        on_event=_kv_pool_event)
     kvpool.OWNER = "slot0"
     if kvpool.Driver.get() is None:
         print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
@@ -13094,6 +13141,41 @@ def _par_room() -> int | None:
         return None
     _, reserved = mem.memory()
     return max(0, int(mem.peak) - int(reserved))
+
+
+def _guard(rows: int, cap: int) -> tuple[int, dict] | None:
+    """SRV-785: the admission's and the KV pool's floor from the live state (server/slots.py `guard`): one prefill
+    chunk's workspace at the class of `rows` (the longest prefill in flight or the one checked; `Budget.workspace_rows`
+    of a resumed chunk), one KV commit of a chunk's rows (`slots.kv_step`), the last ask of a chat's sandbox
+    for `SANDBOX_CLAIM_S`, and `GUARD_MARGIN_GB`, at most `cap`. None without a memory policy: the floor as
+    configured. Every part is slot 0's: the side slots run the same model."""
+    mem = dict.get(STATE, "mem")
+    if mem is None or not getattr(mem, "on", False):
+        return None
+    chunk = int(dict.get(STATE, "prefix_chunk") or 0) or 4096
+    rows = int(rows)
+    step = int(mem.workspace_rows(rows, min(rows, chunk), line=False)) if rows > 0 else 0
+    kv = slots_mod.kv_step(getattr(getattr(dict.get(STATE, "engine"), "kv", None), "pages", None), chunk)
+    claim, at = _SANDBOX_CLAIM
+    sandbox = claim if time.monotonic() - at < SANDBOX_CLAIM_S else 0
+    return slots_mod.guard(cap, step=step, kv=kv, sandbox=sandbox, margin=int(GUARD_MARGIN_GB * (1 << 30)))
+
+
+def _mem_wait_of(d: dict, fwd: int, t0: float, limit: float, place: int, freed: int) -> dict:
+    """SRV-787: a request's wait for memory as the live view reads it (server/activity.py `memory_of`), in bytes,
+    from the admission's last check `d` (the gate's peak wait: its workspace and how far over the peak): what the
+    turn needs past the floor's sum, the rows it reads, MemAvailable, the guard and its inputs, how short it is;
+    `t0` the wait's start (perf_counter), `limit` its bound (s), `place` in line, `freed` what reclaims gave back."""
+    if d.get("peak_wait"):
+        need, free, floor, short = int(d.get("ws") or 0), None, None, int(d.get("over") or 0)
+    else:
+        avail, after, floor = d.get("avail"), d.get("after"), d.get("floor")
+        need = int(avail - after) if avail is not None and after is not None else int(d.get("need") or 0)
+        free = avail
+        short = max(0, int(floor) - int(after)) if after is not None and floor is not None else None
+    return {"need": need, "rows": int(fwd), "free": free, "guard": floor, "short": short,
+            "peak_wait": bool(d.get("peak_wait")), "guard_inputs": d.get("guard"), "freed": int(freed),
+            "t0": float(t0), "bound_s": float(limit), "place": int(place)}
 
 
 def _par_spare() -> int:
@@ -13493,6 +13575,11 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         dmeet = slots_mod.Meeting(a.parallel_draft_rows, a.batch_timeout_ms / 1e3)
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
+    # SRV-785: the slots are built under the configured floor; from now on both checks read the live guard
+    adm.guard = lambda rows: _guard(rows, adm.cap)
+    kp = kvpool.POOL
+    if isinstance(kp, slots_mod.GuardedPool):
+        kp.guard = lambda: (_guard(adm.ctx_rows(), kp.hard_floor_cfg) or (None,))[0]
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
@@ -13516,7 +13603,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(max_rows) + ' rows, cut ' + cut if meet else 'off'}; packed draft "
           f"{'on' if dmeet is not None else 'off'}; admission floor "
-          f"{a.parallel_floor_gb:g} GiB MemAvailable", flush=True)
+          f"{a.parallel_floor_gb:g} GiB MemAvailable at most (the guard: a chunk + a KV commit + a sandbox's ask + "
+          f"margin {GUARD_MARGIN_GB:g} GiB); a wait for memory ends after {MEM_WAIT_S:g} s", flush=True)
 
 
 def _gib(b) -> str:

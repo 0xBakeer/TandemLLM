@@ -486,8 +486,7 @@ class ParallelBoard:
             ttft = (rec.t_first - rec.t_arrival) * 1e3
         label = None
         if not relayed and ended is None:
-            label = ("waiting for memory" if state == "waiting_memory" else
-                     act.label({"state": state, "prefill": prefill and {
+            label = (act.label({"state": state, "prefill": prefill and {
                          "done": prefill["done"], "total": prefill["total"],
                          "pct": prefill["pct"]}, "tool": {"name": tool},
                          # 0.8.2: the handler's reason for the wait (server/app.py `_queue_why`)
@@ -529,6 +528,9 @@ class ParallelBoard:
         slot = getattr(rec, "slot", None) if not relayed else (peer or {}).get("slot")
         if slot is not None:
             lane["slot"] = slot
+        if state == "waiting_memory" and not relayed and ended is None:
+            # SRV-787: why it waits and when the wait ends (server/activity.py `memory_of`)
+            lane["memory"] = act.memory_of(getattr(rec, "mem_wait", None), now_p)
         if ended is not None:
             lane["finish"] = rec.finish_reason
             lane["status"] = int(rec.status or 0)

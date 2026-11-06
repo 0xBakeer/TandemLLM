@@ -60,6 +60,11 @@
         "refused": {
           "type": "integer",
           "minimum": 0
+        },
+        "waiting_memory": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "SRV-787: requests on a slot that the admission holds for memory (not in prefilling); absent on older servers"
         }
       },
       "required": [
@@ -761,6 +766,7 @@
           "type": "string",
           "enum": [
             "queued",
+            "waiting_memory",
             "prefilling",
             "replaying",
             "thinking",
@@ -812,6 +818,7 @@
           "type": "string",
           "enum": [
             "queued",
+            "waiting_memory",
             "prefilling",
             "replaying",
             "thinking",
@@ -1418,6 +1425,157 @@
             "last_action"
           ],
           "additionalProperties": false
+        },
+        "memory": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "SRV-787: while the state is waiting_memory, why the request waits and how the wait ends; null otherwise, absent on older servers",
+          "properties": {
+            "need_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rows": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "free_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "guard_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "short_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "peak_wait": {
+              "type": "boolean"
+            },
+            "guard": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "SRV-785: the guard's inputs: a prefill chunk's workspace, a KV commit, a sandbox's ask, the margin, and the configured floor that caps it",
+              "properties": {
+                "step": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "kv": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "sandbox": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "margin": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "cap": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "freed_gib": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "in_the_way": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "request_id": {
+                  "type": "string"
+                },
+                "tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "eta_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "waited_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "bound_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ends_in_ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "place": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "need_gib",
+            "rows",
+            "waited_ms",
+            "bound_s",
+            "ends_in_ms",
+            "lines"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -1452,6 +1610,7 @@
             "type": "string",
             "enum": [
               "queued",
+              "waiting_memory",
               "prefilling",
               "replaying",
               "thinking",
@@ -1660,6 +1819,7 @@
             "type": "string",
             "enum": [
               "queued",
+              "waiting_memory",
               "prefilling",
               "replaying",
               "thinking",

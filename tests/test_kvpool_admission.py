@@ -175,7 +175,10 @@ def test_a_non_streamed_wait_ends_in_a_readable_503():
     assert 1.4 < time.monotonic() - t0 < 4.0
     code, body, hdr = h.sent
     assert code == 503 and body["error"]["code"] == "memory_wait_timeout", body
-    assert "memory is almost full" in body["error"]["message"] and hdr.get("Retry-After") == "30"
+    # SRV-787: the reason in words (it said "memory is almost full; 1 request(s) are running")
+    assert body["error"]["message"].startswith("Not enough memory for this turn right now (needed "), body
+    assert body["error"]["message"].endswith(" free above the guard). Try again when the other chat finishes, or "
+                                             "start a shorter conversation.") and hdr.get("Retry-After") == "30"
     assert rec.wait_reason == "memory" and rec.waiting_memory is False
     assert said and said[0][1] == 1, said              # the line, with its place in line
     assert adm.stats["timeouts"] == 1 and adm.report()["waiting_memory"] == 0
@@ -1361,6 +1364,151 @@ def test_the_release_route_answers_trusted_local_and_the_admin_only():
         app._memory_release = old[0]
         app.STATE.clear()
         app.STATE.update(old[1])
+
+
+def test_srv785_the_servers_guard_grows_with_the_chunks_class_and_stays_under_the_floor():
+    """SRV-785: `_guard`, the admission's and the KV pool's live floor: one prefill chunk's workspace at the class of
+    the rows (Flash-Next's own model, `_workspace_rows` of a resumed chunk), one KV commit of a chunk's rows, a
+    sandbox's ask while it is recent, and the margin; never above the floor it is given. Without a memory policy: no
+    answer (the floor as configured). The 2026-11-05 turns: 38k agent turns, the 85k and the 128k turn."""
+    import types
+    from engine.models.flashnext import serving as FS
+    app = _app()
+
+    def qsa_class(last):                            # Flash-Next's (engine.py): ratio 4, TOPK 512
+        if (last + 1) // 4 <= 512:
+            return 0
+        nb = 1024
+        while nb * 4 < last + 1:
+            nb *= 2
+        return nb
+    fn = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=qsa_class))
+
+    class Mem:
+        on = True
+
+        def workspace_rows(self, n, rows=None, line=True):
+            return FS.FlashNextServing._workspace_rows(fn, n, rows, line=line)
+    # 64 regions of 1 KiB rows in 2 MiB pages: a 4,096-row chunk and 256 rows of margin map 4 pages each, 0.5 GiB
+    pages = types.SimpleNamespace(bufs=[types.SimpleNamespace(outer=64, row_bytes=1024, page=2 << 20)],
+                                  margin=lambda: 256)
+    saved = dict(app.STATE)
+    claim = list(app._SANDBOX_CLAIM)
+    try:
+        app.STATE.clear()
+        app.STATE.update(mem=Mem(), prefix_chunk=4096, engine=types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages)))
+        rows = (1_000, 8_000, 38_000, 82_668, 85_229, 128_343, 196_607)
+        got = [app._guard(n, 10 * GiB) for n in rows]
+        g = [x[0] for x in got]
+        assert g == sorted(g) and max(g) <= 10 * GiB and g[0] < 10 * GiB and g[-1] == 10 * GiB, g
+        assert all(x[1]["kv"] == GiB // 2 and x[1]["margin"] == 5 * GiB and x[1]["sandbox"] == 0 for x in got)
+        steps = [x[1]["step"] for x in got]
+        assert steps == sorted(steps) and steps[0] < steps[-1], steps
+        app._SANDBOX_CLAIM[:] = [3 * GiB, time.monotonic()]                       # a sandbox asked a moment ago
+        short = app._guard(1_000, 10 * GiB)
+        assert short[1]["sandbox"] == 3 * GiB and short[0] == min(10 * GiB, g[0] + 3 * GiB), short
+        app._SANDBOX_CLAIM[:] = [3 * GiB, time.monotonic() - app.SANDBOX_CLAIM_S - 1]
+        assert app._guard(1_000, 10 * GiB)[0] == g[0], "an old ask no longer counts"
+        assert app._guard(0, 10 * GiB)[1]["step"] == 0, "no prefill in flight: no chunk"
+        app.STATE["mem"] = None
+        assert app._guard(128_343, 10 * GiB) is None
+    finally:
+        app._SANDBOX_CLAIM[:] = claim
+        app.STATE.clear()
+        app.STATE.update(saved)
+    return ", ".join(f"{n:,}: chunk {x[1]['step'] / GiB:.2f} guard {x[0] / GiB:.2f}" for n, x in zip(rows, got))
+
+
+def _memwait_server(avail_gib):
+    """The handler in process on the fake engine (`--parallel 3`), its admission on a MemAvailable the test moves."""
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    from test_slot0_wait import _fake_parallel
+    _app()
+    pool = _fake_parallel()
+    box = {"avail": int(avail_gib * GiB)}
+    pool.admission.meminfo = lambda: {"MemAvailable": box["avail"]}
+    return pool, box
+
+
+def _chat_stream(out):
+    from test_ui_states import Req
+    body = {"model": "TandemLLM", "stream": True, "max_tokens": 16,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "user", "content": "Summarize: " + "lorem ipsum " * 60}]}
+    head, raw = Req(body, {"User-Agent": "chatd/0.1 (qse-dashboard)"}).response()
+    out.update(head=head, raw=raw)
+
+
+def test_srv787_a_streamed_chat_wait_opens_its_stream_keeps_it_alive_and_ends_with_the_reason():
+    """SRV-787 (2026-11-05): chatd's 128k turn got no byte for 900 s while the admission held it, and chatd's read
+    timeout cut it. A streamed chat request that waits for memory now opens its stream at once (200, `X-Tandem-Wait:
+    memory`) and gets an SSE comment every `MEM_LINE_EVERY_S` with its place, how short memory is, the time waited
+    and when the wait ends; the live view says `waiting_memory` with its lines, not "Prefilling"; at `MEM_WAIT_S` the
+    stream ends with an error event that says why (`memory_wait_timeout`) and `[DONE]`."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 2.5
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    seen = []
+    try:
+        t0 = time.monotonic()
+        th.start()
+        while th.is_alive() and time.monotonic() - t0 < 8:
+            for row in app.live_registry().snapshot()["requests"]:
+                a = row.get("activity") or {}
+                if a.get("state") == "waiting_memory":
+                    seen.append(a)
+            time.sleep(0.2)
+        th.join(10)
+        took = time.monotonic() - t0
+    finally:
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive() and 2.4 < took < 6.0, took
+    head, raw = out["head"], out["raw"]
+    assert head.startswith("HTTP/1.1 200") and "text/event-stream" in head and "X-Tandem-Wait: memory" in head, head
+    pings = [ln for ln in raw.split("\n") if ln.startswith(": waiting for memory, position 1, ")]
+    assert len(pings) >= 3 and all(" GiB short, " in p and " s unless memory frees" in p for p in pings), raw[:600]
+    events = [json.loads(ln[6:]) for ln in raw.split("\n") if ln.startswith("data: {")]
+    err = events[-1].get("error") or {}
+    assert err.get("code") == "memory_wait_timeout" and err.get("status") == 503, events[-1]
+    assert err["message"].startswith("Not enough memory for this turn right now (needed "), err
+    assert raw.rstrip().endswith("data: [DONE]") and raw.index(pings[0]) < raw.index('"memory_wait_timeout"'), raw
+    assert seen and seen[0]["label"] == "Waiting for memory" and seen[0]["prefill"] is None, seen[:1]
+    m = seen[-1]["memory"]
+    assert m["bound_s"] == 2.5 and m["lines"][0].startswith("This turn needs about ") and \
+        m["lines"][2].startswith("Starts automatically; Stop cancels. Will be refused in "), m
+    assert pool.admission.stats["timeouts"] == 1 and pool.admission.report()["waiting_memory"] == 0
+    return f"{len(pings)} keepalives in {took:.1f} s, then: {err['message']}"
+
+
+def test_srv787_a_streamed_chat_wait_that_ends_in_time_is_served():
+    """SRV-787: memory frees before the bound: the request is admitted and served on the stream it opened while it
+    waited, its comments first, no error, the wait booked (`wait_mem_ms`)."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 30.0
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    try:
+        th.start()
+        time.sleep(2.2)
+        box["avail"] = 200 * GiB
+        th.join(20)
+    finally:
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive()
+    raw = out["raw"]
+    assert raw.count(": waiting for memory, position 1, ") >= 2 and '"error"' not in raw, raw[:800]
+    assert '"content"' in raw and raw.rstrip().endswith("data: [DONE]"), raw[-300:]
+    assert pool.admission.stats["timeouts"] == 0 and pool.admission.stats["waits"] == 1
+    done = [r for r, _ in app.live_registry()._done]
+    assert done and done[-1].wait_mem_ms >= 2000 and done[-1].stop["reason"] in ("length", "stop"), vars(done[-1])
 
 
 if __name__ == "__main__":

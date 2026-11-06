@@ -206,6 +206,8 @@ class RequestRecord:
         # whether it is waiting for memory right now (the live and parallel views' lane state)
         self.wait_reason: str | None = None
         self.waiting_memory = False
+        # SRV-787: the wait's reason in bytes while and after it waits (server/app.py `_mem_wait_of`)
+        self.mem_wait: dict | None = None
         # SRV-241: how the request sampled -- None greedy, `client` the client's own sampling,
         # `regenerate` the regenerate's (server/regenerate.py); `regen` the detection's decision
         self.sampling: str | None = None
