@@ -747,6 +747,9 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
 #: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
 KV_RECOMPUTE_MAX = 16
+#: SRV-E6: the KV pool's ladder drops idle slots' captured graphs after slot 0's conversation (`on`; off by default:
+#: the re-capture per slot is unmeasured, and only a family with `drop_idle_graphs` gives anything back)
+RECLAIM_GRAPHS = (os.environ.get("QSE_RECLAIM_GRAPHS", "off") or "off") == "on"
 #: SRV-775: a request the memory gate refuses waits for the prefills in flight; alone, it runs over the
 #: engine's declared peak and is counted (`_par_admit`). 1: a lone one waits too, and the gate counts the
 #: workspaces of the prefills in flight on the reserve, as the admission holds them: by their rows (in no profile)
@@ -5987,15 +5990,18 @@ def _victim_words(v: dict) -> str:
 
 
 def _reclaim_lines(head: str, kw: dict) -> None:
-    """The reclaim's line (`level`, `bytes`, the rest of `kw`), or one for each conversation it
-    took (`_RECLAIM.victims`), with that one's bytes and words."""
+    """The reclaim's line (`level`, `bytes`, the rest of `kw`: the level's `ms` in the admission's
+    ladder), or one for each conversation it took (`_RECLAIM.victims`), with that one's bytes and
+    words (its own save's `ms`; 0 for one the idle backfill had written, SRV-E6)."""
     victims = getattr(_RECLAIM, "victims", None) or []
     _RECLAIM.victims = []
-    if kw.get("level") not in ("idle_side", "unwritten_side"):
+    if kw.get("level") not in ("written_side", "idle_side", "unwritten_side"):
         victims = []
     rest = "".join(f" {k}={v}" for k, v in kw.items() if k not in ("level", "bytes"))
     if not victims:
         print(f"{head} level={kw.get('level')} bytes={kw.get('bytes')}{rest}", flush=True)
+        return
+    rest = "".join(f" {k}={v}" for k, v in kw.items() if k not in ("level", "bytes", "ms"))
     for v in victims:
         print(f"{head} level={kw.get('level')} bytes={v['bytes']}{rest} {_victim_words(v)}",
               flush=True)
@@ -6030,14 +6036,21 @@ def kv_trim_current() -> int:
 
 def _kv_reclaim_caches(want: int, owner) -> int:
     """Pool reclaim, level 1: the memory policy's levels, cheapest first (engine/cache.py `Budget`
-    `LEVELS`), only what nothing is using, and the allocator's free blocks back to the driver."""
+    `LEVELS`), only what nothing is using, and the allocator's free blocks back to the driver
+    (`empty`). SRV-E6: `empty` frees device memory, so it runs only while no graph capture holds
+    `capture_lock.GUARD`, taken without waiting (a reclaim never waits for a capture); skipped, the
+    next level's `empty` or the next pass gives the blocks back."""
     mem = dict.get(STATE, "mem")
     if mem is None:
         return 0
     got = 0
     for lv in mem.LEVELS:
         got += int(mem.shed(lv, "kv_pool", safe=True) or 0)
-        got += int(mem.empty("kv_pool") or 0)
+        if capture_lock.GUARD.acquire(blocking=False):
+            try:
+                got += int(mem.empty("kv_pool") or 0)
+            finally:
+                capture_lock.GUARD.release()
         if got >= want:
             break
     return got
@@ -6065,12 +6078,19 @@ def _kv_reclaim_kept_park(want: int, owner) -> int:
 
 
 def _add_kv_reclaimers(pool) -> None:
-    """The KV pool's reclaim order, cheapest first; the side conversations no save could write
-    (SRV-779) after every other conversation, ENG-371's kept park last."""
+    """The KV pool's reclaim order, cheapest first (the full-pool order approved 2026-10-24): the
+    caches and the allocator's free blocks, the small models, the idle side conversations already
+    current on the NVMe (SRV-E6: the idle backfill wrote them; trimmed only), the ones not written
+    yet (saved, then trimmed), slot 0's idle conversation, the idle slots' graphs (`RECLAIM_GRAPHS`,
+    off), the side conversations no save could write (SRV-779) after every other conversation,
+    ENG-371's kept park last."""
     pool.add_reclaimer("caches", _kv_reclaim_caches)
     pool.add_reclaimer("roles", _kv_reclaim_roles)
+    pool.add_reclaimer("written_side", _kv_reclaim_written)
     pool.add_reclaimer("idle_side", _kv_reclaim_side)
     pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    if RECLAIM_GRAPHS:
+        pool.add_reclaimer("graphs", _kv_reclaim_graphs)
     pool.add_reclaimer("unwritten_side", _kv_reclaim_unwritten)
     pool.add_reclaimer("kept_park", _kv_reclaim_kept_park)
 
@@ -6090,7 +6110,14 @@ def _kv_reclaim_roles(want: int, owner) -> int:
     return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
-def _kv_reclaim_side(want: int, owner, write: bool = True) -> int:
+def _kv_reclaim_written(want: int, owner) -> int:
+    """SRV-E6, before any save: the idle side conversations already current on the NVMe (the idle
+    backfill wrote them and no turn ran since, `SessionSpill.current`), oldest first: their pages
+    go and nothing is written, so the request that waits pays a trim (ms), not a save (0.5-4 s)."""
+    return _kv_reclaim_side(want, owner, only_written=True)
+
+
+def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = False) -> int:
     """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. SRV-779: each
     goes to the NVMe first (`_write_rows`, from `drain_min_tokens` up) and its pages only once the
     save returned an entry; one the save refuses (the day's write budget, the spill busy, no room)
@@ -6098,11 +6125,13 @@ def _kv_reclaim_side(want: int, owner, write: bool = True) -> int:
     (`write` False) takes it unwritten. Its next turn comes back from the entry on its own slot
     (`_spill_home`). A slot whose turn ended within RECLAIM_RECENT_S, or that recorded no end,
     goes last (live 2026-11-02: an agent between two tool steps lost its 85,010 rows first, as a
-    None carry sorted as the oldest)."""
+    None carry sorted as the oldest). SRV-E6: one current on the NVMe is trimmed without a save
+    (`written=true ms=0`); `only_written`, only those (`_kv_reclaim_written`)."""
     _RECLAIM.victims = []
     pool = dict.get(STATE, "pool")
     if pool is None:
         return 0
+    sp = dict.get(STATE, "spill")
     got = 0
     now = time.monotonic()
 
@@ -6125,7 +6154,13 @@ def _kv_reclaim_side(want: int, owner, write: bool = True) -> int:
             rows = int(getattr(res, "valid", 0) or 0) if res is not None else 0
             v = {"slot": s.index, "conv": getattr(res, "owner", None), "rows": rows,
                  "written": False, "why": None, "ms": 0.0}
-            if res is not None and write:
+            cur = sp.current(res) if sp is not None and res is not None else None
+            if only_written and cur is None:
+                continue
+            if cur is not None:
+                v["written"] = True
+                s.written = {"eid": cur.eid, "owner": res.owner}
+            elif res is not None and write:
                 t0 = time.perf_counter()
                 try:
                     info, why = _write_rows(res, eng, vals.get("drafter"), "kv_pool", wait_s)
@@ -6220,7 +6255,8 @@ def _keep_think(think) -> None:
 
 def _kv_reclaim_slot0(want: int, owner) -> int:
     """Pool reclaim, level 4: slot 0's idle conversation, to the NVMe first when the spill is on
-    (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
+    (engine/spill.py, the tier a replaced conversation goes to), then its pages. SRV-E6: one the
+    idle backfill wrote and nothing changed since (`SessionSpill.current`) is not written again."""
     if owner == "slot0":
         return 0
     eng = dict.get(STATE, "engine")
@@ -6231,6 +6267,8 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
         res = dict.get(STATE, "resident")
         if res is not None:
             sp = res.spiller
+            if sp is not None and sp.current(res) is not None:
+                sp = None                  # SRV-E6: on the NVMe as it is: only its pages go
             if (sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30)
                     and sp._own_io.locked()):
                 # SRV-779: the spill's I/O is held, maybe by this very thread (a side slot's
@@ -6247,23 +6285,97 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
         LOCK._lk.release()
 
 
+def _kv_reclaim_graphs(want: int, owner) -> int:
+    """SRV-E6 (`QSE_RECLAIM_GRAPHS=on`, off by default): the captured graphs of idle slots' engines
+    (their private pools, 6.96 GiB of free scratch on 2026-11-05), through the model family's own
+    `drop_idle_graphs()` (bytes given back), then the allocator's free blocks. A slot pays the
+    re-capture at its next turn in a class (unmeasured per slot); a family without the method
+    gives nothing back here. Each engine only while its slot is idle and no capture runs."""
+    pool = dict.get(STATE, "pool")
+    held = [(LOCK._lk, dict.get(STATE, "engine"))] + [
+        (s.lock, (s.values or {}).get("engine")) for s in (pool.side() if pool is not None else ())
+        if f"slot{s.index}" != owner]
+    got = 0
+    for lk, eng in held:
+        drop = getattr(eng, "drop_idle_graphs", None)
+        if got >= want or drop is None or not lk.acquire(blocking=False):
+            continue
+        try:
+            if capture_lock.GUARD.acquire(blocking=False):
+                try:
+                    got += int(drop() or 0)
+                finally:
+                    capture_lock.GUARD.release()
+        finally:
+            lk.release()
+    mem = dict.get(STATE, "mem")
+    if got and mem is not None and capture_lock.GUARD.acquire(blocking=False):
+        try:
+            got += int(mem.empty("graphs") or 0)
+        finally:
+            capture_lock.GUARD.release()
+    return got
+
+
+#: SRV-E6: the host heap is trimmed after a reclaim at most this often (s): `malloc_trim` holds the heap's
+#: arenas while it walks them, and the admission's ladder may run every second while a request waits
+TRIM_HOST_EVERY_S = 30.0
+_TRIM = {"t": -1e18, "calls": 0, "ms": 0.0}
+
+
+def _trim_host(why: str) -> None:
+    """SRV-E6 (plan 2.5): after a reclaim gave memory back, glibc's free pages to the system
+    (`malloc_trim(0)`): what the host side of the freed caches and conversations held stays in
+    the heap's arenas otherwise (host RSS 15.0 GiB before the 2026-11-05 23:07 restart, 9.19 after).
+    Linux only, at most every TRIM_HOST_EVERY_S; RSS before and after in the log line."""
+    now = time.monotonic()
+    if not sys.platform.startswith("linux") or now - _TRIM["t"] < TRIM_HOST_EVERY_S:
+        return
+    _TRIM["t"] = now
+
+    def rss() -> int:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    try:
+        import ctypes
+        before, t0 = rss(), time.perf_counter()
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+        ms = (time.perf_counter() - t0) * 1e3
+        after = rss()
+    except Exception:                                              # noqa: BLE001
+        return
+    _TRIM["calls"] += 1
+    _TRIM["ms"] += ms
+    print(f"[memory] malloc_trim after the {why} reclaim: RSS {_gib(before)} -> {_gib(after)} GiB "
+          f"({ms:.0f} ms)", flush=True)
+
+
 def _kv_reclaim_idle(d: dict, owner) -> int:
-    """SRV-307, before a request waits for memory: the pages idle conversations keep (idle side
-    slots, then slot 0's idle one, to the NVMe first), as much as the admission is short. Not the
-    caches: the admission already counts their growth, and shedding them leaves it unchanged."""
+    """SRV-307, before a request waits for memory: the KV pool's ladder (`_add_kv_reclaimers`), in
+    its order, as much as the admission is short (`want`, from the admission's sum; nothing when it
+    passes): the caches' safe levels and the allocator's free blocks, the small models, the idle
+    side conversations already current on the NVMe (SRV-E6: trimmed only), those not written yet
+    (saved, then trimmed), slot 0's idle conversation, the graphs (a knob, off), the side
+    conversations no save could write, the kept park. SRV-E6: the caches' level runs here too (it
+    was skipped, as the admission counts the caches' growth; the allocator's free blocks that
+    `empty` gives back are MemAvailable the sum never counted). Each level that gives something
+    back says how much and in how many ms; then the host heap is trimmed (`_trim_host`)."""
     pool = kvpool.POOL
     if pool is None or d.get("after") is None:
         return 0
     want = int(d.get("floor", 0)) - int(d["after"])
+    if want <= 0:
+        return 0
     rm = dict.get(STATE, "role_mem")
-    if rm is not None and want > 0:
+    if rm is not None:
         rm.note_pressure("admission")
     got = 0
     _RECLAIM.wait = True                   # a request's own thread, before it waits: no restore
     try:
         for name, fn in list(pool.reclaimers):
-            if name == "caches" or got >= want:
-                continue
+            if got >= want:
+                break
+            t0 = time.perf_counter()
             try:
                 n = int(fn(want - got, owner) or 0)
             except Exception:                                      # noqa: BLE001
@@ -6275,9 +6387,12 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
                 pool.stats["reclaimed_bytes"] += n
                 # SRV-779: one line for each conversation taken, its victim named
                 _reclaim_lines("[kv-pool] reclaim for admission",
-                               {"level": name, "bytes": n, "owner": owner})
+                               {"level": name, "bytes": n,
+                                "ms": round((time.perf_counter() - t0) * 1e3), "owner": owner})
     finally:
         _RECLAIM.wait = False
+    if got:
+        _trim_host("admission")
     return got
 
 
@@ -6328,6 +6443,8 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
                                {"level": name, "bytes": n, "owner": "release"})
     finally:
         _RECLAIM.wait = False
+    if got:
+        _trim_host(why)
     after = memsplit.mem_available()
     print(f"[memory] release for {why}: asked {_gib(want)} GiB, gave back {_gib(got)} GiB "
           f"({', '.join(levels) or 'nothing idle'}), MemAvailable {_gib(before)} -> "

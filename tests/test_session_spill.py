@@ -38,8 +38,8 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      on its own slot from that entry, bit for bit, prefilling only its tail
   13 SRV-E6, the idle backfill: an idle chat is written once (not while busy, not within the
      interval, only the changed blocks after its next turn), the capture guard only around device
-     steps, idle saves skipped past the write budget while pressure saves go, and a resident chat's
-     entry never evicted
+     steps, idle saves skipped past the write budget while pressure saves go, a resident chat's
+     entry never evicted, and a reclaim of a chat the backfill wrote only trims it
 
 Run: python tests/test_session_spill.py
 """
@@ -975,10 +975,11 @@ def _same_state(a, b, anchors="equal"):
             assert torch.equal(x, y), k
 
 
-def _pressure_run(d, reclaim: bool):
+def _pressure_run(d, reclaim: bool, idle: bool = False):
     """Chat S's turn on side slot 1, then (`reclaim`) the KV pool's reclaim of the idle slot for another slot's
     admission, then S's next turn, served on its home slot: (the state after the read, the state after turn 2,
-    turn 2's tokens and prefill, the run's objects)."""
+    turn 2's tokens and prefill, the run's objects). `idle` (SRV-E6): the idle backfill writes S first, and the
+    reclaim is the admission's ladder (`_kv_reclaim_idle` over `_add_kv_reclaimers`), short by one byte."""
     sp, t, al0, pool, side, side_res = _side_pool(d)
     out1, _ = _on_side(pool, side, S_PROMPT, 60, "S")
     e = side_res.end["at"]
@@ -987,15 +988,30 @@ def _pressure_run(d, reclaim: bool):
     read = {}
     if reclaim:
         eng1 = side.values["engine"]
+        if idle:
+            read["idle_saves"] = len(sp.backfill([_Slot(1, side_res, eng1)], now=side_res.t_used + 25))
         eng1.kv.pages = pages = _Pages(eng1, side_res)
         try:
-            got = app._kv_reclaim_side(1, "slot0")
+            if idle:
+                from engine import kvpool
+                kp, old = kvpool.KVPool(hard_floor=0, meminfo=lambda: 1 << 40), kvpool.POOL
+                app._add_kv_reclaimers(kp)
+                kvpool.POOL = kp
+                try:
+                    got = app._kv_reclaim_idle({"floor": 1, "after": 0}, "slot0")
+                finally:
+                    kvpool.POOL = old
+            else:
+                got = app._kv_reclaim_side(1, "slot0")
         finally:
             eng1.kv.pages = None
+        read["saves_at_reclaim"] = sp.stats["saves"]
         assert got > 0 and pages.trims == [0] and side_res.valid == 0 and eng1.kv.length == 0
         assert side.written is not None and side.written["owner"] == "S", side.written
         entry = sp.entries[side.written["eid"]]
-        assert entry.valid == e and entry.man["end"]["at"] == e and entry.man["reason"] == "kv_pool"
+        read["reclaim_reason"] = entry.man["reason"]
+        assert entry.valid == e and entry.man["end"]["at"] == e
+        assert entry.man["reason"] == ("idle" if idle else "kv_pool")
         # the regions written are the side slot's own alignment's, not slot 0's
         assert regions and entry.man["extra"] == {"end_regions": [list(x) for x in regions]}, entry.man["extra"]
         assert al0.regions(app.STATE["resident"]) == []
@@ -1253,6 +1269,47 @@ def test_a_save_never_evicts_the_entry_of_a_chat_still_in_ram():
         assert s is not None and a["eid"] not in sp.entries and sp.stats["evicted"].get("budget") == 1
         t.close()
         return "S refused while A was resident; written, evicting A's entry, once A left"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_pressure_reclaim_of_an_idle_chat_already_written_only_trims():
+    """SRV-E6 + SRV-779: chat S on side slot 1 is written by the idle backfill; the KV pool's reclaim then takes its
+    pages at the `written_side` level without a save (no save is counted, the line says `written=true ms=0`), and
+    S's next turn comes back on slot 1 from that entry with the rows, end anchor, logits and tokens of a run whose
+    rows never left. A turn that changes S makes it unwritten again: the `written_side` level then takes nothing."""
+    import contextlib
+    import io
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        ref_before, _, ref_after, ref_out, ref_pre, _, e0, _ = _pressure_run(d, reclaim=False)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        lines = io.StringIO()
+        with contextlib.redirect_stdout(lines):
+            before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions) = _pressure_run(
+                d, reclaim=True, idle=True)
+        assert e == e0
+        assert read["saves_at_reclaim"] == 1 and read["idle_saves"] == 1, read
+        assert read["reclaim_reason"] == "idle", "the entry the reclaim found is the backfill's"
+        got = [s for s in lines.getvalue().splitlines() if s.startswith("[kv-pool] reclaim for admission")]
+        assert len(got) == 1 and " level=written_side " in got[0] and got[0].endswith(" written=true ms=0") \
+            and "victim=slot1 " in got[0], got
+        _same_state(read["state"], before, anchors="kept")
+        assert pre2["kind"] == "spill" and pre2["reused"] == e, pre2
+        assert torch.equal(pre2["logits"], ref_pre["logits"]) and out2 == ref_out
+        _same_state(after, ref_after, anchors="kept")
+        # S's turn moved its rows: not current, nothing for the written level
+        assert sp.current(side_res) is None
+        eng1 = side.values["engine"]
+        eng1.kv.pages = _Pages(eng1, side_res)
+        try:
+            assert app._kv_reclaim_written(1, "slot0") == 0 and side_res.valid > 0
+        finally:
+            eng1.kv.pages = None
+        return f"{e} rows written idle, trimmed with no save, read back on slot 1: same logits and {len(out2)} tokens"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

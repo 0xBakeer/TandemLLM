@@ -13,7 +13,10 @@ memory as the dashboard sees it.
   * the contract schema knows the new state and the new total;
   * SRV-779: an idle side conversation is written to the NVMe before its pages go (one the day's write
     budget refuses waits for the last level), the turn that just ended goes last, and each reclaim line
-    names its victim; a lane that gives way on a side slot is written first too.
+    names its victim; a lane that gives way on a side slot is written first too;
+  * SRV-E6: the admission's ladder runs the pool's levels in order (the caches first, then the side
+    conversations already current on the NVMe, trimmed without a save), stops at what it is short,
+    does nothing when the admission passes, and logs each level with its bytes and ms.
 
 Run: python tests/test_kvpool_admission.py
 """
@@ -206,6 +209,8 @@ def test_a_streamed_wait_outlasts_the_queue_timeout():
 
 
 def test_admission_takes_back_idle_conversations_before_it_waits():
+    """SRV-E6: the caches' level runs here too now (it gives the allocator's free blocks back, which the admission's
+    sum never counted), first; the rest as before."""
     app = _app()
     from engine import kvpool
     calls = []
@@ -217,11 +222,12 @@ def test_admission_takes_back_idle_conversations_before_it_waits():
     kvpool.POOL = pool
     try:
         got = app._kv_reclaim_idle({"floor": 15 * GiB, "after": 10 * GiB}, "slot2")
-        assert got == 7 * GiB, got
-        assert calls == [("idle_side", 5 * GiB, "slot2"), ("idle_slot0", 2 * GiB, "slot2")], calls
+        assert got == 8 * GiB, got
+        assert calls == [("caches", 5 * GiB), ("idle_side", 4 * GiB, "slot2"),
+                         ("idle_slot0", GiB, "slot2")], calls
         calls.clear()
-        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": 13 * GiB}, "slot1") == 3 * GiB
-        assert [c[0] for c in calls] == ["idle_side"], "stops once enough came back"
+        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": 13 * GiB}, "slot1") == 4 * GiB
+        assert [c[0] for c in calls] == ["caches", "idle_side"], "stops once enough came back"
         assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": None}, "slot1") == 0
     finally:
         kvpool.POOL = old
@@ -1063,14 +1069,32 @@ class _Spill:
     """Slot 0's session spill as `_write_rows` uses it: a save records its owner and engine in `log` and returns an
     entry, or is refused by the day's write budget for the owners in `refuse` (SRV-273's guard)."""
 
-    def __init__(self, log, refuse=()):
+    def __init__(self, log, refuse=(), current=()):
         import threading
         self.cfg = {"drain_min_tokens": 4096}
         self._own_io = threading.Lock()
         self.stats = {"refused": {}, "failed": {}}
-        self.log, self.refuse = log, set(refuse)
+        self.log, self.refuse, self.cur = log, set(refuse), set(current)
 
-    def save_resident(self, res, eng, drafter, reason):
+    def current(self, res):
+        """SRV-E6: the owners in `current` were written by the idle backfill and have not changed since."""
+        import types
+        return types.SimpleNamespace(eid=f"e-{res.owner}", valid=res.valid) if res.owner in self.cur else None
+
+    def io(self, wait_s=None):
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            got = self._own_io.acquire(timeout=wait_s) if wait_s else self._own_io.acquire(blocking=False)
+            try:
+                yield got
+            finally:
+                if got:
+                    self._own_io.release()
+        return held()
+
+    def save_resident(self, res, eng, drafter, reason, guard=None):
         if res.owner in self.refuse:
             self.stats["refused"]["write_budget"] = self.stats["refused"].get("write_budget", 0) + 1
             return None
@@ -1103,7 +1127,7 @@ def _side_slot(log, index, owner, valid, ended_s_ago, now):
     return s
 
 
-def _reclaim_run(app, side, d, owner="slot0", refuse=()):
+def _reclaim_run(app, side, d, owner="slot0", refuse=(), current=()):
     """`_kv_reclaim_idle` over the server's own reclaim order (`_add_kv_reclaimers`) with `side` as the pool's side
     slots and `_Spill` as slot 0's spill: (what came back, the log, the printed lines)."""
     import contextlib
@@ -1114,7 +1138,7 @@ def _reclaim_run(app, side, d, owner="slot0", refuse=()):
     app._add_kv_reclaimers(kp)
     keys = ("pool", "spill", "engine", "resident", "mem", "wren", "role_mem")
     saved, old = {k: dict.get(app.STATE, k) for k in keys if dict.__contains__(app.STATE, k)}, kvpool.POOL
-    app.STATE.update(pool=slots.Pool([slots.Slot(0, 262_144)] + side), spill=_Spill(log, refuse),
+    app.STATE.update(pool=slots.Pool([slots.Slot(0, 262_144)] + side), spill=_Spill(log, refuse, current),
                      engine=None, resident=None, mem=None, wren=None, role_mem=None)
     kvpool.POOL = kp
     out = io.StringIO()
@@ -1215,6 +1239,84 @@ def test_srv779_a_lane_that_gives_way_on_a_side_slot_is_written_first():
     assert got == 3 * GiB and eng.kv.length == 0 and side.written == {"eid": "e-lane", "owner": "lane"}
     assert "[kv-pool] give back victim=slot2 conv=lane rows=70520 written=true ms=" in out.getvalue(), out.getvalue()
     return "70,520 rows written, then 3 GiB back"
+
+
+def test_srv_e6_the_ladder_runs_its_levels_in_order_and_stops_at_what_is_short():
+    """SRV-E6 (plan row 5): `_kv_reclaim_idle` over the server's own order (`_add_kv_reclaimers`), each level a fake
+    that records its turn: caches, roles, the side chats already on the NVMe, the others, slot 0, (the graphs, a
+    knob), the unwritten ones, the kept park; it stops once it has what the admission is short, runs nothing when
+    the admission passes, and logs each level that gave something with its bytes and ms."""
+    import contextlib
+    import io
+    from engine import kvpool
+    app = _app()
+    names = ("caches", "roles", "written", "side", "slot0", "graphs", "unwritten", "kept_park")
+    calls, gives = [], {}
+    saved = {n: getattr(app, f"_kv_reclaim_{n}") for n in names}
+    for n in names:
+        setattr(app, f"_kv_reclaim_{n}",
+                lambda want, o, n=n: calls.append(n) or gives.get(n, GiB))
+    old_pool, old_graphs = kvpool.POOL, app.RECLAIM_GRAPHS
+
+    def run(d, graphs=False):
+        app.RECLAIM_GRAPHS = graphs
+        kp = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+        app._add_kv_reclaimers(kp)
+        kvpool.POOL = kp
+        calls.clear()
+        app._RECLAIM.victims = []          # the fakes take no conversation
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = app._kv_reclaim_idle(d, "slot4")
+        return got, list(calls), [s for s in out.getvalue().splitlines() if s.startswith("[kv-pool]")]
+    try:
+        got, order, lines = run({"floor": 15 * GiB, "after": 0})
+        assert order == ["caches", "roles", "written", "side", "slot0", "unwritten", "kept_park"], order
+        assert got == 7 * GiB and len(lines) == 7, lines
+        assert [ln.split()[4].split("=")[1] for ln in lines] == [
+            "caches", "roles", "written_side", "idle_side", "idle_slot0", "unwritten_side", "kept_park"], lines
+        for ln in lines:
+            assert f" bytes={GiB} ms=" in ln and ln.endswith(" owner=slot4"), ln
+        got, order, _ = run({"floor": 15 * GiB, "after": 0}, graphs=True)
+        assert order == ["caches", "roles", "written", "side", "slot0", "graphs", "unwritten", "kept_park"], order
+        got, order, lines = run({"floor": 15 * GiB, "after": 12 * GiB})
+        assert order == ["caches", "roles", "written"] and got == 3 * GiB, (order, got)
+        gives["caches"] = 4 * GiB
+        got, order, _ = run({"floor": 15 * GiB, "after": 12 * GiB})
+        assert order == ["caches"] and got == 4 * GiB, "the allocator's blocks were enough"
+        for after in (15 * GiB, 20 * GiB):
+            got, order, lines = run({"floor": 15 * GiB, "after": after})
+            assert got == 0 and order == [] and lines == [], "the corrected check passes: nothing"
+    finally:
+        for n, fn in saved.items():
+            setattr(app, f"_kv_reclaim_{n}", fn)
+        kvpool.POOL, app.RECLAIM_GRAPHS = old_pool, old_graphs
+    return "caches, roles, written_side, idle_side, idle_slot0, [graphs], unwritten_side, kept_park; stops at want"
+
+
+def test_srv_e6_a_side_chat_current_on_the_nvme_goes_first_and_is_not_written_again():
+    """SRV-E6: the idle backfill wrote chat `w` and nothing changed since; the ladder's `written_side` level takes its
+    pages before an older chat that still needs a save, with no save (`written=true ms=0`, its slot's `written` set
+    for its return home), and never clears a chat that is not current there; the next level saves `u` first."""
+    import re
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 2, "u", 50_000, 600, now), _side_slot(log, 3, "w", 85_010, 100, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB}, current={"w"})
+    assert got == 3 * GiB and log == [("clear", "w", 85_010), ("trim", "w")], log
+    assert side[1].written == {"eid": "e-w", "owner": "w"} and side[0].written is None
+    pat = re.compile(r"^\[kv-pool\] reclaim for admission level=written_side bytes=\d+ owner=slot0 "
+                     r"victim=slot3 conv=w rows=85010 written=true ms=0$")
+    assert [s for s in lines if pat.match(s)], lines
+    log = []
+    side = [_side_slot(log, 2, "u", 50_000, 600, now), _side_slot(log, 3, "w", 85_010, 100, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 10 * GiB}, current={"w"})
+    eng2 = side[0].values["engine"]
+    assert got == 6 * GiB and log == [("clear", "w", 85_010), ("trim", "w"), ("save", "u", eng2, "kv_pool"),
+                                      ("clear", "u", 50_000), ("trim", "u")], log
+    assert sum(1 for x in log if x[0] == "save") == 1, "w is never written again"
+    return "w (current, 100 s idle) trimmed first without a save; u (600 s) saved then trimmed"
 
 
 def test_the_release_route_answers_trusted_local_and_the_admin_only():

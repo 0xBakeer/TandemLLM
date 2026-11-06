@@ -118,7 +118,8 @@ def test_the_pool_reclaims_roles_before_conversations():
             resident=None)
         app._kv_after_load(types.SimpleNamespace())
         names = [n for n, _ in pool.reclaimers]
-        assert names == ["caches", "roles", "idle_side", "idle_slot0", "unwritten_side",
+        # SRV-E6: the side chats the idle backfill wrote go right after the roles, trimmed only
+        assert names == ["caches", "roles", "written_side", "idle_side", "idle_slot0", "unwritten_side",
                          "kept_park"], names
         # spy on the levels after the roles: they must not run when the roles were enough
         pool.reclaimers = [(n, (lambda f, n: (lambda w, o: (calls.append(n), f(w, o))[1]))(f, n))
@@ -142,11 +143,11 @@ def test_the_pool_reclaims_roles_before_conversations():
             pool.gate("slot1", 8 * GIB)
         except kvpool.PoolFull:
             pass
-        assert calls == ["caches", "roles", "idle_side", "idle_slot0", "unwritten_side",
+        assert calls == ["caches", "roles", "written_side", "idle_side", "idle_slot0", "unwritten_side",
                          "kept_park"], calls
         st = rm.report()["roles"]
         assert st["shadow"]["state"] == st["narrator"]["state"] == "unloaded_for_memory"
-        # the admission's reclaim before a wait goes through the roles too (not the caches)
+        # the admission's reclaim before a wait goes through the roles too
         assert rm.last_pressure is not None
     finally:
         kvpool.POOL = old_pool
