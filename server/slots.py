@@ -244,6 +244,16 @@ class Admission:
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
+        if over_peak and gin and need_ws > 0:
+            # the guard's chunk is the most one prefill allocates between two checks; an over-peak admit's
+            # workspace is that chunk and counts in full below, so the floor holds only what is left of it
+            # (2026-11-06: a 142k turn's 10.8 GiB counted as its workspace and again as the floor's chunk
+            # waited 17 s at MemAvailable 19.9 GiB, where 9.2 GiB would have been left after it)
+            own = min(int(gin["step"]), need_ws)
+            if own:
+                gin = dict(gin, step=int(gin["step"]) - own, own=own)
+                gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
+                floor = min(self.cap, gin["guard"])
         spare = 0
         if over_peak and self.spare is not None:
             try:
@@ -408,7 +418,8 @@ class Admission:
         if not gin:
             return ""
         g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731
-        return (f" = chunk {g(gin['step'])} + KV commit {g(gin['kv'])} + sandbox {g(gin['sandbox'])} + margin "
+        own = f" (this request's {g(gin['own'])} counted above)" if gin.get("own") else ""
+        return (f" = chunk {g(gin['step'])}{own} + KV commit {g(gin['kv'])} + sandbox {g(gin['sandbox'])} + margin "
                 f"{g(gin['margin'])}, at most {g(gin['cap'])}")
 
     def report(self) -> dict:

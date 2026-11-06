@@ -526,6 +526,28 @@ def test_srv785_the_guard_is_the_live_sum_and_never_above_the_floor():
     return "6.95 for a short turn, 10 at 128k and for a sandbox's ask, 10 without a guard"
 
 
+def test_srv785_an_over_peak_admit_is_not_held_for_its_own_chunk_twice():
+    """2026-11-06 live: a 142,692-token turn the gate admitted over the peak (workspace 10.8 GiB, 0.8 of it in the
+    allocator's free blocks, KV 0.5) found MemAvailable 19.9 - growth 0.2 - its 10.0 new - KV 0.5 = 9.2 against a
+    floor of 10 (chunk 10.8 + KV 0.4 + margin 5.0, capped): its own chunk counted twice, a 17 s wait. Its workspace
+    is that chunk: the floor keeps the KV commit and the margin, 5.4, and it starts. Under the peak the floor is
+    unchanged."""
+    gib = lambda x: int(x * GiB)                                                  # noqa: E731
+    live = lambda rows: slots.guard(gib(10), step=gib(10.8), kv=gib(0.4), margin=gib(5))   # noqa: E731
+
+    def adm():
+        return slots.Admission(gib(10), meminfo=lambda: {"MemAvailable": gib(19.9)}, growth=lambda: gib(0.2),
+                               room=lambda: 0, spare=lambda: gib(0.8), guard=live)
+    ok, d = adm().reserve("t", gib(10.8) + gib(0.5), kv=gib(0.5), over_peak=True, rows=142_692)
+    assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(10.8), d
+    assert abs(d["after"] - gib(9.4)) < GiB // 100, d
+    text = slots.Admission.describe(d)
+    assert "chunk 0.0 (this request's 10.8 counted above) + KV commit 0.4" in text, text
+    ok, d = adm().reserve("u", gib(4) + gib(0.5), kv=gib(0.5), rows=142_692)
+    assert d["floor"] == gib(10) and "own" not in d["guard"], d
+    return text
+
+
 def test_srv775_describe_names_a_peak_wait():
     d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
          "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}
