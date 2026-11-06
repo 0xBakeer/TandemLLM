@@ -34,6 +34,8 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      before the replay through the server's hook
   11 a long prompt no entry serves although one shares a long head with it: one line says why
      (the end not reached and the alignment refused, no end, the read cost, a line too short)
+  12 SRV-779: a side slot's chat whose pages the KV pool reclaims is written first and comes back
+     on its own slot from that entry, bit for bit, prefilling only its tail
 
 Run: python tests/test_session_spill.py
 """
@@ -867,6 +869,197 @@ def test_fx16_no_entry_served_says_why_in_one_line():
         assert lines == [] and sp.stats["restores"] == 1, (lines, sp.stats)
         t.close()
         return "end_no_align, anchors_below and slow each one line; a served copy none"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 12. a side slot's chat under pressure
+
+S_PROMPT = tokens(64, seed=90) + tokens(70, seed=92)
+
+
+class _Pages:
+    """The KV pool's pages of a side slot's engine for one reclaim (`_kv_reclaim_side`): `trim(0)` gives every row
+    back as the pool's driver does, and what the slot held after it reads as fresh pages (zeros), with its recurrent
+    state and its prefix's anchor and end buffers overwritten too, so whatever comes back was read from the NVMe."""
+
+    def __init__(self, eng, res):
+        self.eng, self.res, self.trims = eng, res, []
+
+    def committed_bytes(self):
+        return sum(t.numel() * t.element_size() for t, _ in cache._kv_views(self.eng, None))
+
+    def trim(self, rows=0):
+        n = self.committed_bytes()
+        self.trims.append(rows)
+        for t, _ in cache._kv_views(self.eng, None):
+            t.zero_()
+        for t in cache.state_now(self.eng):
+            t.fill_(0.5)
+        for pair in [self.res._end_bufs] + list(self.res._free):
+            for t in pair or ():
+                t.fill_(0.25)
+        return n
+
+
+def _side_pool(d):
+    """Slot 0 with its spill and an end alignment of its own; side slot 1 with a resident prefix and an alignment
+    of its own, wired to slot 0's spill as the server wires it at the start (`_side_spills`)."""
+    from server import diskcache, endalign
+    from server import slots as S
+    from test_end_align import tb_of
+    res0 = _state(park_bytes=BIG)
+    sp, t = _spill(d, res0)
+    al0 = endalign.EndAlign(tb_of())
+    diskcache.wire_end_align(sp, al0, res0)
+    vals = {k: None for k in S.OVERLAY}
+    side_res = cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, guest_max=40, guest_frac=1.0, end=True,
+                                    park_bytes=0)
+    vals.update(engine=fresh(), drafter=None, max_len=512, resident=side_res,
+                end_align=endalign.EndAlign(tb_of()))
+    side = S.Slot(1, 512, values=vals)
+    pool = S.Pool([S.Slot(0, 512), side])
+    app.STATE["pool"] = pool
+    assert app._side_spills(sp) == 1 and isinstance(side_res.spiller, app._SideSpill)
+    return sp, t, al0, pool, side, side_res
+
+
+def _on_side(pool, side, ids, n, session):
+    """A turn on side slot 1 as the handler serves it there: the slot taken, bound, the stream, `_remember`; the
+    prefill's logits in `pre["logits"]`."""
+    from server import slots as S
+    s = pool.take_slot(side.index, len(ids) + n, owner=session)
+    assert s is side
+    S.bind(s)
+    got, real = [], cache.prefill
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        got.append(out[0].detach().float().clone())
+        return out
+    cache.prefill = spy
+    try:
+        out, pre, ctx = turn(ids, n, session)
+    finally:
+        cache.prefill = real
+        S.bind(None)
+        pool.release_side(s)
+    pre["logits"] = got[-1]
+    return out, pre
+
+
+def _side_state(side, n):
+    """The side slot's rows below `n`, its end anchor (line and state) and its anchors, cloned."""
+    vals, res = side.values, side.values["resident"]
+    return {"rows": _rows(vals["engine"], n),
+            "end_at": res.end["at"] if res.end is not None else None,
+            "end": tuple(x.clone() for x in res._end_bufs) if res.end is not None else None,
+            "anchors": {b: tuple(x.clone() for x in p) for b, p in res.anchors.items()}}
+
+
+def _same_state(a, b, anchors="equal"):
+    _same_rows(a["rows"], b["rows"])
+    assert a["end_at"] == b["end_at"], (a["end_at"], b["end_at"])
+    for x, y in zip(a["end"], b["end"]):
+        assert torch.equal(x, y)
+    if anchors == "equal":
+        assert sorted(a["anchors"]) == sorted(b["anchors"]), (sorted(a["anchors"]), sorted(b["anchors"]))
+    # the spill keeps the newest anchors (`cfg["anchors"]`): every one that came back is the bytes it was
+    assert a["anchors"] and set(a["anchors"]) <= set(b["anchors"])
+    for k, p in a["anchors"].items():
+        for x, y in zip(p, b["anchors"][k]):
+            assert torch.equal(x, y), k
+
+
+def _pressure_run(d, reclaim: bool):
+    """Chat S's turn on side slot 1, then (`reclaim`) the KV pool's reclaim of the idle slot for another slot's
+    admission, then S's next turn, served on its home slot: (the state after the read, the state after turn 2,
+    turn 2's tokens and prefill, the run's objects)."""
+    sp, t, al0, pool, side, side_res = _side_pool(d)
+    out1, _ = _on_side(pool, side, S_PROMPT, 60, "S")
+    e = side_res.end["at"]
+    regions = side.values["end_align"].regions(side_res)
+    before = _side_state(side, e)
+    read = {}
+    if reclaim:
+        eng1 = side.values["engine"]
+        eng1.kv.pages = pages = _Pages(eng1, side_res)
+        try:
+            got = app._kv_reclaim_side(1, "slot0")
+        finally:
+            eng1.kv.pages = None
+        assert got > 0 and pages.trims == [0] and side_res.valid == 0 and eng1.kv.length == 0
+        assert side.written is not None and side.written["owner"] == "S", side.written
+        entry = sp.entries[side.written["eid"]]
+        assert entry.valid == e and entry.man["end"]["at"] == e and entry.man["reason"] == "kv_pool"
+        # the regions written are the side slot's own alignment's, not slot 0's
+        assert regions and entry.man["extra"] == {"end_regions": [list(x) for x in regions]}, entry.man["extra"]
+        assert al0.regions(app.STATE["resident"]) == []
+        # its next turn's home: the slot its rows were written from, while it holds no other conversation
+        assert app._spill_home(pool, entry.eid, len(S_PROMPT) + 200, CH) == 1
+        real = sp.restore
+
+        def spy(res, eng, *a, **k):
+            info = real(res, eng, *a, **k)
+            read["state"] = _side_state(side, e)
+            read["regions"] = side.values["end_align"].regions(res)
+            read["info"] = info
+            read["eng"] = eng
+            return info
+        sp.restore = spy
+    try:
+        ids2 = S_PROMPT + out1 + TOOL
+        out2, pre2 = _on_side(pool, side, ids2, 24, "S")
+    finally:
+        sp.__dict__.pop("restore", None)
+    after = _side_state(side, side_res.end["at"])
+    t.close()
+    return before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions)
+
+
+def test_a_side_slots_chat_written_under_pressure_comes_back_at_home_bit_for_bit():
+    """SRV-779 (plan step 3): a chat on side slot 1, its pages reclaimed for another slot's admission (written to
+    the NVMe first through slot 0's spill, `_kv_reclaim_side`), comes back on slot 1 from that entry
+    (`_SideSpill.maybe_restore` into the side engine's buffers): its rows, end anchor and anchors right after the
+    read are the bytes they were before the trim, and the next turn's prefill logits, tokens, rows, end anchor and
+    anchors equal a run whose rows never left."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        ref_before, _, ref_after, ref_out, ref_pre, _, e0, _ = _pressure_run(d, reclaim=False)
+        assert ref_pre["kind"] == "end" and ref_pre["reused"] == e0, ref_pre
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions) = _pressure_run(d, reclaim=True)
+        assert e == e0
+        _same_state(before, ref_before)
+        assert read["eng"] is side.values["engine"], "read into the side engine's own buffers"
+        assert read["info"]["tokens"] == e and read["info"]["end"], read["info"]
+        _same_state(read["state"], before, anchors="kept")       # right after the read: the bytes that were there
+        assert read["regions"] == regions, "its regions back in its own alignment"
+        assert pre2["kind"] == "spill" and pre2["reused"] == e, pre2
+        assert torch.equal(pre2["logits"], ref_pre["logits"]), "next-turn logits bit for bit"
+        assert out2 == ref_out
+        _same_state(after, ref_after, anchors="kept")
+        return (f"{e} rows written, trimmed, read back on slot 1 ({read['info']['blocks_read']} blocks); turn 2's "
+                f"logits and {len(out2)} tokens equal the never-trimmed run")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_side_restore_prefills_only_the_tail():
+    """The restored side chat's next turn forwards what follows its end anchor only (n - line), not its prompt;
+    and once the slot holds rows again its entry names no home there (`_side_home` finds the rows instead)."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        _, read, _, _, pre2, ids2, e, (sp, side, side_res, _) = _pressure_run(d, reclaim=True)
+        line = read["info"]["line"]
+        assert line == e and pre2["reused"] == line, (line, pre2)
+        assert pre2["forwarded"] == len(ids2) - line, pre2
+        eid = side.written["eid"]
+        assert side_res.valid >= CH and app._spill_home(app.STATE["pool"], eid, len(ids2), CH) is None
+        return f"{len(ids2)} tokens, {pre2['forwarded']} forwarded after the line at {line}"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

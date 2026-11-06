@@ -369,10 +369,18 @@ def wire_end_align(spill, al, res=None) -> None:
     resume after the restore will, so a chat whose client leaves the reasoning out comes back
     from the disk instead of being read again. A parked conversation's end (`res`, engine/cache.py
     `ResidentPrefix._park`) the same way: its regions parked with it and adopted when it comes
-    back, the park's offer aligning the copy, and the parked end written to the NVMe with them."""
+    back, the park's offer aligning the copy, and the parked end written to the NVMe with them.
+
+    SRV-779: the regions an entry is written with and read back into are its prefix's own
+    alignment's (`res.end_extra_of` / `res.end_adopt`, a side slot's `EndAlign` wired with `res`),
+    slot 0's `al` when the prefix has none; the offer's alignment is a probe of its own
+    (`EndAlign.offers`) and the same for every slot."""
     if spill is not None:
-        spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
-        spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
+        spill.extra_of = lambda r: {"end_regions": [
+            list(x) for x in (getattr(r, "end_extra_of", None) or al.regions)(r)]}
+        spill.on_adopt = lambda r, extra: (
+            getattr(r, "end_adopt", None) or (lambda r_, g: al.adopt(r_, g or [])))(
+                r, extra.get("end_regions") or [])
         spill.offer_align = lambda toks, end, extra, keys: al.offers(
             toks, end, (extra or {}).get("end_regions") or [], keys)
         spill.park_extra_of = lambda r: {"end_regions": [list(x) for x in r.park_regions]}

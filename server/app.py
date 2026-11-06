@@ -1465,7 +1465,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                     # 496 s generation (2026-10-13); the disk tier serves that head on a side
                     # slot too (server/diskcache.py `SideReader`)
                     if got is not None and (conv is None or int(got[1]) >= conv):
-                        why.update(wait="spill", spill=int(got[1]))
+                        why.update(wait="spill", spill=int(got[1]), spill_eid=got[0].eid)
                         with pool._lk:
                             pool.stats["spill_waits"] = pool.stats.get("spill_waits", 0) + 1
                     elif got is not None:
@@ -1524,6 +1524,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     # FX16: the side slot that holds this conversation's rows (its last turn ran there and
     # nothing wrote over them since): the turn resumes at its end there, beside slot 0
     home = _side_home(pool, ids, need, chunk, conv)
+    if home is None and why.get("wait") == "spill":
+        # SRV-779: the side slot its rows were written from, while it holds no other
+        # conversation: it reads them back there (`_SideSpill`), not through slot 0
+        back = _spill_home(pool, why.get("spill_eid"), need, chunk)
+        if back is not None:
+            why.update(home=back, home_share=0, spill_home=True)
+            return need
     if why.get("wait"):
         here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill", "park"))
         if home is not None and home[1] > here:
@@ -1625,7 +1632,7 @@ def _par_nums(why: dict) -> str:
                                               "conv", "need", "guest", "park", "slot0_wait_s",
                                               "home", "home_share", "home_wait", "hop_from",
                                               "prefer_side", "prefer_side_end", "slot0_stale", "new_wait",
-                                              "spill", "spill_head", "slot0_wait")
+                                              "spill", "spill_head", "spill_home", "slot0_wait")
                     if k in why)
     if "n_images" in why:
         nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
@@ -1689,6 +1696,22 @@ def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) ->
     near = [(h, s) for h, s in found if h >= top - chunk]
     h, s = next(((h, s) for h, s in near if not s.busy), next((h, s) for h, s in found if h == top))
     return s.index, h
+
+
+def _spill_home(pool, eid: str | None, need: int, chunk: int) -> int | None:
+    """SRV-779: the index of the side slot whose conversation was written to NVMe entry `eid`
+    before its rows went (`Slot.written`: the KV pool's reclaim, a lane giving way, ENG-371's
+    keeper), when the slot holds no other conversation now (under a chunk of rows), reads the
+    spill (`_SideSpill`) and its window holds `need` rows; else None."""
+    if eid is None:
+        return None
+    for s in pool.side():
+        res = (s.values or {}).get("resident")
+        if (s.written is not None and s.written.get("eid") == eid and need <= s.max_len
+                and res is not None and getattr(res, "spiller", None) is not None
+                and int(getattr(res, "valid", 0) or 0) < chunk):
+            return s.index
+    return None
 
 
 def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
@@ -4378,8 +4401,10 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
     """A conversation on the NVMe (engine/spill.py) that this prompt continues further
     than every cache in RAM is read back into the engine's buffers before the end anchor's replay,
     the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
-    request: the prefill then starts from what is in place."""
-    sp, res = STATE.get("spill"), STATE.get("resident")
+    request: the prefill then starts from what is in place. SRV-779: on a side slot too, through
+    its prefix's view of the spill (`_SideSpill`), into the slot's own buffers."""
+    res = STATE.get("resident")
+    sp = getattr(res, "spiller", None)
     if sp is None or res is None:
         return                 # FX16: with no entry the park's end still comes back here
     parked = int(res.stats.get("park_tokens_reused", 0))
@@ -6199,9 +6224,15 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
     try:
         res = dict.get(STATE, "resident")
         if res is not None:
+            sp = res.spiller
+            if (sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30)
+                    and sp._own_io.locked()):
+                # SRV-779: the spill's I/O is held, maybe by this very thread (a side slot's
+                # restore whose page gate asks): the save would wait for it, so slot 0 stays
+                return 0
             if res._stash is not None:
                 res.settle_guest(eng)
-            if res.spiller is not None and res.valid >= getattr(res.spiller, "min_tokens", 1 << 30):
+            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
                 res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
             res.clear()
         eng.kv.length = 0
@@ -13067,7 +13098,8 @@ def _side_resident(a, tok):
     """FX16: a side slot's own resident prefix (engine/cache.py `ResidentPrefix`), or None with
     `QSE_SIDE_RESIDENT_GB=0` or when slot 0 has none. The anchors it holds, its stash for a guest
     and its end anchor are sized by `SIDE_RESIDENT_GB` / `SIDE_STASH_GB`; no pin, no park, no
-    disk tier and no NVMe spill of its own (`OVERLAY` keeps those None on a side slot). Its
+    disk tier and no NVMe spill of its own (`OVERLAY` keeps those None on a side slot); SRV-779:
+    it writes to and reads from slot 0's spill (`_side_spills`). Its
     buffers are given back under the memory policy's levels with slot 0's, the side's after.
 
     Before 0.4.8 a side slot kept no conversation: the next turn of a chat that ran there was
@@ -13106,6 +13138,56 @@ def _side_resident(a, tok):
                     return n
             mem.register(level, both)
     return res
+
+
+class _SideSpill:
+    """SRV-779: a side slot's view of slot 0's session spill (engine/spill.py `SessionSpill`), its
+    resident prefix's `spiller`: the slot's prefill reads the slot's own conversation back in
+    place from the NVMe (`maybe_restore` into the side engine's buffers, as `SideReader` reads the
+    disk tier), and another session's prefill writes the slot's long conversation there first, as
+    slot 0's does. Its saves and reads run on the side slot's thread outside the engine lock, so
+    they hold `capture_lock.GUARD` (no CUDA call inside slot 0's graph capture, as `_keep_parent`).
+    Everything else is the spill's own."""
+
+    def __init__(self, sp):
+        self.sp = sp
+
+    def __getattr__(self, k):
+        return getattr(self.sp, k)
+
+    def save_resident(self, *a, **kw):
+        with capture_lock.GUARD:
+            return self.sp.save_resident(*a, **kw)
+
+    def maybe_restore(self, *a, **kw):
+        with capture_lock.GUARD:
+            return self.sp.maybe_restore(*a, **kw)
+
+    def restore(self, *a, **kw):
+        with capture_lock.GUARD:
+            return self.sp.restore(*a, **kw)
+
+
+def _side_spills(sp) -> int:
+    """SRV-779: after the spill starts (`start_spill`), every side slot's resident prefix reads and
+    writes it (`_SideSpill`), and an entry's end-alignment regions are its own slot's
+    (`wire_end_align` with the slot's `EndAlign`: `extra_of` and `on_adopt` resolve it from the
+    prefix). A conversation the KV pool's reclaim wrote from a side slot then comes back on that
+    slot (`_spill_home`), not through slot 0. The side slots wired."""
+    pool = dict.get(STATE, "pool")
+    if sp is None or pool is None:
+        return 0
+    n = 0
+    for s in pool.side():
+        vals = s.values or {}
+        r, al = vals.get("resident"), vals.get("end_align")
+        if r is None:
+            continue
+        if al is not None:
+            diskcache_mod.wire_end_align(None, al, r)
+        r.spiller = _SideSpill(sp)
+        n += 1
+    return n
 
 
 def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
@@ -13490,6 +13572,9 @@ def _serve(a, led) -> None:
     # Live conversations on the NVMe (engine/spill.py), and the one the last planned
     # stop wrote read back before the first request
     STATE["spill"] = diskcache_mod.start_spill(STATE, a, STATE["disk_cache"], journal)
+    if _side_spills(STATE["spill"]):
+        print("[spill] side slots read and write it: a conversation reclaimed on its slot comes "
+              "back there", flush=True)
     spill_startup()
     # Compaction as a continuation, and the summary prepared ahead
     STATE["compaction"] = dict(compaction_mod.SETTINGS, mode=a.compaction,
