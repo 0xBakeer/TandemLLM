@@ -6148,7 +6148,8 @@ def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = 
         t = (s.carry or {}).get("t")
         return float(t) if t is not None else now
     idle = [s for s in pool.side() if f"slot{s.index}" != owner and not s.busy]
-    idle.sort(key=lambda s: (now - ended(s) < RECLAIM_RECENT_S, ended(s)))
+    # the idle conversations of lower-priority chats first (`tandem.priority`, kept on the slot by `_par_admit`)
+    idle.sort(key=lambda s: (int(getattr(s, "prio", 1)), now - ended(s) < RECLAIM_RECENT_S, ended(s)))
     wait_s = KEEP_IO_WAIT_S if getattr(_RECLAIM, "wait", False) else 0.0
     for s in idle:
         if got >= want:
@@ -8317,7 +8318,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
                    stream: bool = False, rows: int | None = None, respond: bool = True,
-                   cold: bool = False, home: int = 0) -> bool:
+                   cold: bool = False, home: int = 0, priority: int = 1) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8505,12 +8506,22 @@ class Handler(BaseHTTPRequestHandler):
             (`Admission.check`)."""
             return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")),
                                rows=n)
+        # the chat's priority (`tandem.priority`): the line for memory is by it, and the pool's reclaim takes the
+        # idle conversations of lower-priority chats first (`_kv_reclaim_side`)
+        slot_now = slots_mod.current()
+        if slot_now is not None:
+            slot_now.prio = int(priority)
+        else:
+            STATE["slot0_prio"] = int(priority)
         d = gate()
         gate_again = d is not None
         if gate_again:
             adm.stats["peak_waits"] += 1
         freed = 0                     # SRV-787: what the reclaims gave back for it, for the live view
-        if not gate_again:
+        if not gate_again and adm.outranked(priority):
+            # a chat of a higher priority waits for memory: this request joins the line behind it
+            _, d = adm.check(est["ws_r1"] + kv, count=False, kv=kv, over_peak=bool(est.get("over_peak")), rows=n)
+        elif not gate_again:
             ok, d = reserve()
             got = _kv_reclaim_idle(d, owner) if not ok else 0
             if got:
@@ -8554,7 +8565,8 @@ class Handler(BaseHTTPRequestHandler):
                     return False
                 if rec is not None:
                     # SRV-787: what the live view says while it waits (server/activity.py `memory_of`)
-                    rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid), freed)
+                    rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid, priority), freed)
+                    rec.mem_wait["higher"] = adm.ahead_higher(cid)
                 if self._client_gone():
                     if respond:
                         # SRV-777: no response has started, so nothing else books this end: abandoned, as the
@@ -8570,7 +8582,7 @@ class Handler(BaseHTTPRequestHandler):
                             rec.wait_mem_ms = round(waited * 1e3, 1)
                         print(f"[req] {cid} left while waiting for memory ({waited * 1e3:.0f} ms)", flush=True)
                     raise ClientGone("client left while waiting for memory")
-                place = adm.wait(cid)
+                place = adm.wait(cid, priority)
                 line = time.monotonic() - said >= MEM_LINE_EVERY_S
                 if line and said > 0:
                     # SRV-787: the engine log says why every MEM_LINE_EVERY_S, the guard's inputs with it
@@ -10193,7 +10205,8 @@ class Handler(BaseHTTPRequestHandler):
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
                     rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold,
                     home=(int(par_why.get("home_share") or 0)
-                          if side is not None and par_why.get("home") == side.index else 0)):
+                          if side is not None and par_why.get("home") == side.index else 0),
+                    priority=_priority_of(body)):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -13184,6 +13197,14 @@ def _guard(rows: int, cap: int) -> tuple[int, dict] | None:
     claim, at = _SANDBOX_CLAIM
     sandbox = claim if time.monotonic() - at < SANDBOX_CLAIM_S else 0
     return slots_mod.guard(cap, step=step, kv=kv, sandbox=sandbox, margin=int(GUARD_MARGIN_GB * (1 << 30)))
+
+
+def _priority_of(body) -> int:
+    """A chat's priority for memory, from the request's `tandem.priority` ("high", "normal", "low"): 2, 1, 0.
+    Anything else, and a request without the field: normal."""
+    t = body.get("tandem") if isinstance(body, dict) else None
+    p = t.get("priority") if isinstance(t, dict) else None
+    return {"high": 2, "low": 0}.get(p, 1) if isinstance(p, str) else 1
 
 
 def _mem_wait_of(d: dict, fwd: int, t0: float, limit: float, place: int, freed: int) -> dict:

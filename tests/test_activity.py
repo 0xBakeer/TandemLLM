@@ -326,6 +326,10 @@ def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
                                     "frees. Stop cancels; it gives up only after 10 min without memory (8 m "), m["lines"]
     assert m["lines"][2].endswith(" s left)"), m["lines"]
     assert activity._span(10_800) == "3 h" and activity._span(8_100) == "2 h 15 min", "hours from an hour up"
+    rec.mem_wait["higher"] = 2
+    lines = activity.memory_of(rec.mem_wait, time.perf_counter(), {"request_id": "o", "tokens": 131_073, "eta_ms": None})["lines"]
+    assert lines[1] == "2 chats with a higher priority are ahead in the line for memory", lines
+    rec.mem_wait["higher"] = 0
     rec.mem_wait["freed"] = int(1.2 * G)
     lines = activity.memory_of(rec.mem_wait, time.perf_counter())["lines"]
     assert lines[1] == "Freeing idle cache (1.2 GiB given back)", lines

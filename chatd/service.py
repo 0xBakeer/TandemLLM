@@ -65,6 +65,9 @@ DEFAULT_SETTINGS = {
     # (15 files, one or two a call) while it was still fixing its first errors, before any check
     "max_steps": 100,
     "sandbox_network": "on", "plan_mode": False,
+    # the chat's priority for the engine's memory: high | normal | low. The line of chats that wait for memory
+    # is by it, and the idle conversations of lower-priority chats give their memory back first
+    "priority": "normal",
     # SRV-387/SRV-391: ask | auto | yolo (chatd/tools.py decide_mode); null: the default mode
     # (GET/PUT /permissions/mode), which a new chat copies when it is created
     "permission_mode": None,
@@ -80,6 +83,7 @@ DEFAULT_SETTINGS = {
 }
 # `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
 EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
+PRIORITIES = ("high", "normal", "low")
 #: interruptions that are a stop of the harness's own, not an error: the call cap (SRV-665) and
 #: the run monitor's stall rule (SRV-677); the chat reads idle and Continue goes on
 RESUMABLE = ("limit", "stall")
@@ -2034,6 +2038,8 @@ def _clean_settings(patch: dict) -> dict:
         out["profile"] = None           # the Chat tab's runs take the chat-app profile
     if "effort" in out and out["effort"] not in EFFORTS:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
+    if "priority" in out and out["priority"] not in PRIORITIES:
+        raise ApiError(400, "bad_request", f"priority must be one of {', '.join(PRIORITIES)}")
     if "max_steps" in out:
         out["max_steps"] = max(1, min(200, int(out["max_steps"] or DEFAULT_SETTINGS["max_steps"])))
     if "verify" in out:
