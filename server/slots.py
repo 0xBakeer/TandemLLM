@@ -487,6 +487,10 @@ class Slot:
         # other request has written the slot's buffers since
         self.gen = 0
         self.carry: dict | None = None
+        # SRV-779: the NVMe entry this slot's last conversation was written to before its rows
+        # went (`eid`, `owner`; server/app.py `_write_rows`): while the slot holds no other
+        # conversation, that conversation's next turn comes back here (`_spill_home`)
+        self.written: dict | None = None
 
     @property
     def busy(self) -> bool:

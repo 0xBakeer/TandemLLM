@@ -4717,20 +4717,14 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     if (sp is None or not (stay or _comes_back(res.owner)) or res._stash is not None
             or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
         return
-    if sp._own_io.locked():
-        # slot 0's save or restore holds the spill's own I/O: the write waits for it (this side
-        # thread holds no lock it needs), at most KEEP_IO_WAIT_S, then the rows go unwritten
-        if not sp._own_io.acquire(timeout=KEEP_IO_WAIT_S):
-            print(f"[spill] {res.owner}: not written, the spill stayed busy "
-                  f"{KEEP_IO_WAIT_S:g} s", flush=True)
-            return
-        sp._own_io.release()
-    # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
-    # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
-    # slot 0, and its request ended in an error)
-    with capture_lock.GUARD, torch.no_grad():
-        info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
+    info, why = _write_rows(res, eng, drafter, "switch")
+    if why == "busy":
+        print(f"[spill] {res.owner}: not written, the spill stayed busy "
+              f"{KEEP_IO_WAIT_S:g} s", flush=True)
+        return
+    if info and slot is not None:
+        slot.written = {"eid": info["eid"], "owner": res.owner}
     where = f"slot {slot.index}" if slot is not None else "slot 0"
     who = ("parent" if _waiting_parent(res.owner) else "worker" if _comes_back(res.owner)
            else "conversation")
@@ -4739,6 +4733,41 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
               f"another session's prefill, {info['ms']:.0f} ms", flush=True)
     else:
         print(f"[spill] {who} {res.owner} on {where}: not written, its rows go", flush=True)
+
+
+def _write_rows(res, eng, drafter, reason: str, wait_s: float = KEEP_IO_WAIT_S):
+    """ENG-371's save of a slot's conversation to slot 0's NVMe spill, for any owner and any slot
+    (SRV-779: the KV pool's reclaim of an idle conversation, a lane that gives its memory back):
+    (the save's info, None) or (None, why not): `short` under `drain_min_tokens`, `busy` when the
+    spill's own I/O stayed held `wait_s` (0: not waited for; the thread that holds it may be this
+    one, inside a restore's page gate), else the spill's own refusal (`write_budget`, `room`,
+    `reading`, `failed`). Any thread, the slot's lock held or its slot idle."""
+    sp = dict.get(STATE, "spill")
+    if sp is None:
+        return None, "no_spill"
+    if res.valid < int(sp.cfg.get("drain_min_tokens", 4096)):
+        return None, "short"
+    if sp._own_io.locked():
+        # slot 0's save or restore holds the spill's own I/O: the write waits for it (this
+        # thread holds no lock it needs), at most `wait_s`, then the rows are not written
+        if wait_s <= 0 or not sp._own_io.acquire(timeout=wait_s):
+            return None, "busy"
+        sp._own_io.release()
+    refused = dict(sp.stats["refused"])
+    failed = dict(sp.stats["failed"])
+    # outside the engine lock: no CUDA call inside slot 0's graph capture (engine/capture_lock.py;
+    # live 2026-10-18 01:16 a side slot's save broke a verify graph's capture on slot 0, and its
+    # request ended in an error)
+    with capture_lock.GUARD, torch.no_grad():
+        if res._stash is not None:
+            res.settle_guest(eng)
+        info = sp.save_resident(res, eng, drafter, reason)
+    if info:
+        return info, None
+    why = next((k for k, v in sp.stats["refused"].items() if v > refused.get(k, 0)), None)
+    if why is None and any(v > failed.get(k, 0) for k, v in sp.stats["failed"].items()):
+        why = "failed"
+    return None, why or "nothing"
 
 
 #: ENG-371: this thread's gate retry lets a waited-for park go (`on`); a shed kept one (`kept`)
@@ -5898,9 +5927,47 @@ def _memory_event(ev: dict) -> None:
 
 # ------------------------------------------------------------------ SRV-307: the shared KV pool
 def _kv_pool_event(kind: str, kw: dict) -> None:
-    """A pool event (engine/kvpool.py): the log, and the residency journal for a refusal."""
-    if kind in ("reclaim", "refused", "reclaim_error"):
+    """A pool event (engine/kvpool.py): the log, and the residency journal for a refusal. A
+    reclaim of conversations names each victim (SRV-779, `_victim_words`), one line each."""
+    if kind == "reclaim":
+        _reclaim_lines("[kv-pool] reclaim", kw)
+    elif kind in ("refused", "reclaim_error"):
         print(f"[kv-pool] {kind} " + " ".join(f"{k}={v}" for k, v in kw.items()), flush=True)
+
+
+#: SRV-779: on the thread that runs a reclaim, the conversations its last level took (`victims`,
+#: for the log line) and whether a level may wait for the spill's own I/O (`wait`: the admission's
+#: reclaim before a request waits, and a release for the sandbox; never the page gate inside a
+#: forward or a restore, whose thread may hold that I/O itself)
+_RECLAIM = threading.local()
+#: SRV-779: a side slot whose turn ended less than this ago is the idle level's last victim (an agent
+#: between two tool steps comes back in seconds); a slot with no end recorded counts as just ended
+RECLAIM_RECENT_S = 30.0
+
+
+def _victim_words(v: dict) -> str:
+    """`victim=slot3 conv=<session> rows=85010 written=true ms=612` (`why=` when not written)."""
+    from engine import spill as spill_mod
+    words = (f"victim=slot{v['slot']} conv={spill_mod._short(v.get('conv'))} rows={v['rows']} "
+             f"written={'true' if v['written'] else 'false'}")
+    if v["written"]:
+        return words + f" ms={v['ms']:.0f}"
+    return words + (f" why={v['why']}" if v.get("why") else "")
+
+
+def _reclaim_lines(head: str, kw: dict) -> None:
+    """The reclaim's line (`level`, `bytes`, the rest of `kw`), or one for each conversation it
+    took (`_RECLAIM.victims`), with that one's bytes and words."""
+    victims = getattr(_RECLAIM, "victims", None) or []
+    _RECLAIM.victims = []
+    if kw.get("level") not in ("idle_side", "unwritten_side"):
+        victims = []
+    rest = "".join(f" {k}={v}" for k, v in kw.items() if k not in ("level", "bytes"))
+    if not victims:
+        print(f"{head} level={kw.get('level')} bytes={kw.get('bytes')}{rest}", flush=True)
+    for v in victims:
+        print(f"{head} level={kw.get('level')} bytes={v['bytes']}{rest} {_victim_words(v)}",
+              flush=True)
 
 
 def _kv_keep_rows(eng, res, slot=None) -> int:
@@ -5967,11 +6034,13 @@ def _kv_reclaim_kept_park(want: int, owner) -> int:
 
 
 def _add_kv_reclaimers(pool) -> None:
-    """The KV pool's reclaim order, cheapest first; ENG-371's kept park last."""
+    """The KV pool's reclaim order, cheapest first; the side conversations no save could write
+    (SRV-779) after every other conversation, ENG-371's kept park last."""
     pool.add_reclaimer("caches", _kv_reclaim_caches)
     pool.add_reclaimer("roles", _kv_reclaim_roles)
     pool.add_reclaimer("idle_side", _kv_reclaim_side)
     pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    pool.add_reclaimer("unwritten_side", _kv_reclaim_unwritten)
     pool.add_reclaimer("kept_park", _kv_reclaim_kept_park)
 
 
@@ -5990,52 +6059,113 @@ def _kv_reclaim_roles(want: int, owner) -> int:
     return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
-def _kv_reclaim_side(want: int, owner) -> int:
-    """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. The slot's
-    next turn re-reads its prompt (or comes back from the disk tier); nothing is lost but time."""
+def _kv_reclaim_side(want: int, owner, write: bool = True) -> int:
+    """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. SRV-779: each
+    goes to the NVMe first (`_write_rows`, from `drain_min_tokens` up) and its pages only once the
+    save returned an entry; one the save refuses (the day's write budget, the spill busy, no room)
+    stays and is skipped, and only the `unwritten_side` level after every other conversation's
+    (`write` False) takes it unwritten. Its next turn comes back from the entry on its own slot
+    (`_spill_home`). A slot whose turn ended within RECLAIM_RECENT_S, or that recorded no end,
+    goes last (live 2026-11-02: an agent between two tool steps lost its 85,010 rows first, as a
+    None carry sorted as the oldest)."""
+    _RECLAIM.victims = []
     pool = dict.get(STATE, "pool")
     if pool is None:
         return 0
     got = 0
+    now = time.monotonic()
+
+    def ended(s) -> float:
+        t = (s.carry or {}).get("t")
+        return float(t) if t is not None else now
     idle = [s for s in pool.side() if f"slot{s.index}" != owner and not s.busy]
-    idle.sort(key=lambda s: float((s.carry or {}).get("t") or 0.0))
+    idle.sort(key=lambda s: (now - ended(s) < RECLAIM_RECENT_S, ended(s)))
+    wait_s = KEEP_IO_WAIT_S if getattr(_RECLAIM, "wait", False) else 0.0
     for s in idle:
         if got >= want:
             break
-        eng = (s.values or {}).get("engine")
+        vals = s.values or {}
+        eng = vals.get("engine")
         pages = getattr(getattr(eng, "kv", None), "pages", None)
         if pages is None or pages.committed_bytes() == 0 or not s.lock.acquire(blocking=False):
             continue
         try:
-            res = (s.values or {}).get("resident")
+            res = vals.get("resident")
+            rows = int(getattr(res, "valid", 0) or 0) if res is not None else 0
+            v = {"slot": s.index, "conv": getattr(res, "owner", None), "rows": rows,
+                 "written": False, "why": None, "ms": 0.0}
+            if res is not None and write:
+                t0 = time.perf_counter()
+                try:
+                    info, why = _write_rows(res, eng, vals.get("drafter"), "kv_pool", wait_s)
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
+                    info, why = None, "error"
+                v.update(written=info is not None, why=why,
+                         ms=(time.perf_counter() - t0) * 1e3)
+                if info is not None:
+                    s.written = {"eid": info["eid"], "owner": res.owner}
+                elif why not in ("short", "no_spill", "nothing"):
+                    # under `drain_min_tokens`, no spill, or nothing a restore could resume at:
+                    # its pages go as before
+                    print(f"[kv-pool] reclaim skips slot {s.index}: its {rows} rows not "
+                          f"written ({why}), kept until nothing else is left", flush=True)
+                    continue
+            elif res is not None:
+                v["why"] = "nothing_else_left"
             if res is not None:
                 res.clear()
             s.carry = None
             eng.kv.length = 0
-            got += pages.trim(0)
+            n = pages.trim(0)
+            got += n
+            if n:
+                v["bytes"] = n
+                _RECLAIM.victims.append(v)
         finally:
             s.lock.release()
     return got
 
 
+def _kv_reclaim_unwritten(want: int, owner) -> int:
+    """SRV-779, after every other conversation: the idle side conversations `_kv_reclaim_side`
+    kept because no save could write them, given back unwritten (the page gate inside a forward
+    or a restore never refuses while they hold pages). Said on the log line (`why=`) and here."""
+    n = _kv_reclaim_side(want, owner, write=False)
+    if n:
+        print(f"[kv-pool] nothing else to reclaim ({owner}): {_gib(n)} GiB of side "
+              f"conversations went unwritten", flush=True)
+    return n
+
+
 def _kv_give_back_own() -> int:
     """SRV-709: the calling request's slot gives every page back to the pool (it continues later by
-    reading its prompt and its text again): slot 0's conversation goes to the NVMe first when the
-    spill is on, as when the pool reclaims it idle. Bytes given back."""
-    eng = dict.get(STATE, "engine")
+    reading its prompt and its text again). SRV-779: its conversation goes to the NVMe first
+    (`_write_rows`, from `drain_min_tokens` up), on slot 0 and on a side slot, so the
+    continuation reads back what it held and prefills the rest; the pages go back either way, as
+    the lane must give way. The slot's own engine and prefix (`STATE.get`, the overlay's on a side
+    slot): `dict.get` read slot 0's from a side lane, whose give-back then emptied slot 0. Bytes
+    given back."""
+    eng = STATE.get("engine")
     pages = getattr(getattr(eng, "kv", None), "pages", None)
     if pages is None:
         return 0
-    res = dict.get(STATE, "resident")
+    res = STATE.get("resident")
+    slot = slots_mod.current()
     if res is not None:
+        rows, why, t0 = int(res.valid), None, time.perf_counter()
         try:
             if getattr(res, "_stash", None) is not None:
                 res.settle_guest(eng)
-            sp = getattr(res, "spiller", None)
-            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
-                res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
+            info, why = _write_rows(res, eng, STATE.get("drafter"), "kv_pool")
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+            info = None
+        if info is not None and slot is not None:
+            slot.written = {"eid": info["eid"], "owner": res.owner}
+        v = {"slot": slot.index if slot is not None else 0, "conv": res.owner, "rows": rows,
+             "written": info is not None, "why": why, "ms": (time.perf_counter() - t0) * 1e3}
+        print(f"[kv-pool] give back {_victim_words(v)}", flush=True)
         res.clear()
     eng.kv.length = 0
     return int(pages.trim(0))
@@ -6092,20 +6222,25 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
     if rm is not None and want > 0:
         rm.note_pressure("admission")
     got = 0
-    for name, fn in list(pool.reclaimers):
-        if name == "caches" or got >= want:
-            continue
-        try:
-            n = int(fn(want - got, owner) or 0)
-        except Exception:                                          # noqa: BLE001
-            logbuf.print_exc()
-            n = 0
-        if n:
-            got += n
-            pool.stats["reclaims"] += 1
-            pool.stats["reclaimed_bytes"] += n
-            print(f"[kv-pool] reclaim for admission level={name} bytes={n} owner={owner}",
-                  flush=True)
+    _RECLAIM.wait = True                   # a request's own thread, before it waits: no restore
+    try:
+        for name, fn in list(pool.reclaimers):
+            if name == "caches" or got >= want:
+                continue
+            try:
+                n = int(fn(want - got, owner) or 0)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+                n = 0
+            if n:
+                got += n
+                pool.stats["reclaims"] += 1
+                pool.stats["reclaimed_bytes"] += n
+                # SRV-779: one line for each conversation taken, its victim named
+                _reclaim_lines("[kv-pool] reclaim for admission",
+                               {"level": name, "bytes": n, "owner": owner})
+    finally:
+        _RECLAIM.wait = False
     return got
 
 
@@ -6138,18 +6273,24 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
     rm = dict.get(STATE, "role_mem")
     if rm is not None and got < want:
         rm.note_pressure(why)
-    for name, fn in list(pool.reclaimers) if pool is not None else []:
-        if name == "caches" or got >= want:
-            continue
-        try:
-            n = int(fn(want - got, "release") or 0)
-        except Exception:                                          # noqa: BLE001
-            logbuf.print_exc()
-            n = 0
-        if n:
-            got, levels[name] = got + n, n
-            pool.stats["reclaims"] += 1
-            pool.stats["reclaimed_bytes"] += n
+    _RECLAIM.wait = True
+    try:
+        for name, fn in list(pool.reclaimers) if pool is not None else []:
+            if name == "caches" or got >= want:
+                continue
+            try:
+                n = int(fn(want - got, "release") or 0)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+                n = 0
+            if n:
+                got, levels[name] = got + n, n
+                pool.stats["reclaims"] += 1
+                pool.stats["reclaimed_bytes"] += n
+                _reclaim_lines(f"[kv-pool] reclaim for {why}",
+                               {"level": name, "bytes": n, "owner": "release"})
+    finally:
+        _RECLAIM.wait = False
     after = memsplit.mem_available()
     print(f"[memory] release for {why}: asked {_gib(want)} GiB, gave back {_gib(got)} GiB "
           f"({', '.join(levels) or 'nothing idle'}), MemAvailable {_gib(before)} -> "

@@ -10,7 +10,10 @@ memory as the dashboard sees it.
     out, and the report counts them (`waiting_memory`);
   * the parallel view shows a held request's lane as `waiting_memory` with the label "waiting for
     memory", counts it in `totals.waiting_memory` and `waiting`, never in `decoding`;
-  * the contract schema knows the new state and the new total.
+  * the contract schema knows the new state and the new total;
+  * SRV-779: an idle side conversation is written to the NVMe before its pages go (one the day's write
+    budget refuses waits for the last level), the turn that just ended goes last, and each reclaim line
+    names its victim; a lane that gives way on a side slot is written first too.
 
 Run: python tests/test_kvpool_admission.py
 """
@@ -1054,6 +1057,164 @@ def test_srv787_the_handler_passes_the_home_share_to_the_admission():
     call = call[:call.index("return")]
     assert 'home=(int(par_why.get("home_share") or 0)' in call, call
     assert 'if side is not None and par_why.get("home") == side.index else 0)' in call, call
+
+
+class _Spill:
+    """Slot 0's session spill as `_write_rows` uses it: a save records its owner and engine in `log` and returns an
+    entry, or is refused by the day's write budget for the owners in `refuse` (SRV-273's guard)."""
+
+    def __init__(self, log, refuse=()):
+        import threading
+        self.cfg = {"drain_min_tokens": 4096}
+        self._own_io = threading.Lock()
+        self.stats = {"refused": {}, "failed": {}}
+        self.log, self.refuse = log, set(refuse)
+
+    def save_resident(self, res, eng, drafter, reason):
+        if res.owner in self.refuse:
+            self.stats["refused"]["write_budget"] = self.stats["refused"].get("write_budget", 0) + 1
+            return None
+        self.log.append(("save", res.owner, eng, reason))
+        return {"eid": f"e-{res.owner}", "tokens": res.valid, "ms": 1.0}
+
+
+class _Conv:
+    """An idle side slot's resident prefix: `valid` rows of `owner`'s conversation."""
+
+    def __init__(self, log, owner, valid):
+        self.log, self.owner, self.valid, self._stash = log, owner, valid, None
+
+    def clear(self):
+        self.log.append(("clear", self.owner, self.valid))
+        self.valid = 0
+
+
+def _side_slot(log, index, owner, valid, ended_s_ago, now):
+    """Side slot `index` holding `owner`'s idle conversation of `valid` rows (3 GiB of pages), its turn ended
+    `ended_s_ago` (None: no end recorded)."""
+    import types
+    eng = types.SimpleNamespace(kv=types.SimpleNamespace(length=valid))
+    eng.kv.pages = types.SimpleNamespace(committed_bytes=lambda: 3 * GiB,
+                                         trim=lambda n, o=owner: log.append(("trim", o)) or 3 * GiB)
+    s = slots.Slot(index, 262_144, values={"engine": eng, "drafter": None,
+                                           "resident": _Conv(log, owner, valid)})
+    if ended_s_ago is not None:
+        s.carry = {"gen": s.gen, "t": now - ended_s_ago, "at": valid}
+    return s
+
+
+def _reclaim_run(app, side, d, owner="slot0", refuse=()):
+    """`_kv_reclaim_idle` over the server's own reclaim order (`_add_kv_reclaimers`) with `side` as the pool's side
+    slots and `_Spill` as slot 0's spill: (what came back, the log, the printed lines)."""
+    import contextlib
+    import io
+    from engine import kvpool
+    log = side[0].values["resident"].log
+    kp = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+    app._add_kv_reclaimers(kp)
+    keys = ("pool", "spill", "engine", "resident", "mem", "wren", "role_mem")
+    saved, old = {k: dict.get(app.STATE, k) for k in keys if dict.__contains__(app.STATE, k)}, kvpool.POOL
+    app.STATE.update(pool=slots.Pool([slots.Slot(0, 262_144)] + side), spill=_Spill(log, refuse),
+                     engine=None, resident=None, mem=None, wren=None, role_mem=None)
+    kvpool.POOL = kp
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app._kv_reclaim_idle(d, owner)
+    finally:
+        kvpool.POOL = old
+        for k in keys:
+            app.STATE.pop(k, None)
+        app.STATE.update(saved)
+    return got, log, out.getvalue().splitlines()
+
+
+def test_srv779_an_idle_side_chat_is_written_before_its_pages_go():
+    """SRV-779: the pool's reclaim of an idle side conversation writes it to the NVMe with the side slot's own
+    resident and engine (`_write_rows`, ENG-371's keeper generalised to any owner) before its pages go; one under
+    `drain_min_tokens` goes as before; one the day's write budget refuses is skipped, and only the `unwritten_side`
+    level after every other conversation takes it, saying so. Never a clear of a written-size conversation without
+    its entry first (live 2026-11-05 22:57: slot 1's 128k chat, 3.783 GiB, went unwritten)."""
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 1, "g6", 85_010, 600, now), _side_slot(log, 2, "tiny", 3_000, 500, now),
+            _side_slot(log, 3, "g7", 40_000, 400, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 6 * GiB}, refuse={"g7"})
+    eng1 = side[0].values["engine"]
+    assert log[:3] == [("save", "g6", eng1, "kv_pool"), ("clear", "g6", 85_010), ("trim", "g6")], log
+    assert log[3:5] == [("clear", "tiny", 3_000), ("trim", "tiny")], log
+    assert ("save", "g7") not in [x[:2] for x in log]
+    assert log[5:] == [("clear", "g7", 40_000), ("trim", "g7")], "g7 goes last, unwritten, nothing else left"
+    assert got == 9 * GiB and side[0].written == {"eid": "e-g6", "owner": "g6"} and side[2].written is None
+    saves = {x[1] for x in log if x[0] == "save"}
+    for i, x in enumerate(log):
+        if x[0] == "clear" and x[2] >= 4096 and x[1] not in saves:
+            assert x[1] == "g7" and any("nothing else to reclaim" in s for s in lines), (x, lines)
+    assert any("reclaim skips slot 3: its 40000 rows not written (write_budget)" in s for s in lines), lines
+    # the budget allows it: written like the others, no unwritten level
+    log2 = []
+    side = [_side_slot(log2, 3, "g7", 40_000, 400, _t.monotonic())]
+    got, log2, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB})
+    assert [x[0] for x in log2] == ["save", "clear", "trim"] and got == 3 * GiB, log2
+    assert not any("unwritten_side" in s for s in lines), lines
+    return "85,010 rows written then trimmed; 3,000 trimmed as before; 40,000 refused by the budget, kept to the last"
+
+
+def test_srv779_a_turn_that_just_ended_is_the_last_victim():
+    """SRV-779: idle side conversations go oldest first, and a slot whose turn ended within RECLAIM_RECENT_S (an
+    agent between tool steps) or that recorded no end (a None carry, which sorted as the oldest) goes last; each
+    reclaim line names its victim: slot, conversation, rows, written and the save's ms."""
+    import re
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 2, "none", 20_000, None, now),       # its turn just ended, no end kept
+            _side_slot(log, 3, "agent", 85_010, 1, now),          # between two tool steps
+            _side_slot(log, 4, "older", 30_000, 120, now),
+            _side_slot(log, 5, "oldest", 50_000, 600, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB})
+    assert got == 3 * GiB and [x[1] for x in log if x[0] == "trim"] == ["oldest"], log
+    log = []
+    side = [_side_slot(log, 2, "none", 20_000, None, now), _side_slot(log, 3, "agent", 85_010, 1, now),
+            _side_slot(log, 4, "older", 30_000, 120, now), _side_slot(log, 5, "oldest", 50_000, 600, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 20 * GiB, "after": 10 * GiB})
+    assert got == 12 * GiB, got
+    assert [x[1] for x in log if x[0] == "trim"] == ["oldest", "older", "agent", "none"], log
+    pat = re.compile(r"^\[kv-pool\] reclaim for admission level=idle_side bytes=(\d+) owner=slot0 "
+                     r"victim=slot(\d+) conv=(\S+) rows=(\d+) written=(true|false) ms=(\d+)$")
+    got_lines = [pat.match(s).groups() for s in lines if s.startswith("[kv-pool] reclaim for admission")]
+    assert got_lines == [(str(3 * GiB), "5", "oldest", "50000", "true", got_lines[0][5]),
+                         (str(3 * GiB), "4", "older", "30000", "true", got_lines[1][5]),
+                         (str(3 * GiB), "3", "agent", "85010", "true", got_lines[2][5]),
+                         (str(3 * GiB), "2", "none", "20000", "true", got_lines[3][5])], lines
+    return "slot 5 (600 s), 4 (120 s), 3 (1 s), 2 (no end); each line: victim, conv, rows, written, ms"
+
+
+def test_srv779_a_lane_that_gives_way_on_a_side_slot_is_written_first():
+    """SRV-709's give-back on a side slot (it trimmed unwritten, slot 0 alone spilled): the lane's conversation goes
+    to the NVMe first with the side engine, then every page; its continuation then reads it back on that slot."""
+    import contextlib
+    import io
+    app = _app()
+    log = []
+    side = _side_slot(log, 2, "lane", 70_520, 5, 0.0)
+    saved = {k: dict.get(app.STATE, k) for k in ("spill",) if dict.__contains__(app.STATE, k)}
+    app.STATE["spill"] = _Spill(log)
+    out = io.StringIO()
+    slots.bind(side)
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app._kv_give_back_own()
+    finally:
+        slots.bind(None)
+        app.STATE.pop("spill", None)
+        app.STATE.update(saved)
+    eng = side.values["engine"]
+    assert log == [("save", "lane", eng, "kv_pool"), ("clear", "lane", 70_520), ("trim", "lane")], log
+    assert got == 3 * GiB and eng.kv.length == 0 and side.written == {"eid": "e-lane", "owner": "lane"}
+    assert "[kv-pool] give back victim=slot2 conv=lane rows=70520 written=true ms=" in out.getvalue(), out.getvalue()
+    return "70,520 rows written, then 3 GiB back"
 
 
 def test_the_release_route_answers_trusted_local_and_the_admin_only():
