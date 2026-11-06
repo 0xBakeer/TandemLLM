@@ -103,6 +103,60 @@ def test_waiters_keep_their_order_and_are_counted():
     assert adm.report()["waiting_memory"] == 0
 
 
+def test_the_line_for_memory_is_by_the_chats_priority_then_arrival_and_a_waiter_ages():
+    """A chat's priority (`tandem.priority`: low 0, normal 1, high 2) orders the requests that wait for memory, then
+    their arrival. A waiter counts one step higher for every `WAIT_AGE_S` waited, so a low one is not passed for
+    ever; a lane put at the head (`first`) stays before every priority; a new request sees whether a higher one
+    waits (`outranked`) and how many are ahead of it for their priority (`ahead_higher`)."""
+    app = _app()
+    adm = _adm(10)
+    assert adm.wait("low", 0) == 1 and adm.wait("n1", 1) == 1 and adm.wait("low", 0) == 2
+    assert adm.wait("n2", 1) == 2 and adm.wait("high", 2) == 1
+    assert [adm.wait(k) for k in ("high", "n1", "n2", "low")] == [1, 2, 3, 4], "asking again keeps the priority"
+    assert [adm.ahead_higher(k) for k in ("high", "n1", "n2", "low")] == [0, 1, 1, 3]
+    assert adm.outranked(1) and adm.outranked(0) and not adm.outranked(2)
+    adm.waiting["low"] -= 2 * slots.WAIT_AGE_S + 1                      # it has waited an hour
+    assert [adm.wait(k) for k in ("low", "high", "n1", "n2")] == [1, 2, 3, 4], "aged two steps: before the high one"
+    adm.first("n2")
+    assert adm.wait("n2") == 1 and adm.wait("low") == 2
+    assert adm.outranked(2), "a lane at the head is before a high one too"
+    adm.release("high")
+    adm.unwait("low")
+    adm.unwait("n2")
+    assert set(adm.prio) == {"n1"} and not adm.outranked(1) and adm.outranked(0)
+    assert [app._priority_of(b) for b in ({"tandem": {"priority": "high"}}, {"tandem": {"priority": "low"}},
+                                          {"tandem": {"priority": "normal"}}, {"tandem": {"priority": 7}},
+                                          {"tandem": None}, {}, None)] == [2, 0, 1, 1, 1, 1, 1]
+
+
+def test_the_pools_reclaim_takes_the_idle_conversations_of_lower_priority_chats_first():
+    """The idle side slots give their conversations back in the order of their chats' priority (kept on the slot
+    by `_par_admit`): a low one first, a high one last, whatever their ages."""
+    import types
+    app = _app()
+
+    def side(i, prio=None):
+        trims = []
+        pages = types.SimpleNamespace(committed_bytes=lambda: GiB, trim=lambda n: trims.append(n) or GiB)
+        s = slots.Slot(i, 262_144, values={"engine": types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages, length=9)), "resident": None})
+        if prio is not None:
+            s.prio = prio
+        return s, trims
+    (high, th), (low, tl), (norm, tn) = side(1, 2), side(2, 0), side(3)
+    saved = app.STATE.get("pool")
+    try:
+        app.STATE["pool"] = slots.Pool([slots.Slot(0, 262_144), high, low, norm])
+        assert app._kv_reclaim_side(GiB, "slot0") == GiB and (th, tl, tn) == ([], [0], [])
+        assert app._kv_reclaim_side(2 * GiB, "slot0") == 2 * GiB and (th, tl, tn) == ([], [0, 0], [0])
+        assert app._kv_reclaim_side(3 * GiB, "slot0") == 3 * GiB and th == [0], "a high one too, last"
+    finally:
+        if saved is None:
+            app.STATE.pop("pool", None)
+        else:
+            app.STATE["pool"] = saved
+
+
 def test_describe_names_the_kv_pages():
     adm = _adm(30)
     adm.reserve("a", 4 * GiB, kv=3 * GiB, owner="s1")

@@ -65,6 +65,10 @@ def read_meminfo(path: str = "/proc/meminfo") -> dict | None:
         return None
 
 
+#: a request that waits for memory counts one priority step higher for every this many seconds it has waited
+WAIT_AGE_S = 1800.0
+
+
 def slot_bytes(max_len: int, *, per_token: int = 106_752, constant: int = 7 * GiB + GiB // 2) -> int:
     """What one side slot costs before it serves anything: 64 KiB of engine KV, 2 x 20 KiB of
     draft KV (two drafter arms) and 256 B of rotary table a token of window, plus a constant for
@@ -176,6 +180,7 @@ class Admission:
         self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
         self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
+        self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
         self.last_refused: dict | None = None   # 0.8.2: the last check that said no (`check`'s d)
         self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
                       "timeouts": 0, "alone": 0, "lone_checked": 0, "peak_waits": 0}
@@ -340,6 +345,7 @@ class Admission:
                     if rows:
                         self.rows[key] = int(rows)
                     self.waiting.pop(key, None)
+                    self.prio.pop(key, None)
                 self.stats["admitted"] += 1
         return ok, d
 
@@ -351,12 +357,41 @@ class Admission:
             if key in self.held:
                 self.held[key] = self.kv.get(key, (0,))[0]
 
-    def wait(self, key) -> int:
-        """SRV-305: `key` waits for memory; returns its place in line (1 = next)."""
+    def wait(self, key, prio: int = 1) -> int:
+        """SRV-305: `key` waits for memory; returns its place in line (1 = next). The line is by the chat's priority
+        (`prio`: 0 low, 1 normal, 2 high), then by arrival; a waiter counts one step higher for every `WAIT_AGE_S` it
+        has waited, so a low one is not passed for ever."""
         with self.lock:
-            self.waiting.setdefault(key, time.monotonic())
-            t = self.waiting[key]
-            return 1 + sum(1 for v in self.waiting.values() if v < t)
+            now = time.monotonic()
+            if key not in self.waiting:
+                self.waiting[key] = now
+                self.prio[key] = max(0, min(2, int(prio)))
+            mine = self._rank(key, now)
+            return 1 + sum(1 for k in self.waiting if k != key and self._rank(k, now) < mine)
+
+    def _rank(self, key, now: float) -> tuple:
+        """Where `key` stands in the line (smaller first); under the lock. A lane `first` put at the head (a
+        negative arrival) stays before every priority."""
+        t = self.waiting[key]
+        if t < 0:
+            return (-9, t)
+        return (-min(2, self.prio.get(key, 1) + int(max(0.0, now - t) // WAIT_AGE_S)), t)
+
+    def outranked(self, prio: int = 1) -> bool:
+        """Does a request wait for memory whose priority (aged) is above `prio`? A new request then joins the
+        line instead of taking the bytes the waiter is held for."""
+        with self.lock:
+            now = time.monotonic()
+            return any(self._rank(k, now)[0] < -int(prio) for k in self.waiting)
+
+    def ahead_higher(self, key) -> int:
+        """The waiters ahead of `key` because their chat's priority is higher (not because they came first)."""
+        with self.lock:
+            if key not in self.waiting:
+                return 0
+            now = time.monotonic()
+            mine = self._rank(key, now)
+            return sum(1 for k in self.waiting if k != key and self._rank(k, now)[0] < mine[0])
 
     def first(self, key) -> None:
         """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
@@ -368,6 +403,7 @@ class Admission:
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
+            self.prio.pop(key, None)
 
     def release(self, key) -> None:
         with self.lock:
@@ -375,6 +411,7 @@ class Admission:
             self.kv.pop(key, None)
             self.rows.pop(key, None)
             self.waiting.pop(key, None)
+            self.prio.pop(key, None)
 
     @staticmethod
     def describe(d: dict) -> str:

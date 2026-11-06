@@ -534,6 +534,29 @@ def test_a_compactions_summary_is_one_more_turn_of_the_chats_own_request():
         c.close()
 
 
+def test_a_chats_priority_goes_to_the_engine_and_only_the_three_words_are_taken():
+    """The chat's priority for the engine's memory (`settings.priority`: high, normal, low): chatd sends it in the
+    body's `tandem` field when it is not normal; any other word is a 400 and nothing changes."""
+    c = Chat()
+    try:
+        small_window(c, window=100_000)                     # our engine's model: the body carries `tandem`
+        cid = c.new()
+        assert c.ok("GET", f"/conversations/{cid}")["settings"]["priority"] == "normal"
+        c.send(cid, "hello")
+        c.wait_idle(cid, 20)
+        assert requests(c)[-1]["tandem"] == {"compaction": False}
+        for word in ("high", "low"):
+            c.ok("PATCH", f"/conversations/{cid}/settings", {"priority": word})
+            c.send(cid, f"again, {word}")
+            c.wait_idle(cid, 20)
+            assert requests(c)[-1]["tandem"] == {"compaction": False, "priority": word}
+        st, err, _ = c.call("PATCH", f"/conversations/{cid}/settings", {"priority": "urgent"})
+        assert st == 400 and "priority must be one of high, normal, low" in err["error"]["message"], err
+        assert c.ok("GET", f"/conversations/{cid}")["settings"]["priority"] == "low"
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------------- the engine's memory refusal
 # Live 2026-10-17 ("Voxel Pagoda City Build"): a run compacted at step 43 grew back to 215,247
 # tokens, under 80 % of its 262,144 window, and the engine answered every call with a 503 ("a

@@ -746,7 +746,11 @@ def memory_lines(m: dict, waited: float, left: float, way: dict | None = None) -
     else:
         why = (f"This turn needs about {_gb(m['need'])} GiB to read {rows} new tokens; "
                f"{_gb(m.get('free') or 0)} GiB is free and {_gb(m.get('guard') or 0)} must stay free for the system")
-    if way:
+    if m.get("higher"):
+        k = int(m["higher"])
+        now = (f"{k} chat{'s' if k > 1 else ''} with a higher priority {'are' if k > 1 else 'is'} ahead in the "
+               f"line for memory")
+    elif way:
         eta = way.get("eta_ms")
         now = (f"A {round(int(way.get('tokens') or 0) / 1000):,}k turn on another chat is reading ("
                + (f"about {_span(eta / 1e3)} left)" if eta is not None else "no estimate yet)"))

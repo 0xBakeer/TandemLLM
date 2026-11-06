@@ -182,7 +182,7 @@ describe('the Parallel view on the 0.6.x shape (mock fixture "stall")', () => {
   it('a lane held for memory is waiting, not writing', () => {
     const m = d.lanes.find((l) => l.state === 'waiting_memory')!;
     expect(stateTone(m)).toBe('wait');
-    expect(stateLine(m)).toBe('Waiting for memory');
+    expect(stateLine(m)).toBe('Waiting for free memory: continues by itself');
   });
   it('the In flight tile speaks the legend\'s words (the server\'s waiting counts the prefill too)', () => {
     expect(d.totals.waiting).toBe(2);
