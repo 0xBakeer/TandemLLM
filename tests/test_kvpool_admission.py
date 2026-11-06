@@ -157,6 +157,49 @@ def test_the_pools_reclaim_takes_the_idle_conversations_of_lower_priority_chats_
             app.STATE["pool"] = saved
 
 
+def test_an_older_copy_of_a_chat_goes_first_and_is_never_written():
+    """2026-11-06 live: after three compactions two copies of 217k and 218k rows, of chats that lived on other slots
+    by then, held 12.3 GiB of KV. A slot whose conversation is an older copy of a chat (the chat's newest rows are on
+    another slot) goes before every other idle conversation, at the level that takes only written ones too, and its
+    rows are not written: the save would write over the chat's one NVMe entry."""
+    import types
+    app = _app()
+    writes = []
+
+    def side(i, owner, used, prio=None):
+        trims = []
+        pages = types.SimpleNamespace(committed_bytes=lambda: GiB, trim=lambda n: trims.append(n) or GiB)
+        res = types.SimpleNamespace(owner=owner, valid=200_000, t_used=used, _stash=None, clear=lambda: None)
+        s = slots.Slot(i, 262_144, values={"engine": types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages, length=9)), "resident": res, "drafter": None})
+        if prio is not None:
+            s.prio = prio
+        return s, trims, res
+    (old, t_old, r_old), (new, t_new, r_new), (other, t_other, r_other) = (
+        side(1, "chat-A", 100.0, prio=2), side(2, "chat-A", 500.0), side(3, "chat-B", 50.0, prio=0))
+    saved = {k: app.STATE.get(k) for k in ("pool", "resident", "spill")}
+    was = app._write_rows
+    app._write_rows = lambda res, eng, drafter, reason, wait_s: writes.append(res) or ({"eid": "e1"}, None)
+    try:
+        app.STATE["pool"] = slots.Pool([slots.Slot(0, 262_144), old, new, other])
+        app.STATE["resident"], app.STATE["spill"] = None, None
+        assert app._newer_copies() == {"chat-A": (500.0, 2), "chat-B": (50.0, 3)}
+        assert app._kv_reclaim_written(GiB, "slot0") == GiB, "the level of the written ones takes it"
+        assert (t_old, t_new, t_other) == ([0], [], []) and writes == [], "the older copy, not written"
+        assert app._RECLAIM.victims[0]["why"] == "older_copy" and app._RECLAIM.victims[0]["written"] is False
+        t_old.clear()
+        assert app._kv_reclaim_side(2 * GiB, "slot0") == 2 * GiB
+        assert t_old == [0] and t_other == [0] and t_new == [] and writes == [r_other], \
+            "the older copy first (high priority or not), then the low chat's, written; the chat's newest stays"
+    finally:
+        app._write_rows = was
+        for k, v in saved.items():
+            if v is None:
+                app.STATE.pop(k, None)
+            else:
+                app.STATE[k] = v
+
+
 def test_describe_names_the_kv_pages():
     adm = _adm(30)
     adm.reserve("a", 4 * GiB, kv=3 * GiB, owner="s1")
