@@ -1438,6 +1438,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                                "tps": pre.get("tps_now"), "eta_ms": pre.get("eta_ms"),
                                "cached": int(pre.get("cached") or 0), "why": pre.get("why")}
                 run.set_phase("prefill", prefill_words(pre))
+            elif state == "waiting_memory" and run.phase in ("queued", "prefill"):
+                # SRV-787: the engine holds the call for memory; nothing prefills (it read "Prefilling" for 870 s)
+                lines = (act.get("memory") or {}).get("lines") or []
+                run.set_phase("queued", ": ".join([act.get("label") or "Waiting for memory"] + lines[:1])
+                              + "".join(f". {x}" for x in lines[1:]))
             elif state == "queued" and run.phase in ("queued", "prefill"):
                 place = (act.get("queue") or {}).get("place")
                 run.set_phase("queued", act.get("label") or "Queued",
