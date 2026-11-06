@@ -357,8 +357,8 @@ def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
     assert (s["reason"], s["detail"], s["state"]) == ("refused", "memory_wait_timeout", "waiting_memory"), s
     assert s["sentence"] == "refused: not enough memory after 600 s of waiting", s["sentence"]
     words = activity.refusal_words(late.mem_wait)
-    assert words == ("Not enough memory for this turn right now (needed 9.3 GiB, 15 free above the guard). Try "
-                     "again when the other chat finishes, or start a shorter conversation."), words
+    assert words == ("Memory stayed full for 10 min, so this turn did not start (needed 9.3 GiB, 15 free above the "
+                     "guard). Continue tries again; a shorter conversation or fewer chats at once needs less."), words
     return " / ".join(m["lines"])
 
 
