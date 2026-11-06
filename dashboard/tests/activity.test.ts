@@ -210,7 +210,7 @@ function dec(over: Partial<NonNullable<LiveActivity['decode']>> = {}): NonNullab
 }
 
 describe('SRV-787: a request held for memory', () => {
-  const lines = ['This turn needs about 9.3 GiB to read 70,520 new tokens; 25 GiB is free and 10 must stay free for the system', 'A 131k turn on another chat is reading (about 2 m 0 s left)', 'Starts automatically; Stop cancels. Will be refused in 8 m 40 s unless memory frees'];
+  const lines = ['This turn needs about 9.3 GiB to read 70,520 new tokens; 25 GiB is free and 10 must stay free for the system', 'A 131k turn on another chat is reading (about 2 min left)', 'Starts automatically; Stop cancels. Will be refused in 8 m 40 s unless memory frees'];
   const memory = { need_gib: 9.3, rows: 70520, free_gib: 25, guard_gib: 10, short_gib: 0, peak_wait: false, guard: { step: 6.25, kv: 0.3, sandbox: 0, margin: 5, cap: 10 }, freed_gib: 0, in_the_way: { request_id: 'chatcmpl-o', tokens: 131073, eta_ms: 120000 }, waited_ms: 80000, bound_s: 600, ends_in_ms: 520000, place: 1, lines };
   const held = () => req('waiting_memory', { label: 'Waiting for memory', memory }, { phase: 'prefill', ttft_ms: null, decode_tps: null, decode_tps_now: null, prefill_tps: null, tokens: 0 });
   it('the Now line: the label and the server\'s three lines, never a rate or a bar', () => {

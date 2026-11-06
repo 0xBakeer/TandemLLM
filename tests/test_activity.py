@@ -330,6 +330,9 @@ def test_srv787_a_request_held_for_memory_is_waiting_not_prefilling():
     rec.mem_wait["freed"] = 0
     assert activity.memory_of(rec.mem_wait, t0 + 80)["lines"][1] == ("Waiting for memory to free (re-checked every "
                                                                      "second, 1 m 20 s so far)")
+    way = {"request_id": "o", "tokens": 131_073, "eta_ms": 120_000.0}
+    assert activity.memory_of(rec.mem_wait, t0 + 80, way)["lines"][1] == ("A 131k turn on another chat is reading "
+                                                                          "(about 2 min left)")
     peak = dict(rec.mem_wait, peak_wait=True, need=int(9.47 * G), rows=128_343, free=None, guard=None,
                 short=int(0.27 * G))
     assert activity.memory_of(peak, t0 + 1)["lines"][0] == ("This turn needs about 9.5 GiB to read 128,343 new "

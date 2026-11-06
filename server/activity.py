@@ -705,9 +705,9 @@ def _gb(b) -> str:
 
 
 def _span(s: float) -> str:
-    """"45 s", "1 m 20 s"."""
+    """"45 s", "1 m 20 s", "2 min"."""
     s = max(0, int(round(s)))
-    return f"{s} s" if s < 60 else f"{s // 60} m {s % 60} s"
+    return f"{s} s" if s < 60 else f"{s // 60} min" if s % 60 == 0 else f"{s // 60} m {s % 60} s"
 
 
 def memory_of(m: dict | None, now_p: float, way: dict | None = None) -> dict | None:
