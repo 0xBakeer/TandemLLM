@@ -550,6 +550,15 @@ def test_srv785_an_admit_is_not_held_for_its_own_chunk_twice():
     ok, d = b.reserve("u", gib(5.6) + gib(2.1), kv=gib(2.1), rows=60_000)
     assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(3.9), d
     assert abs(d["after"] - gib(6.7)) < GiB // 100, d
+    # live 15:14: the guard's full chunk at a 177k class (10.8) above the request's own workspace (7.6); with no
+    # longer prefill in flight the request's rows set the class and its workspace is the chunk: floor 5.4, not 8.5
+    live = lambda rows: slots.guard(gib(10), step=gib(10.8), kv=gib(0.4), margin=gib(5))  # noqa: E731
+    c = slots.Admission(gib(10), meminfo=lambda: {"MemAvailable": gib(16.7)}, growth=lambda: gib(0.2), guard=live)
+    ok, d = c.reserve("v", gib(7.6) + gib(0.3), kv=gib(0.3), rows=176_693)
+    assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(10.8), d
+    c.held["w"], c.rows["w"] = 0, 200_000                                          # a longer prefill admitted
+    ok, d = c.check(gib(7.6) + gib(0.3), kv=gib(0.3), rows=176_693)
+    assert d["guard"]["own"] == gib(7.6), "a longer prefill in flight: only the request's own part of the chunk"
     return text
 
 

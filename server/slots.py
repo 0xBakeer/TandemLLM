@@ -250,7 +250,10 @@ class Admission:
             # all the engine may still allocate. The floor holds only what is left of the chunk (2026-11-06: a 142k
             # turn's 10.8 GiB counted as its workspace and again as the floor's chunk waited 17 s at MemAvailable
             # 19.9 GiB; under the peak, four chats' turns waited 10 to 65 s on a 3.9 GiB chunk counted twice)
-            own = min(int(gin["step"]), need_ws)
+            # the chunk's class is this request's own rows unless a longer prefill is in flight: then its workspace
+            # is the chunk, all of it (the guard's estimate of a full chunk at its class ran 3.2 GiB above the
+            # request's own and held a 177k turn 176 s at 0.1 GiB short, 2026-11-06 15:14)
+            own = int(gin["step"]) if int(rows) >= self.ctx_rows() else min(int(gin["step"]), need_ws)
             if own:
                 gin = dict(gin, step=int(gin["step"]) - own, own=own)
                 gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
