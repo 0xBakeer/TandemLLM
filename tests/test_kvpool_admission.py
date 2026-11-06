@@ -1026,7 +1026,7 @@ def _home_admit(app, res, n, home, cid="home"):
 def test_srv787_a_turn_at_home_on_a_side_slot_is_charged_the_rows_the_slot_lacks():
     """SRV-787: a turn at home on its side slot (`_side_home`'s share) is charged the rows past what the slot holds, at
     the gate and the floor, not a cold prefill of the whole prompt. A slot of 57,823 valid rows under a 128,343-row
-    prompt: 70,520 rows, 8.21 GiB by Flash-Next's model at the floor instead of 9.47 for all 128,343; a share past the
+    prompt: 70,520 rows, 5.45 GiB by Flash-Next's model at the floor instead of 6.72 for all 128,343; a share past the
     slot's rows counts the rows only; a slot emptied since (a reclaim) or a turn not at home is cold, as before. The
     workspaces measured on 2026-11-02 (28 continuations, `FN_RESUMED`), replayed as turns at home on a slot holding
     all but their forwarded rows: each charged its forwarded rows and at least what it took."""
@@ -1037,15 +1037,15 @@ def test_srv787_a_turn_at_home_on_a_side_slot_is_charged_the_rows_the_slot_lacks
     rec, mem, held = _home_admit(app, res, n, home=57_823)
     assert rec.ws_rows == 70_520 and rec.ws_kind == "home", vars(rec)
     assert [g["rows"] for g in mem.gates] == [70_520] and mem.gates[0]["ceiling"] is False, mem.gates
-    assert held == mem.model(n, 70_520, line=False) and abs(held / GiB - 8.21) < 0.01, held / GiB
+    assert held == mem.model(n, 70_520, line=False) and abs(held / GiB - 5.45) < 0.01, held / GiB
     cold, home_ws = mem.model(n, n, line=False), held
-    assert abs(cold / GiB - 9.47) < 0.01 and home_ws < cold
+    assert abs(cold / GiB - 6.72) < 0.01 and home_ws < cold
     assert _home_admit(app, _HomeRes(57_823), n, home=128_000)[0].ws_rows == 70_520, "at most the slot's rows"
     for r, home in ((_HomeRes(0), 57_823), (_HomeRes(57_823), 0)):
         rec, _, held = _home_admit(app, r, n, home=home)
         assert rec.ws_rows == n and rec.ws_kind is None and held == cold, (home, vars(rec))
     least = None
-    assert len(FN_RESUMED) == 28
+    assert len(FN_RESUMED) == 27
     for i, (m, rows, took) in enumerate(FN_RESUMED):
         rec, mem, held = _home_admit(app, _HomeRes(m - rows), m, home=m - rows, cid=f"r{i}")
         gate = mem.model(m, rows)
@@ -1053,6 +1053,41 @@ def test_srv787_a_turn_at_home_on_a_side_slot_is_charged_the_rows_the_slot_lacks
         least = held / GiB - took if least is None else min(least, held / GiB - took)
     return (f"70,520 rows: {home_ws / GiB:.2f} GiB vs cold {cold / GiB:.2f}; {len(FN_RESUMED)} continuations covered "
             f"(+{least:.2f} GiB the least)")
+
+
+def test_srv787_a_turn_whose_rows_come_back_from_the_nvme_is_charged_the_rows_past_its_entry():
+    """2026-11-06 live: a turn whose rows the pool's reclaim had written to the NVMe was charged a cold prefill
+    (`ws_rows=183849 ws_gib=10.75`, a wait of 588 s) and forwarded 217 rows after the restore. The admission asks the
+    spill what it serves, as the restore will (`SessionSpill.candidate`): the rows past the entry's line are charged.
+    No entry, an entry behind the rows in place, or a spill that raises: as before."""
+    import types
+    app = _app()
+    n = 188_627
+    asked = []
+
+    def res_with(got):
+        r = _HomeRes(0)
+
+        def candidate(res, keys, max_len, replay, mm_ok=False):
+            asked.append((len(keys), max_len, replay))
+            if got == "raise":
+                raise OSError("the NVMe is gone")
+            return got
+        r.spiller = types.SimpleNamespace(candidate=candidate)
+        return r
+    rec, mem, held = _home_admit(app, res_with(("entry", 188_410, 0)), n, home=0)
+    assert rec.ws_rows == 217 and rec.ws_kind == "spill" and asked[-1] == (n, n - 1, True), (vars(rec), asked)
+    assert held == mem.model(n, 217, line=False) and held < 1.5 * GiB, held / GiB
+    cold = mem.model(n, n, line=False)
+    for got in (None, "raise"):
+        rec, _, held = _home_admit(app, res_with(got), n, home=0)
+        assert rec.ws_rows == n and rec.ws_kind is None and held == cold, (got, vars(rec))
+    # at home with more rows in place than the entry serves: the rows in place count
+    r = res_with(("entry", 50_000, 0))
+    r.valid = 120_000
+    rec, _, _ = _home_admit(app, r, n, home=120_000)
+    assert rec.ws_rows == n - 120_000 and rec.ws_kind == "home", vars(rec)
+    return f"217 rows charged {held / GiB:.2f} GiB cold; with the entry {mem.model(n, 217, line=False) / GiB:.2f}"
 
 
 def test_srv787_the_handler_passes_the_home_share_to_the_admission():
@@ -1402,7 +1437,8 @@ def test_srv785_the_servers_guard_grows_with_the_chunks_class_and_stays_under_th
         rows = (1_000, 8_000, 38_000, 82_668, 85_229, 128_343, 196_607)
         got = [app._guard(n, 10 * GiB) for n in rows]
         g = [x[0] for x in got]
-        assert g == sorted(g) and max(g) <= 10 * GiB and g[0] < 10 * GiB and g[-1] == 10 * GiB, g
+        # 2026-11-06: the chunk's class term counts a tile's rows, so the guard stays under the floor at 196k too
+        assert g == sorted(g) and max(g) <= 10 * GiB and g[0] < g[-1] and 9 * GiB < g[-1] < 10 * GiB, g
         assert all(x[1]["kv"] == GiB // 2 and x[1]["margin"] == 5 * GiB and x[1]["sandbox"] == 0 for x in got)
         steps = [x[1]["step"] for x in got]
         assert steps == sorted(steps) and steps[0] < steps[-1], steps

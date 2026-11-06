@@ -8407,6 +8407,21 @@ class Handler(BaseHTTPRequestHandler):
                 held = min(int(home), int(getattr(res_, "valid", 0) or 0))
                 if held > int(start):
                     start, kind = held, "home"
+            if not full and not cold and res_ is not None and int(start) < n - 1:
+                # a conversation the pool's reclaim wrote to the NVMe is read back in place before its prefill
+                # (`_spill_restore`): the rows its entry serves are not forwarded. Asked as the restore asks
+                # (`SessionSpill.candidate`, host work only). 2026-11-06: turns whose rows had been swapped out were
+                # charged a cold prefill (ws_rows=183,849, 10.75 GiB) and waited up to 10 minutes; they forwarded
+                # 217 rows. A restore that fails forwards more than was charged: the prefill's own gate holds it
+                sp_ = getattr(res_, "spiller", None)
+                if sp_ is not None:
+                    try:
+                        got = sp_.candidate(res_, keys, n - 1, True, mm_ok=mm_ok)
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()
+                        got = None
+                    if got is not None and int(got[1]) > int(start):
+                        start, kind = min(int(got[1]), n - 1), "spill"
             fwd = max(1, n - int(start))
             ws = mem.workspace_rows(n, fwd) if mem is not None else max(
                 cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
