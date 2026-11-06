@@ -244,11 +244,12 @@ class Admission:
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
-        if over_peak and gin and need_ws > 0:
-            # the guard's chunk is the most one prefill allocates between two checks; an over-peak admit's
-            # workspace is that chunk and counts in full below, so the floor holds only what is left of it
-            # (2026-11-06: a 142k turn's 10.8 GiB counted as its workspace and again as the floor's chunk
-            # waited 17 s at MemAvailable 19.9 GiB, where 9.2 GiB would have been left after it)
+        if gin and need_ws > 0:
+            # the guard's chunk is the most one prefill allocates between two checks. This request's workspace is
+            # that allocation and is charged below: in full over the peak, under it inside the room, which bounds
+            # all the engine may still allocate. The floor holds only what is left of the chunk (2026-11-06: a 142k
+            # turn's 10.8 GiB counted as its workspace and again as the floor's chunk waited 17 s at MemAvailable
+            # 19.9 GiB; under the peak, four chats' turns waited 10 to 65 s on a 3.9 GiB chunk counted twice)
             own = min(int(gin["step"]), need_ws)
             if own:
                 gin = dict(gin, step=int(gin["step"]) - own, own=own)
