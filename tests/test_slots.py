@@ -421,6 +421,70 @@ def test_srv775_an_over_peak_admit_is_credited_the_allocators_free_blocks():
     return "after " + ", ".join(rows) + " GiB (spare 2.3, 0, 10, raising, none)"
 
 
+def test_srv787_a_cold_128k_turn_is_not_charged_the_room_and_its_workspace():
+    """SRV-787 (2026-11-05): a turn the gate admitted over the peak was charged the engine's room to its peak AND its
+    workspace, though the policy grows no cache while that workspace is in flight. 22:41, the 128k turn that waited
+    900 s with the engine idle: floor 10, MemAvailable 25.0, room 8.5, cache growth 13.6, a workspace of 9.47 with
+    1.44 in free blocks, 0.355 of KV pages and 0.457 in flight. The sum said 7.7 < 10; the larger of the two says
+    15.7 on today's growth, 16.2 on the growth the policy allows (`_par_growth`). 23:00 (82k on slot 5, 9.3 < 10 and
+    34 s of wait) and 23:03 (9.9 < 10) start at once; the cold 128k turn of 23:03 (4.1 GiB of KV pages to commit)
+    still waits, at 9.6 instead of 5.5. Every figure as its log line printed it."""
+    rows = []
+
+    def case(avail, room, growth, ws, spare, kv, kv_in=0.0):
+        a = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(avail * GiB)},
+                            growth=lambda: int(growth * GiB), room=lambda: int(room * GiB),
+                            spare=lambda: int(spare * GiB))
+        if kv_in:
+            assert a.reserve("decoding", int(kv_in * GiB), kv=int(kv_in * GiB))[0]   # its KV pages only
+        w, s, k = int(ws * GiB), int(spare * GiB), int(kv * GiB)
+        ok, d = a.reserve("turn", w + k, kv=k, over_peak=True)
+        summed = int(avail * GiB) - min(int(room * GiB), int(growth * GiB)) - (w - s) - k - int(kv_in * GiB)
+        assert d["after"] == int(avail * GiB) - max(min(int(room * GiB), int(growth * GiB)), w - s) - k \
+            - int(kv_in * GiB), d
+        assert d["after"] != summed and ok is (d["after"] >= 10 * GiB) and ("turn" in a.held) is ok, d
+        rows.append(f"{summed / GiB:.1f} -> {d['after'] / GiB:.1f}")
+        return ok, d, summed
+    ok, d, summed = case(25.0, 8.5, 13.6, 9.47, 1.44, 0.355, 0.457)               # 22:41, today's growth
+    assert f"{summed / GiB:.1f}" == "7.7" and ok and f"{d['after'] / GiB:.1f}" == "15.7", d
+    text = slots.Admission.describe(d)
+    assert text.startswith("MemAvailable 25.0 GiB - the larger of the engine's room to its peak 8.5 (under the room: "
+                           "cache growth 13.6, workspaces in flight 0.0) and this request over the peak 8.0 new (1.4 "
+                           "of its 9.5 in the allocator's free blocks) = 15.7 GiB (>= floor 10.0)"), text
+    ok, d, _ = case(25.0, 8.5, 1.7, 9.47, 1.44, 0.355, 0.457)                     # 22:41, the policy's growth
+    assert ok and f"{d['after'] / GiB:.1f}" == "16.2", d
+    text = slots.Admission.describe(d)
+    assert ("the larger of cache growth 1.7 + workspaces in flight 0.0 and this request over the peak 8.0 new "
+            "(1.4 of its 9.5 in the allocator's free blocks) = 16.2 GiB (>= floor 10.0)") in text, text
+    ok, d, summed = case(21.1, 4.1, 13.6, 8.46, 1.4, 0.6)                         # 23:00, slot 5
+    assert f"{summed / GiB:.1f}" == "9.3" and ok and f"{d['after'] / GiB:.1f}" == "13.4", d
+    assert slots.Admission.describe(d).startswith("alone: MemAvailable 21.1 GiB - the larger of"), d
+    ok, d, summed = case(21.82, 4.06, 13.6, 8.62, 1.36, 0.64)                      # 23:03
+    assert f"{summed / GiB:.1f}" == "9.9" and ok and f"{d['after'] / GiB:.1f}" == "13.9", d
+    ok, d, summed = case(21.8, 4.1, 13.6, 9.47, 1.4, 4.1)                          # 23:03, the cold 128k turn
+    assert f"{summed / GiB:.1f}" == "5.5" and not ok and f"{d['after'] / GiB:.1f}" == "9.6", d
+    return "summed -> the larger: " + ", ".join(rows)
+
+
+def test_srv787_under_the_peak_and_without_a_policy_the_count_is_as_before():
+    """SRV-787 changes only an over-peak admit under a policy: a prefill under the peak is capped by the room with the
+    growth and the workspaces in flight, as before, and with no room (no policy) the over-peak workspace adds to the
+    growth, as before. Another prefill's workspace in flight counts with the over-peak one."""
+    def adm(room):
+        return slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 30 * GiB}, growth=lambda: 4 * GiB,
+                               room=room)
+    ok, d = adm(lambda: 6 * GiB).reserve("u", 5 * GiB)                            # under: min(6, 4 + 5)
+    assert ok and d["after"] == 24 * GiB, d
+    ok, d = adm(None).reserve("n", 5 * GiB, over_peak=True)                       # no policy: 4 + 5
+    assert ok and d["after"] == 21 * GiB, d
+    a = adm(lambda: 6 * GiB)
+    assert a.reserve("other", 3 * GiB)[0]                                         # a workspace in flight
+    ok, d = a.reserve("o", 5 * GiB, over_peak=True)                               # max(min(6, 4 + 3), 3 + 5)
+    assert ok and d["after"] == 22 * GiB, d
+    assert "+ workspaces in flight 3.0 = 22.0 GiB" in slots.Admission.describe(d), slots.Admission.describe(d)
+    return "under 24, no policy 21, beside a workspace in flight 22"
+
+
 def test_srv775_describe_names_a_peak_wait():
     d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
          "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}

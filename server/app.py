@@ -8026,7 +8026,8 @@ class Handler(BaseHTTPRequestHandler):
         each prefill it admits under the peak), less the KV pages still to commit and its own, stays at
         the floor, alone too; a request admitted over the peak counts its workspace past the room, in full
         less the allocator's free default-pool blocks, which it takes before any new memory (`_par_spare`),
-        so the floor alone bounds it. The idle conversations' pages come back only for a request this
+        so the floor alone bounds it (the larger of that and the room's charge, SRV-787: no cache grows
+        while it runs). The idle conversations' pages come back only for a request this
         floor holds back, never for one the gate refuses while other prefills run. A wait is in
         one-second slices with the GPU turn given up; a request that waits leaves the prefill burst
         (it prefills alone once admitted, and the burst's others go on without it), and one waiting for

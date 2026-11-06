@@ -85,7 +85,8 @@ class Admission:
     what the long-lived caches may still take (their budgets minus what they hold). The engine's
     room to its peak (`room`) caps the cache growth, the workspaces in flight and this request's
     together; a prefill the memory gate admitted over the peak counts its workspace past that cap,
-    in full less the allocator's free default-pool blocks it takes first (`spare`). A prefill's
+    in full less the allocator's free default-pool blocks it takes first (`spare`), and the larger of
+    the two counts, never their sum: the policy grows no cache while it runs (SRV-787). A prefill's
     workspace leaves the reservation when it has run (`prefilled`), its KV part stays until the
     release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
     request is admitted and says so."""
@@ -156,7 +157,8 @@ class Admission:
     def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
         it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
-        the allocator's free default-pool blocks it takes before any new memory (`spare`)."""
+        the allocator's free default-pool blocks it takes before any new memory (`spare`), against the room's
+        charge, the larger of the two (SRV-787)."""
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
         held_ws, held_kv = self._held()
@@ -183,10 +185,18 @@ class Admission:
                 room = None
         # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's:
         # the gate bounds every prefill it admits under the peak to the room. One it admitted over
-        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first
+        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first.
+        # SRV-787: the larger of the two, not their sum: the policy lets no cache grow while that workspace is in
+        # flight, nor once the reserve is at the peak (`Budget.admit`: reserve + bytes + `ws_now` <= peak), so the
+        # room and the over-peak workspace never leave MemAvailable together (2026-11-05: a lone 128k turn found
+        # 25.0 - 8.5 - 8.0 - 0.8 = 7.7 < 10 and waited 900 s with the engine idle). Without a policy, the sum
         under = grow + held_ws + (0 if over_peak else need_ws)
-        take = min(room, under) if room is not None else under
-        take += new_ws if over_peak else 0
+        if room is None:
+            take = under + (new_ws if over_peak else 0)
+        elif over_peak:
+            take = max(min(room, under), held_ws + new_ws)
+        else:
+            take = min(room, under)
         # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
         # its room, always counted
         take += held_kv + int(kv)
@@ -281,15 +291,22 @@ class Admission:
         spare = int(d.get("spare") or 0)
         # SRV-775: an over-peak admit's workspace is new memory past the allocator's free default-pool blocks
         free = f" ({g(spare)} of its {g(need_ws)} in the allocator's free blocks)" if spare else ""
-        # SRV-775: the room caps the growth and the workspaces under the peak; an over-peak admit's is out of it
-        mid = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
-               f"workspaces in flight {g(d.get('in_flight_ws') or 0)}"
-               + ("" if over else f", this request's {g(need_ws)}") + ")"
-               + (f" - this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
-                  if over else "")
-               if capped else
-               f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
-               f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
+        held_ws = d.get("in_flight_ws") or 0
+        # SRV-775: the room caps the growth and the workspaces under the peak
+        roomed = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
+                  f"workspaces in flight {g(held_ws)}" + ("" if over else f", this request's {g(need_ws)}") + ")"
+                  if capped else "")
+        if over and room is not None:
+            # SRV-787: an over-peak admit's workspace is out of the room, and counts as the larger of the two
+            mid = (f"the larger of "
+                   + (roomed or f"cache growth {g(d['grow_left'])} + workspaces in flight {g(held_ws)}")
+                   + f" and this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
+                   + (f" + workspaces in flight {g(held_ws)}" if held_ws else ""))
+        elif capped:
+            mid = roomed
+        else:
+            mid = (f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
+                   f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
         return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
                 + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})"
                 + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"
