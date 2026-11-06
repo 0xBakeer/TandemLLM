@@ -6119,6 +6119,31 @@ def _kv_reclaim_roles(want: int, owner) -> int:
     return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
+def _newer_copies() -> dict:
+    """The slot that holds each chat's newest conversation: owner -> (its `t_used`, the slot's index), over slot 0
+    and the side slots. A chat on another slot than this one left an older copy there: after a compaction its
+    next request shares only the head with the rows it had, takes another slot, and the 200k rows it will not
+    continue stay (2026-11-06: two copies of 217k and 218k rows held 12.3 GiB of KV with every chat at 34k)."""
+    out: dict = {}
+    pool = dict.get(STATE, "pool")
+    slots_ = [(0, dict.get(STATE, "resident"))] + (
+        [(s.index, (s.values or {}).get("resident")) for s in pool.side()] if pool is not None else [])
+    for i, res in slots_:
+        o = getattr(res, "owner", None) if res is not None else None
+        if o is None or not int(getattr(res, "valid", 0) or 0):
+            continue
+        t = float(getattr(res, "t_used", 0.0) or 0.0)
+        if o not in out or t > out[o][0]:
+            out[o] = (t, i)
+    return out
+
+
+def _older_copy(index: int, res, newest: dict) -> bool:
+    """Is slot `index`'s conversation an older copy of a chat whose newest one is on another slot?"""
+    o = getattr(res, "owner", None) if res is not None else None
+    return o is not None and o in newest and newest[o][1] != index
+
+
 def _kv_reclaim_written(want: int, owner) -> int:
     """SRV-E6, before any save: the idle side conversations already current on the NVMe (the idle
     backfill wrote them and no turn ran since, `SessionSpill.current`), oldest first: their pages
@@ -6135,7 +6160,11 @@ def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = 
     (`_spill_home`). A slot whose turn ended within RECLAIM_RECENT_S, or that recorded no end,
     goes last (live 2026-11-02: an agent between two tool steps lost its 85,010 rows first, as a
     None carry sorted as the oldest). SRV-E6: one current on the NVMe is trimmed without a save
-    (`written=true ms=0`); `only_written`, only those (`_kv_reclaim_written`)."""
+    (`written=true ms=0`); `only_written`, only those (`_kv_reclaim_written`).
+
+    An older copy of a chat that lives on another slot now (`_older_copy`) goes before everything else, at the
+    `only_written` level too, and is never written: its save would write over the chat's one entry with rows the
+    chat no longer continues."""
     _RECLAIM.victims = []
     pool = dict.get(STATE, "pool")
     if pool is None:
@@ -6148,8 +6177,13 @@ def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = 
         t = (s.carry or {}).get("t")
         return float(t) if t is not None else now
     idle = [s for s in pool.side() if f"slot{s.index}" != owner and not s.busy]
-    # the idle conversations of lower-priority chats first (`tandem.priority`, kept on the slot by `_par_admit`)
-    idle.sort(key=lambda s: (int(getattr(s, "prio", 1)), now - ended(s) < RECLAIM_RECENT_S, ended(s)))
+    newest = _newer_copies()
+
+    def older(s) -> bool:
+        return _older_copy(s.index, (s.values or {}).get("resident"), newest)
+    # older copies first; then the idle conversations of lower-priority chats (`tandem.priority`, kept on the
+    # slot by `_par_admit`)
+    idle.sort(key=lambda s: (not older(s), int(getattr(s, "prio", 1)), now - ended(s) < RECLAIM_RECENT_S, ended(s)))
     wait_s = KEEP_IO_WAIT_S if getattr(_RECLAIM, "wait", False) else 0.0
     for s in idle:
         if got >= want:
@@ -6164,10 +6198,14 @@ def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = 
             rows = int(getattr(res, "valid", 0) or 0) if res is not None else 0
             v = {"slot": s.index, "conv": getattr(res, "owner", None), "rows": rows,
                  "written": False, "why": None, "ms": 0.0}
-            cur = sp.current(res) if sp is not None and res is not None else None
-            if only_written and cur is None:
+            dead = older(s)
+            cur = sp.current(res) if sp is not None and res is not None and not dead else None
+            if only_written and cur is None and not dead:
                 continue
-            if cur is not None:
+            if dead:
+                v["why"] = "older_copy"
+                s.written = None           # nothing of the chat comes back here: its newest rows are elsewhere
+            elif cur is not None:
                 v["written"] = True
                 s.written = {"eid": cur.eid, "owner": res.owner}
             elif res is not None and write:
@@ -6277,8 +6315,8 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
         res = dict.get(STATE, "resident")
         if res is not None:
             sp = res.spiller
-            if sp is not None and sp.current(res) is not None:
-                sp = None                  # SRV-E6: on the NVMe as it is: only its pages go
+            if sp is not None and (sp.current(res) is not None or _older_copy(0, res, _newer_copies())):
+                sp = None                  # SRV-E6: on the NVMe as it is, or an older copy: only its pages go
             if (sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30)
                     and sp._own_io.locked()):
                 # SRV-779: the spill's I/O is held, maybe by this very thread (a side slot's
