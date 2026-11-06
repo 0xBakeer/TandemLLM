@@ -281,6 +281,7 @@ export class QseParallel extends LightElement {
     let prefill: TemplateResult | string = '—';
     const ptps = l.prefill?.tps ?? l.prefill?.tps_avg;
     if (ptps != null) prefill = html`<span title=${l.prefill?.tps != null ? 'tokens a second, now' : 'tokens a second over the whole prefill'}>${rate(ptps)}</span>`;
+    else if (l.state === 'waiting_memory') prefill = '—'; // SRV-787: nothing prefills while it waits
     else if (!l.prefill) prefill = html`<span class="par-nr" title="the proxy sees the time to the first token, not the backend's prefill">${NR}</span>`;
     let cache: TemplateResult | string;
     if (l.cache_hit != null) cache = html`<span title="${exact(l.cached_tokens)} of ${exact(l.prompt_tokens)} prompt tokens cached">${pct(l.cache_hit, 0)}</span>`;
@@ -295,7 +296,7 @@ export class QseParallel extends LightElement {
         <span class="par-who-top"><span class="par-bk-tag">${l.backend}</span><span class="par-model">${l.model ?? ''}</span></span>
         <span class="par-who-sub">${l.slot != null ? html`<span class="par-slot-tag" title="the engine's sequence slot">slot ${l.slot}</span> · ` : nothing}${l.via === 'engine' ? html`<span class="par-via" title="the engine's own live count, state and prefill (it files this request under the proxy's id)">engine view</span> · ` : nothing}${l.client.kind}${who && who !== l.client.kind ? html` · <span class="par-sess">${who}</span>` : nothing}</span>
       </span>
-      <span class="par-state" role="cell"><span class="par-dot tone-${tone} ${live && tone !== 'wait' ? 'is-live' : ''}"></span><span class="par-state-word">${l.label ?? stateLine(l)}</span></span>
+      <span class="par-state" role="cell" title=${l.memory?.lines?.join('\n') ?? ''}><span class="par-dot tone-${tone} ${live && tone !== 'wait' ? 'is-live' : ''}"></span><span class="par-state-word">${l.state === 'waiting_memory' && l.memory ? stateLine(l) : l.label ?? stateLine(l)}</span></span>
       <span class="par-tokens" role="cell" title=${sourceWord(l)}>
         <span class="par-bar">${bar ? html`<span class="par-bar-think" style="width:${(bar.think * 100).toFixed(2)}%"></span><span class="par-bar-out" style="width:${(bar.out * 100).toFixed(2)}%"></span>` : html`<span class="par-bar-unknown"></span>`}</span>
         <span class="par-tok-num num">${tokens}${l.thinking_tokens ? html`<span class="par-think-n"> · ${exact(l.thinking_tokens)} think</span>` : nothing}${l.tool_chars ? html`<span class="par-think-n"> · ${compact(l.tool_chars)} chars of call</span>` : nothing}</span>

@@ -593,7 +593,7 @@ export interface LiveLine {
 // ---- contract 1.1: what the model is doing right now ------------------
 // Definitions in docs/contract/dashboard-v1 (live.schema.json, contract 1.1); the words (`label`,
 // `sentence`) come from server/activity.py and are shown as sent.
-export type ActivityState = 'queued' | 'prefilling' | 'replaying' | 'thinking' | 'closing_reasoning' | 'writing' | 'tool_call' | 'finishing' | 'done';
+export type ActivityState = 'queued' | 'waiting_memory' | 'prefilling' | 'replaying' | 'thinking' | 'closing_reasoning' | 'writing' | 'tool_call' | 'finishing' | 'done';
 export type EngineState = 'idle' | 'busy' | 'waiting_for_client' | 'draining' | 'starting';
 export type StopReason = 'stop' | 'length' | 'tool_calls' | 'timeout' | 'abandoned' | 'error' | 'refused' | 'rejected' | 'cancelled';
 export type FinishingStep = 'flush' | 'saving_state' | 'final_chunk';
@@ -652,6 +652,28 @@ export interface LiveActivity {
   // live 1.2 (SRV-115, absent on older servers): the session monitor on this request; the label
   // says "Supervising: ..." while a hidden forward runs (and a second after it)
   conductor?: LiveConductor | null;
+  /** SRV-787 (absent on older servers): while the state is `waiting_memory`, why and until when */
+  memory?: MemoryWait | null;
+}
+
+/** SRV-787: a request the engine's admission holds for memory (server/activity.py `memory_of`). The `lines` are
+ *  the server's words (what and why, what happens meanwhile, how it ends) and are shown as sent. */
+export interface MemoryWait {
+  need_gib: number | null;
+  rows: number | null;
+  free_gib?: number | null;
+  guard_gib?: number | null;
+  short_gib?: number | null;
+  peak_wait?: boolean;
+  /** SRV-785: the guard's inputs, the configured floor (`cap`) its upper bound */
+  guard?: { step: number | null; kv: number | null; sandbox: number | null; margin: number | null; cap: number | null } | null;
+  freed_gib?: number | null;
+  in_the_way?: { request_id: string; tokens: number | null; eta_ms: number | null } | null;
+  waited_ms: number | null;
+  bound_s: number | null;
+  ends_in_ms: number | null;
+  place?: number | null;
+  lines: string[];
 }
 
 /** live 1.2 (SRV-115); `shadow` and the decisions' `score`, `tier`, `at_tokens` are VIS-44's. */
@@ -721,6 +743,8 @@ export interface LiveRecent {
 export interface LiveCounts {
   in_flight: number;
   queued: number;
+  /** SRV-787 (absent on older servers): on a slot, held for memory; not in `prefilling` */
+  waiting_memory?: number;
   prefilling: number;
   decoding: number;
   completed_1m: number;

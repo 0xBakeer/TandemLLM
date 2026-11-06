@@ -3,6 +3,7 @@
 // takes the first free row, so rows never jump), the backends' colours, the series merge and the
 // stack the chart draws. No DOM here: the view (views/parallel.ts) renders, this file decides.
 
+import type { MemoryWait } from '../api/types';
 import type { SeriesColor } from '../charts/chart-base';
 
 export type LaneState = 'queued' | 'waiting_memory' | 'prefilling' | 'waiting' | 'replaying' | 'thinking' | 'closing_reasoning' | 'tool_call' | 'writing' | 'finishing' | 'done';
@@ -41,6 +42,8 @@ export interface Lane {
   via?: 'engine' | null;
   /** the engine's sequence slot (server `--parallel N`); absent without side slots */
   slot?: number;
+  /** SRV-787: while `waiting_memory`, why it waits and when the wait ends; absent otherwise */
+  memory?: MemoryWait | null;
 }
 
 /** The engine's sequence slots (server/slots.py, `--parallel N`); absent without side slots. */
@@ -289,6 +292,11 @@ export function stateTone(l: Lane): 'wait' | 'prefill' | 'think' | 'tool' | 'wri
 export function stateLine(l: Lane): string {
   if (l.state === 'tool_call') return l.tool ? `Tool call: ${l.tool}` : 'Tool call';
   if (l.state === 'prefilling' && l.prefill?.pct != null) return `Prefilling ${Math.round(l.prefill.pct)} %`;
+  if (l.state === 'waiting_memory' && l.memory?.ends_in_ms != null) {
+    // SRV-787: when the wait ends, in the server's words ("8 m 40 s")
+    const s = Math.round(l.memory.ends_in_ms / 1000);
+    return `Waiting for memory, refused in ${s < 60 ? `${s} s` : `${Math.floor(s / 60)} m ${s % 60} s`} unless memory frees`;
+  }
   if (l.state === 'done') return l.finish && l.finish !== 'stop' ? `Done: ${l.finish.replace('_', ' ')}` : 'Done';
   return STATE_WORD[l.state] ?? l.state;
 }

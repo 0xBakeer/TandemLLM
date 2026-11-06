@@ -85,6 +85,10 @@ describe('words and bars', () => {
     expect(stateTone(lane('a', { state: 'done', finish: 'error' }))).toBe('error');
     expect(stateLine(lane('a', { state: 'tool_call', tool: 'read_file' }))).toBe('Tool call: read_file');
     expect(stateLine(lane('a', { state: 'done', finish: 'tool_calls' }))).toBe('Done: tool calls');
+    // SRV-787: when the wait for memory ends
+    const memory = { need_gib: 9.3, rows: 70520, waited_ms: 80000, bound_s: 600, ends_in_ms: 519600, lines: ['a', 'b', 'c'] };
+    expect(stateLine(lane('a', { state: 'waiting_memory', memory }))).toBe('Waiting for memory, refused in 8 m 40 s unless memory frees');
+    expect(stateLine(lane('a', { state: 'waiting_memory' }))).toBe('Waiting for memory');
   });
   it('a lane without a live count has no bar; the scale only grows in powers of two', () => {
     expect(tokenBar(lane('a', { tokens: null }), 512)).toBeNull();

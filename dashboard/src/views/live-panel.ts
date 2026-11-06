@@ -23,7 +23,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
-import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
+import { activityCell, clientFlag, constrainedWord, continuesText, memoryLines, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
 import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
 import { agoShort, cachedShare, clockSkew, decodeFigure, elapsed, emptyFoot, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
 import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
@@ -307,7 +307,15 @@ export class QseLivePanel extends LightElement {
 
   private cell(r: LiveRequest): TemplateResult {
     const c = activityCell(r.activity, r);
-    return html`<span class="phase act tone-${c.tone} ${c.moving ? 'is-moving' : ''}" title=${c.detail ? `${c.word} ${c.detail}` : c.word}><span class="phase-glyph" aria-hidden="true">${c.glyph}</span><span class="clip">${c.word}${c.detail ? html` <span class="act-detail num">${c.detail}</span>` : nothing}</span></span>`;
+    const mem = memoryLines(r.activity);
+    return html`<span class="phase act tone-${c.tone} ${c.moving ? 'is-moving' : ''}" title=${[c.detail ? `${c.word} ${c.detail}` : c.word, ...mem].join('\n')}><span class="phase-glyph" aria-hidden="true">${c.glyph}</span><span class="clip">${c.word}${c.detail ? html` <span class="act-detail num">${c.detail}</span>` : nothing}</span></span>`;
+  }
+
+  /** SRV-787: a request held for memory: why, what happens meanwhile, how the wait ends (the server's lines). */
+  private memory(r: LiveRequest): TemplateResult | typeof nothing {
+    const lines = memoryLines(r.activity);
+    if (!lines.length) return nothing;
+    return html`<ul class="live-mem" data-memory>${lines.map((x) => html`<li class="clip" title=${x}>${x}</li>`)}</ul>`;
   }
 
   /** One line, cut with an ellipsis (the whole text is the tooltip). With `reserve` (a 1.1 list) the
@@ -460,6 +468,7 @@ export class QseLivePanel extends LightElement {
       <div class="live-card-id"><code class="live-id" title=${r.request_id}>${r.request_id.slice(0, 18)}</code> ${this.meta(r)}</div>
       ${this.voice(r)}
       ${this.flags(r, v11)}
+      ${this.memory(r)}
       <dl class="live-card-grid">
         <div><dt>tokens</dt><dd class="num">${this.tokens(r, false)}</dd></div>
         <div><dt>decode now / avg</dt><dd class="num" title=${notes?.decode[1] || notes?.decode[0].trim() || ''}>${this.decodeCell(r)}</dd></div>
