@@ -485,6 +485,47 @@ def test_srv787_under_the_peak_and_without_a_policy_the_count_is_as_before():
     return "under 24, no policy 21, beside a workspace in flight 22"
 
 
+def test_srv785_the_guard_is_the_live_sum_and_never_above_the_floor():
+    """SRV-785: the floor a check holds is the live guard, one prefill chunk's workspace at the longest prefill's class
+    + one KV commit + a sandbox's ask + the kernel's margin, never above the configured floor. A short turn's guard is
+    lower than the floor (MemAvailable 12, a 4 GiB turn: 8 >= 6.95 admits, where the floor of 10 held it); a guard
+    above the floor, one that fails, or none leave the floor as configured. The class is the longest prefill in
+    flight until it has run (`prefilled`), and the wait line names the inputs."""
+    g, gin = slots.guard(10 * GiB, step=int(1.65 * GiB), kv=int(0.3 * GiB), margin=5 * GiB)
+    assert g == int(6.95 * GiB) and gin == {"step": int(1.65 * GiB), "kv": int(0.3 * GiB), "sandbox": 0,
+                                           "margin": 5 * GiB, "cap": 10 * GiB, "guard": g}, gin
+    for step, sandbox in ((int(8.4 * GiB), 0), (0, 6 * GiB), (40 * GiB, 40 * GiB)):
+        assert slots.guard(10 * GiB, step=step, kv=int(0.3 * GiB), sandbox=sandbox, margin=5 * GiB)[0] == 10 * GiB
+
+    seen = []
+
+    def live(rows):
+        seen.append(rows)
+        step = int(1.65 * GiB) if rows <= 8192 else int(6.25 * GiB)        # the chunk's class grows with the rows
+        return slots.guard(10 * GiB, step=step, kv=int(0.3 * GiB), margin=5 * GiB)
+    a = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}, guard=live)
+    ok, d = a.reserve("short", 4 * GiB, rows=2_000)
+    assert ok and d["floor"] == int(6.95 * GiB) and d["after"] == 8 * GiB and seen[-1] == 2_000, d
+    text = slots.Admission.describe(d)
+    assert text.endswith("= 8.0 GiB (>= floor 6.9 = chunk 1.6 + KV commit 0.3 + sandbox 0.0 + margin 5.0, at most "
+                         "10.0)"), text
+    assert a.ctx_rows() == 2_000 and a.report()["guard_gib"] == 6.95 and a.report()["floor_gib"] == 10.0
+    a.prefilled("short")
+    assert a.ctx_rows() == 0
+    a.release("short")
+    assert a.reserve("long", 0, rows=128_343)[0] and a.ctx_rows() == 128_343
+    assert a.floor_at(2_000)[0] == 10 * GiB and seen[-1] == 128_343, "the longest prefill in flight sets the class"
+    a.release("long")
+    assert a.ctx_rows() == 0 and a.floor == int(6.95 * GiB)
+    for bad in (lambda rows: 1 / 0, lambda rows: None, lambda rows: (40 * GiB, {})):
+        b = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}, guard=bad)
+        ok, d = b.reserve("short", 4 * GiB, rows=2_000)
+        assert not ok and d["floor"] == 10 * GiB and "guard" not in d, d
+    ok, d = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}).reserve("short", 4 * GiB)
+    assert not ok and d["floor"] == 10 * GiB and slots.Admission.describe(d).endswith("(< floor 10.0)"), d
+    return "6.95 for a short turn, 10 at 128k and for a sandbox's ask, 10 without a guard"
+
+
 def test_srv775_describe_names_a_peak_wait():
     d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
          "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}

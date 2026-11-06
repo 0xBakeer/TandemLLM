@@ -94,6 +94,51 @@ def test_gate_refuses_under_the_hard_floor_and_commits_nothing():
     assert pool.stats["refused"] == 1
 
 
+def test_srv785_the_hard_floor_is_the_live_guard_never_above_its_value():
+    """SRV-785: the server's pool (server/slots.py `GuardedPool`, engine/kvpool.py's bytes unchanged) reads the same
+    live guard as the admission (`guard`), at most the configured value: a commit the configured 10 GiB refused
+    passes under a guard of 6.95; a guard above the value, one that fails or has no answer, and a pool without one
+    keep the configured floor; 0 stays off."""
+    from server import slots
+    mem = FakeMem(int(10.1 * GiB))
+    pool = slots.GuardedPool(hard_floor=10 * GiB, margin_rows=0, meminfo=mem)
+    assert pool.hard_floor_cfg == 10 * GiB and isinstance(pool, kvpool.KVPool)
+    b = kvpool.PagedBuffer(_engine_shape(), 3, torch.bfloat16, "cpu", owner="s", pool=pool)
+    for guard in (None, lambda: 12 * GiB, lambda: None, lambda: 1 / 0):
+        pool.guard = guard
+        assert pool.hard_floor == 10 * GiB
+        try:
+            b.ensure(4096)                 # 128 MiB would leave 9.98 GiB
+            raise AssertionError("PoolFull expected")
+        except kvpool.PoolFull as e:
+            assert "under the hard floor 10.0 GiB" in str(e), e
+    pool.guard = lambda: int(6.95 * GiB)
+    assert pool.hard_floor == int(6.95 * GiB) and b.ensure(4096) == 64 * 2 * MiB
+    assert pool.report()["hard_floor_gib"] == 6.95 and pool.report()["hard_floor_cfg_gib"] == 10.0
+    off = slots.GuardedPool(hard_floor=0, meminfo=mem)
+    off.guard = lambda: 6 * GiB
+    assert off.hard_floor == 0
+    return "6.95 under the guard; 10 above it, without an answer or a guard"
+
+
+def test_srv785_a_sets_step_is_the_pages_one_commit_maps():
+    """SRV-785: `slots.kv_step(pages, rows)`, the guard's KV commit: every region's pages for `rows` and the margin,
+    one more page where they straddle one; never less than what a commit of those rows from any point maps."""
+    from server import slots
+    pool, _ = _pool(margin=256)
+    ps = kvpool.PagedSet("slot1", pool=pool)
+    ps.add(kvpool.PagedBuffer(_engine_shape(), 3, torch.bfloat16, "cpu", pool=pool))
+    ps.add(kvpool.PagedBuffer((5, 8, 65536, 64), 2, torch.bfloat16, "cpu", pool=pool))
+    step = slots.kv_step(ps, 4096)
+    # 4,352 rows: 2 pages + 1 in each of the 64 regions of 512 B rows; of 128 B rows 1 + 1 in each of 40
+    assert step == (64 * 3 + 40 * 2) * 2 * MiB, step / MiB
+    for start in (0, 1, 4000, 12_345):
+        ps.ensure(start)
+        assert ps.need_bytes(start + 4096) <= step, start
+    assert slots.kv_step(None, 4096) == 0 and slots.kv_step(kvpool.PagedSet("x", pool=pool), 4096) == 0
+    return f"{step / MiB:.0f} MiB for a 4,096-row chunk"
+
+
 def test_reclaimers_run_in_order_and_stop_when_enough():
     pool, mem = _pool(avail=int(10.05 * GiB), floor=10 * GiB)
     calls = []
