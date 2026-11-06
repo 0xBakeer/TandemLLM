@@ -924,6 +924,43 @@ def test_srv773_the_served_prompts_end_is_held_after_the_routers_notes():
     return "gate on the client's tokens: no hold; on the served prompt: held until the prefill"
 
 
+def test_srv787_the_caches_growth_is_what_the_policy_still_admits():
+    """SRV-787: the admission's cache growth (`_par_growth`) is the caches' budgets left, at most what the memory policy
+    still lets them allocate (`Budget.admit`): `ceiling - slack` less what is allocated, and nothing while a prefill
+    admitted over the peak is in flight or once the reserve is at the peak. On a real `Budget`: budgets 13.6 GiB under a
+    ceiling 1.7 above what is allocated count 1.7, and admit takes 1.7 and refuses a MiB more; with a 9.47 GiB
+    workspace admitted over the peak they count 0 and admit refuses a byte, until that prefill has run. The response
+    cache's token ids are host memory, outside the policy, and count as before; without a policy the budgets do."""
+    import types
+    app = _app()
+    from test_budget import FakeAlloc, budget
+    fa = FakeAlloc(61.12, reserve_gib=67.31 - 61.12)
+    mem = budget(fa, ceiling=64.82, peak=75.82, slack=2)
+    store = types.SimpleNamespace(budget=int(2.1 * GiB), bytes=0)
+    res = types.SimpleNamespace(budget=int(2.5 * GiB), stash_budget=GiB, pin_budget=4 * GiB, park_budget=4 * GiB,
+                                bytes=0)
+    room = int(64.82 * GiB) - int(2 * GiB) - int(61.12 * GiB)
+    app.STATE.clear()
+    try:
+        app.STATE.update(state_store=store, resident=res)
+        assert app._par_growth() == int(2.1 * GiB) + int(11.5 * GiB), "no policy: the budgets, 13.6"
+        app.STATE["mem"] = mem
+        assert app._par_growth() == room and abs(room / GiB - 1.7) < 0.01, app._par_growth() / GiB
+        assert mem.admit("store", room) and not mem.admit("store", room + (1 << 20)), "the policy's own answer"
+        mem.admit_over_peak(128_343, 128_343, int(9.47 * GiB), 1, cid="7294")
+        assert mem.ws_now == int(9.47 * GiB) and app._par_growth() == 0
+        assert not mem.admit("store", 1), "no cache grows while the over-peak workspace is in flight"
+        app.STATE["response_cache"] = types.SimpleNamespace(budget=256 << 20, bytes=0)
+        assert app._par_growth() == 256 << 20, "the response cache: host memory, outside the policy"
+        mem.prefill_done()
+        assert app._par_growth() == room + (256 << 20)
+        fa.res = int(75.9 * GiB)                                   # the reserve over the peak: nothing new either
+        assert app._par_growth() == 256 << 20 and not mem.admit("store", 1)
+    finally:
+        app.STATE.clear()
+    return f"budgets 13.6 GiB -> {room / GiB:.2f} under the ceiling; 0 with an over-peak prefill in flight"
+
+
 def test_the_release_route_answers_trusted_local_and_the_admin_only():
     import contextlib
     import io

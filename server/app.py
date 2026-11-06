@@ -12787,21 +12787,33 @@ def _par_spare() -> int:
 
 
 def _par_growth() -> int:
-    """What the long-lived caches may still take: each one's budget less what it holds."""
+    """What the long-lived caches may still take: each one's budget less what it holds. SRV-787: the engine's caches
+    at most what their policy still lets them allocate (`Budget.admit`): `ceiling - slack` less what is allocated, and
+    nothing while the reserve and the largest prefill admitted (`ws_now`) are at the peak, as with an over-peak prefill
+    in flight (2026-11-05: the budgets counted 13.6 GiB where admit allowed 4.5, and 0 for the turn over the peak). The
+    response cache holds token ids in host memory, outside the policy: its budget counts as it is."""
     g = 0
     store, res, rc = (dict.get(STATE, "state_store"), dict.get(STATE, "resident"),
                       dict.get(STATE, "response_cache"))
-    for obj, budget in ((store, "budget"), (rc, "budget")):
-        if obj is not None:
-            try:
-                g += max(0, int(getattr(obj, budget)) - int(getattr(obj, "bytes", 0)))
-            except Exception:                                      # noqa: BLE001
-                pass
+    if store is not None:
+        try:
+            g += max(0, int(store.budget) - int(getattr(store, "bytes", 0)))
+        except Exception:                                          # noqa: BLE001
+            pass
     if res is not None:
         try:
             total = sum(int(getattr(res, k, 0) or 0) for k in ("budget", "stash_budget",
                                                                "pin_budget", "park_budget"))
             g += max(0, total - int(getattr(res, "bytes", 0) or 0))
+        except Exception:                                          # noqa: BLE001
+            pass
+    mem = dict.get(STATE, "mem")
+    if mem is not None and getattr(mem, "on", False):
+        alloc, reserved = mem.memory()
+        g = 0 if reserved + mem.ws_now >= mem.peak else min(g, max(0, mem.ceiling - mem.slack - alloc))
+    if rc is not None:
+        try:
+            g += max(0, int(rc.budget) - int(getattr(rc, "bytes", 0)))
         except Exception:                                          # noqa: BLE001
             pass
     return g
