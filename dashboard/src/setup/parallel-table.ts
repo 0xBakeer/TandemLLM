@@ -1,7 +1,7 @@
 // <qse-parallel-table>: the weight cards' speed rows (SPD-245, model.yaml `parallel`): decode alone, the
 // first token of a cold 2k / 8k / 32k prompt, and 1, 2, 4 and 8 requests at once in total tok/s, each
 // row with its build, commit, date and setup. A level is shown only with its proof (N decoded at once),
-// which the registry already refuses to load without.
+// which the registry already refuses to load without. The table also names the card's slot count (#101).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
@@ -25,6 +25,12 @@ export function parallelRows(m: Pick<SetupModel, 'profiles'> & Partial<Pick<Setu
 /** the row of one weight card, or null */
 export function parallelFor(m: Partial<Pick<SetupModel, 'parallel'>> | null | undefined, profile: string): SetupParallelRow | null {
   return m?.parallel?.rows.find((r) => r.profile === profile) ?? null;
+}
+
+/** #101: the card's slot count and what a request over it does, or nothing without one */
+export function slotsLine(m: Partial<Pick<SetupModel, 'parallelism'>> | null | undefined): string | null {
+  const n = m?.parallelism?.slots?.default ?? null;
+  return n != null && n > 0 ? S.parallelSlots(n) : null;
 }
 
 /** the weight card's name of a row: its profile's label, a community pack's name, else the id */
@@ -82,7 +88,8 @@ export class QseParallelTable extends LightElement {
           <tbody>${rows.map((r) => this.row(m, r))}</tbody>
         </table>
       </div>
-      <div class="mt-foot muted small">${S.parallelFoot}
+      <div class="mt-foot muted small">
+        ${slotsLine(m) ? html`<p class="pt-slots" data-slots-line>${slotsLine(m)}</p>` : nothing}${S.parallelFoot}
         <details class="mt-method"><summary>${S.howMeasured}</summary><p>${m.parallel?.method ?? ''}</p>
           <ul class="pt-setups">${rows.map((r) => html`<li data-setup=${r.profile}><strong>${rowLabel(m, r)}</strong>: ${S.parallelBuild(r.build, r.commit, r.date)} ${setupLine(r)}${r.note ? html` ${r.note}` : nothing}</li>`)}</ul>
         </details>

@@ -72,6 +72,16 @@ One token of context window costs 106,752 bytes, which is 104.25 KiB or 106.75 k
 
 The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verify graphs, about 7.5 GiB each, only with `QSE_SIDE_GRAPHS=on`; the guide always writes it off, as the reference box runs, and a side slot then costs 1.19 GiB beyond its KV (the load stage `side_slots` took 3.58 GiB for three on 2026-10-10).
 
+### The card's slot count
+
+Every card states the chats it serves at once, its `parallelism.slots`: 8 on the 27B, Flash-Next, Ornith, Flint, LFM2.5 and Nemotron-Bolt cards, 3 on the Nemotron Lightning and Super-VL cards, with `max` the most the card speaks for (above it the parallelism step says the count is untested; [measurement.md](measurement.md#the-weight-cards-speed-rows) has the measured rows). The Weights step shows it beside every card's parallel line and the Model step's speed table above its foot, with what a request over it does: it waits in the queue until a lane frees ([parallel-requests.md](parallel-requests.md)).
+
+The parallelism step writes the count as `QSE_PARALLEL` into `run/setup.env`, which `ops/serve.env` reads after the weight profile, so a fresh install runs the card's count. A start from a shipped profile alone keeps the profile's own value: 8 in the profiles of Flash-Next, LFM2.5 and Nemotron-Bolt, 1 in `ops/profiles/_ornith.env` and `ops/profiles/_flint.env`, and every other profile inherits `ops/serve.env`'s 8.
+
+### Ornith's two chats
+
+Two Ornith chats fit on one Spark. Its weights take 59.95 GiB in EXL3 4.0, 61.16 GiB with the MTP layer; the family runs with the KV pool off (`kv_pool.default: false`), so a lane's whole 262,144-token window is memory at load: 24 KiB a token, 6.00 GiB a lane, or 6.5 GiB with the MTP layer's 2 KiB a token. The estimate for 2 slots of 262,144 tokens comes to 90.05 GiB of the 106.63 GiB budget (121.63 GiB for the Spark less the 15 GiB floor): `fits` and `fits_worst` are true, both lanes hold their full window (`lanes_full` 2), and 16.58 GiB of the budget is left. The estimate counts the weights without the MTP layer; with its 1.21 GiB and its 0.5 GiB of KV a lane, 2 slots come to about 92.3 GiB and still fit. The card's default of 8 slots does not: 126.05 GiB, 19.42 GiB over the budget, and 4 lanes can hold the full window, so 8 lanes run a shorter window or with the pool on. What kept Ornith at one chat until 0.14.2 was the joint verify of several slots on its Qwen3.5 MoE trunk (SRV-653); SPD-217 built the side slots and their one joint pass, and the card's row then measured 8 lanes at 37.7 / 47.0 / 58.4 / 69.8 tok/s (SRV-711, 2026-10-24), so nothing blocks 2 slots now.
+
 ### Flash-Next, the second model
 
 `models/qwen3.8-flash-next/model.yaml` gives the models step its second tile. Its five profiles are the EXL3 packs (2.05 to 6.05 bits a weight). Fields the 27B's entry does not use, all optional:

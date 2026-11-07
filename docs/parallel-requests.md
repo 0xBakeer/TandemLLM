@@ -1,6 +1,6 @@
 # Parallel requests
 
-With `--parallel N` the engine holds N sequences (lanes) over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. The flag's own default is 1; the shipped `ops/serve.env`, the profiles of every family with side slots and the Setup Guide run 8 lanes (SRV-707), every lane with the same window.
+With `--parallel N` the engine holds N sequences (lanes) over the one copy of the weights and decodes up to N requests at once. Two or more decoding requests share each verify pass, so the weights are read once for all of them. The flag's own default is 1; the shipped `ops/serve.env`, the profiles of every family with side slots and the Setup Guide run 8 lanes (SRV-707), every lane with the same window, except `ops/profiles/_ornith.env` and `_flint.env`, which keep `QSE_PARALLEL=1` (a setup through the guide writes the card's count over it, [setup.md](setup.md#the-cards-slot-count)).
 
 How it works inside (slots, the GPU turn, lockstep rounds, admission) is in [server.md](server.md), section Parallel requests. This page is about using it.
 

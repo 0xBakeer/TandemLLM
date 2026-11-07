@@ -1,11 +1,12 @@
 // The weight cards' speed rows (SPD-245, model.yaml `parallel`): the table lists every row under its weight
 // card's name (a community pack by its name), decode, the first token at 2k / 8k / 32k and 1 / 2 / 4 / 8 at
 // once; the selected row is "your choice"; a level whose proof is not N shows no number; the weight card's
-// line names one request alone and the most at once; a model without rows renders nothing.
+// line names one request alone and the most at once; the slots line names the card's chats at once (#101);
+// a model without rows renders nothing.
 import { describe, expect, it } from 'vitest';
 import m27 from '../mock/setup/qwen3.8-27b.json';
 import type { SetupModel, SetupParallelRow } from '../src/api/types';
-import { cardLine, levelRate, parallelFor, parallelRows, QseParallelTable, rowLabel } from '../src/setup/parallel-table';
+import { cardLine, levelRate, parallelFor, parallelRows, QseParallelTable, rowLabel, slotsLine } from '../src/setup/parallel-table';
 import { S } from '../src/setup/strings';
 
 function text(v: unknown): string {
@@ -82,6 +83,9 @@ describe('the weight cards\' speed rows', () => {
     // the setup of every row is named: build, commit, date, lanes, sampling, store, cache
     expect(html).toContain('build 0.14.2 (345ab0fa), 2026-10-26;');
     expect(html).toContain('8 lanes of 262,144 tokens, 512 tokens a request, T 1, top-k 20, top-p 0.95, thinking off, suffix store off, response cache off, 3 rounds a level');
+    // #101: the table names the card's slot count above its foot
+    expect(html).toContain('data-slots-line');
+    expect(html).toContain('8 chats at once: one more waits in the queue.');
   });
 
   it('a level that did not decode N at once shows no number', () => {
@@ -95,6 +99,13 @@ describe('the weight cards\' speed rows', () => {
     expect(cardLine(m, 'exl3-6.0')).toBe('27.0 tok/s alone');
     expect(cardLine(m, 'exl3-2.5')).toBeNull();
     expect(cardLine(null, 'exl3-4.0')).toBeNull();
+  });
+
+  it('the card\'s slots line: the count and what a request over it does; one chat; no count, no line', () => {
+    expect(slotsLine(m)).toBe('8 chats at once: one more waits in the queue.');
+    expect(slotsLine({ parallelism: { slots: { min: 1, max: 8, default: 1 } } } as never))
+      .toBe('One chat at once: one more waits in the queue.');
+    expect(slotsLine(null)).toBeNull();
   });
 
   it('a model without rows renders nothing', () => {

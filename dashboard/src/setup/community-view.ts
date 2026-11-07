@@ -19,7 +19,7 @@ import { ago, dateLong } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { boxState, cardsOf, countText, DOCS_URL, httpsUrl, isSortKey, searchCards, SORT_KEYS, SORT_LABEL, sortCards, type CommunityCard, type SortKey } from './community';
-import { cardLine } from './parallel-table';
+import { cardLine, slotsLine } from './parallel-table';
 import { S } from './strings';
 
 const C = S.community;
@@ -174,6 +174,7 @@ export class QseCommunity extends LightElement {
           </div>`
         : html`<p class="ccard-speed-none muted small">${C.notMeasured}</p>`}
       ${cardLine(this.model, c.id) ? html`<p class="ccard-par muted small num" data-parallel-line>${S.weightsAtOnce}: ${cardLine(this.model, c.id)}</p>` : nothing}
+      ${slotsLine(this.model) ? html`<p class="ccard-par muted small num" data-slots-line>${S.weightsSlots}: ${slotsLine(this.model)}</p>` : nothing}
       <footer class="ccard-foot">
         <span class="ccard-links">
           ${c.licenseUrl
