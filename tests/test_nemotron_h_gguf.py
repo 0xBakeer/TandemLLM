@@ -279,6 +279,59 @@ def test_a_quantized_tied_embedding_aliases_the_head():
         return f"tied alias ok; self-check {res['rows']} rows"
 
 
+def test_nvfp4_experts_load_dense_with_their_tensor_scale():
+    """NVFP4 expert stacks (not an IQ2_XXS pair) load as BF16 `ExpertsRelu2` through `_dense`, each
+    stack with its tensor scale (`<name>.scale`) applied; a scale that is not one F32 value is
+    refused at load instead of being dropped."""
+    try:
+        import gguf
+        gguf.GGMLQuantizationType.NVFP4
+    except Exception:  # noqa: BLE001
+        return "skipped: gguf-py missing or without NVFP4"
+    from unittest import mock
+    from engine.models.nemotron_h.gguf_load import load_gguf
+    from engine.models.nemotron_h.load import ExpertsRelu2
+    from tools import gguf_quants as GQ
+    T = gguf.GGMLQuantizationType
+    orig = gguf.GGUFWriter.add_tensor
+    scales = {"up": 0.03, "down": 0.5}
+
+    def write(path: str, bad: bool):
+        def wrap(self, name, arr, *a, **kw):
+            kind = next((k for k in scales if name.endswith(f"ffn_{k}_exps.weight")), None)
+            if kind is None:
+                return orig(self, name, arr, *a, **kw)
+            E, R, C = arr.shape[0], arr.shape[1], arr.shape[2] // 66 * 256   # the IQ2_XXS fixture's values a row
+            raw = random_nvfp4_small(E * R, C, seed=7 if kind == "up" else 8).reshape(E, R, -1)
+            orig(self, name, raw, raw_dtype=T.NVFP4)
+            sc = np.full(2 if bad and kind == "down" else 1, scales[kind], dtype=np.float32)
+            return orig(self, name[:-len(".weight")] + ".scale", sc)
+        with mock.patch.object(gguf.GGUFWriter, "add_tensor", wrap):
+            write_gguf(path)
+
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "e.gguf")
+        write(p, bad=False)
+        c3, W, experts, timing, g = load_gguf(p, device="cpu", log=None)
+        assert g.types()["NVFP4"] == 3 + 2 * len(c3.moe_layers), g.types()
+        for li in c3.moe_layers:
+            ex = experts[li]
+            assert isinstance(ex, ExpertsRelu2), type(ex)
+            for kind, got in (("up", ex.up), ("down", ex.down)):
+                stored = f"blk.{li}.ffn_{kind}_exps.weight"
+                x = GQ.dequant(40, np.array(g.raw(stored)), g.tensors[stored].shape).reshape(got.shape)
+                assert torch.equal(got, (x * float(np.float32(scales[kind]))).to(torch.bfloat16)), (li, kind)
+                assert not torch.equal(got, x.to(torch.bfloat16)), (li, kind, "the scale was dropped")
+        write(p, bad=True)
+        try:
+            load_gguf(p, device="cpu", log=None)
+        except ValueError as e:
+            assert "ffn_down_exps.scale" in str(e) and "tensor scale" in str(e), e
+        else:
+            raise AssertionError("a two-value tensor scale loaded")
+    return f"{len(c3.moe_layers)} NVFP4 expert pairs scaled at load; a two-value scale refused"
+
+
 def header_gguf(path: str, dims: tuple, ty: int = 0, alignment: int | None = None, data: int = 64) -> None:
     """A GGUF of one tensor written by hand (no gguf-py): the header, the table and `data` bytes."""
     import struct

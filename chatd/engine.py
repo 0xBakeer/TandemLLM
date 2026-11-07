@@ -34,7 +34,9 @@ import urllib.parse
 # older than the `chat-app` client kind counts chatd as the dashboard (its chat profile)
 USER_AGENT = "chatd/0.1 (qse-dashboard)"
 CONNECT_TIMEOUT_S = 10.0
-READ_TIMEOUT_S = 900.0       # a 158k prefill is about 3.5 minutes of silence
+# a 158k prefill is about 3.5 minutes of silence. Per read: every line read (an SSE comment too) starts it again, so
+# a call the engine holds for memory and keeps alive with a comment every 15 s is never cut (SRV-787)
+READ_TIMEOUT_S = 900.0
 
 
 class EngineError(Exception):
@@ -173,9 +175,9 @@ class Engine:
     def stream(self, body: bytes, headers: dict, opened=None) -> Call:
         """Open a streamed completion. EngineError for a refusal (retryable for 429 and 5xx and a
         connection that fails, not for a 4xx). `opened(conn)`: called once the request is sent, before
-        the wait for the response's headers. SRV-777: an engine sends none while a request waits for
-        memory or in its line, so the caller keeps the connection to shut it on Stop (`shut`); the engine
-        sees the close and ends the request."""
+        the wait for the response's headers. SRV-777: an engine sends none while a request waits in its
+        line for up to `queue_wait.OPEN_AFTER_S` (and, before SRV-787, for memory), so the caller keeps the
+        connection to shut it on Stop (`shut`); the engine sees the close and ends the request."""
         conn = self._conn(CONNECT_TIMEOUT_S)
         try:
             h = self._headers(headers)

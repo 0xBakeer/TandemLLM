@@ -44,6 +44,7 @@
 \texttt{QSE\_\allowbreak{}FN\_\allowbreak{}BPW} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}2.05.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}3.05.env and 3 more} \\
 \texttt{QSE\_\allowbreak{}FN\_\allowbreak{}TABLE} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}2.05.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}3.05.env and 3 more} \\
 \texttt{QSE\_\allowbreak{}FN\_\allowbreak{}VISION\_\allowbreak{}FILE} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}4.05.env} \\
+\texttt{QSE\_\allowbreak{}GUARD\_\allowbreak{}MARGIN\_\allowbreak{}GB} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}HEALTH\_\allowbreak{}TTL\_\allowbreak{}MS} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} server/\allowbreak{}app.py,\allowbreak{} server/\allowbreak{}health\_\allowbreak{}cache.py} \\
 \texttt{QSE\_\allowbreak{}IMAGE\_\allowbreak{}BACKEND} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}KV\_\allowbreak{}ADMIT\_\allowbreak{}ROWS} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}app.py} \\
@@ -62,6 +63,7 @@
 \texttt{QSE\_\allowbreak{}LIVE\_\allowbreak{}NOW\_\allowbreak{}WINDOW\_\allowbreak{}S} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}live.py} \\
 \texttt{QSE\_\allowbreak{}LIVE\_\allowbreak{}PREFILL\_\allowbreak{}WARMUP\_\allowbreak{}CHUNKS} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}live.py} \\
 \texttt{QSE\_\allowbreak{}MEM\_\allowbreak{}NEED\_\allowbreak{}GIB} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}2.05.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}3.05.env,\allowbreak{} ops/\allowbreak{}profiles/\allowbreak{}flashnext-\allowbreak{}4.05.env and 27 more} \\
+\texttt{QSE\_\allowbreak{}MEM\_\allowbreak{}WAIT\_\allowbreak{}S} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}METRICS\_\allowbreak{}TOKEN} & \texttt{ops/\allowbreak{}chatd.service,\allowbreak{} ops/\allowbreak{}chatd.sh,\allowbreak{} ops/\allowbreak{}make-\allowbreak{}secrets.sh and 3 more} \\
 \texttt{QSE\_\allowbreak{}MODE} & \texttt{install.sh,\allowbreak{} ops/\allowbreak{}serve.env,\allowbreak{} ops/\allowbreak{}start.sh and 1 more} \\
 \texttt{QSE\_\allowbreak{}NH\_\allowbreak{}DENSE\_\allowbreak{}ROWS} & \texttt{engine/\allowbreak{}models/\allowbreak{}nemotron\_\allowbreak{}h/\allowbreak{}engine.py} \\
@@ -105,6 +107,7 @@
 \texttt{QSE\_\allowbreak{}PRICE\_\allowbreak{}TABLE} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}PROFILE\_\allowbreak{}NAME} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} ops/\allowbreak{}start.sh} \\
 \texttt{QSE\_\allowbreak{}PROFILE\_\allowbreak{}OVERRIDE} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} ops/\allowbreak{}use-\allowbreak{}profile.sh,\allowbreak{} server/\allowbreak{}setup/\allowbreak{}apply.py and 1 more} \\
+\texttt{QSE\_\allowbreak{}RECLAIM\_\allowbreak{}GRAPHS} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}REQ\_\allowbreak{}PEAK} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}ROLES\_\allowbreak{}DYNAMIC} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}rolemem.py} \\
 \texttt{QSE\_\allowbreak{}ROLE\_\allowbreak{}MAX\_\allowbreak{}HOLD\_\allowbreak{}S} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}rolemem.py} \\
@@ -142,7 +145,7 @@
 \texttt{QSE\_\allowbreak{}SETUP\_\allowbreak{}ENV\_\allowbreak{}FILE} & \texttt{ops/\allowbreak{}serve.env} \\
 \texttt{QSE\_\allowbreak{}SETUP\_\allowbreak{}MODE} & \texttt{ops/\allowbreak{}start.sh} \\
 \texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}GRAPHS} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}app.py} \\
-\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}app.py and 1 more} \\
+\texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}MAX\_\allowbreak{}LEN} & \texttt{ops/\allowbreak{}profiles/\allowbreak{}\_\allowbreak{}flashnext.env,\allowbreak{} ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}app.py and 2 more} \\
 \texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}RESIDENT\_\allowbreak{}GB} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}SIDE\_\allowbreak{}SLOT\_\allowbreak{}CONST\_\allowbreak{}GB} & \texttt{ops/\allowbreak{}serve.env,\allowbreak{} server/\allowbreak{}app.py} \\
 \texttt{QSE\_\allowbreak{}STACK\_\allowbreak{}SAMPLE} & \texttt{server/\allowbreak{}app.py,\allowbreak{} server/\allowbreak{}stack\_\allowbreak{}sampler.py} \\

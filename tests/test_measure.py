@@ -170,11 +170,20 @@ def test_the_three_views_render_from_records():
     # gate: the verdict table from two stores, the gate's own rules
     rows, md = views.render_gate(base, head)
     ids = {r["id"]: r for r in rows}
-    for rid in ("decode.c1", "decode.c1-1k", "decode.c8", "decode.c8.wall", "prefill.2k", "prefill.8k",
-                "prefill.burst4x1k", "lossless.card-code.greedy"):
+    gate_ids = ("decode.c1", "decode.c1-1k", "decode.c8", "decode.c8.wall", "prefill.2k", "prefill.8k",
+                "prefill.burst4x1k", "lossless.card-code.greedy")
+    for rid in gate_ids:
         assert rid in ids, (rid, sorted(ids))
-        assert ids[rid]["verdict"] in ("PASS", "SKIPPED"), (rid, ids[rid])
-    assert md.startswith("verdict PASS") and "| decode |" in md
+        assert ids[rid]["verdict"] in ("PASS", "SKIPPED", "WORSE"), (rid, ids[rid])
+    assert ids["lossless.card-code.greedy"]["verdict"] == "PASS", ids["lossless.card-code.greedy"]
+    assert md.startswith("verdict ") and "| decode |" in md
+    # the speed rows above are two fake-engine runs on a shared runner, so their verdict is timing
+    # (prefill.2k resolved 21.8 % worse once in CI); one store against itself passes every row
+    rows_same, md_same = views.render_gate(head, head)
+    same = {r["id"]: r for r in rows_same}
+    for rid in gate_ids:
+        assert same[rid]["verdict"] in ("PASS", "SKIPPED"), (rid, same[rid])
+    assert md_same.startswith("verdict PASS"), md_same[:200]
     # the gate's runner writes each arm's suites as records (tools/measure/gatearm.py): the same table
     import types
     from tools.measure import gatearm
@@ -186,7 +195,11 @@ def test_the_three_views_render_from_records():
         gatearm.record_arm(gout, arm, knobs, {s: v[side][0] for s, v in g.items()}, "fake", "fake-pack", "abc",
                            log=lambda *x: None)
     rows2, md2 = views.render_gate(str(gout / "records" / "base"), str(gout / "records" / "head"))
-    assert [r["id"] for r in rows2] == [r["id"] for r in rows] and md2.startswith("verdict PASS"), md2[:400]
+    # the same rows; base vs head timed on a busy runner may say WORSE on a speed row (as above), so the PASS rule
+    # is checked on head against itself
+    assert [r["id"] for r in rows2] == [r["id"] for r in rows], md2[:400]
+    md3 = views.render_gate(str(gout / "records" / "head"), str(gout / "records" / "head"))[1]
+    assert md3.startswith("verdict PASS"), md3[:400]
     # report: a page from the measured records
     html = views.render_report(st, "9.9.9", ["fake-pack"], None, "Fake", os.path.join(head, "p.html"))
     assert 'id="s-g"' in html and "Rows from: measured" in html

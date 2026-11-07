@@ -22,8 +22,10 @@ from engine.sample import Sampler  # noqa: E402
 from server import sampling_defaults as sd  # noqa: E402
 
 
-def _chi2_crit(dof: int, z: float = 3.09) -> float:
-    """The chi-square quantile at p = 0.001 (Wilson-Hilferty)."""
+def _chi2_crit(dof: int, z: float = 4.753) -> float:
+    """The chi-square quantile at p = 1e-6 (Wilson-Hilferty). The draws use fresh seeds, so a bound at
+    p = 0.001 over this file's checks failed about one run in 200 by chance; a wrong distribution
+    gives a statistic in the hundreds at these counts."""
     a = 2.0 / (9.0 * dof)
     return dof * (1.0 - a + z * math.sqrt(a)) ** 3
 
@@ -128,7 +130,7 @@ def test_an_admitted_request_takes_the_keyed_walk():
 
 def test_the_keyed_walk_samples_the_filtered_distribution():
     """Over fresh seeds, the keyed draw at one position follows `_filter`'s probabilities (top_k, top_p and the
-    temperature applied), as the unseeded multinomial does: chi-square within p = 0.001 for both."""
+    temperature applied), as the unseeded multinomial does: chi-square within p = 1e-6 for both."""
     logits = _row(10, seed=3)
     n = 6000
     probs = Sampler(temperature=0.8, top_p=0.9, top_k=6)._filter(logits.float())
@@ -147,13 +149,13 @@ def test_the_keyed_walk_samples_the_filtered_distribution():
         assert stat < _chi2_crit(dof), (name, stat, dof, c, p)
     sk, dof = _chi2(keyed, p)
     sdn, _ = _chi2(dense, p)
-    return f"{n} seeds, {dof + 1} kept tokens: chi2 keyed {sk:.1f}, dense {sdn:.1f} (p=0.001 bound {_chi2_crit(dof):.1f})"
+    return f"{n} seeds, {dof + 1} kept tokens: chi2 keyed {sk:.1f}, dense {sdn:.1f} (p=1e-6 bound {_chi2_crit(dof):.1f})"
 
 
 def test_the_keyed_walk_draws_each_position_afresh():
     """A two-deep chain [anchor, b]: where the first draw is b the walk goes on, and the second token must
     follow row 1's own filtered distribution, whatever noise the first position had (the positions' noise
-    rows are independent): chi-square within p = 0.001, and the first token follows row 0."""
+    rows are independent): chi-square within p = 1e-6, and the first token follows row 0."""
     l0 = torch.tensor([3.0, 0.2, 0.1, -0.5, -1.0, 0.4])
     l1 = _row(6, seed=11, scale=1.2)
     rows = torch.stack([l0, l1])
@@ -171,7 +173,7 @@ def test_the_keyed_walk_draws_each_position_afresh():
     for c, p in ((first, p0), (second, p1)):
         stat, dof = _chi2(c, p)
         assert stat < _chi2_crit(dof), (stat, dof, c, p)
-    return f"first token over 6000 seeds, second over the {sum(second)} that took b: both within p=0.001"
+    return f"first token over 6000 seeds, second over the {sum(second)} that took b: both within p=1e-6"
 
 
 if __name__ == "__main__":

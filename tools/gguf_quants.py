@@ -11,7 +11,8 @@ Q8_0 / IQ2_XXS / NVFP4 set. Two tiers, chosen per tensor by `gguf_load`:
 The block layouts and decode order are ggml's (llama.cpp `ggml-quants.c`, MIT), cross-checked
 against gguf-py's `quants.py` (MIT); the IQ lattice grids live in `tools/gguf_grids.py`. NVFP4
 and Q8_0 keep their existing dedicated modules. Q1_0 (type 41) has no settled ggml decode and
-no known checkpoints — it stays a clean refusal.
+no known checkpoints — it stays a clean refusal, as does Q8_1 (an activation format, no
+reference decode to check one against).
 """
 
 from __future__ import annotations
@@ -174,12 +175,6 @@ def dq_q5_1(b):
 def dq_q8_0(b):
     d, q = np.hsplit(b, [2])
     return _f16(d) * q.view(np.int8).astype(np.float32)
-
-
-def dq_q8_1(b):
-    # block_q8_1: f32 pair (d, s); s = d * sum(q) is a dot-product auxiliary, not part of the weight.
-    ds, q = np.hsplit(b, [8])
-    return ds[:, :4].view(np.float32) * q.view(np.int8).astype(np.float32)
 
 
 def _q4k_scales(sc12):
@@ -448,7 +443,6 @@ TYPES = {
     6:  (32, 22, dq_q5_0),
     7:  (32, 24, dq_q5_1),
     8:  (32, 34, dq_q8_0),
-    9:  (32, 40, dq_q8_1),
     10: (256, 84, dq_q2_k),
     11: (256, 110, dq_q3_k),
     12: (256, 144, dq_q4_k),
@@ -672,69 +666,31 @@ if HAVE_TRITON:
 
     @triton.jit
     def _q2k_gemm(X, s_x, QS, DS, DM, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
-        # Q2_K: hoist each 32-byte code plane and each phase's eight folded scales; same contract.
+        # Q2_K: 256 weights a super-block; qs[64] hold the 2-bit codes of sub s at byte
+        # (s//4)*32 + t, shift 2*(s%4); scales are 16 4-bit pairs folded to DS/DM fp16 [N, nb, 16]
+        # at load (index s*2 + t//16). Same contract as _q40_gemm.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
         rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        ts = tl.arange(0, 8)
         acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
-            base = (cols * NB + kb) * 16
             for s in tl.static_range(8):
-                phase = s // 4
-                if s == 0:
-                    q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + phase * 32 + t[None, :],
-                                mask=cm[:, None], other=0)
-                    ds_phase = tl.load(DS + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
-                    dm_phase = tl.load(DM + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
-                if s == 4:
-                    q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + phase * 32 + t[None, :],
-                                mask=cm[:, None], other=0)
-                    ds_phase = tl.load(DS + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
-                    dm_phase = tl.load(DM + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
+                q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + (s // 4) * 32 + t[None, :],
+                            mask=cm[:, None], other=0)
                 code = (q >> (2 * (s % 4))) & 3
-                if s == 0 or s == 4:
-                    ds_t = tl.permute(tl.reshape(ds_phase, [BN, 2, 2, 2]), [0, 3, 2, 1])
-                    ds_a, ds_b = tl.split(ds_t)
-                    ds_aa, ds_ab = tl.split(ds_a)
-                    ds_ba, ds_bb = tl.split(ds_b)
-                    ds_s0, ds_s1 = tl.split(ds_aa)
-                    ds_s2, ds_s3 = tl.split(ds_ab)
-                    ds_s4, ds_s5 = tl.split(ds_ba)
-                    ds_s6, ds_s7 = tl.split(ds_bb)
-                    dm_t = tl.permute(tl.reshape(dm_phase, [BN, 2, 2, 2]), [0, 3, 2, 1])
-                    dm_a, dm_b = tl.split(dm_t)
-                    dm_aa, dm_ab = tl.split(dm_a)
-                    dm_ba, dm_bb = tl.split(dm_b)
-                    dm_s0, dm_s1 = tl.split(dm_aa)
-                    dm_s2, dm_s3 = tl.split(dm_ab)
-                    dm_s4, dm_s5 = tl.split(dm_ba)
-                    dm_s6, dm_s7 = tl.split(dm_bb)
-                if (s % 4) == 0:
-                    ds0, ds1 = ds_s0, ds_s1
-                    dm0, dm1 = dm_s0, dm_s1
-                if (s % 4) == 1:
-                    ds0, ds1 = ds_s2, ds_s3
-                    dm0, dm1 = dm_s2, dm_s3
-                if (s % 4) == 2:
-                    ds0, ds1 = ds_s4, ds_s5
-                    dm0, dm1 = dm_s4, dm_s5
-                if (s % 4) == 3:
-                    ds0, ds1 = ds_s6, ds_s7
-                    dm0, dm1 = dm_s6, dm_s7
+                base = (cols * NB + kb) * 16 + s * 2
+                ds0 = tl.load(DS + base, mask=cm, other=0.0)
+                ds1 = tl.load(DS + base + 1, mask=cm, other=0.0)
+                dm0 = tl.load(DM + base, mask=cm, other=0.0)
+                dm1 = tl.load(DM + base + 1, mask=cm, other=0.0)
                 hi = (t // 16)[None, :] == 1
-                sel_ds = tl.where(hi, ds1[:, None], ds0[:, None])
-                sel_dm = tl.where(hi, dm1[:, None], dm0[:, None])
                 # magic int->bf16: bf16(0x4300|c) == 128+c
                 cb = ((code.to(tl.int32) | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True) - 128.0
-                w = cb * sel_ds.to(tl.bfloat16) - sel_dm.to(tl.bfloat16)
+                w = (cb * tl.where(hi, ds1[:, None], ds0[:, None]).to(tl.bfloat16)
+                     - tl.where(hi, dm1[:, None], dm0[:, None]).to(tl.bfloat16))
                 x = tl.load(X + rows[:, None] * s_x + kb * 256 + s * 32 + t[None, :],
                             mask=rows[:, None] < M, other=0.0)
                 acc += tl.dot(x, tl.trans(w))
@@ -743,54 +699,29 @@ if HAVE_TRITON:
 
     @triton.jit
     def _q3k_gemm(X, s_x, QS, HM, DL, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr, BM: tl.constexpr):
-        # Q3_K: hoist each 32-byte code plane, hmask, and each phase's eight folded scales.
+        # Q3_K: 2-bit codes like Q2_K plus one hmask bit per element (0 -> subtract 4);
+        # 16 signed 6-bit scales folded to DL fp16 [N, nb, 16] at load. Same contract.
         pm = tl.program_id(0)
         pn = tl.program_id(1)
         rows = pm * BM + tl.arange(0, BM)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
         t = tl.arange(0, 32)
-        ts = tl.arange(0, 8)
         acc = tl.zeros([BM, BN], dtype=tl.float32)
         for kb in range(0, NB):
-            base = (cols * NB + kb) * 16
-            hm = tl.load(HM + (cols[:, None] * NB + kb) * 32 + t[None, :],
-                         mask=cm[:, None], other=0)
             for s in tl.static_range(8):
-                phase = s // 4
-                if s == 0:
-                    q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + phase * 32 + t[None, :],
-                                mask=cm[:, None], other=0)
-                    dl_phase = tl.load(DL + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
-                if s == 4:
-                    q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + phase * 32 + t[None, :],
-                                mask=cm[:, None], other=0)
-                    dl_phase = tl.load(DL + base[:, None] + phase * 8 + ts[None, :],
-                                       mask=cm[:, None], other=0.0)
+                q = tl.load(QS + (cols[:, None] * NB + kb) * 64 + (s // 4) * 32 + t[None, :],
+                            mask=cm[:, None], other=0)
+                hm = tl.load(HM + (cols[:, None] * NB + kb) * 32 + t[None, :], mask=cm[:, None], other=0)
                 code = ((q >> (2 * (s % 4))) & 3).to(tl.int32)
+                base = (cols * NB + kb) * 16 + s * 2
+                dl0 = tl.load(DL + base, mask=cm, other=0.0)
+                dl1 = tl.load(DL + base + 1, mask=cm, other=0.0)
                 # magic int->bf16: bf16(0x4300|c) == 128+c; -(132-4*hbit) gives c - 4*(1-hbit)
                 cb = ((code | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True)
                 hb = ((hm >> s) & 1).to(tl.bfloat16)
-                if s == 0 or s == 4:
-                    dl_t = tl.permute(tl.reshape(dl_phase, [BN, 2, 2, 2]), [0, 3, 2, 1])
-                    dl_a, dl_b = tl.split(dl_t)
-                    dl_aa, dl_ab = tl.split(dl_a)
-                    dl_ba, dl_bb = tl.split(dl_b)
-                    dl_s0, dl_s1 = tl.split(dl_aa)
-                    dl_s2, dl_s3 = tl.split(dl_ab)
-                    dl_s4, dl_s5 = tl.split(dl_ba)
-                    dl_s6, dl_s7 = tl.split(dl_bb)
-                if (s % 4) == 0:
-                    dl0, dl1 = dl_s0, dl_s1
-                if (s % 4) == 1:
-                    dl0, dl1 = dl_s2, dl_s3
-                if (s % 4) == 2:
-                    dl0, dl1 = dl_s4, dl_s5
-                if (s % 4) == 3:
-                    dl0, dl1 = dl_s6, dl_s7
-                dl = tl.where((t // 16)[None, :] == 1, dl1[:, None], dl0[:, None])
-                w = (cb - (132.0 - 4.0 * hb)) * dl.to(tl.bfloat16)
+                dl = tl.where((t // 16)[None, :] == 1, dl1[:, None], dl0[:, None]).to(tl.bfloat16)
+                w = (cb - (132.0 - 4.0 * hb)) * dl
                 x = tl.load(X + rows[:, None] * s_x + kb * 256 + s * 32 + t[None, :],
                             mask=rows[:, None] < M, other=0.0)
                 acc += tl.dot(x, tl.trans(w))
@@ -2005,8 +1936,7 @@ def _cap(tid: int, N: int, K: int) -> int:
 
 
 # (tid, N, K) -> (BN, num_warps, num_stages) on Ada: interleaved-A/B winners over the default
-# launch at M=1 that also held at M=33 (proto/sweep_s3.py + proto/ab_cfg.py). No entry -> the
-# class's built-in default.
+# launch at M=1 that also held at M=33. No entry -> the class's built-in default.
 _GEMM_CFG = {
     (10, 14336, 4096): (32, 4, 1),   # Q2_K
     (11, 14336, 4096): (32, 2, 2),   # Q3_K

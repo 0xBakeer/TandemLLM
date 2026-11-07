@@ -34,6 +34,12 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      before the replay through the server's hook
   11 a long prompt no entry serves although one shares a long head with it: one line says why
      (the end not reached and the alignment refused, no end, the read cost, a line too short)
+  12 SRV-779: a side slot's chat whose pages the KV pool reclaims is written first and comes back
+     on its own slot from that entry, bit for bit, prefilling only its tail
+  13 SRV-E6, the idle backfill: an idle chat is written once (not while busy, not within the
+     interval, only the changed blocks after its next turn), the capture guard only around device
+     steps, idle saves skipped past the write budget while pressure saves go, a resident chat's
+     entry never evicted, and a reclaim of a chat the backfill wrote only trims it
 
 Run: python tests/test_session_spill.py
 """
@@ -867,6 +873,469 @@ def test_fx16_no_entry_served_says_why_in_one_line():
         assert lines == [] and sp.stats["restores"] == 1, (lines, sp.stats)
         t.close()
         return "end_no_align, anchors_below and slow each one line; a served copy none"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 12. a side slot's chat under pressure
+
+S_PROMPT = tokens(64, seed=90) + tokens(70, seed=92)
+
+
+class _Pages:
+    """The KV pool's pages of a side slot's engine for one reclaim (`_kv_reclaim_side`): `trim(0)` gives every row
+    back as the pool's driver does, and what the slot held after it reads as fresh pages (zeros), with its recurrent
+    state and its prefix's anchor and end buffers overwritten too, so whatever comes back was read from the NVMe."""
+
+    def __init__(self, eng, res):
+        self.eng, self.res, self.trims = eng, res, []
+
+    def committed_bytes(self):
+        return sum(t.numel() * t.element_size() for t, _ in cache._kv_views(self.eng, None))
+
+    def trim(self, rows=0):
+        n = self.committed_bytes()
+        self.trims.append(rows)
+        for t, _ in cache._kv_views(self.eng, None):
+            t.zero_()
+        for t in cache.state_now(self.eng):
+            t.fill_(0.5)
+        for pair in [self.res._end_bufs] + list(self.res._free):
+            for t in pair or ():
+                t.fill_(0.25)
+        return n
+
+
+def _side_pool(d):
+    """Slot 0 with its spill and an end alignment of its own; side slot 1 with a resident prefix and an alignment
+    of its own, wired to slot 0's spill as the server wires it at the start (`_side_spills`)."""
+    from server import diskcache, endalign
+    from server import slots as S
+    from test_end_align import tb_of
+    res0 = _state(park_bytes=BIG)
+    sp, t = _spill(d, res0)
+    al0 = endalign.EndAlign(tb_of())
+    diskcache.wire_end_align(sp, al0, res0)
+    vals = {k: None for k in S.OVERLAY}
+    side_res = cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, guest_max=40, guest_frac=1.0, end=True,
+                                    park_bytes=0)
+    vals.update(engine=fresh(), drafter=None, max_len=512, resident=side_res,
+                end_align=endalign.EndAlign(tb_of()))
+    side = S.Slot(1, 512, values=vals)
+    pool = S.Pool([S.Slot(0, 512), side])
+    app.STATE["pool"] = pool
+    assert app._side_spills(sp) == 1 and isinstance(side_res.spiller, app._SideSpill)
+    return sp, t, al0, pool, side, side_res
+
+
+def _on_side(pool, side, ids, n, session):
+    """A turn on side slot 1 as the handler serves it there: the slot taken, bound, the stream, `_remember`; the
+    prefill's logits in `pre["logits"]`."""
+    from server import slots as S
+    s = pool.take_slot(side.index, len(ids) + n, owner=session)
+    assert s is side
+    S.bind(s)
+    got, real = [], cache.prefill
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        got.append(out[0].detach().float().clone())
+        return out
+    cache.prefill = spy
+    try:
+        out, pre, ctx = turn(ids, n, session)
+    finally:
+        cache.prefill = real
+        S.bind(None)
+        pool.release_side(s)
+    pre["logits"] = got[-1]
+    return out, pre
+
+
+def _side_state(side, n):
+    """The side slot's rows below `n`, its end anchor (line and state) and its anchors, cloned."""
+    vals, res = side.values, side.values["resident"]
+    return {"rows": _rows(vals["engine"], n),
+            "end_at": res.end["at"] if res.end is not None else None,
+            "end": tuple(x.clone() for x in res._end_bufs) if res.end is not None else None,
+            "anchors": {b: tuple(x.clone() for x in p) for b, p in res.anchors.items()}}
+
+
+def _same_state(a, b, anchors="equal"):
+    _same_rows(a["rows"], b["rows"])
+    assert a["end_at"] == b["end_at"], (a["end_at"], b["end_at"])
+    for x, y in zip(a["end"], b["end"]):
+        assert torch.equal(x, y)
+    if anchors == "equal":
+        assert sorted(a["anchors"]) == sorted(b["anchors"]), (sorted(a["anchors"]), sorted(b["anchors"]))
+    # the spill keeps the newest anchors (`cfg["anchors"]`): every one that came back is the bytes it was
+    assert a["anchors"] and set(a["anchors"]) <= set(b["anchors"])
+    for k, p in a["anchors"].items():
+        for x, y in zip(p, b["anchors"][k]):
+            assert torch.equal(x, y), k
+
+
+def _pressure_run(d, reclaim: bool, idle: bool = False):
+    """Chat S's turn on side slot 1, then (`reclaim`) the KV pool's reclaim of the idle slot for another slot's
+    admission, then S's next turn, served on its home slot: (the state after the read, the state after turn 2,
+    turn 2's tokens and prefill, the run's objects). `idle` (SRV-E6): the idle backfill writes S first, and the
+    reclaim is the admission's ladder (`_kv_reclaim_idle` over `_add_kv_reclaimers`), short by one byte."""
+    sp, t, al0, pool, side, side_res = _side_pool(d)
+    out1, _ = _on_side(pool, side, S_PROMPT, 60, "S")
+    e = side_res.end["at"]
+    regions = side.values["end_align"].regions(side_res)
+    before = _side_state(side, e)
+    read = {}
+    if reclaim:
+        eng1 = side.values["engine"]
+        if idle:
+            read["idle_saves"] = len(sp.backfill([_Slot(1, side_res, eng1)], now=side_res.t_used + 25))
+        eng1.kv.pages = pages = _Pages(eng1, side_res)
+        try:
+            if idle:
+                from engine import kvpool
+                kp, old = kvpool.KVPool(hard_floor=0, meminfo=lambda: 1 << 40), kvpool.POOL
+                app._add_kv_reclaimers(kp)
+                kvpool.POOL = kp
+                try:
+                    got = app._kv_reclaim_idle({"floor": 1, "after": 0}, "slot0")
+                finally:
+                    kvpool.POOL = old
+            else:
+                got = app._kv_reclaim_side(1, "slot0")
+        finally:
+            eng1.kv.pages = None
+        read["saves_at_reclaim"] = sp.stats["saves"]
+        assert got > 0 and pages.trims == [0] and side_res.valid == 0 and eng1.kv.length == 0
+        assert side.written is not None and side.written["owner"] == "S", side.written
+        entry = sp.entries[side.written["eid"]]
+        read["reclaim_reason"] = entry.man["reason"]
+        assert entry.valid == e and entry.man["end"]["at"] == e
+        assert entry.man["reason"] == ("idle" if idle else "kv_pool")
+        # the regions written are the side slot's own alignment's, not slot 0's
+        assert regions and entry.man["extra"] == {"end_regions": [list(x) for x in regions]}, entry.man["extra"]
+        assert al0.regions(app.STATE["resident"]) == []
+        # its next turn's home: the slot its rows were written from, while it holds no other conversation
+        assert app._spill_home(pool, entry.eid, len(S_PROMPT) + 200, CH) == 1
+        real = sp.restore
+
+        def spy(res, eng, *a, **k):
+            info = real(res, eng, *a, **k)
+            read["state"] = _side_state(side, e)
+            read["regions"] = side.values["end_align"].regions(res)
+            read["info"] = info
+            read["eng"] = eng
+            return info
+        sp.restore = spy
+    try:
+        ids2 = S_PROMPT + out1 + TOOL
+        out2, pre2 = _on_side(pool, side, ids2, 24, "S")
+    finally:
+        sp.__dict__.pop("restore", None)
+    after = _side_state(side, side_res.end["at"])
+    t.close()
+    return before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions)
+
+
+def test_a_side_slots_chat_written_under_pressure_comes_back_at_home_bit_for_bit():
+    """SRV-779 (plan step 3): a chat on side slot 1, its pages reclaimed for another slot's admission (written to
+    the NVMe first through slot 0's spill, `_kv_reclaim_side`), comes back on slot 1 from that entry
+    (`_SideSpill.maybe_restore` into the side engine's buffers): its rows, end anchor and anchors right after the
+    read are the bytes they were before the trim, and the next turn's prefill logits, tokens, rows, end anchor and
+    anchors equal a run whose rows never left."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        ref_before, _, ref_after, ref_out, ref_pre, _, e0, _ = _pressure_run(d, reclaim=False)
+        assert ref_pre["kind"] == "end" and ref_pre["reused"] == e0, ref_pre
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions) = _pressure_run(d, reclaim=True)
+        assert e == e0
+        _same_state(before, ref_before)
+        assert read["eng"] is side.values["engine"], "read into the side engine's own buffers"
+        assert read["info"]["tokens"] == e and read["info"]["end"], read["info"]
+        _same_state(read["state"], before, anchors="kept")       # right after the read: the bytes that were there
+        assert read["regions"] == regions, "its regions back in its own alignment"
+        assert pre2["kind"] == "spill" and pre2["reused"] == e, pre2
+        assert torch.equal(pre2["logits"], ref_pre["logits"]), "next-turn logits bit for bit"
+        assert out2 == ref_out
+        _same_state(after, ref_after, anchors="kept")
+        return (f"{e} rows written, trimmed, read back on slot 1 ({read['info']['blocks_read']} blocks); turn 2's "
+                f"logits and {len(out2)} tokens equal the never-trimmed run")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_side_restore_prefills_only_the_tail():
+    """The restored side chat's next turn forwards what follows its end anchor only (n - line), not its prompt;
+    and once the slot holds rows again its entry names no home there (`_side_home` finds the rows instead)."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        _, read, _, _, pre2, ids2, e, (sp, side, side_res, _) = _pressure_run(d, reclaim=True)
+        line = read["info"]["line"]
+        assert line == e and pre2["reused"] == line, (line, pre2)
+        assert pre2["forwarded"] == len(ids2) - line, pre2
+        eid = side.written["eid"]
+        assert side_res.valid >= CH and app._spill_home(app.STATE["pool"], eid, len(ids2), CH) is None
+        return f"{len(ids2)} tokens, {pre2['forwarded']} forwarded after the line at {line}"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 13. the idle backfill (SRV-E6)
+
+class _Slot:
+    """A slot as the idle backfill sees it (server/app.py `_spill_idle_slots`): its conversation and a lock it takes
+    without waiting; `hold()` makes it busy as a request would."""
+
+    def __init__(self, key, res, eng, drafter=None):
+        import threading
+        self.key, self.res, self.eng, self.drafter = key, res, eng, drafter
+        self.lock = threading.Lock()
+
+    def take(self):
+        return self.lock.acquire(blocking=False)
+
+    def give(self):
+        self.lock.release()
+
+
+def test_idle_backfill_writes_an_idle_chat_once_not_while_busy_nor_within_the_interval():
+    """SRV-E6 (01a0e2d7's backfill, applied to the spill): a conversation idle `idle_s` is written with reason `idle`
+    while its rows stay; not before, not while its slot is busy, not again within `idle_every_s` (nor at all while
+    nothing changed); after its next turn and the interval, only the blocks that changed are written, and a read
+    over the rows in place reads nothing."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        eng = app.STATE["engine"]
+        prompt = tokens(200, seed=74)
+        out1, _, _ = turn(prompt, 30, session="A")
+        n1 = res.valid
+        rows1 = _rows(eng, n1)
+        slot = _Slot(0, res, eng)
+        t1 = res.t_used
+        assert sp.backfill([slot], now=t1 + 5) == [] and sp.stats["saves"] == 0, "idle 5 s: not yet"
+        slot.lock.acquire()
+        assert sp.backfill([slot], now=t1 + 25) == [] and sp.stats["idle"]["busy"] == 1, "busy: skipped"
+        slot.lock.release()
+        first = sp.backfill([slot], now=t1 + 25)
+        assert len(first) == 1 and first[0]["reason"] == "idle" and first[0]["key"] == 0, first
+        e = sp.entries[first[0]["eid"]]
+        assert e.valid == n1 and e.man["reason"] == "idle" and e.man["owner"] == "A"
+        assert res.valid == n1 and not slot.lock.locked(), "the rows stay, the slot is free again"
+        _same_rows(_rows(eng, n1), rows1)
+        assert sp.current(res) is e
+        assert "guard_ms" in first[0] and first[0]["guard_max_ms"] <= first[0]["ms"], first[0]
+        assert sp.backfill([slot], now=t1 + 30) == [] and sp.backfill([slot], now=t1 + 40) == [], \
+            "current on the disk: nothing to write, however long it stays idle"
+        # its next turn, at t1 + 45 on the fake clock: the rows moved, the entry is not current any more
+        out2, _, _ = turn(prompt + out1 + TOOL, 20, session="A")
+        assert sp.current(res) is None
+        res.t_used = t1 + 45
+        assert sp.backfill([slot], now=t1 + 50) == [], "idle 5 s since its last turn: not yet"
+        assert sp.backfill([slot], now=t1 + 84) == [], "idle 39 s, but 59 s after its last idle save"
+        second = sp.backfill([slot], now=t1 + 86)
+        assert len(second) == 1 and second[0]["eid"] == first[0]["eid"], second
+        assert second[0]["blocks_kept"] >= (len(prompt) + len(out1)) // CH - 2, second
+        assert second[0]["blocks_written"] < first[0]["blocks_written"], (first, second)
+        assert sp.stats["saves"] == 2 and sp.stats["idle"]["saves"] == 2
+        info = sp.restore(res, eng, None, sp.entries[second[0]["eid"]])
+        assert info["blocks_read"] == 0, info
+        assert sp.current(res) is sp.entries[second[0]["eid"]], "read back, it is current again"
+        t.close()
+        return (f"{first[0]['blocks_written']} blocks after 20 s idle, then {second[0]['blocks_written']} written "
+                f"and {second[0]['blocks_kept']} kept a turn and a minute later")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_idle_backfill_writes_only_the_newest_copy_of_a_chat_on_several_slots():
+    """2026-11-06 live: one chat on three slots (its home and copies from before a compaction) was written from each
+    in turn into its one entry, every save making the others stale: 4.4 to 4.9 GB a save until the day's write budget
+    was gone. Only the copy used last is written; the older ones are counted (`older_copy`), and another chat on
+    another slot is still written."""
+    import types
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        saved = []
+        sp.save_resident = lambda r, *a, **k: saved.append(r) or {"bytes_written": 1, "eid": "x"}
+        mk = lambda owner, used: types.SimpleNamespace(valid=50_000, _stash=None, t_used=used, owner=owner,  # noqa: E731
+                                                       tokens=list(range(50_000)))
+        old, new, other = mk("chat-A", 100.0), mk("chat-A", 200.0), mk("chat-B", 150.0)
+        slots = [_Slot(1, old, None), _Slot(3, new, None), _Slot(5, other, None)]
+        sp.current = lambda r, deep=False: None
+        got = sp.backfill(slots, now=300.0)
+        assert [s for s in saved] == [new, other], saved
+        assert sorted(g["key"] for g in got) == [3, 5] and sp.stats["idle"]["older_copy"] == 1, (got, sp.stats["idle"])
+        t.close()
+        return "the newest copy and the other chat written, the older copy skipped"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_idle_backfill_holds_the_capture_guard_for_device_steps_only():
+    """SRV-E6: the backfill's save holds `capture_lock.GUARD` around each block's device work, never around a write;
+    it takes the spill's own I/O lock first and skips the pass while another holds it (a pressure save, a read), and
+    a reclaim inside a thread that holds that lock is told `busy` (`io`), never deadlocked."""
+    import threading
+    from engine import capture_lock
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        eng = app.STATE["engine"]
+        turn(tokens(200, seed=75), 30, session="B")
+        slot = _Slot(0, res, eng)
+        seen, real = [], disk_cache.write_file
+        me = threading.get_ident()
+
+        def spy(*a, **k):
+            if threading.get_ident() == me:
+                seen.append(capture_lock.held())
+            return real(*a, **k)
+        # the spill's I/O held by another thread: the pass waits for nothing and writes nothing
+        got = threading.Event()
+        free = threading.Event()
+
+        def holder():
+            with sp.io() as ok:
+                assert ok
+                got.set()
+                free.wait(10)
+        th = threading.Thread(target=holder)
+        th.start()
+        got.wait(10)
+        assert sp.backfill([slot], now=res.t_used + 25) == [] and sp.stats["idle"]["spill_busy"] == 1
+        free.set()
+        th.join()
+        assert not slot.lock.locked()
+        spill.dc.write_file = spy
+        try:
+            out = sp.backfill([slot], now=res.t_used + 25)
+        finally:
+            spill.dc.write_file = real
+        assert len(out) == 1 and seen and not any(seen), seen     # the anchors' writes on the saver's own thread
+        assert not capture_lock.held()
+        # inside the spill's I/O (a restore's page gate): a pressure save is `busy`, no deadlock
+        app.STATE["spill"] = sp
+        res2 = cache.ResidentPrefix(BIG, CH, end=True)
+        res2.valid, res2.owner, res2._stash = 10 ** 6, "x", None
+        with sp.io() as ok:
+            assert ok
+            with sp.io(0) as again:
+                assert again is False
+            assert app._write_rows(res2, eng, None, "kv_pool", 0.0) == (None, "busy")
+        t.close()
+        return f"{len(seen)} writes on the saver's thread, none under the guard; a held spill skips the pass"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_past_the_write_budget_idle_saves_are_skipped_and_counted_pressure_saves_still_go():
+    """SRV-E6 under SRV-273's guard: past the day's budget an idle save is refused (`refused.write_budget`, the
+    guard's `spill:idle` skip, the backfill's own count) and asked again only after `idle_every_s`; a pressure save
+    of the same conversation (`kv_pool`, the KV pool's reclaim) still goes, as an eviction of a long one does."""
+    d = tempfile.mkdtemp(prefix="qse-guard-")
+    old_big = disk_cache.GUARD_BIG_TOKENS
+    try:
+        os.makedirs(os.path.join(d, "g"), exist_ok=True)
+        g = disk_cache.WriteGuard(os.path.join(d, "g"), budget_gb=1.0)
+        g.add(int(1.2 * disk_cache.GB), "tier")
+        res = _state()
+        sp, t = _spill(d, res)
+        sp.guard = g
+        eng = app.STATE["engine"]
+        turn(tokens(200, seed=76), 30, session="C")
+        disk_cache.GUARD_BIG_TOKENS = 128                     # the random model's chat counts as a long one
+        slot = _Slot(3, res, eng)
+        now = res.t_used + 25
+        assert sp.backfill([slot], now=now) == []
+        assert sp.stats["idle"]["refused"] == {"write_budget": 1}, sp.stats["idle"]
+        assert sp.stats["refused"]["write_budget"] == 1 and g.report()["skipped_today"] == {"spill:idle": 1}
+        assert sp.backfill([slot], now=now + 30) == [] and sp.stats["idle"]["refused"]["write_budget"] == 1, \
+            "asked again only after the interval"
+        assert sp.backfill([slot], now=now + 61) == [] and sp.stats["idle"]["refused"]["write_budget"] == 2
+        assert not sp.entries
+        info, why = app._write_rows(res, eng, None, "kv_pool")
+        assert why is None and info["blocks_written"] > 0 and info["reason"] == "kv_pool", (info, why)
+        assert sp.current(res) is not None
+        assert g.allow("spill", "kv_pool", 128) and not g.allow("spill", "kv_pool", 127)
+        g.add(int(0.4 * disk_cache.GB), "spill")              # past 1.5 budgets: only the drain
+        assert not g.allow("spill", "kv_pool", 10 ** 6) and g.allow("spill", "drain", 10)
+        t.close()
+        return "idle refused twice in 61 s (counted), the kv_pool save of the same chat written"
+    finally:
+        disk_cache.GUARD_BIG_TOKENS = old_big
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_save_never_evicts_the_entry_of_a_chat_still_in_ram():
+    """SRV-271's minimum slice: with every idle chat on the disk, least recently used alone would evict the entry of a
+    chat a slot still holds. A save's sweep keeps every resident conversation's entry (`residents`): the new save is
+    refused for room instead; once that chat leaves the slot, its entry may go."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        sp, t, al0, pool, side, side_res = _side_pool(d)
+        res0, eng0 = app.STATE["resident"], app.STATE["engine"]
+        turn(tokens(150, seed=77), 30, session="A")             # chat A on slot 0
+        a = sp.save_resident(res0, eng0, None, "idle")
+        _on_side(pool, side, S_PROMPT, 40, "S")                   # chat S on side slot 1
+        sp.cfg["budget_gb"] = (a["bytes"] * 1.5) / disk_cache.GB  # room for one of them
+        sp.residents = lambda: [res0, side_res]
+        assert sp.save_resident(side_res, side.values["engine"], None, "idle") is None
+        assert sp.stats["refused"].get("room") == 1 and a["eid"] in sp.entries, "A's entry stays while A is in RAM"
+        res0.clear()                                              # A leaves slot 0
+        s = sp.save_resident(side_res, side.values["engine"], None, "idle")
+        assert s is not None and a["eid"] not in sp.entries and sp.stats["evicted"].get("budget") == 1
+        t.close()
+        return "S refused while A was resident; written, evicting A's entry, once A left"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_pressure_reclaim_of_an_idle_chat_already_written_only_trims():
+    """SRV-E6 + SRV-779: chat S on side slot 1 is written by the idle backfill; the KV pool's reclaim then takes its
+    pages at the `written_side` level without a save (no save is counted, the line says `written=true ms=0`), and
+    S's next turn comes back on slot 1 from that entry with the rows, end anchor, logits and tokens of a run whose
+    rows never left. A turn that changes S makes it unwritten again: the `written_side` level then takes nothing."""
+    import contextlib
+    import io
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        ref_before, _, ref_after, ref_out, ref_pre, _, e0, _ = _pressure_run(d, reclaim=False)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        lines = io.StringIO()
+        with contextlib.redirect_stdout(lines):
+            before, read, after, out2, pre2, ids2, e, (sp, side, side_res, regions) = _pressure_run(
+                d, reclaim=True, idle=True)
+        assert e == e0
+        assert read["saves_at_reclaim"] == 1 and read["idle_saves"] == 1, read
+        assert read["reclaim_reason"] == "idle", "the entry the reclaim found is the backfill's"
+        got = [s for s in lines.getvalue().splitlines() if s.startswith("[kv-pool] reclaim for admission")]
+        assert len(got) == 1 and " level=written_side " in got[0] and got[0].endswith(" written=true ms=0") \
+            and "victim=slot1 " in got[0], got
+        _same_state(read["state"], before, anchors="kept")
+        assert pre2["kind"] == "spill" and pre2["reused"] == e, pre2
+        assert torch.equal(pre2["logits"], ref_pre["logits"]) and out2 == ref_out
+        _same_state(after, ref_after, anchors="kept")
+        # S's turn moved its rows: not current, nothing for the written level
+        assert sp.current(side_res) is None
+        eng1 = side.values["engine"]
+        eng1.kv.pages = _Pages(eng1, side_res)
+        try:
+            assert app._kv_reclaim_written(1, "slot0") == 0 and side_res.valid > 0
+        finally:
+            eng1.kv.pages = None
+        return f"{e} rows written idle, trimmed with no save, read back on slot 1: same logits and {len(out2)} tokens"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

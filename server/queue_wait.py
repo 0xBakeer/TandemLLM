@@ -210,6 +210,14 @@ def comment(pos: int, eta: float | None, waited: float) -> bytes:
     return f": waiting, position {int(pos)}{tail}, {waited:.0f} s so far\n\n".encode()
 
 
+def mem_comment(pos: int, short_gib: float, waited: float, left: float) -> bytes:
+    """SRV-787: the SSE comment a stream waiting for memory gets every `MEM_LINE_EVERY_S` (server/app.py): its place,
+    how short memory is, the time waited and when the wait ends. It keeps a client's idle-read timer from closing
+    the connection while nothing else is sent (chatd's `READ_TIMEOUT_S` cut a 128k turn after 900 s, 2026-11-05)."""
+    return (f": waiting for memory, position {int(pos)}, {max(0.0, short_gib):.1f} GiB short, {waited:.0f} s so "
+            f"far, refused in {max(0.0, left):.0f} s unless memory frees\n\n").encode()
+
+
 def own_eta_ms(rows: int, rate: float | None, *, free: bool, ahead_rows: int = 0,
                holder_ms: float | None = 0.0, turn_ms: float = 0.0) -> float | None:
     """SPD-249: when a raw internal question of `rows` prompt rows (the router's Qwen stage) has

@@ -89,6 +89,7 @@ class _Mem:
     def __init__(self, peak, reserved, per_token=cache.WORKSPACE_PER_TOKEN):
         self.peak, self._r, self.ws_floor, self.ws_per_token = peak, reserved, \
             cache.WORKSPACE_FLOOR, per_token
+        self.ceiling, self.slack, self.ws_now = peak, 0, 0       # SRV-787: what `_par_growth` reads
 
     def memory(self):
         return self._r, self._r
@@ -130,7 +131,8 @@ def test_3_the_need_and_the_engines_room():
     app.STATE["mem"] = _Mem(peak=int(84.6 * GiB), reserved=int(77.4 * GiB))
     app.STATE["state_store"] = types.SimpleNamespace(budget=int(10 * GiB), bytes=int(2 * GiB),
                                                      max_entry=GiB)
-    assert app._par_growth() == 8 * GiB                      # the caches' budgets left
+    # the caches' budgets left (8), at most what the policy lets them allocate under its ceiling (SRV-787)
+    assert abs(app._par_growth() - int(7.2 * GiB)) < GiB // 100
     assert abs(app._par_room() - int(7.2 * GiB)) < GiB // 100  # the engine's room to its peak
     # FX7's live case on MemAvailable 25.0, growth 6.6, in flight 2.1, need 2.1 ->
     # 14.1 (< 15): the 576-token request waited 63 s. Now its need is its workspace and the

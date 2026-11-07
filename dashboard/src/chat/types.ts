@@ -475,6 +475,8 @@ export interface ChatSettings {
   max_steps: number;
   /** 'on' = the internet without the LAN; see SandboxStatus.network */
   sandbox_network: 'off' | 'on';
+  /** the chat's priority for the engine's memory: who waits first when it is tight; absent = normal */
+  priority?: 'high' | 'normal' | 'low';
   /** SRV-363: the model reads and plans, changes nothing, until the plan is approved */
   plan_mode?: boolean;
   /** who approves a tool call (chat/permission.ts); absent on an older server = auto */

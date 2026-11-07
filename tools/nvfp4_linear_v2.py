@@ -229,7 +229,7 @@ def use_v2(M: int) -> bool:
         return False
     if V2 == "all":
         return True
-    if V2 is None and not _hw_v2():
+    if not _hw_v2():
         return False
     return V2_MIN <= M <= V2_MAX
 

@@ -1479,6 +1479,9 @@ WRITE_BUDGET_GB = 200.0
 #: more than a minute of prefill); under the hard line only a planned stop's drain goes
 GUARD_BIG_TOKENS = 32768
 GUARD_HARD = 1.5
+#: the spill's reasons the guard lets through past the budget (not past `GUARD_HARD`) for a conversation of at
+#: least `GUARD_BIG_TOKENS`: it leaves the RAM now, and unwritten it is read again from its start
+GUARD_EVICTIONS = ("evict", "switch", "kv_pool")
 
 
 class WriteGuard:
@@ -1491,7 +1494,9 @@ class WriteGuard:
     day the tier writes nothing and the spill writes only a planned stop's drain and evictions of
     conversations of at least `GUARD_BIG_TOKENS`; past `GUARD_HARD` times the budget only the
     drain. Each skip is counted and logged. The day's count survives a restart (`writes.json`
-    beside the tier, written at most once a minute and at close)."""
+    beside the tier, written at most once a minute and at close). SRV-E6: the KV pool's save of a
+    conversation whose pages it takes (`kv_pool`) is an eviction here; the idle backfill's
+    (`idle`) is optional, so past the budget it stops first."""
 
     def __init__(self, root: str, budget_gb: float = WRITE_BUDGET_GB, clock=time.time,
                  on_event=None):
@@ -1546,7 +1551,7 @@ class WriteGuard:
             return True
         hard = used >= GUARD_HARD * self.budget
         ok = (who == "spill" and (reason == "drain" or
-                                  (not hard and reason in ("evict", "switch")
+                                  (not hard and reason in GUARD_EVICTIONS
                                    and tokens >= GUARD_BIG_TOKENS)))
         if not ok:
             key = f"{who}:{reason or '-'}"

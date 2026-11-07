@@ -2,7 +2,9 @@
 `chatd.service.Service`.
 
 PLAN MODE is a chat setting (`plan_mode`). The model may use the read tools (read_file, glob, grep,
-web_search, web_fetch, the library, present) and `todo_write`; it gets a line on the turn's user
+web_search, web_fetch, the library, present), `todo_write`, and a tool that says it changes
+nothing: an MCP tool marked `readOnlyHint`, an Open WebUI tool with no network or process import
+(`Tool.side_effects` False, the same test auto mode uses); it gets a line on the turn's user
 message that asks for a plan and no changes (`plan_onto`), and effort high unless the chat chose
 more: on our engine as high's reasoning cap, the chat's effort word unchanged (the template renders
 the word in the system turn; chatd/agent.py `plan_effort`). A call to any other tool is refused with "plan mode: read tools only" and the run goes on.

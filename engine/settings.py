@@ -462,6 +462,13 @@ KNOBS: dict[str, tuple] = {
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =
     # weights rounded to fp16 on the tensor cores
     'FN_PREFILL_MM': ('fp32', 'tools/fn_prefill_kernels.py'),
+    # 1: the indexer's top-k past 8,192 blocks (contexts > 32k) on the torch sort, not the radix-select kernel
+    'FN_QSA_TORCH_BIG': ('0', 'tools/fn_seq_kernels.py'),
+    # 1: the indexer's block scores keep the torch relu, head sum, scale and mask, not the fused epilogue
+    'FN_QSA_EPI_TORCH': ('0', 'tools/fn_prefill_kernels.py'),
+    # unread prompt rows the MTP head reads at most, in a turn the whole backlog would make plain (0: all);
+    # older rows stay unread
+    'MTP_BACKLOG_CAP': ('2048', 'engine/methods/mtp_drafter.py'),
     # GEMVs of few output rows (mixer down, router, GDN a/b) with each row's K split over the warps of a
     # CTA (more loads in flight); sets their summation order, so a build keeps one value
     'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),

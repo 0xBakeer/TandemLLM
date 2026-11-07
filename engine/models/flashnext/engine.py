@@ -106,6 +106,10 @@ JG_CUTS = (2, 10, 22, 34)
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
 PREFILL_CHUNK = int(_S.get("FN_PREFILL_CHUNK"))
+#: the prefill's rows a tile of the indexer's scores and select (`_attn_pre`): a multiple of the scores' 1,024-row
+#: GEMM block, so a tile's products are the whole chunk's; and the tokens a tile of the PLE decode (`_ple_pre`)
+QSA_TILE = 1024
+PLE_DECODE_TOKENS = 512
 
 
 class ClassError(RuntimeError):
@@ -590,9 +594,16 @@ class FlashNextEngine(FlashNextRef):
             SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], P["cos"],
                         P["sin"], c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
         if cls:
-            sc = PK.qsa_scores_rows(iq, st.pool[li], P["nblk"], cls)
-            SK.qsa_select(sc, P["tail"], P["sel"])
-            del sc
+            pool = st.pool[li][:P["pool"][1]] if _S.get("FN_QSA_LIVE") == "1" else st.pool[li]
+            # in tiles of QSA_TILE rows: a chunk's scores are [rows, class] fp32 (1.07 GiB for 4,096 rows at 65,536
+            # blocks, beside the products of each 1,024-row block), a tile's a quarter of it. The scores' GEMMs run
+            # in blocks of 1,024 rows either way (`qsa_scores_rows`) and the select is a row's own, so the tiles'
+            # arithmetic is the whole call's (measured 2026-11-06 at 200k: the chunk's peak 4.2 -> 2.7 GiB)
+            for r0 in range(0, x.shape[0], QSA_TILE):
+                r1 = min(x.shape[0], r0 + QSA_TILE)
+                sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls)
+                SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
+                del sc
         o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
         y = K.gate_mul(o, qkv, c.head_dim)
         return self.lin(y, self.W[p + "o_proj.weight"])
@@ -653,7 +664,13 @@ class FlashNextEngine(FlashNextRef):
         ids = self.ple_ids(tokens, li, st).reshape(-1).numpy()
         packed = torch.from_numpy(tab.rows_of(ids)).to(self.device)
         heads = torch.from_numpy(np.searchsorted(tab.offsets_np, ids, side="right") - 1).to(self.device)
-        emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(T, -1)
+        # the decode in tiles of PLE_DECODE_TOKENS tokens' rows: its bit streams are int32 [rows, 160 K, 16]
+        # (2.2 GiB for a 4,096-token chunk, the chunk's largest allocation below 131k of context). A row decodes
+        # alone (integer ops, one multiply and add an element), so the tiles' rows are the whole call's
+        step = max(1, PLE_DECODE_TOKENS * (packed.shape[0] // max(1, T)))
+        emb = torch.cat([decode_rows(packed[r0:r0 + step], heads[r0:r0 + step], pd["bias"], tab.K,
+                                     pd["codebook"]).to(self.dtype)
+                         for r0 in range(0, packed.shape[0], step)]).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
         val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)
         qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)

@@ -41,7 +41,7 @@ from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
 from engine.settings import SETTINGS as _S
 from engine.models.flashnext import coupled as CP
-from engine.models.flashnext.engine import (CAPTURE_ROWS, PREFILL_CHUNK, CommitGraph, DecodeGraph, FlashNextEngine,
+from engine.models.flashnext.engine import (CAPTURE_ROWS, PREFILL_CHUNK, QSA_TILE, CommitGraph, DecodeGraph, FlashNextEngine,
                                             VerifyGraph, _state_restore, _state_saved)
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
@@ -269,9 +269,14 @@ class FlashNextCacheState(SectionState):
 WS_LINE_FLOOR, WS_LINE_ROW, WS_CAP = int(2.75 * (1 << 30)), 76_309, int(10.75 * (1 << 30))
 #: SRV-773: the workspace by forwarded rows and context class (`_workspace_rows`), measured 2026-11-02 (`cost`): one
 #: chunk of FN_PREFILL_CHUNK rows takes `A + B x T + D x T x class` for its T rows, every forwarded row its streams
-WS_CHUNK_A = int(0.25 * (1 << 30))     # fit 0.180 GiB
-WS_ROW_B = 176_000                     # a row: the chunk's activations, q/k/v, MoE buffers, slabs (fit 170,274)
-WS_ROW_CLASS_D = 32                    # a row and a class block: the indexer's scores, [T, class] fp32 (fit 29.9)
+#: 2026-11-06, after the indexer's scores and the PLE decode went into row tiles (engine.py `QSA_TILE`): raw requests
+#: alone on the Spark, 20 rows from 6.7k to 255k of context (`FN_RESUMED_1106`, tests/test_budget.py). A tail of
+#: 4,406 to 4,652 rows peaks at 2.18 to 2.65 GiB at every context from 112k to 255k (8.36 GiB at 138k before), one of
+#: 1,094 to 1,156 rows at 0.95 to 1.51, 266 to 282 rows at 0.26 to 0.47, 14 rows at 0.10 to 0.13. The class's term
+#: counts a tile's rows only: its scores are [tile, class] fp32 and each 1,024-row block's products [4 x 1,024, blocks]
+WS_CHUNK_A = int(0.25 * (1 << 30))
+WS_ROW_B = 400_000                     # a row: the chunk's activations, q/k/v, MoE buffers, slabs, the PLE rows
+WS_ROW_CLASS_D = 24                    # a tile's row and a class block: the indexer's scores and products (19 measured)
 WS_STACK_ROW = 20_480                  # a row's streams: `prompt_stack`, hc_count 4 x hidden 2,560 bf16 (the config)
 WS_FLOOR_1, WS_ADD_1 = int(0.75 * (1 << 30)), int(0.5 * (1 << 30))    # a resumed chunk or less: its floor, its margin
 WS_ADD_N = 1 << 30                     # more than a chunk: the margin (the streams' cat copy)
@@ -425,13 +430,16 @@ class FlashNextServing:
 
         def chunk(t: int) -> int:
             t = min(int(t), PREFILL_CHUNK)
-            return WS_CHUNK_A + WS_ROW_B * t + WS_ROW_CLASS_D * t * cls
+            return WS_CHUNK_A + WS_ROW_B * t + WS_ROW_CLASS_D * min(t, QSA_TILE) * cls
         if r <= PREFILL_CHUNK and (r < n or not line):
             ws = max(WS_FLOOR_1, int(WS_MARGIN * (chunk(r) + WS_STACK_ROW * r)) + WS_ADD_1)
         else:
-            ws = int(WS_MARGIN * (chunk(PREFILL_CHUNK) + WS_STACK_ROW * r)) + WS_ADD_N
+            ws = int(WS_MARGIN * (chunk(r) + WS_STACK_ROW * r)) + WS_ADD_N
             if line:
-                ws = max(min(max(WS_LINE_FLOOR, WS_LINE_ROW * n), WS_CAP), ws)
+                # a cold prompt: the whole context's line. A resumed forward of more than a chunk: the line of its
+                # rows (2026-11-06: 22,262 rows at 134k took 2.56 GiB, 61,050 at 201k 3.77, 41,417 at 249k 3.46,
+                # each charged the context's 10.75)
+                ws = max(min(max(WS_LINE_FLOOR, WS_LINE_ROW * (n if r == n else r)), WS_CAP), ws)
         return min(ws, WS_CAP)
 
     def manifest(self) -> Manifest:

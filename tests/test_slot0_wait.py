@@ -28,6 +28,7 @@ import os
 import sys
 import threading
 import time
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_par_continue import HEAD, FakeResident, _need, _restore, _session, _setup, _turns  # noqa: E402,I001
@@ -45,7 +46,7 @@ class FakeSpill:
         self.stats = {}
 
     def candidate(self, res, keys, max_len, **kw):
-        return (object(), self.line, 0)
+        return (types.SimpleNamespace(eid="e1"), self.line, 0)
 
 
 @contextlib.contextmanager
@@ -105,6 +106,40 @@ def test_a_spilled_conversation_tries_slot_0_first():
     finally:
         A._conv_start = real
         _restore(saved)
+
+
+def test_srv779_a_side_chat_written_under_pressure_goes_home_not_to_slot_0():
+    """SRV-779: the entry was written from side slot 1 before its rows went (`Slot.written`) and the slot holds no
+    other conversation: the turn goes home to slot 1, which reads it back (`_SideSpill`), no slot 0 first. Once the
+    slot holds another conversation, or reads no spill, the turn tries slot 0 first as before."""
+    ids, conv = _owui_new_chat()
+    ids = ids + [5_000_000 + i for i in range(3_000)]
+    pool, saved = _setup(FakeResident(_session(1, HEAD, 3_000)))
+    side = pool.slots[1]
+    other = FakeResident(_session(7, HEAD, 3_000))
+    other.spiller = object()
+    empty = FakeResident([])
+    empty.spiller = object()
+    side.values = {k: None for k in S.OVERLAY}
+    side.values["resident"] = empty
+    side.written = {"eid": "e1", "owner": "c:chat"}
+    real = A._conv_start
+    A._conv_start = lambda ids_: conv
+    try:
+        with _spill(FakeSpill(line=conv + 2_048)):
+            need, why = _need(ids, max_new=32_768, plan_active=False)
+            assert why["wait"] == "spill" and why["home"] == 1 and why["home_share"] == 0, why
+            assert why["spill_home"] and "slot0_first" not in why, why
+            side.values["resident"] = other                             # another chat on slot 1 since
+            _, why = _need(ids, max_new=32_768, plan_active=False)
+            assert "home" not in why and why["slot0_first"], why
+            side.values["resident"] = FakeResident([])                  # no spill on the side slot
+            _, why = _need(ids, max_new=32_768, plan_active=False)
+            assert "home" not in why and why["slot0_first"], why
+    finally:
+        A._conv_start = real
+        _restore(saved)
+    return "home slot 1 (rows 0, read back there); slot 0 first once slot 1 holds another chat"
 
 
 def test_a_continuing_turn_gets_its_side_window_with_slot_0_first():

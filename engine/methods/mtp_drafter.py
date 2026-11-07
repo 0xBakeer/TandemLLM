@@ -51,6 +51,7 @@ import torch
 
 from engine.drafters import run_steps
 from engine.methods.staircut import StairCut
+from engine.settings import SETTINGS as _S
 from engine.tree import DraftTree
 
 
@@ -440,12 +441,19 @@ class MTPTreeDrafter:
         it has not read (past rows a plain turn skipped), then StairCut decides whether the turn drafts;
         a plain turn drops the backlog."""
         unfed = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0)
-        at = max(0, n - 1 - unfed)
-        if self.head.st.length < at:
-            self.head.resume(at)
         # the graphs this class lacks: captured by the engine while the server is idle, so a turn that
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
+        # MTP_BACKLOG_CAP: trimmed only where the whole backlog would make the turn plain; a turn that drafts
+        # with it keeps it
+        cap = int(_S.get("MTP_BACKLOG_CAP"))
+        if (cap > 0 and self.head.depth and self.lanes <= 1 and unfed > cap
+                and not self.cut.pays(self.cls, unfed, self.answer, extra)):
+            self._trim_backlog(cap)
+            unfed = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0)
+        at = max(0, n - 1 - unfed)
+        if self.head.st.length < at:
+            self.head.resume(at)
         # no draft head: no backlog to read into it, and each round's match decides (above)
         # the decision's inputs, for the request's line (a plain turn whose reason is not seen cannot be argued)
         c = self.cut
@@ -459,6 +467,22 @@ class MTPTreeDrafter:
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
+
+    def _trim_backlog(self, cap: int) -> None:
+        """MTP_BACKLOG_CAP: only the last `cap` unread rows go into the head; the older ones stay unread, as a
+        plain turn leaves its rows (the drafts are verified, so the text does not change, only what they match)."""
+        drop = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0) - cap
+        while drop > 0 and self.queue:
+            rows, nexts = self.queue[0]
+            if len(nexts) <= drop:
+                self.queue.pop(0)
+                drop -= len(nexts)
+            else:
+                self.queue[0] = (rows[drop:], nexts[drop:])
+                drop = 0
+        if drop > 0 and self.held is not None:
+            ht, hs = self.held
+            self.held = (ht[drop:], hs[drop:])
 
     def _mtp_look(self, context: list[int]) -> tuple | None:
         """A draft head's round: the lookup (`_look`), or None when the lookup backoff skips it (`mtp_look_backoff`: a

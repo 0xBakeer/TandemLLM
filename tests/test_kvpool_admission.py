@@ -10,7 +10,13 @@ memory as the dashboard sees it.
     out, and the report counts them (`waiting_memory`);
   * the parallel view shows a held request's lane as `waiting_memory` with the label "waiting for
     memory", counts it in `totals.waiting_memory` and `waiting`, never in `decoding`;
-  * the contract schema knows the new state and the new total.
+  * the contract schema knows the new state and the new total;
+  * SRV-779: an idle side conversation is written to the NVMe before its pages go (one the day's write
+    budget refuses waits for the last level), the turn that just ended goes last, and each reclaim line
+    names its victim; a lane that gives way on a side slot is written first too;
+  * SRV-E6: the admission's ladder runs the pool's levels in order (the caches first, then the side
+    conversations already current on the NVMe, trimmed without a save), stops at what it is short,
+    does nothing when the admission passes, and logs each level with its bytes and ms.
 
 Run: python tests/test_kvpool_admission.py
 """
@@ -97,6 +103,103 @@ def test_waiters_keep_their_order_and_are_counted():
     assert adm.report()["waiting_memory"] == 0
 
 
+def test_the_line_for_memory_is_by_the_chats_priority_then_arrival_and_a_waiter_ages():
+    """A chat's priority (`tandem.priority`: low 0, normal 1, high 2) orders the requests that wait for memory, then
+    their arrival. A waiter counts one step higher for every `WAIT_AGE_S` waited, so a low one is not passed for
+    ever; a lane put at the head (`first`) stays before every priority; a new request sees whether a higher one
+    waits (`outranked`) and how many are ahead of it for their priority (`ahead_higher`)."""
+    app = _app()
+    adm = _adm(10)
+    assert adm.wait("low", 0) == 1 and adm.wait("n1", 1) == 1 and adm.wait("low", 0) == 2
+    assert adm.wait("n2", 1) == 2 and adm.wait("high", 2) == 1
+    assert [adm.wait(k) for k in ("high", "n1", "n2", "low")] == [1, 2, 3, 4], "asking again keeps the priority"
+    assert [adm.ahead_higher(k) for k in ("high", "n1", "n2", "low")] == [0, 1, 1, 3]
+    assert adm.outranked(1) and adm.outranked(0) and not adm.outranked(2)
+    adm.waiting["low"] -= 2 * slots.WAIT_AGE_S + 1                      # it has waited an hour
+    assert [adm.wait(k) for k in ("low", "high", "n1", "n2")] == [1, 2, 3, 4], "aged two steps: before the high one"
+    adm.first("n2")
+    assert adm.wait("n2") == 1 and adm.wait("low") == 2
+    assert adm.outranked(2), "a lane at the head is before a high one too"
+    adm.release("high")
+    adm.unwait("low")
+    adm.unwait("n2")
+    assert set(adm.prio) == {"n1"} and not adm.outranked(1) and adm.outranked(0)
+    assert [app._priority_of(b) for b in ({"tandem": {"priority": "high"}}, {"tandem": {"priority": "low"}},
+                                          {"tandem": {"priority": "normal"}}, {"tandem": {"priority": 7}},
+                                          {"tandem": None}, {}, None)] == [2, 0, 1, 1, 1, 1, 1]
+
+
+def test_the_pools_reclaim_takes_the_idle_conversations_of_lower_priority_chats_first():
+    """The idle side slots give their conversations back in the order of their chats' priority (kept on the slot
+    by `_par_admit`): a low one first, a high one last, whatever their ages."""
+    import types
+    app = _app()
+
+    def side(i, prio=None):
+        trims = []
+        pages = types.SimpleNamespace(committed_bytes=lambda: GiB, trim=lambda n: trims.append(n) or GiB)
+        s = slots.Slot(i, 262_144, values={"engine": types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages, length=9)), "resident": None})
+        if prio is not None:
+            s.prio = prio
+        return s, trims
+    (high, th), (low, tl), (norm, tn) = side(1, 2), side(2, 0), side(3)
+    saved = app.STATE.get("pool")
+    try:
+        app.STATE["pool"] = slots.Pool([slots.Slot(0, 262_144), high, low, norm])
+        assert app._kv_reclaim_side(GiB, "slot0") == GiB and (th, tl, tn) == ([], [0], [])
+        assert app._kv_reclaim_side(2 * GiB, "slot0") == 2 * GiB and (th, tl, tn) == ([], [0, 0], [0])
+        assert app._kv_reclaim_side(3 * GiB, "slot0") == 3 * GiB and th == [0], "a high one too, last"
+    finally:
+        if saved is None:
+            app.STATE.pop("pool", None)
+        else:
+            app.STATE["pool"] = saved
+
+
+def test_an_older_copy_of_a_chat_goes_first_and_is_never_written():
+    """2026-11-06 live: after three compactions two copies of 217k and 218k rows, of chats that lived on other slots
+    by then, held 12.3 GiB of KV. A slot whose conversation is an older copy of a chat (the chat's newest rows are on
+    another slot) goes before every other idle conversation, at the level that takes only written ones too, and its
+    rows are not written: the save would write over the chat's one NVMe entry."""
+    import types
+    app = _app()
+    writes = []
+
+    def side(i, owner, used, prio=None):
+        trims = []
+        pages = types.SimpleNamespace(committed_bytes=lambda: GiB, trim=lambda n: trims.append(n) or GiB)
+        res = types.SimpleNamespace(owner=owner, valid=200_000, t_used=used, _stash=None, clear=lambda: None)
+        s = slots.Slot(i, 262_144, values={"engine": types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages, length=9)), "resident": res, "drafter": None})
+        if prio is not None:
+            s.prio = prio
+        return s, trims, res
+    (old, t_old, r_old), (new, t_new, r_new), (other, t_other, r_other) = (
+        side(1, "chat-A", 100.0, prio=2), side(2, "chat-A", 500.0), side(3, "chat-B", 50.0, prio=0))
+    saved = {k: app.STATE.get(k) for k in ("pool", "resident", "spill")}
+    was = app._write_rows
+    app._write_rows = lambda res, eng, drafter, reason, wait_s: writes.append(res) or ({"eid": "e1"}, None)
+    try:
+        app.STATE["pool"] = slots.Pool([slots.Slot(0, 262_144), old, new, other])
+        app.STATE["resident"], app.STATE["spill"] = None, None
+        assert app._newer_copies() == {"chat-A": (500.0, 2), "chat-B": (50.0, 3)}
+        assert app._kv_reclaim_written(GiB, "slot0") == GiB, "the level of the written ones takes it"
+        assert (t_old, t_new, t_other) == ([0], [], []) and writes == [], "the older copy, not written"
+        assert app._RECLAIM.victims[0]["why"] == "older_copy" and app._RECLAIM.victims[0]["written"] is False
+        t_old.clear()
+        assert app._kv_reclaim_side(2 * GiB, "slot0") == 2 * GiB
+        assert t_old == [0] and t_other == [0] and t_new == [] and writes == [r_other], \
+            "the older copy first (high priority or not), then the low chat's, written; the chat's newest stays"
+    finally:
+        app._write_rows = was
+        for k, v in saved.items():
+            if v is None:
+                app.STATE.pop(k, None)
+            else:
+                app.STATE[k] = v
+
+
 def test_describe_names_the_kv_pages():
     adm = _adm(30)
     adm.reserve("a", 4 * GiB, kv=3 * GiB, owner="s1")
@@ -169,7 +272,11 @@ def test_a_non_streamed_wait_ends_in_a_readable_503():
     assert 1.4 < time.monotonic() - t0 < 4.0
     code, body, hdr = h.sent
     assert code == 503 and body["error"]["code"] == "memory_wait_timeout", body
-    assert "memory is almost full" in body["error"]["message"] and hdr.get("Retry-After") == "30"
+    # SRV-787: the reason in words (it said "memory is almost full; 1 request(s) are running")
+    assert body["error"]["message"].startswith("Memory stayed full for "), body
+    assert " so this turn did not start (needed " in body["error"]["message"], body
+    assert body["error"]["message"].endswith(" free above the guard). Continue tries again; a shorter conversation "
+                                             "or fewer chats at once needs less.") and hdr.get("Retry-After") == "30"
     assert rec.wait_reason == "memory" and rec.waiting_memory is False
     assert said and said[0][1] == 1, said              # the line, with its place in line
     assert adm.stats["timeouts"] == 1 and adm.report()["waiting_memory"] == 0
@@ -203,6 +310,8 @@ def test_a_streamed_wait_outlasts_the_queue_timeout():
 
 
 def test_admission_takes_back_idle_conversations_before_it_waits():
+    """SRV-E6: the caches' level runs here too now (it gives the allocator's free blocks back, which the admission's
+    sum never counted), first; the rest as before."""
     app = _app()
     from engine import kvpool
     calls = []
@@ -214,11 +323,12 @@ def test_admission_takes_back_idle_conversations_before_it_waits():
     kvpool.POOL = pool
     try:
         got = app._kv_reclaim_idle({"floor": 15 * GiB, "after": 10 * GiB}, "slot2")
-        assert got == 7 * GiB, got
-        assert calls == [("idle_side", 5 * GiB, "slot2"), ("idle_slot0", 2 * GiB, "slot2")], calls
+        assert got == 8 * GiB, got
+        assert calls == [("caches", 5 * GiB), ("idle_side", 4 * GiB, "slot2"),
+                         ("idle_slot0", GiB, "slot2")], calls
         calls.clear()
-        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": 13 * GiB}, "slot1") == 3 * GiB
-        assert [c[0] for c in calls] == ["idle_side"], "stops once enough came back"
+        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": 13 * GiB}, "slot1") == 4 * GiB
+        assert [c[0] for c in calls] == ["caches", "idle_side"], "stops once enough came back"
         assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": None}, "slot1") == 0
     finally:
         kvpool.POOL = old
@@ -924,6 +1034,427 @@ def test_srv773_the_served_prompts_end_is_held_after_the_routers_notes():
     return "gate on the client's tokens: no hold; on the served prompt: held until the prefill"
 
 
+def test_srv787_the_caches_growth_is_what_the_policy_still_admits():
+    """SRV-787: the admission's cache growth (`_par_growth`) is the caches' budgets left, at most what the memory policy
+    still lets them allocate (`Budget.admit`): `ceiling - slack` less what is allocated, and nothing while a prefill
+    admitted over the peak is in flight or once the reserve is at the peak. On a real `Budget`: budgets 13.6 GiB under a
+    ceiling 1.7 above what is allocated count 1.7, and admit takes 1.7 and refuses a MiB more; with a 9.47 GiB
+    workspace admitted over the peak they count 0 and admit refuses a byte, until that prefill has run. The response
+    cache's token ids are host memory, outside the policy, and count as before; without a policy the budgets do."""
+    import types
+    app = _app()
+    from test_budget import FakeAlloc, budget
+    fa = FakeAlloc(61.12, reserve_gib=67.31 - 61.12)
+    mem = budget(fa, ceiling=64.82, peak=75.82, slack=2)
+    store = types.SimpleNamespace(budget=int(2.1 * GiB), bytes=0)
+    res = types.SimpleNamespace(budget=int(2.5 * GiB), stash_budget=GiB, pin_budget=4 * GiB, park_budget=4 * GiB,
+                                bytes=0)
+    room = int(64.82 * GiB) - int(2 * GiB) - int(61.12 * GiB)
+    app.STATE.clear()
+    try:
+        app.STATE.update(state_store=store, resident=res)
+        assert app._par_growth() == int(2.1 * GiB) + int(11.5 * GiB), "no policy: the budgets, 13.6"
+        app.STATE["mem"] = mem
+        assert app._par_growth() == room and abs(room / GiB - 1.7) < 0.01, app._par_growth() / GiB
+        assert mem.admit("store", room) and not mem.admit("store", room + (1 << 20)), "the policy's own answer"
+        mem.admit_over_peak(128_343, 128_343, int(9.47 * GiB), 1, cid="7294")
+        assert mem.ws_now == int(9.47 * GiB) and app._par_growth() == 0
+        assert not mem.admit("store", 1), "no cache grows while the over-peak workspace is in flight"
+        app.STATE["response_cache"] = types.SimpleNamespace(budget=256 << 20, bytes=0)
+        assert app._par_growth() == 256 << 20, "the response cache: host memory, outside the policy"
+        mem.prefill_done()
+        assert app._par_growth() == room + (256 << 20)
+        fa.res = int(75.9 * GiB)                                   # the reserve over the peak: nothing new either
+        assert app._par_growth() == 256 << 20 and not mem.admit("store", 1)
+    finally:
+        app.STATE.clear()
+    return f"budgets 13.6 GiB -> {room / GiB:.2f} under the ceiling; 0 with an over-peak prefill in flight"
+
+
+class _HomeRes:
+    """A side slot's resident prefix holding `valid` rows of the conversation, with no end anchor or anchor the
+    client's tokens reach (live: they part from the rows at the first router note the prefill puts back)."""
+
+    def __init__(self, valid):
+        self.valid, self.end, self.end_hold, self.asked = valid, None, False, 0
+
+    def resume_estimate(self, keys, n, mm_ok=False):
+        self.asked += 1
+        return 0, None
+
+
+class _FNMem(_Mem):
+    """`_Mem` with Flash-Next's workspace model (`FlashNextServing._workspace_rows`)."""
+
+    def __init__(self, *a, **kw):
+        import types
+        from engine.models.flashnext import serving as FS
+        from test_fn_serving import _qsa_class
+        super().__init__(*a, **kw)
+        stub = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=_qsa_class))
+        self.model = lambda n, r, line=True: FS.FlashNextServing._workspace_rows(stub, n, r, line=line)  # noqa: E731
+
+    def workspace_rows(self, n, rows=None, line=True):
+        return self.model(n, n if rows is None else rows, line)
+
+
+def _home_admit(app, res, n, home, cid="home"):
+    """`_par_admit` of an `n`-row prompt on side slot 1 whose resident is `res`, at home there with `home` tokens."""
+    import types
+    import torch
+    from server import usage
+    mem = _FNMem(peak=int(75.82 * GiB), ws=0, res=res)
+    app.STATE.clear()
+    app.STATE.update(mem=mem, mem_load={"allocated": int(54.4 * GiB)}, queue_timeout=1.0, request_timeout=30.0)
+    adm = _adm(100, floor_gib=10)
+    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 0)
+    rec = usage.RequestRecord(f"chatcmpl-{cid}", "chat", True)
+    slots.bind(slots.Slot(1, 262_144, values={"resident": res}))
+    try:
+        ok = app.Handler._par_admit(_H(), pool, cid, torch.zeros(n, dtype=torch.long), rec=rec, stream=True,
+                                    home=home)
+    finally:
+        slots.bind(None)
+        app.STATE.clear()
+    assert ok is True
+    return rec, mem, adm.held[cid]
+
+
+def test_srv787_a_turn_at_home_on_a_side_slot_is_charged_the_rows_the_slot_lacks():
+    """SRV-787: a turn at home on its side slot (`_side_home`'s share) is charged the rows past what the slot holds, at
+    the gate and the floor, not a cold prefill of the whole prompt. A slot of 57,823 valid rows under a 128,343-row
+    prompt: 70,520 rows, 5.45 GiB by Flash-Next's model at the floor instead of 6.72 for all 128,343; a share past the
+    slot's rows counts the rows only; a slot emptied since (a reclaim) or a turn not at home is cold, as before. The
+    workspaces measured on 2026-11-02 (28 continuations, `FN_RESUMED`), replayed as turns at home on a slot holding
+    all but their forwarded rows: each charged its forwarded rows and at least what it took."""
+    app = _app()
+    from test_budget import FN_RESUMED
+    n = 128_343
+    res = _HomeRes(57_823)
+    rec, mem, held = _home_admit(app, res, n, home=57_823)
+    assert rec.ws_rows == 70_520 and rec.ws_kind == "home", vars(rec)
+    assert [g["rows"] for g in mem.gates] == [70_520] and mem.gates[0]["ceiling"] is False, mem.gates
+    assert held == mem.model(n, 70_520, line=False) and abs(held / GiB - 5.45) < 0.01, held / GiB
+    cold, home_ws = mem.model(n, n, line=False), held
+    assert abs(cold / GiB - 6.72) < 0.01 and home_ws < cold
+    assert _home_admit(app, _HomeRes(57_823), n, home=128_000)[0].ws_rows == 70_520, "at most the slot's rows"
+    for r, home in ((_HomeRes(0), 57_823), (_HomeRes(57_823), 0)):
+        rec, _, held = _home_admit(app, r, n, home=home)
+        assert rec.ws_rows == n and rec.ws_kind is None and held == cold, (home, vars(rec))
+    least = None
+    assert len(FN_RESUMED) == 27
+    for i, (m, rows, took) in enumerate(FN_RESUMED):
+        rec, mem, held = _home_admit(app, _HomeRes(m - rows), m, home=m - rows, cid=f"r{i}")
+        gate = mem.model(m, rows)
+        assert rec.ws_rows == rows and held >= took * GiB and gate >= took * GiB, (m, rows, took, held / GiB)
+        least = held / GiB - took if least is None else min(least, held / GiB - took)
+    return (f"70,520 rows: {home_ws / GiB:.2f} GiB vs cold {cold / GiB:.2f}; {len(FN_RESUMED)} continuations covered "
+            f"(+{least:.2f} GiB the least)")
+
+
+def test_srv787_a_turn_whose_rows_come_back_from_the_nvme_is_charged_the_rows_past_its_entry():
+    """2026-11-06 live: a turn whose rows the pool's reclaim had written to the NVMe was charged a cold prefill
+    (`ws_rows=183849 ws_gib=10.75`, a wait of 588 s) and forwarded 217 rows after the restore. The admission asks the
+    spill what it serves, as the restore will (`SessionSpill.candidate`): the rows past the entry's line are charged.
+    No entry, an entry behind the rows in place, or a spill that raises: as before."""
+    import types
+    app = _app()
+    n = 188_627
+    asked = []
+
+    def res_with(got):
+        r = _HomeRes(0)
+
+        def candidate(res, keys, max_len, replay, mm_ok=False):
+            asked.append((len(keys), max_len, replay))
+            if got == "raise":
+                raise OSError("the NVMe is gone")
+            return got
+        r.spiller = types.SimpleNamespace(candidate=candidate)
+        return r
+    rec, mem, held = _home_admit(app, res_with(("entry", 188_410, 0)), n, home=0)
+    assert rec.ws_rows == 217 and rec.ws_kind == "spill" and asked[-1] == (n, n - 1, True), (vars(rec), asked)
+    assert held == mem.model(n, 217, line=False) and held < 1.5 * GiB, held / GiB
+    cold = mem.model(n, n, line=False)
+    for got in (None, "raise"):
+        rec, _, held = _home_admit(app, res_with(got), n, home=0)
+        assert rec.ws_rows == n and rec.ws_kind is None and held == cold, (got, vars(rec))
+    # at home with more rows in place than the entry serves: the rows in place count
+    r = res_with(("entry", 50_000, 0))
+    r.valid = 120_000
+    rec, _, _ = _home_admit(app, r, n, home=120_000)
+    assert rec.ws_rows == n - 120_000 and rec.ws_kind == "home", vars(rec)
+    return f"217 rows charged {held / GiB:.2f} GiB cold; with the entry {mem.model(n, 217, line=False) / GiB:.2f}"
+
+
+def test_srv787_the_handler_passes_the_home_share_to_the_admission():
+    """The `[parallel]` line's pick keeps the share of the side slot that holds the conversation (`_side_home`) also
+    when nothing waits, and the handler passes it to `_par_admit` only on that slot."""
+    import inspect
+    app = _app()
+    src = inspect.getsource(app._par_side_need)
+    assert "why.update(home=home[0], home_share=home[1])" in src
+    handler = inspect.getsource(app.Handler)
+    call = handler[handler.index("not self._par_admit(\n"):]
+    call = call[:call.index("return")]
+    assert 'home=(int(par_why.get("home_share") or 0)' in call, call
+    assert 'if side is not None and par_why.get("home") == side.index else 0)' in call, call
+
+
+class _Spill:
+    """Slot 0's session spill as `_write_rows` uses it: a save records its owner and engine in `log` and returns an
+    entry, or is refused by the day's write budget for the owners in `refuse` (SRV-273's guard)."""
+
+    def __init__(self, log, refuse=(), current=()):
+        import threading
+        self.cfg = {"drain_min_tokens": 4096}
+        self._own_io = threading.Lock()
+        self.stats = {"refused": {}, "failed": {}}
+        self.log, self.refuse, self.cur = log, set(refuse), set(current)
+
+    def current(self, res):
+        """SRV-E6: the owners in `current` were written by the idle backfill and have not changed since."""
+        import types
+        return types.SimpleNamespace(eid=f"e-{res.owner}", valid=res.valid) if res.owner in self.cur else None
+
+    def io(self, wait_s=None):
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            got = self._own_io.acquire(timeout=wait_s) if wait_s else self._own_io.acquire(blocking=False)
+            try:
+                yield got
+            finally:
+                if got:
+                    self._own_io.release()
+        return held()
+
+    def save_resident(self, res, eng, drafter, reason, guard=None):
+        if res.owner in self.refuse:
+            self.stats["refused"]["write_budget"] = self.stats["refused"].get("write_budget", 0) + 1
+            return None
+        self.log.append(("save", res.owner, eng, reason))
+        return {"eid": f"e-{res.owner}", "tokens": res.valid, "ms": 1.0}
+
+
+class _Conv:
+    """An idle side slot's resident prefix: `valid` rows of `owner`'s conversation."""
+
+    def __init__(self, log, owner, valid):
+        self.log, self.owner, self.valid, self._stash = log, owner, valid, None
+
+    def clear(self):
+        self.log.append(("clear", self.owner, self.valid))
+        self.valid = 0
+
+
+def _side_slot(log, index, owner, valid, ended_s_ago, now):
+    """Side slot `index` holding `owner`'s idle conversation of `valid` rows (3 GiB of pages), its turn ended
+    `ended_s_ago` (None: no end recorded)."""
+    import types
+    eng = types.SimpleNamespace(kv=types.SimpleNamespace(length=valid))
+    eng.kv.pages = types.SimpleNamespace(committed_bytes=lambda: 3 * GiB,
+                                         trim=lambda n, o=owner: log.append(("trim", o)) or 3 * GiB)
+    s = slots.Slot(index, 262_144, values={"engine": eng, "drafter": None,
+                                           "resident": _Conv(log, owner, valid)})
+    if ended_s_ago is not None:
+        s.carry = {"gen": s.gen, "t": now - ended_s_ago, "at": valid}
+    return s
+
+
+def _reclaim_run(app, side, d, owner="slot0", refuse=(), current=()):
+    """`_kv_reclaim_idle` over the server's own reclaim order (`_add_kv_reclaimers`) with `side` as the pool's side
+    slots and `_Spill` as slot 0's spill: (what came back, the log, the printed lines)."""
+    import contextlib
+    import io
+    from engine import kvpool
+    log = side[0].values["resident"].log
+    kp = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+    app._add_kv_reclaimers(kp)
+    keys = ("pool", "spill", "engine", "resident", "mem", "wren", "role_mem")
+    saved, old = {k: dict.get(app.STATE, k) for k in keys if dict.__contains__(app.STATE, k)}, kvpool.POOL
+    app.STATE.update(pool=slots.Pool([slots.Slot(0, 262_144)] + side), spill=_Spill(log, refuse, current),
+                     engine=None, resident=None, mem=None, wren=None, role_mem=None)
+    kvpool.POOL = kp
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app._kv_reclaim_idle(d, owner)
+    finally:
+        kvpool.POOL = old
+        for k in keys:
+            app.STATE.pop(k, None)
+        app.STATE.update(saved)
+    return got, log, out.getvalue().splitlines()
+
+
+def test_srv779_an_idle_side_chat_is_written_before_its_pages_go():
+    """SRV-779: the pool's reclaim of an idle side conversation writes it to the NVMe with the side slot's own
+    resident and engine (`_write_rows`, ENG-371's keeper generalised to any owner) before its pages go; one under
+    `drain_min_tokens` goes as before; one the day's write budget refuses is skipped, and only the `unwritten_side`
+    level after every other conversation takes it, saying so. Never a clear of a written-size conversation without
+    its entry first (live 2026-11-05 22:57: slot 1's 128k chat, 3.783 GiB, went unwritten)."""
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 1, "g6", 85_010, 600, now), _side_slot(log, 2, "tiny", 3_000, 500, now),
+            _side_slot(log, 3, "g7", 40_000, 400, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 6 * GiB}, refuse={"g7"})
+    eng1 = side[0].values["engine"]
+    assert log[:3] == [("save", "g6", eng1, "kv_pool"), ("clear", "g6", 85_010), ("trim", "g6")], log
+    assert log[3:5] == [("clear", "tiny", 3_000), ("trim", "tiny")], log
+    assert ("save", "g7") not in [x[:2] for x in log]
+    assert log[5:] == [("clear", "g7", 40_000), ("trim", "g7")], "g7 goes last, unwritten, nothing else left"
+    assert got == 9 * GiB and side[0].written == {"eid": "e-g6", "owner": "g6"} and side[2].written is None
+    saves = {x[1] for x in log if x[0] == "save"}
+    for i, x in enumerate(log):
+        if x[0] == "clear" and x[2] >= 4096 and x[1] not in saves:
+            assert x[1] == "g7" and any("nothing else to reclaim" in s for s in lines), (x, lines)
+    assert any("reclaim skips slot 3: its 40000 rows not written (write_budget)" in s for s in lines), lines
+    # the budget allows it: written like the others, no unwritten level
+    log2 = []
+    side = [_side_slot(log2, 3, "g7", 40_000, 400, _t.monotonic())]
+    got, log2, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB})
+    assert [x[0] for x in log2] == ["save", "clear", "trim"] and got == 3 * GiB, log2
+    assert not any("unwritten_side" in s for s in lines), lines
+    return "85,010 rows written then trimmed; 3,000 trimmed as before; 40,000 refused by the budget, kept to the last"
+
+
+def test_srv779_a_turn_that_just_ended_is_the_last_victim():
+    """SRV-779: idle side conversations go oldest first, and a slot whose turn ended within RECLAIM_RECENT_S (an
+    agent between tool steps) or that recorded no end (a None carry, which sorted as the oldest) goes last; each
+    reclaim line names its victim: slot, conversation, rows, written and the save's ms."""
+    import re
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 2, "none", 20_000, None, now),       # its turn just ended, no end kept
+            _side_slot(log, 3, "agent", 85_010, 1, now),          # between two tool steps
+            _side_slot(log, 4, "older", 30_000, 120, now),
+            _side_slot(log, 5, "oldest", 50_000, 600, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB})
+    assert got == 3 * GiB and [x[1] for x in log if x[0] == "trim"] == ["oldest"], log
+    log = []
+    side = [_side_slot(log, 2, "none", 20_000, None, now), _side_slot(log, 3, "agent", 85_010, 1, now),
+            _side_slot(log, 4, "older", 30_000, 120, now), _side_slot(log, 5, "oldest", 50_000, 600, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 20 * GiB, "after": 10 * GiB})
+    assert got == 12 * GiB, got
+    assert [x[1] for x in log if x[0] == "trim"] == ["oldest", "older", "agent", "none"], log
+    pat = re.compile(r"^\[kv-pool\] reclaim for admission level=idle_side bytes=(\d+) owner=slot0 "
+                     r"victim=slot(\d+) conv=(\S+) rows=(\d+) written=(true|false) ms=(\d+)$")
+    got_lines = [pat.match(s).groups() for s in lines if s.startswith("[kv-pool] reclaim for admission")]
+    assert got_lines == [(str(3 * GiB), "5", "oldest", "50000", "true", got_lines[0][5]),
+                         (str(3 * GiB), "4", "older", "30000", "true", got_lines[1][5]),
+                         (str(3 * GiB), "3", "agent", "85010", "true", got_lines[2][5]),
+                         (str(3 * GiB), "2", "none", "20000", "true", got_lines[3][5])], lines
+    return "slot 5 (600 s), 4 (120 s), 3 (1 s), 2 (no end); each line: victim, conv, rows, written, ms"
+
+
+def test_srv779_a_lane_that_gives_way_on_a_side_slot_is_written_first():
+    """SRV-709's give-back on a side slot (it trimmed unwritten, slot 0 alone spilled): the lane's conversation goes
+    to the NVMe first with the side engine, then every page; its continuation then reads it back on that slot."""
+    import contextlib
+    import io
+    app = _app()
+    log = []
+    side = _side_slot(log, 2, "lane", 70_520, 5, 0.0)
+    saved = {k: dict.get(app.STATE, k) for k in ("spill",) if dict.__contains__(app.STATE, k)}
+    app.STATE["spill"] = _Spill(log)
+    out = io.StringIO()
+    slots.bind(side)
+    try:
+        with contextlib.redirect_stdout(out):
+            got = app._kv_give_back_own()
+    finally:
+        slots.bind(None)
+        app.STATE.pop("spill", None)
+        app.STATE.update(saved)
+    eng = side.values["engine"]
+    assert log == [("save", "lane", eng, "kv_pool"), ("clear", "lane", 70_520), ("trim", "lane")], log
+    assert got == 3 * GiB and eng.kv.length == 0 and side.written == {"eid": "e-lane", "owner": "lane"}
+    assert "[kv-pool] give back victim=slot2 conv=lane rows=70520 written=true ms=" in out.getvalue(), out.getvalue()
+    return "70,520 rows written, then 3 GiB back"
+
+
+def test_srv_e6_the_ladder_runs_its_levels_in_order_and_stops_at_what_is_short():
+    """SRV-E6 (plan row 5): `_kv_reclaim_idle` over the server's own order (`_add_kv_reclaimers`), each level a fake
+    that records its turn: caches, roles, the side chats already on the NVMe, the others, slot 0, (the graphs, a
+    knob), the unwritten ones, the kept park; it stops once it has what the admission is short, runs nothing when
+    the admission passes, and logs each level that gave something with its bytes and ms."""
+    import contextlib
+    import io
+    from engine import kvpool
+    app = _app()
+    names = ("caches", "roles", "written", "side", "slot0", "graphs", "unwritten", "kept_park")
+    calls, gives = [], {}
+    saved = {n: getattr(app, f"_kv_reclaim_{n}") for n in names}
+    for n in names:
+        setattr(app, f"_kv_reclaim_{n}",
+                lambda want, o, n=n: calls.append(n) or gives.get(n, GiB))
+    old_pool, old_graphs = kvpool.POOL, app.RECLAIM_GRAPHS
+
+    def run(d, graphs=False):
+        app.RECLAIM_GRAPHS = graphs
+        kp = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+        app._add_kv_reclaimers(kp)
+        kvpool.POOL = kp
+        calls.clear()
+        app._RECLAIM.victims = []          # the fakes take no conversation
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            got = app._kv_reclaim_idle(d, "slot4")
+        return got, list(calls), [s for s in out.getvalue().splitlines() if s.startswith("[kv-pool]")]
+    try:
+        got, order, lines = run({"floor": 15 * GiB, "after": 0})
+        assert order == ["caches", "roles", "written", "side", "slot0", "unwritten", "kept_park"], order
+        assert got == 7 * GiB and len(lines) == 7, lines
+        assert [ln.split()[4].split("=")[1] for ln in lines] == [
+            "caches", "roles", "written_side", "idle_side", "idle_slot0", "unwritten_side", "kept_park"], lines
+        for ln in lines:
+            assert f" bytes={GiB} ms=" in ln and ln.endswith(" owner=slot4"), ln
+        got, order, _ = run({"floor": 15 * GiB, "after": 0}, graphs=True)
+        assert order == ["caches", "roles", "written", "side", "slot0", "graphs", "unwritten", "kept_park"], order
+        got, order, lines = run({"floor": 15 * GiB, "after": 12 * GiB})
+        assert order == ["caches", "roles", "written"] and got == 3 * GiB, (order, got)
+        gives["caches"] = 4 * GiB
+        got, order, _ = run({"floor": 15 * GiB, "after": 12 * GiB})
+        assert order == ["caches"] and got == 4 * GiB, "the allocator's blocks were enough"
+        for after in (15 * GiB, 20 * GiB):
+            got, order, lines = run({"floor": 15 * GiB, "after": after})
+            assert got == 0 and order == [] and lines == [], "the corrected check passes: nothing"
+    finally:
+        for n, fn in saved.items():
+            setattr(app, f"_kv_reclaim_{n}", fn)
+        kvpool.POOL, app.RECLAIM_GRAPHS = old_pool, old_graphs
+    return "caches, roles, written_side, idle_side, idle_slot0, [graphs], unwritten_side, kept_park; stops at want"
+
+
+def test_srv_e6_a_side_chat_current_on_the_nvme_goes_first_and_is_not_written_again():
+    """SRV-E6: the idle backfill wrote chat `w` and nothing changed since; the ladder's `written_side` level takes its
+    pages before an older chat that still needs a save, with no save (`written=true ms=0`, its slot's `written` set
+    for its return home), and never clears a chat that is not current there; the next level saves `u` first."""
+    import re
+    import time as _t
+    app = _app()
+    log, now = [], _t.monotonic()
+    side = [_side_slot(log, 2, "u", 50_000, 600, now), _side_slot(log, 3, "w", 85_010, 100, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 13 * GiB}, current={"w"})
+    assert got == 3 * GiB and log == [("clear", "w", 85_010), ("trim", "w")], log
+    assert side[1].written == {"eid": "e-w", "owner": "w"} and side[0].written is None
+    pat = re.compile(r"^\[kv-pool\] reclaim for admission level=written_side bytes=\d+ owner=slot0 "
+                     r"victim=slot3 conv=w rows=85010 written=true ms=0$")
+    assert [s for s in lines if pat.match(s)], lines
+    log = []
+    side = [_side_slot(log, 2, "u", 50_000, 600, now), _side_slot(log, 3, "w", 85_010, 100, now)]
+    got, log, lines = _reclaim_run(app, side, {"floor": 15 * GiB, "after": 10 * GiB}, current={"w"})
+    eng2 = side[0].values["engine"]
+    assert got == 6 * GiB and log == [("clear", "w", 85_010), ("trim", "w"), ("save", "u", eng2, "kv_pool"),
+                                      ("clear", "u", 50_000), ("trim", "u")], log
+    assert sum(1 for x in log if x[0] == "save") == 1, "w is never written again"
+    return "w (current, 100 s idle) trimmed first without a save; u (600 s) saved then trimmed"
+
+
 def test_the_release_route_answers_trusted_local_and_the_admin_only():
     import contextlib
     import io
@@ -966,6 +1497,181 @@ def test_the_release_route_answers_trusted_local_and_the_admin_only():
         app._memory_release = old[0]
         app.STATE.clear()
         app.STATE.update(old[1])
+
+
+def test_srv785_the_servers_guard_grows_with_the_chunks_class_and_stays_under_the_floor():
+    """SRV-785: `_guard`, the admission's and the KV pool's live floor: one prefill chunk's workspace at the class of
+    the rows (Flash-Next's own model, `_workspace_rows` of a resumed chunk), one KV commit of a chunk's rows, a
+    sandbox's ask while it is recent, and the margin; never above the floor it is given. Without a memory policy: no
+    answer (the floor as configured). The 2026-11-05 turns: 38k agent turns, the 85k and the 128k turn."""
+    import types
+    from engine.models.flashnext import serving as FS
+    app = _app()
+
+    def qsa_class(last):                            # Flash-Next's (engine.py): ratio 4, TOPK 512
+        if (last + 1) // 4 <= 512:
+            return 0
+        nb = 1024
+        while nb * 4 < last + 1:
+            nb *= 2
+        return nb
+    fn = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=qsa_class))
+
+    class Mem:
+        on = True
+
+        def workspace_rows(self, n, rows=None, line=True):
+            return FS.FlashNextServing._workspace_rows(fn, n, rows, line=line)
+    # 64 regions of 1 KiB rows in 2 MiB pages: a 4,096-row chunk and 256 rows of margin map 4 pages each, 0.5 GiB
+    pages = types.SimpleNamespace(bufs=[types.SimpleNamespace(outer=64, row_bytes=1024, page=2 << 20)],
+                                  margin=lambda: 256)
+    saved = dict(app.STATE)
+    claim = list(app._SANDBOX_CLAIM)
+    try:
+        app.STATE.clear()
+        app.STATE.update(mem=Mem(), prefix_chunk=4096, engine=types.SimpleNamespace(kv=types.SimpleNamespace(
+            pages=pages)))
+        rows = (1_000, 8_000, 38_000, 82_668, 85_229, 128_343, 196_607)
+        got = [app._guard(n, 10 * GiB) for n in rows]
+        g = [x[0] for x in got]
+        # 2026-11-06: the chunk's class term counts a tile's rows, so the guard stays under the floor at 196k too
+        assert g == sorted(g) and max(g) <= 10 * GiB and g[0] < g[-1] and 9 * GiB < g[-1] < 10 * GiB, g
+        assert all(x[1]["kv"] == GiB // 2 and x[1]["margin"] == 5 * GiB and x[1]["sandbox"] == 0 for x in got)
+        steps = [x[1]["step"] for x in got]
+        assert steps == sorted(steps) and steps[0] < steps[-1], steps
+        app._SANDBOX_CLAIM[:] = [3 * GiB, time.monotonic()]                       # a sandbox asked a moment ago
+        short = app._guard(1_000, 10 * GiB)
+        assert short[1]["sandbox"] == 3 * GiB and short[0] == min(10 * GiB, g[0] + 3 * GiB), short
+        app._SANDBOX_CLAIM[:] = [3 * GiB, time.monotonic() - app.SANDBOX_CLAIM_S - 1]
+        assert app._guard(1_000, 10 * GiB)[0] == g[0], "an old ask no longer counts"
+        assert app._guard(0, 10 * GiB)[1]["step"] == 0, "no prefill in flight: no chunk"
+        app.STATE["mem"] = None
+        assert app._guard(128_343, 10 * GiB) is None
+    finally:
+        app._SANDBOX_CLAIM[:] = claim
+        app.STATE.clear()
+        app.STATE.update(saved)
+    return ", ".join(f"{n:,}: chunk {x[1]['step'] / GiB:.2f} guard {x[0] / GiB:.2f}" for n, x in zip(rows, got))
+
+
+def _memwait_server(avail_gib):
+    """The handler in process on the fake engine (`--parallel 3`), its admission on a MemAvailable the test moves."""
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    from test_slot0_wait import _fake_parallel
+    _app()
+    pool = _fake_parallel()
+    box = {"avail": int(avail_gib * GiB)}
+    pool.admission.meminfo = lambda: {"MemAvailable": box["avail"]}
+    return pool, box
+
+
+def _chat_stream(out):
+    from test_ui_states import Req
+    body = {"model": "TandemLLM", "stream": True, "max_tokens": 16,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "user", "content": "Summarize: " + "lorem ipsum " * 60}]}
+    head, raw = Req(body, {"User-Agent": "chatd/0.1 (qse-dashboard)"}).response()
+    out.update(head=head, raw=raw)
+
+
+def test_srv787_a_streamed_chat_wait_opens_its_stream_keeps_it_alive_and_ends_with_the_reason():
+    """SRV-787 (2026-11-05): chatd's 128k turn got no byte for 900 s while the admission held it, and chatd's read
+    timeout cut it. A streamed chat request that waits for memory now opens its stream at once (200, `X-Tandem-Wait:
+    memory`) and gets an SSE comment every `MEM_LINE_EVERY_S` with its place, how short memory is, the time waited
+    and when the wait ends; the live view says `waiting_memory` with its lines, not "Prefilling"; at `MEM_WAIT_S` the
+    stream ends with an error event that says why (`memory_wait_timeout`) and `[DONE]`."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 2.5
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    seen = []
+    try:
+        t0 = time.monotonic()
+        th.start()
+        while th.is_alive() and time.monotonic() - t0 < 8:
+            for row in app.live_registry().snapshot()["requests"]:
+                a = row.get("activity") or {}
+                if a.get("state") == "waiting_memory":
+                    seen.append(a)
+            time.sleep(0.2)
+        th.join(10)
+        took = time.monotonic() - t0
+    finally:
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive() and 2.4 < took < 6.0, took
+    head, raw = out["head"], out["raw"]
+    assert head.startswith("HTTP/1.1 200") and "text/event-stream" in head and "X-Tandem-Wait: memory" in head, head
+    pings = [ln for ln in raw.split("\n") if ln.startswith(": waiting for memory, position 1, ")]
+    assert len(pings) >= 3 and all(" GiB short, " in p and " s unless memory frees" in p for p in pings), raw[:600]
+    events = [json.loads(ln[6:]) for ln in raw.split("\n") if ln.startswith("data: {")]
+    err = events[-1].get("error") or {}
+    assert err.get("code") == "memory_wait_timeout" and err.get("status") == 503, events[-1]
+    assert err["message"].startswith("Memory stayed full for 2 s, so this turn did not start (needed "), err
+    assert raw.rstrip().endswith("data: [DONE]") and raw.index(pings[0]) < raw.index('"memory_wait_timeout"'), raw
+    assert seen and seen[0]["label"] == "Waiting for memory" and seen[0]["prefill"] is None, seen[:1]
+    m = seen[-1]["memory"]
+    assert m["bound_s"] == 2.5 and m["lines"][0].startswith("This turn needs about ") and \
+        m["lines"][2].startswith("Memory is tight: this chat waits and continues by itself as soon as memory "
+                                 "frees. Stop cancels; it gives up only after 2 s without memory ("), m
+    assert pool.admission.stats["timeouts"] == 1 and pool.admission.report()["waiting_memory"] == 0
+    return f"{len(pings)} keepalives in {took:.1f} s, then: {err['message']}"
+
+
+def test_srv787_a_planned_stop_ends_a_wait_for_memory_at_once_with_a_retryable_503():
+    """2026-11-06: a stop (`draining`) while a streamed chat waits for memory ends the wait within a second with an
+    error the client retries after the restart, instead of holding the stop to its grace and SIGKILL (13:05 live:
+    120 s, then killed, the turns lost)."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 30.0
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    try:
+        th.start()
+        time.sleep(1.5)
+        t0 = time.monotonic()
+        app.STATE["draining"] = True
+        th.join(10)
+        took = time.monotonic() - t0
+    finally:
+        app.STATE.pop("draining", None)
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive() and took < 3.0, took
+    raw = out["raw"]
+    assert "The engine is restarting; send the request again in a moment." in raw, raw[-400:]
+    assert pool.admission.stats["timeouts"] == 0 and pool.admission.report()["waiting_memory"] == 0
+    return f"ended {took:.1f} s after the stop"
+
+
+def test_srv787_a_streamed_chat_wait_that_ends_in_time_is_served():
+    """SRV-787: memory frees before the bound: the request is admitted and served on the stream it opened while it
+    waited, its comments first, no error, the wait booked (`wait_mem_ms`)."""
+    import threading
+    app = _app()
+    pool, box = _memwait_server(5)
+    was = app.MEM_LINE_EVERY_S, app.MEM_WAIT_S
+    app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = 0.5, 30.0
+    out: dict = {}
+    th = threading.Thread(target=_chat_stream, args=(out,), daemon=True)
+    try:
+        th.start()
+        time.sleep(2.2)
+        box["avail"] = 200 * GiB
+        th.join(20)
+    finally:
+        app.MEM_LINE_EVERY_S, app.MEM_WAIT_S = was
+    assert not th.is_alive()
+    raw = out["raw"]
+    assert raw.count(": waiting for memory, position 1, ") >= 2 and '"error"' not in raw, raw[:800]
+    assert '"content"' in raw and raw.rstrip().endswith("data: [DONE]"), raw[-300:]
+    assert pool.admission.stats["timeouts"] == 0 and pool.admission.stats["waits"] == 1
+    done = [r for r, _ in app.live_registry()._done]
+    assert done and done[-1].wait_mem_ms >= 2000 and done[-1].stop["reason"] in ("length", "stop"), vars(done[-1])
 
 
 if __name__ == "__main__":

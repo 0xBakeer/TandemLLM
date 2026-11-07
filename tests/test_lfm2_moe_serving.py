@@ -28,11 +28,6 @@ from engine.models.lfm2_moe.ref import LfmState  # noqa: E402
 from engine.models.lfm2_moe.serving import Lfm2MoeServing  # noqa: E402
 from tests.test_lfm2_moe_ref import TINY  # noqa: E402
 
-_GPU_NO_INLINE = types.SimpleNamespace(
-    profile=lambda d=None: types.SimpleNamespace(inline=lambda kind: False))
-_GPU_INLINE = types.SimpleNamespace(
-    profile=lambda d=None: types.SimpleNamespace(inline=lambda kind: True))
-
 
 def _raises(fn, *needles):
     try:
@@ -303,10 +298,13 @@ def test_graphs_ok_demands_the_probe_verdicts():
         return s
 
     import tools as _tools
+    from tools import gpu as _gpu
+    ada_prof = _gpu.profile_for((8, 9), "NVIDIA GeForce RTX 4090")
+    gb10_prof = _gpu.profile_for((12, 1), "NVIDIA GB10")
     with mock.patch.dict("sys.modules", {"tools.exl3_ada": ada, "tools.moe_ada": moe}), \
          mock.patch.object(_tools, "exl3_ada", ada, create=True), \
          mock.patch.object(_tools, "moe_ada", moe, create=True), \
-         mock.patch.object(srv_mod, "_gpu", _GPU_NO_INLINE):
+         mock.patch.object(_gpu, "profile", lambda d: ada_prof):
         def go(kbs, gemv, rot, moe_ok, banks):
             state["gemv"], state["rot"], state["moe"] = dict(gemv), rot, moe_ok
             return srv(kbs, banks)._graphs_ok
@@ -321,7 +319,7 @@ def test_graphs_ok_demands_the_probe_verdicts():
         assert go((2,), {2: True}, True, None, ()) is True            # no banks: no MoE ask
     assert srv((2,), (), "cpu")._graphs_ok is False
     s = srv((2,), (0,))
-    with mock.patch.object(srv_mod, "_gpu", _GPU_INLINE):
+    with mock.patch.object(_gpu, "profile", lambda d: gb10_prof):
         assert s._graphs_ok is True                                  # native: no probe needed
 
 

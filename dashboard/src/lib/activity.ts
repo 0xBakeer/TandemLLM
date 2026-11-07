@@ -14,6 +14,7 @@ export type Tone = 'idle' | 'queued' | 'prefill' | 'replay' | 'think' | 'write' 
 
 export const GLYPH: Record<ActivityState, string> = {
   queued: '○',
+  waiting_memory: '◌',
   prefilling: '◐',
   replaying: '↻',
   thinking: '◍',
@@ -26,6 +27,7 @@ export const GLYPH: Record<ActivityState, string> = {
 
 export const TONE: Record<ActivityState, Tone> = {
   queued: 'queued',
+  waiting_memory: 'wait',
   prefilling: 'prefill',
   replaying: 'replay',
   thinking: 'think',
@@ -38,7 +40,7 @@ export const TONE: Record<ActivityState, Tone> = {
 
 /** The state as a word: `closing_reasoning` reads "closing reasoning". */
 export function stateWord(s: ActivityState | string): string {
-  return s === 'tool_call' ? 'tool call' : s.replace(/_/g, ' ');
+  return s === 'tool_call' ? 'tool call' : s === 'waiting_memory' ? 'waiting for memory' : s.replace(/_/g, ' ');
 }
 
 /** States where tokens move (the glyph pulses; nothing pulses under reduced motion). */
@@ -46,7 +48,7 @@ export function isMoving(s: ActivityState | null | undefined): boolean {
   return s === 'prefilling' || s === 'replaying' || s === 'thinking' || s === 'closing_reasoning' || s === 'writing' || s === 'tool_call';
 }
 
-const RANK: Record<ActivityState, number> = { tool_call: 0, writing: 1, thinking: 2, closing_reasoning: 3, finishing: 4, replaying: 5, prefilling: 6, queued: 7, done: 8 };
+const RANK: Record<ActivityState, number> = { tool_call: 0, writing: 1, thinking: 2, closing_reasoning: 3, finishing: 4, replaying: 5, prefilling: 6, waiting_memory: 7, queued: 8, done: 9 };
 
 /** The request the Now line speaks for: the one furthest along, never a finished one. */
 export function pickRunning(rows: LiveRequest[]): LiveRequest | null {
@@ -153,6 +155,8 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   let estimate: number | null = null;
   let sinceMarkMs: number | null = null;
   if (st === 'queued') n.push(q?.wait_ms != null && `waiting ${secs(q.wait_ms)}`, q?.timeout_s != null && `gives up after ${q.timeout_s} s`);
+  // SRV-787: the server's three lines (what and why, what happens meanwhile, how it ends); never a rate
+  else if (st === 'waiting_memory') n.push(...memoryLines(a));
   else if (st === 'prefilling') {
     const e = prefillEstimate(r);
     if (windows && p && p.tps_live !== undefined) {
@@ -180,6 +184,11 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   else if (st === 'finishing') n.push(d && `${exact(d.tokens)} tokens`);
   n.push(!!a.constrained && constrainedWord(a.constrained));
   return line(GLYPH[st], TONE[st], a.label, n.filter((x): x is string => !!x), { sinceMs: a.since_ms, client: r.client.kind, requestId: r.request_id, progress, estimate, sinceMarkMs, moving: isMoving(st), warning: clientFlag(a) });
+}
+
+/** SRV-787: the lines of a request held for memory, as the server sent them; none for any other state. */
+export function memoryLines(a: LiveActivity | null | undefined): string[] {
+  return a?.state === 'waiting_memory' ? (a.memory?.lines ?? []).filter((x) => !!x) : [];
 }
 
 export function constrainedWord(c: LiveActivity['constrained']): string {
@@ -233,6 +242,7 @@ export function activityCell(a: LiveActivity | null | undefined, r?: Pick<LiveRe
   let word = stateWord(st);
   let detail: string | null = null;
   if (st === 'queued') detail = [q?.place ? `${q.place_is_estimate ? 'about ' : ''}${ordinal(q.place)}` : '', q?.wait_ms != null ? secs(q.wait_ms) : ''].filter(Boolean).join(' · ') || null;
+  else if (st === 'waiting_memory') detail = a.memory?.waited_ms != null ? secs(a.memory.waited_ms) : null;
   else if (st === 'prefilling') detail = p && p.pct != null && p.progress !== 'single_call' ? `${Math.round(p.pct)} %` : p ? `${exact(p.total)} tokens` : null;
   else if (st === 'replaying') detail = r ? `${exact(r.tokens)} tok` : null;
   else if (st === 'thinking') detail = d ? `${exact(d.thinking_tokens)} tok` : null;

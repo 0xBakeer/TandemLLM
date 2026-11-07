@@ -26,8 +26,10 @@ and the record absorbs it only at the end.
 Definitions (also in docs/contract/dashboard-v1, live.schema.json):
 
     phase             queued until the engine lock, prefill until the first token, decode until the
-                      end, then done (a refusal or a 400 is done too, with its status)
-    tokens            tokens the handler has received so far; equals completion_tokens at the end
+                      end, then done (a refusal or a 400 is done too, with its status); a request the
+                      admission holds for memory is in prefill too, its activity `waiting_memory`,
+                      and counts as `waiting_memory`, not `prefilling` (SRV-787)
+    tokens           tokens the handler has received so far; equals completion_tokens at the end
     decode_tps        (tokens - 1) / seconds since the first token (running average)
     decode_tps_now    tokens over the last two samples (about 2 s); null before two samples exist
     prefill_tps       forwarded / prompt_ms, from the first token on; null while prefilling and
@@ -262,6 +264,7 @@ class LiveRegistry:
         self._prev: tuple[float, int, bool] | None = None   # (perf, tokens, something decoding)
         self._last_sample_p: float | None = None
         self._was_fast = False
+        self._sched_fast = False        # this tick was timed by the fast cadence (_run)
         self.samples_taken = 0
         # the event every open stream writes: (seq, bytes), made once a tick
         self.seq = 0
@@ -446,7 +449,9 @@ class LiveRegistry:
             if busy is not None:
                 busy.gate(min(0.25, self.cadence()))
             self.tick()
-            self._stop.wait(self.cadence())
+            c = self.cadence()
+            self._sched_fast = c < self.interval
+            self._stop.wait(c)
 
     def event(self) -> tuple[int, bytes] | None:
         """The newest tick's `(seq, bytes)`: what every open stream writes."""
@@ -476,10 +481,12 @@ class LiveRegistry:
             live = list(self._live.values())
             fast = self._fast_now()
             # one history sample a second: every tick at 1 Hz, every fourth at 4 Hz, and no
-            # extra one on the tick where the cadence drops back
+            # extra one on the tick where the cadence drops back, nor on a tick the fast cadence
+            # timed (a request that opened and ended between two ticks leaves both slow)
+            sched_fast, self._sched_fast = self._sched_fast, False
             due = (self._last_sample_p is None
                    or now_p - self._last_sample_p >= 0.9 * self.interval
-                   or not (fast or self._was_fast))
+                   or not (fast or self._was_fast or sched_fast))
             self._was_fast = fast
             self._decode_marks(live, now_p)
             if self.activity:
@@ -660,7 +667,10 @@ class LiveRegistry:
         counts = {"in_flight": len(live),
                   "queued": sum(1 for r in live if r.t_lock is None),
                   "prefilling": sum(1 for r in live if r.t_lock is not None
-                                    and r.t_first is None),
+                                    and r.t_first is None and not getattr(r, "waiting_memory", False)),
+                  # SRV-787: on its slot, held for memory: not prefilling
+                  "waiting_memory": sum(1 for r in live if r.t_first is None
+                                        and getattr(r, "waiting_memory", False)),
                   "decoding": sum(1 for r in live if r.t_first is not None),
                   "completed_1m": sum(1 for t in self._ends if now_p - t <= MINUTE_S),
                   "served": self._served, "errors": self._errors,
@@ -856,7 +866,10 @@ class LiveRegistry:
              "continues": self._continues(rec),
              "step": getattr(rec, "step", None) if state == "finishing" else None,
              "stop": None,
-             "conductor": act.conductor_of(getattr(rec, "sup", None), now_p)}
+             "conductor": act.conductor_of(getattr(rec, "sup", None), now_p),
+             # SRV-787: why it waits for memory and how the wait ends
+             "memory": (act.memory_of(getattr(rec, "mem_wait", None), now_p, self._in_the_way(rec, now_p))
+                        if state == "waiting_memory" else None)}
         a["label"] = act.label(a)
         if state == "prefilling":
             # the vision tower runs inside the prefill; the state stays `prefilling`
@@ -865,6 +878,22 @@ class LiveRegistry:
             if enc:
                 a["label"] = enc
         return a, act.timeline_of(rec)
+
+    def _in_the_way(self, rec, now_p: float) -> dict | None:
+        """SRV-787: the longest prefill running beside a request that waits for memory: its id, its prompt and
+        its ETA (`activity.prefill_of`), or None."""
+        best = None
+        for r in list(self._live.values()):
+            if (r is rec or r.t_lock is None or r.t_first is not None or r.cache_source in REPLAY
+                    or getattr(r, "waiting_memory", False)):
+                continue
+            n = int(r.prompt_tokens or 0)
+            if best is None or n > best[0]:
+                best = (n, r)
+        if best is None:
+            return None
+        p = act.prefill_of(best[1], now_p) or {}
+        return {"request_id": best[1].request_id, "tokens": p.get("total") or best[0], "eta_ms": p.get("eta_ms")}
 
     def _done_activity(self, rec, now_p: float, ended: float) -> tuple[dict, list]:
         stop = getattr(rec, "stop", None) or {}
@@ -886,7 +915,7 @@ class LiveRegistry:
                         else None, "silent_ms": stop.get("silent_ms"),
                         "gone_ms": None},
              "continues": self._continues(rec), "step": None, "stop": stop or None,
-             "conductor": act.conductor_of(getattr(rec, "sup", None), float("inf"))}
+             "conductor": act.conductor_of(getattr(rec, "sup", None), float("inf")), "memory": None}
         a["label"] = act.label(a)
         return a, act.timeline_of(rec, end, stop.get("reason"))
 

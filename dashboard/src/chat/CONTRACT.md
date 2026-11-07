@@ -202,6 +202,7 @@ interface ChatSettings {
   auto_accept_edits: boolean;                    // v0.2: write tools run without asking
   max_steps: number;                             // v0.2: default 100
   sandbox_network: 'off' | 'on';                 // v0.2: 'on' = internet without the LAN; see SandboxStatus.network
+  priority?: 'high' | 'normal' | 'low';          // the chat's place in the engine's line for memory; absent = normal
   verify?: boolean;                              // SRV-532: check a page or app the run built before it ends (default true)
 }
 type ToolPolicy = 'ask' | 'always' | 'never';

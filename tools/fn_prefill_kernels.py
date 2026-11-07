@@ -30,6 +30,7 @@ with that source). Built on first use for sm_121a.
 from __future__ import annotations
 
 import os
+import struct
 import sys
 
 if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
@@ -41,7 +42,6 @@ from engine import native_build as nb  # noqa: E402
 from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
-from tools import gpu as _gpu  # noqa: E402
 
 _HELPERS = X._CUDA[: X._CUDA.index("constexpr float RSQRT128")]
 
@@ -110,7 +110,7 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
         # torch reference's per-pair walk -- never an exception-driven mid-call switch
         if x.is_cuda:
             from tools import moe_ada
-            if moe_ada.ok(x.device):
+            if _gpu.profile(x.device).moe_ok(x.device):
                 return moe_ada.moe_grouped_ada(x, ids, bank)
         return moe_grouped_reference(x, ids, bank)
     mod = _module()
@@ -254,7 +254,58 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     return X._mm_fp32(x.half(), wf.T)
 
 
+_QE = None
+
+
+def _qsa_epi_kernel():
+    global _QE
+    if _QE is None:
+        import triton
+        import triton.language as tl
+
+        @triton.jit(do_not_specialize=["nb", "NB", "r0"])
+        def qsa_epi_kernel(SC, OUT, NBLK, nb, NB, r0, INV, NH: tl.constexpr, BN: tl.constexpr):
+            r = tl.program_id(0)
+            cols = tl.program_id(1) * BN + tl.arange(0, BN)
+            m = cols < nb
+            base = SC + r.to(tl.int64) * NH * nb
+            acc = tl.maximum(tl.load(base + cols, mask=m, other=0.0), 0.0)
+            for h in tl.static_range(1, NH):
+                acc = acc + tl.maximum(tl.load(base + h * nb + cols, mask=m, other=0.0), 0.0)
+            acc = acc * INV
+            acc = tl.where(cols >= tl.load(NBLK + r0 + r), float("-inf"), acc)
+            tl.store(OUT + (r0 + r).to(tl.int64) * NB + cols, acc, mask=m)
+
+        _QE = qsa_epi_kernel
+    return _QE
+
+
 def qsa_scores_rows(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB: int, block: int = 1024) -> torch.Tensor:
+    """`qsa_scores_rows_torch` with its relu, head sum, scale, mask and store in one pass over each block's
+    library GEMM products (2.5x at 16k blocks; bit for bit: the same products, the same fp32 steps in the
+    same order). QWEN38_FN_QSA_EPI_TORCH=1 keeps the torch ops."""
+    if not iq.is_cuda or _S.get("FN_QSA_EPI_TORCH") == "1":
+        return qsa_scores_rows_torch(iq, pool, nblk, NB, block)
+    import triton
+    M, NH, D = iq.shape
+    nb = min(NB, pool.shape[0])
+    pk = pool[:nb].float().T
+    out = torch.full((M, NB), float("-inf"), dtype=torch.float32, device=iq.device)
+    if nb == 0:
+        return out
+    nbl = nblk.to(torch.int32).contiguous()
+    # torch divides by a scalar as a multiply by its fp32 reciprocal: the same single rounding here
+    f32 = lambda v: struct.unpack("f", struct.pack("f", v))[0]   # noqa: E731
+    inv = f32(1.0 / f32(D ** 0.5))
+    k = _qsa_epi_kernel()
+    for r0 in range(0, M, block):
+        r1 = min(M, r0 + block)
+        sc = iq[r0:r1].reshape(-1, D).float() @ pk
+        k[(r1 - r0, triton.cdiv(nb, 1024))](sc, out, nbl, nb, NB, r0, inv, NH=NH, BN=1024, num_warps=4)
+    return out
+
+
+def qsa_scores_rows_torch(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB: int, block: int = 1024) -> torch.Tensor:
     """The indexer's block scores of a chunk's rows on the library GEMM, the reference's arithmetic
     (`ref.qsa_mask`: fp32 products, relu, summed over the heads in order, / sqrt(head dim)): iq [M, NH, D]
     bf16, pool [blocks, D] bf16 (every complete block pooled; may hold fewer than NB rows), nblk int [M]

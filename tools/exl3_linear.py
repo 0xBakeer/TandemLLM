@@ -68,6 +68,7 @@ from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
 import torch  # noqa: E402
 
+
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
 # ENG-285: the half-integer rates of exllamav3 1.6.0's mul1 packs below 4 bpw (1.5, 2.5, 3.5), as the
@@ -219,7 +220,7 @@ class EXL3Block:
         # once: the dispatch below reads the recorded verdicts, never a mid-call exception
         if self.t.is_cuda and not _gpu.profile(self.t.device).inline("exl3_linear"):
             from tools import exl3_ada
-            exl3_ada.probe(self.t.device, self.kb)
+            _gpu.profile(self.t.device).exl3_probe(self.t.device, self.kb)
 
     @classmethod
     def group(cls, blocks: list["EXL3Block"], names: list[str]) -> "EXL3Block":
@@ -269,9 +270,9 @@ class EXL3Block:
         wi = torch.empty(self.K, n1 - n0, dtype=torch.float16, device=self.t.device)
         if self.t.is_cuda and _gpu.profile(self.t.device).inline("exl3_linear"):
             _module().exl3_recon(self.t, wi, self.kb, n0)
-        elif self.t.is_cuda:
+        elif self.t.is_cuda and _gpu.profile(self.t.device).exl3_decode_ok(self.t.device, self.kb):
             from tools import exl3_ada
-            return exl3_ada.decode(self.t, n0 // 16, n1 // 16)
+            return exl3_ada.decode_trellis_triton(self.t, n0 // 16, n1 // 16)
         else:
             wi.copy_(decode_trellis(self.t, n0 // 16, n1 // 16))
         return wi
@@ -403,8 +404,8 @@ def _fallback_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor | None = N
     purpose (the rotated input to fp16, the output to bf16/fp32): the correctness gate's yardstick.
     `out`: the caller's [M, N] each segment's result is written straight into -- the cat's bytes."""
     from tools import exl3_ada
-    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
-    gok = x.is_cuda and exl3_ada.gemv_ok(x.device, w.kb)
+    ada = x.is_cuda and _gpu.profile(x.device).exl3_rot_ok(x.device)
+    gok = x.is_cuda and _gpu.profile(x.device).exl3_gemv_ok(x.device, w.kb)
     H = hadamard128(x.device)
     M = x.shape[0]
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
@@ -450,8 +451,8 @@ def _reference_xh(xh: torch.Tensor, w: EXL3Block, out: torch.Tensor | None = Non
     """reference_matmul's tail for an input already rotated (`rotate_in`'s [G, M, K] fp16):
     the products, the output rotation, svh. `out`: the caller's [M, N] written per segment."""
     from tools import exl3_ada
-    ada = xh.is_cuda and exl3_ada.rot_ok(xh.device)
-    gok = xh.is_cuda and exl3_ada.gemv_ok(xh.device, w.kb)
+    ada = xh.is_cuda and _gpu.profile(xh.device).exl3_rot_ok(xh.device)
+    gok = xh.is_cuda and _gpu.profile(xh.device).exl3_gemv_ok(xh.device, w.kb)
     H = hadamard128(xh.device)
     M = xh.shape[1]
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
@@ -486,7 +487,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block, out: torch.Tensor | None = No
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
     dst = out if out is not None and out.dtype == odt and out.shape == (M, w.N) and out.stride(1) == 1 else \
         torch.empty(M, w.N, dtype=odt, device=x.device)
-    ada = x.is_cuda and exl3_ada.rot_ok(x.device)
+    ada = x.is_cuda and _gpu.profile(x.device).exl3_rot_ok(x.device)
     H = hadamard128(x.device)
     if ada:
         xhs_all = exl3_ada.rot_in_g(x, w.suh)
@@ -498,7 +499,7 @@ def _reference_rows(x: torch.Tensor, w: EXL3Block, out: torch.Tensor | None = No
             for m in range(M):
                 xs = x[m:m + 1].float() * w.suh[g].float()
                 xhs[m] = (xs.view(1, -1, 128) @ H).view(w.K).to(torch.float16)
-        gok = x.is_cuda and exl3_ada.gemv_ok(x.device, w.kb)
+        gok = x.is_cuda and _gpu.profile(x.device).exl3_gemv_ok(x.device, w.kb)
         if ada and gok:
             exl3_ada.gemv_rot(xhs, w.t[:, n0 // 16:n1 // 16], w.svh[n0:n1], w.out_fp32,
                               out=dst[:, n0:n1])
@@ -545,8 +546,8 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
         y = y.contiguous()
     if not _gpu.profile(y.device).inline("exl3_linear"):
         from tools import exl3_ada
-        if exl3_ada.rot_ok(y.device):
-            gok = exl3_ada.gemv_ok(y.device, w.kb)
+        if _gpu.profile(y.device).exl3_rot_ok(y.device):
+            gok = _gpu.profile(y.device).exl3_gemv_ok(y.device, w.kb)
             xh = exl3_ada.rot_in_silu(y, w.suh[0])
             r = torch.empty(y.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16,
                             device=y.device)
@@ -716,7 +717,7 @@ def _slab_matmul_ada(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
     the library GEMM keeps the fp32 product (`_mm_fp32`), `_exl3_rot_out_kernel` rotates the
     output. Decode+GEMM amortizes the weight read over M rows -- the right shape for prefill."""
     from tools import exl3_ada
-    rot = exl3_ada.rot_ok(x.device)
+    rot = _gpu.profile(x.device).exl3_rot_ok(x.device)
     if xh is None:
         if rot:
             xh = exl3_ada.rot_in_g(x, w.suh)

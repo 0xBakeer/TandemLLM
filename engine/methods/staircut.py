@@ -293,6 +293,18 @@ class StairCut:
     def observe_prime(self, ms_per_row: float, ctx_class: int = 0) -> None:
         self._ema(self.prime, "prime", ms_per_row, ctx_class)
 
+    def pays(self, ctx_class: int, backlog: int, answer: float, extra_ms: float = 0.0) -> bool:
+        """`turn`'s test alone, nothing learned or aged: True unless the prices say the drafts' saving over
+        `answer` tokens does not pay for reading `backlog` rows into the head and for `extra_ms` more."""
+        plain = self.plain_ms(ctx_class)
+        spec = self.spec_ms(ctx_class)
+        prime = self.prime.get(ctx_class, self.prices.prior(1, "prime", ctx_class))
+        if plain is None or spec is None or prime is None:
+            return True
+        if ctx_class in self.rounds:
+            spec = spec / (1.0 + self.TURN_MARGIN)
+        return (plain - spec) * answer > backlog * prime + extra_ms
+
     def turn(self, ctx_class: int, backlog: int, answer: float, extra_ms: float = 0.0) -> bool:
         """Draft this turn? True unless the class has a plain price, a drafted round's price a token
         and a backlog row's price (learned, else the price file's priors), and what the drafts would
