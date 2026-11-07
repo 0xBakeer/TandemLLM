@@ -113,7 +113,7 @@ def _ada89() -> bool:
     """True on Ada (sm_89): IQ2Linear's tl.dot path there; sm_121a keeps _iq2_gemm."""
     global _ADA89
     if _ADA89 is None:
-        _ADA89 = ld is not None and _gpu.profile().id == "ada"
+        _ADA89 = ld is not None and _gpu.profile().sm89()
     return _ADA89
 #: the grid with an entry's 8 magnitudes as the bytes of one int64 (byte j = magnitude j)
 GRID8 = (GRID.astype(np.int64) << (8 * np.arange(8, dtype=np.int64))[None, :]).sum(1)

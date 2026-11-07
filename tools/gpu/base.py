@@ -98,6 +98,11 @@ class GpuProfile:
         """The hardware e2m1 (NVFP4) converters, cvt.*.e2m1x2 (sm_100a and the sm_120 family)."""
         return self.cap is not None and self.cap >= (12, 0)
 
+    def sm89(self) -> bool:
+        """Ada sm_89 itself: the sites whose Triton or asm path is written for that arch alone
+        (the IQ2 tl.dot decode, the nvfp4_relu2 row tile and launch table)."""
+        return False
+
     # -- launch shapes ----------------------------------------------------------------------
     def moe_launch(self) -> tuple[int, int]:
         """(cp.async stages, warps a CTA splits its K range over) of the fused MoE kernels

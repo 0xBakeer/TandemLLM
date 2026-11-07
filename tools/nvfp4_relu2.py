@@ -49,7 +49,7 @@ def _sm89() -> bool:
     """True on Ada sm_89: the wide row tile and the tuned launch table there; other builds keep 16."""
     global _SM89
     if _SM89 is None:
-        _SM89 = _gpu.profile().id == "ada"
+        _SM89 = _gpu.profile().sm89()
     return _SM89
 
 

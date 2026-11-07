@@ -172,8 +172,10 @@ class Lfm2MoeServing:
         kernels' load probes returned True (every decode and MoE launch a device kernel), they
         can. Evaluated lazily: the probes ran at weight load, before capture."""
         if self._graphs is None:
+            from tools import fn_kernels as FK
             ok = (_gpu.profile(self.fn.device).inline("fn_kernels")
-                  and _gpu.profile(self.fn.device).inline("fn_prefill_kernels"))
+                  and _gpu.profile(self.fn.device).inline("fn_prefill_kernels")
+                  and FK._sm_supported(self.fn.device))
             if not ok and self.fn.device.type == "cuda":
                 # the eager fallbacks can be captured only where the load probes actually
                 # passed: the rotation probe, the gemv probe at every rate this model loads,

@@ -87,15 +87,26 @@ def test_gather_vs_reference():
 def test_masked_default_is_bitwise():
     # the wmax<=32 default's contract, run as the persistent regression net: forced addressed
     # vs forced masked through `moe_experts`'s own dispatch, per rate and per arm -- P<16 goes
-    # ungrouped, 16<=P<=128 grouped.
+    # ungrouped, 16<=P<=128 grouped. The parity is a Triton-lowering property proved per device:
+    # the probe is the gate, so where it says False the forced-masked arm only owes the probe's
+    # tolerance (and the addressed default is what actually serves).
+    MA.probe(DEV)
+    eq = MA._MASKED_EQ.get(MA._devkey(DEV))
     for kbs in ([2] * 4, [3] * 4, [4] * 4, [15] * 4, [25] * 4, [35] * 4, [2, 25] * 2):
         bank = _bank(kbs)
         g = torch.Generator().manual_seed(7)
         for m in (1, 4, 8, 16):
             x = (torch.randn(m, 128, generator=g) * .5).to(DEV, torch.bfloat16)
             ids = torch.randint(0, bank.n, (m, 2), generator=g).to(DEV)
-            assert torch.equal(_run_forced(x, ids, bank, False),
-                               _run_forced(x, ids, bank, True)), (kbs, m)
+            if eq:
+                assert torch.equal(_run_forced(x, ids, bank, False),
+                                   _run_forced(x, ids, bank, True)), (kbs, m)
+            else:
+                assert torch.allclose(PK.moe_grouped_reference(x, ids, bank),
+                                      _run_forced(x, ids, bank, True), atol=4e-2, rtol=4e-2), (kbs, m)
+    if not eq:
+        # the fallback actually serves: the masked default stays off on an unproven device
+        assert not MA._use_masked(16, torch.device(DEV))
 
 
 def test_wide_rates_stay_direct():

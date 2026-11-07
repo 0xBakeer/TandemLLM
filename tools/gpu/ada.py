@@ -56,7 +56,8 @@ class Ada(GpuProfile):
     def moe_launch(self) -> tuple[int, int]:
         """(cp.async stages, warps): 4 and 8 measured on the RTX 4080."""
         from engine.settings import SETTINGS as _S
-        return int(_S.get("FN_MOE_ST") or "4"), int(_S.get("FN_MOE_WARPS") or "8")
+        # the defaults are this adapter's (the KNOBS entries carry GB10's): 4 and 8 on the 4080
+        return int(_S.get("FN_MOE_ST", "4")), int(_S.get("FN_MOE_WARPS", "8"))
 
     def dense_split(self, N: int, Kin: int, kb: int, table: dict) -> tuple[int, int]:
         """No distributed shared memory among the CTAs: a split launches plain CTAs whose last-arriving
@@ -91,6 +92,9 @@ class Ada(GpuProfile):
     # answers the FP8 row kernel's launch, and owns the load-time probes and verdicts of
     # tools/exl3_ada.py and tools/moe_ada.py -- the dispatch reaches those kernels only through
     # these answers, so a False verdict always selects reference.
+    def sm89(self) -> bool:
+        return True
+
     def fp8_rows(self, N: int, K: int, bn: int | None = None) -> tuple:
         got = _FP8_ROWS.get((N, K)) if bn is None else None
         return got or super().fp8_rows(N, K, bn)
