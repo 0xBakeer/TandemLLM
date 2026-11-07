@@ -561,8 +561,11 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
+            # plan mode: the read tools, plus a tool that says it changes nothing (an MCP tool
+            # marked readOnlyHint, an Open WebUI tool with no network or process import)
             if settings.get("plan_mode") and part.get("name") not in PLAN_TOOLS and (
-                    tool is not None or self.tool(part.get("name") or "")):
+                    tool is not None or self.tool(part.get("name") or "")) and not (
+                    tool is not None and tool.side_effects is False):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
             if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
