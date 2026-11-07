@@ -75,8 +75,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: (engine/disk_cache.py), and two MoE knobs owned by tools/gpu/gb10.py; no row changes on the GB10: v2 again
 #: #144: the Ada (sm_89) Triton kernels behind the tools/gpu adapter; no row changes on the GB10: v2 again
 #: #159: the QWEN38_MTP_BACKLOG_CAP default in engine/settings.py (v2 counts its knobs; the drafts only, no text)
+#: SRV-E6: the spill's idle backfill, its device steps under the capture guard and the resident prefix's row
+#: generation (engine/spill.py, engine/cache.py, engine/disk_cache.py's write guard): v2's second value again
 GOLDEN_V2 = ("3ae282292ea19b56921784a1ce75814dda978e50c5d9e51afe2814aa3bf9e9b9",
-             "c87e1db3aafe9998fc4ce9dcb202fc7ae476eaae62a1b2d1640ec8573777ef01")
+             "1766753c4d02b07b6091c1c78f56b8c848734ee9080fcd111eb122b7c15dd59f")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -156,10 +158,11 @@ GOLDEN_FP4 = {
     # #158: the indexer's radix select past 8,192 blocks, its fused score epilogue and live pool slice (the bits
     # the same; tools/fn_seq_kernels, tools/fn_prefill_kernels.py, knobs): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe, flint
     "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
-    "qwen4_exp": "b3226d00b2a5e4b2804f0bb91907db90f61864eadd78f6dd11aaeb5c18e4fd6d",
+    # the prefill's indexer scores and PLE decode in row tiles (engine/models/flashnext/engine.py): qwen4_exp, qwen3_5_moe
+    "qwen4_exp": "da2dc2e94d53206157e8df9d7273e85d3c54f96b03be1ecf4b33f0b6f3a83319",
     "nemotron_h": "7e42cc390f3fff2b373e47d1dc7e46bc3b26d7948a13ea3dc53adc1dca718c6b",
     "lfm2_moe": "73d224baccec5ff53847027176a38c9a72aeee3665e82178a426f6a341688904",
-    "qwen3_5_moe": "875113f7da33bf9d4f8a90c6f7ad85aab2e80434d007439fcc4992e8bac4052a",
+    "qwen3_5_moe": "e1981dacb1357c60d011bf3ecb5798625527adf4043bf14e0da571a40c6993a3",
     "flint": "b3d2ef12774d32e91fdf1ec5a43743d6bc12a312853f2dd9e8a4615c3e85d224",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared

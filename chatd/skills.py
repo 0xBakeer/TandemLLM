@@ -188,6 +188,8 @@ class SkillsMixin:
         """What our engine reads from the body: the compaction marker (SRV-351) and the chat's
         pins and blocks by its mode (SRV-361). A pin the library no longer has is left out."""
         t: dict = {"compaction": False}
+        if settings.get("priority") in ("high", "low"):
+            t["priority"] = settings["priority"]         # the chat's place in the engine's line for memory
         gone = set(self.missing_pins(settings))
         pin = [p for p in settings.get("packages") or [] if p not in gone]
         block = set(settings.get("packages_blocked") or []) | self._off()

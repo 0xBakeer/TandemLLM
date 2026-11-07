@@ -235,6 +235,7 @@ def test_the_last_two_samples_give_the_two_second_rate():
     assert snap["sample"]["decode_tps"] == 75.0  # the last second: 45 + 30
     assert [s["tokens"] for s in snap["history"]] == [150, 215, 290]
     assert snap["counts"] == {"in_flight": 2, "queued": 0, "prefilling": 0, "decoding": 2,
+                              "waiting_memory": 0,             # SRV-787: held for memory, not prefilling
                               "completed_1m": 0, "served": 0, "errors": 0, "refused": 0}
 
 

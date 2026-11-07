@@ -738,6 +738,15 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 #: SRV-305: a request waiting for memory gets its line again this often (s)
 MEM_LINE_EVERY_S = 15.0
+#: SRV-787: the longest a request waits for memory before it is refused with the reason (s), streamed or not
+# 2026-11-06: a chat that cannot get memory waits and continues by itself; it gives up after 3 h only
+MEM_WAIT_S = float(os.environ.get("QSE_MEM_WAIT_S", "10800") or 10800)
+#: SRV-785: what the guard keeps free under the largest step the engine can take between two checks (GiB); 5.0 is
+#: the lowest MemAvailable the box was read at without freezing (2026-11-02), where it freezes was never measured
+GUARD_MARGIN_GB = float(os.environ.get("QSE_GUARD_MARGIN_GB", "5") or 5)
+#: SRV-785: a chat sandbox's ask for memory (`_memory_release`) counts in the guard this long (s)
+SANDBOX_CLAIM_S = 60.0
+_SANDBOX_CLAIM = [0, -1e9]                 # (bytes, monotonic time) of the last sandbox ask
 #: SRV-709: a lane whose next pages the KV pool refuses while other lanes run gives its memory back
 #: and goes on as soon as memory is free: its prompt and the text it wrote are read again, as a
 #: continuation of the same answer (`Handler._recomputing`); off: it ends with `memory_full`
@@ -747,6 +756,9 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
 #: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
 KV_RECOMPUTE_MAX = 16
+#: SRV-E6: the KV pool's ladder drops idle slots' captured graphs after slot 0's conversation (`on`; off by default:
+#: the re-capture per slot is unmeasured, and only a family with `drop_idle_graphs` gives anything back)
+RECLAIM_GRAPHS = (os.environ.get("QSE_RECLAIM_GRAPHS", "off") or "off") == "on"
 #: SRV-775: a request the memory gate refuses waits for the prefills in flight; alone, it runs over the
 #: engine's declared peak and is counted (`_par_admit`). 1: a lone one waits too, and the gate counts the
 #: workspaces of the prefills in flight on the reserve, as the admission holds them: by their rows (in no profile)
@@ -1465,7 +1477,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                     # 496 s generation (2026-10-13); the disk tier serves that head on a side
                     # slot too (server/diskcache.py `SideReader`)
                     if got is not None and (conv is None or int(got[1]) >= conv):
-                        why.update(wait="spill", spill=int(got[1]))
+                        why.update(wait="spill", spill=int(got[1]), spill_eid=got[0].eid)
                         with pool._lk:
                             pool.stats["spill_waits"] = pool.stats.get("spill_waits", 0) + 1
                     elif got is not None:
@@ -1524,6 +1536,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     # FX16: the side slot that holds this conversation's rows (its last turn ran there and
     # nothing wrote over them since): the turn resumes at its end there, beside slot 0
     home = _side_home(pool, ids, need, chunk, conv)
+    if home is None and why.get("wait") == "spill":
+        # SRV-779: the side slot its rows were written from, while it holds no other
+        # conversation: it reads them back there (`_SideSpill`), not through slot 0
+        back = _spill_home(pool, why.get("spill_eid"), need, chunk)
+        if back is not None:
+            why.update(home=back, home_share=0, spill_home=True)
+            return need
     if why.get("wait"):
         here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill", "park"))
         if home is not None and home[1] > here:
@@ -1538,7 +1557,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         why["slot0_first"] = True
         return need
     if home is not None:
-        why["home"] = home[0]
+        # SRV-787: and the tokens of the prompt it holds, which the admission does not charge (`_par_admit`'s `home`)
+        why.update(home=home[0], home_share=home[1])
     elif (SIDE_NEW_FIRST == "on" and res is not None
           and not why.get("guest") and not why.get("wait")):
         # FX16: a new conversation beside a resident one a side slot could never hold takes an
@@ -1624,7 +1644,7 @@ def _par_nums(why: dict) -> str:
                                               "conv", "need", "guest", "park", "slot0_wait_s",
                                               "home", "home_share", "home_wait", "hop_from",
                                               "prefer_side", "prefer_side_end", "slot0_stale", "new_wait",
-                                              "spill", "spill_head", "slot0_wait")
+                                              "spill", "spill_head", "spill_home", "slot0_wait")
                     if k in why)
     if "n_images" in why:
         nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
@@ -1688,6 +1708,22 @@ def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) ->
     near = [(h, s) for h, s in found if h >= top - chunk]
     h, s = next(((h, s) for h, s in near if not s.busy), next((h, s) for h, s in found if h == top))
     return s.index, h
+
+
+def _spill_home(pool, eid: str | None, need: int, chunk: int) -> int | None:
+    """SRV-779: the index of the side slot whose conversation was written to NVMe entry `eid`
+    before its rows went (`Slot.written`: the KV pool's reclaim, a lane giving way, ENG-371's
+    keeper), when the slot holds no other conversation now (under a chunk of rows), reads the
+    spill (`_SideSpill`) and its window holds `need` rows; else None."""
+    if eid is None:
+        return None
+    for s in pool.side():
+        res = (s.values or {}).get("resident")
+        if (s.written is not None and s.written.get("eid") == eid and need <= s.max_len
+                and res is not None and getattr(res, "spiller", None) is not None
+                and int(getattr(res, "valid", 0) or 0) < chunk):
+            return s.index
+    return None
 
 
 def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
@@ -4377,8 +4413,10 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
     """A conversation on the NVMe (engine/spill.py) that this prompt continues further
     than every cache in RAM is read back into the engine's buffers before the end anchor's replay,
     the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
-    request: the prefill then starts from what is in place."""
-    sp, res = STATE.get("spill"), STATE.get("resident")
+    request: the prefill then starts from what is in place. SRV-779: on a side slot too, through
+    its prefix's view of the spill (`_SideSpill`), into the slot's own buffers."""
+    res = STATE.get("resident")
+    sp = getattr(res, "spiller", None)
     if sp is None or res is None:
         return                 # FX16: with no entry the park's end still comes back here
     parked = int(res.stats.get("park_tokens_reused", 0))
@@ -4716,20 +4754,14 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     if (sp is None or not (stay or _comes_back(res.owner)) or res._stash is not None
             or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
         return
-    if sp._own_io.locked():
-        # slot 0's save or restore holds the spill's own I/O: the write waits for it (this side
-        # thread holds no lock it needs), at most KEEP_IO_WAIT_S, then the rows go unwritten
-        if not sp._own_io.acquire(timeout=KEEP_IO_WAIT_S):
-            print(f"[spill] {res.owner}: not written, the spill stayed busy "
-                  f"{KEEP_IO_WAIT_S:g} s", flush=True)
-            return
-        sp._own_io.release()
-    # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
-    # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
-    # slot 0, and its request ended in an error)
-    with capture_lock.GUARD, torch.no_grad():
-        info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
+    info, why = _write_rows(res, eng, drafter, "switch")
+    if why == "busy":
+        print(f"[spill] {res.owner}: not written, the spill stayed busy "
+              f"{KEEP_IO_WAIT_S:g} s", flush=True)
+        return
+    if info and slot is not None:
+        slot.written = {"eid": info["eid"], "owner": res.owner}
     where = f"slot {slot.index}" if slot is not None else "slot 0"
     who = ("parent" if _waiting_parent(res.owner) else "worker" if _comes_back(res.owner)
            else "conversation")
@@ -4738,6 +4770,47 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
               f"another session's prefill, {info['ms']:.0f} ms", flush=True)
     else:
         print(f"[spill] {who} {res.owner} on {where}: not written, its rows go", flush=True)
+
+
+def _write_rows(res, eng, drafter, reason: str, wait_s: float = KEEP_IO_WAIT_S):
+    """ENG-371's save of a slot's conversation to slot 0's NVMe spill, for any owner and any slot
+    (SRV-779: the KV pool's reclaim of an idle conversation, a lane that gives its memory back):
+    (the save's info, None) or (None, why not): `short` under `drain_min_tokens`, `busy` when the
+    spill's own I/O stayed held `wait_s` (0: not waited for; the thread that holds it may be this
+    one, inside a restore's page gate), else the spill's own refusal (`write_budget`, `room`,
+    `reading`, `failed`). Any thread, the slot's lock held or its slot idle.
+
+    SRV-E6: a conversation the idle backfill wrote and nothing changed since (`SessionSpill.current`)
+    is not written again: its entry's info with `current` and 0 ms."""
+    sp = dict.get(STATE, "spill")
+    if sp is None:
+        return None, "no_spill"
+    if res.valid < int(sp.cfg.get("drain_min_tokens", 4096)):
+        return None, "short"
+    e = sp.current(res)
+    if e is not None:
+        return {"eid": e.eid, "tokens": e.valid, "ms": 0.0, "current": True}, None
+    refused = dict(sp.stats["refused"])
+    failed = dict(sp.stats["failed"])
+    # slot 0's save or restore may hold the spill's own I/O: the write waits for it, at most
+    # `wait_s`, then the rows are not written. That lock first, then the capture guard, as the idle
+    # backfill takes them; the guard only around the save's device steps (no CUDA call inside a
+    # graph capture: live 2026-10-18 01:16 a side slot's save broke a verify graph's capture on
+    # slot 0, and its request ended in an error)
+    with sp.io(wait_s) as ok:
+        if not ok:
+            return None, "busy"
+        with torch.no_grad():
+            if res._stash is not None:
+                with capture_lock.GUARD:
+                    res.settle_guest(eng)
+            info = sp.save_resident(res, eng, drafter, reason, guard=capture_lock.GUARD)
+    if info:
+        return info, None
+    why = next((k for k, v in sp.stats["refused"].items() if v > refused.get(k, 0)), None)
+    if why is None and any(v > failed.get(k, 0) for k, v in sp.stats["failed"].items()):
+        why = "failed"
+    return None, why or "nothing"
 
 
 #: ENG-371: this thread's gate retry lets a waited-for park go (`on`); a shed kept one (`kept`)
@@ -5897,9 +5970,50 @@ def _memory_event(ev: dict) -> None:
 
 # ------------------------------------------------------------------ SRV-307: the shared KV pool
 def _kv_pool_event(kind: str, kw: dict) -> None:
-    """A pool event (engine/kvpool.py): the log, and the residency journal for a refusal."""
-    if kind in ("reclaim", "refused", "reclaim_error"):
+    """A pool event (engine/kvpool.py): the log, and the residency journal for a refusal. A
+    reclaim of conversations names each victim (SRV-779, `_victim_words`), one line each."""
+    if kind == "reclaim":
+        _reclaim_lines("[kv-pool] reclaim", kw)
+    elif kind in ("refused", "reclaim_error"):
         print(f"[kv-pool] {kind} " + " ".join(f"{k}={v}" for k, v in kw.items()), flush=True)
+
+
+#: SRV-779: on the thread that runs a reclaim, the conversations its last level took (`victims`,
+#: for the log line) and whether a level may wait for the spill's own I/O (`wait`: the admission's
+#: reclaim before a request waits, and a release for the sandbox; never the page gate inside a
+#: forward or a restore, whose thread may hold that I/O itself)
+_RECLAIM = threading.local()
+#: SRV-779: a side slot whose turn ended less than this ago is the idle level's last victim (an agent
+#: between two tool steps comes back in seconds); a slot with no end recorded counts as just ended
+RECLAIM_RECENT_S = 30.0
+
+
+def _victim_words(v: dict) -> str:
+    """`victim=slot3 conv=<session> rows=85010 written=true ms=612` (`why=` when not written)."""
+    from engine import spill as spill_mod
+    words = (f"victim=slot{v['slot']} conv={spill_mod._short(v.get('conv'))} rows={v['rows']} "
+             f"written={'true' if v['written'] else 'false'}")
+    if v["written"]:
+        return words + f" ms={v['ms']:.0f}"
+    return words + (f" why={v['why']}" if v.get("why") else "")
+
+
+def _reclaim_lines(head: str, kw: dict) -> None:
+    """The reclaim's line (`level`, `bytes`, the rest of `kw`: the level's `ms` in the admission's
+    ladder), or one for each conversation it took (`_RECLAIM.victims`), with that one's bytes and
+    words (its own save's `ms`; 0 for one the idle backfill had written, SRV-E6)."""
+    victims = getattr(_RECLAIM, "victims", None) or []
+    _RECLAIM.victims = []
+    if kw.get("level") not in ("written_side", "idle_side", "unwritten_side"):
+        victims = []
+    rest = "".join(f" {k}={v}" for k, v in kw.items() if k not in ("level", "bytes"))
+    if not victims:
+        print(f"{head} level={kw.get('level')} bytes={kw.get('bytes')}{rest}", flush=True)
+        return
+    rest = "".join(f" {k}={v}" for k, v in kw.items() if k not in ("level", "bytes", "ms"))
+    for v in victims:
+        print(f"{head} level={kw.get('level')} bytes={v['bytes']}{rest} {_victim_words(v)}",
+              flush=True)
 
 
 def _kv_keep_rows(eng, res, slot=None) -> int:
@@ -5931,14 +6045,21 @@ def kv_trim_current() -> int:
 
 def _kv_reclaim_caches(want: int, owner) -> int:
     """Pool reclaim, level 1: the memory policy's levels, cheapest first (engine/cache.py `Budget`
-    `LEVELS`), only what nothing is using, and the allocator's free blocks back to the driver."""
+    `LEVELS`), only what nothing is using, and the allocator's free blocks back to the driver
+    (`empty`). SRV-E6: `empty` frees device memory, so it runs only while no graph capture holds
+    `capture_lock.GUARD`, taken without waiting (a reclaim never waits for a capture); skipped, the
+    next level's `empty` or the next pass gives the blocks back."""
     mem = dict.get(STATE, "mem")
     if mem is None:
         return 0
     got = 0
     for lv in mem.LEVELS:
         got += int(mem.shed(lv, "kv_pool", safe=True) or 0)
-        got += int(mem.empty("kv_pool") or 0)
+        if capture_lock.GUARD.acquire(blocking=False):
+            try:
+                got += int(mem.empty("kv_pool") or 0)
+            finally:
+                capture_lock.GUARD.release()
         if got >= want:
             break
     return got
@@ -5966,11 +6087,20 @@ def _kv_reclaim_kept_park(want: int, owner) -> int:
 
 
 def _add_kv_reclaimers(pool) -> None:
-    """The KV pool's reclaim order, cheapest first; ENG-371's kept park last."""
+    """The KV pool's reclaim order, cheapest first (the full-pool order approved 2026-10-24): the
+    caches and the allocator's free blocks, the small models, the idle side conversations already
+    current on the NVMe (SRV-E6: the idle backfill wrote them; trimmed only), the ones not written
+    yet (saved, then trimmed), slot 0's idle conversation, the idle slots' graphs (`RECLAIM_GRAPHS`,
+    off), the side conversations no save could write (SRV-779) after every other conversation,
+    ENG-371's kept park last."""
     pool.add_reclaimer("caches", _kv_reclaim_caches)
     pool.add_reclaimer("roles", _kv_reclaim_roles)
+    pool.add_reclaimer("written_side", _kv_reclaim_written)
     pool.add_reclaimer("idle_side", _kv_reclaim_side)
     pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    if RECLAIM_GRAPHS:
+        pool.add_reclaimer("graphs", _kv_reclaim_graphs)
+    pool.add_reclaimer("unwritten_side", _kv_reclaim_unwritten)
     pool.add_reclaimer("kept_park", _kv_reclaim_kept_park)
 
 
@@ -5989,52 +6119,167 @@ def _kv_reclaim_roles(want: int, owner) -> int:
     return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
-def _kv_reclaim_side(want: int, owner) -> int:
-    """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. The slot's
-    next turn re-reads its prompt (or comes back from the disk tier); nothing is lost but time."""
+def _newer_copies() -> dict:
+    """The slot that holds each chat's newest conversation: owner -> (its `t_used`, the slot's index), over slot 0
+    and the side slots. A chat on another slot than this one left an older copy there: after a compaction its
+    next request shares only the head with the rows it had, takes another slot, and the 200k rows it will not
+    continue stay (2026-11-06: two copies of 217k and 218k rows held 12.3 GiB of KV with every chat at 34k)."""
+    out: dict = {}
+    pool = dict.get(STATE, "pool")
+    slots_ = [(0, dict.get(STATE, "resident"))] + (
+        [(s.index, (s.values or {}).get("resident")) for s in pool.side()] if pool is not None else [])
+    for i, res in slots_:
+        o = getattr(res, "owner", None) if res is not None else None
+        if o is None or not int(getattr(res, "valid", 0) or 0):
+            continue
+        t = float(getattr(res, "t_used", 0.0) or 0.0)
+        if o not in out or t > out[o][0]:
+            out[o] = (t, i)
+    return out
+
+
+def _older_copy(index: int, res, newest: dict) -> bool:
+    """Is slot `index`'s conversation an older copy of a chat whose newest one is on another slot?"""
+    o = getattr(res, "owner", None) if res is not None else None
+    return o is not None and o in newest and newest[o][1] != index
+
+
+def _kv_reclaim_written(want: int, owner) -> int:
+    """SRV-E6, before any save: the idle side conversations already current on the NVMe (the idle
+    backfill wrote them and no turn ran since, `SessionSpill.current`), oldest first: their pages
+    go and nothing is written, so the request that waits pays a trim (ms), not a save (0.5-4 s)."""
+    return _kv_reclaim_side(want, owner, only_written=True)
+
+
+def _kv_reclaim_side(want: int, owner, write: bool = True, only_written: bool = False) -> int:
+    """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. SRV-779: each
+    goes to the NVMe first (`_write_rows`, from `drain_min_tokens` up) and its pages only once the
+    save returned an entry; one the save refuses (the day's write budget, the spill busy, no room)
+    stays and is skipped, and only the `unwritten_side` level after every other conversation's
+    (`write` False) takes it unwritten. Its next turn comes back from the entry on its own slot
+    (`_spill_home`). A slot whose turn ended within RECLAIM_RECENT_S, or that recorded no end,
+    goes last (live 2026-11-02: an agent between two tool steps lost its 85,010 rows first, as a
+    None carry sorted as the oldest). SRV-E6: one current on the NVMe is trimmed without a save
+    (`written=true ms=0`); `only_written`, only those (`_kv_reclaim_written`).
+
+    An older copy of a chat that lives on another slot now (`_older_copy`) goes before everything else, at the
+    `only_written` level too, and is never written: its save would write over the chat's one entry with rows the
+    chat no longer continues."""
+    _RECLAIM.victims = []
     pool = dict.get(STATE, "pool")
     if pool is None:
         return 0
+    sp = dict.get(STATE, "spill")
     got = 0
+    now = time.monotonic()
+
+    def ended(s) -> float:
+        t = (s.carry or {}).get("t")
+        return float(t) if t is not None else now
     idle = [s for s in pool.side() if f"slot{s.index}" != owner and not s.busy]
-    idle.sort(key=lambda s: float((s.carry or {}).get("t") or 0.0))
+    newest = _newer_copies()
+
+    def older(s) -> bool:
+        return _older_copy(s.index, (s.values or {}).get("resident"), newest)
+    # older copies first; then the idle conversations of lower-priority chats (`tandem.priority`, kept on the
+    # slot by `_par_admit`)
+    idle.sort(key=lambda s: (not older(s), int(getattr(s, "prio", 1)), now - ended(s) < RECLAIM_RECENT_S, ended(s)))
+    wait_s = KEEP_IO_WAIT_S if getattr(_RECLAIM, "wait", False) else 0.0
     for s in idle:
         if got >= want:
             break
-        eng = (s.values or {}).get("engine")
+        vals = s.values or {}
+        eng = vals.get("engine")
         pages = getattr(getattr(eng, "kv", None), "pages", None)
         if pages is None or pages.committed_bytes() == 0 or not s.lock.acquire(blocking=False):
             continue
         try:
-            res = (s.values or {}).get("resident")
+            res = vals.get("resident")
+            rows = int(getattr(res, "valid", 0) or 0) if res is not None else 0
+            v = {"slot": s.index, "conv": getattr(res, "owner", None), "rows": rows,
+                 "written": False, "why": None, "ms": 0.0}
+            dead = older(s)
+            cur = sp.current(res) if sp is not None and res is not None and not dead else None
+            if only_written and cur is None and not dead:
+                continue
+            if dead:
+                v["why"] = "older_copy"
+                s.written = None           # nothing of the chat comes back here: its newest rows are elsewhere
+            elif cur is not None:
+                v["written"] = True
+                s.written = {"eid": cur.eid, "owner": res.owner}
+            elif res is not None and write:
+                t0 = time.perf_counter()
+                try:
+                    info, why = _write_rows(res, eng, vals.get("drafter"), "kv_pool", wait_s)
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
+                    info, why = None, "error"
+                v.update(written=info is not None, why=why,
+                         ms=(time.perf_counter() - t0) * 1e3)
+                if info is not None:
+                    s.written = {"eid": info["eid"], "owner": res.owner}
+                elif why not in ("short", "no_spill", "nothing"):
+                    # under `drain_min_tokens`, no spill, or nothing a restore could resume at:
+                    # its pages go as before
+                    print(f"[kv-pool] reclaim skips slot {s.index}: its {rows} rows not "
+                          f"written ({why}), kept until nothing else is left", flush=True)
+                    continue
+            elif res is not None:
+                v["why"] = "nothing_else_left"
             if res is not None:
                 res.clear()
             s.carry = None
             eng.kv.length = 0
-            got += pages.trim(0)
+            n = pages.trim(0)
+            got += n
+            if n:
+                v["bytes"] = n
+                _RECLAIM.victims.append(v)
         finally:
             s.lock.release()
     return got
 
 
+def _kv_reclaim_unwritten(want: int, owner) -> int:
+    """SRV-779, after every other conversation: the idle side conversations `_kv_reclaim_side`
+    kept because no save could write them, given back unwritten (the page gate inside a forward
+    or a restore never refuses while they hold pages). Said on the log line (`why=`) and here."""
+    n = _kv_reclaim_side(want, owner, write=False)
+    if n:
+        print(f"[kv-pool] nothing else to reclaim ({owner}): {_gib(n)} GiB of side "
+              f"conversations went unwritten", flush=True)
+    return n
+
+
 def _kv_give_back_own() -> int:
     """SRV-709: the calling request's slot gives every page back to the pool (it continues later by
-    reading its prompt and its text again): slot 0's conversation goes to the NVMe first when the
-    spill is on, as when the pool reclaims it idle. Bytes given back."""
-    eng = dict.get(STATE, "engine")
+    reading its prompt and its text again). SRV-779: its conversation goes to the NVMe first
+    (`_write_rows`, from `drain_min_tokens` up), on slot 0 and on a side slot, so the
+    continuation reads back what it held and prefills the rest; the pages go back either way, as
+    the lane must give way. The slot's own engine and prefix (`STATE.get`, the overlay's on a side
+    slot): `dict.get` read slot 0's from a side lane, whose give-back then emptied slot 0. Bytes
+    given back."""
+    eng = STATE.get("engine")
     pages = getattr(getattr(eng, "kv", None), "pages", None)
     if pages is None:
         return 0
-    res = dict.get(STATE, "resident")
+    res = STATE.get("resident")
+    slot = slots_mod.current()
     if res is not None:
+        rows, why, t0 = int(res.valid), None, time.perf_counter()
         try:
             if getattr(res, "_stash", None) is not None:
                 res.settle_guest(eng)
-            sp = getattr(res, "spiller", None)
-            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
-                res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
+            info, why = _write_rows(res, eng, STATE.get("drafter"), "kv_pool")
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+            info = None
+        if info is not None and slot is not None:
+            slot.written = {"eid": info["eid"], "owner": res.owner}
+        v = {"slot": slot.index if slot is not None else 0, "conv": res.owner, "rows": rows,
+             "written": info is not None, "why": why, "ms": (time.perf_counter() - t0) * 1e3}
+        print(f"[kv-pool] give back {_victim_words(v)}", flush=True)
         res.clear()
     eng.kv.length = 0
     return int(pages.trim(0))
@@ -6058,7 +6303,8 @@ def _keep_think(think) -> None:
 
 def _kv_reclaim_slot0(want: int, owner) -> int:
     """Pool reclaim, level 4: slot 0's idle conversation, to the NVMe first when the spill is on
-    (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
+    (engine/spill.py, the tier a replaced conversation goes to), then its pages. SRV-E6: one the
+    idle backfill wrote and nothing changed since (`SessionSpill.current`) is not written again."""
     if owner == "slot0":
         return 0
     eng = dict.get(STATE, "engine")
@@ -6068,9 +6314,17 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
     try:
         res = dict.get(STATE, "resident")
         if res is not None:
+            sp = res.spiller
+            if sp is not None and (sp.current(res) is not None or _older_copy(0, res, _newer_copies())):
+                sp = None                  # SRV-E6: on the NVMe as it is, or an older copy: only its pages go
+            if (sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30)
+                    and sp._own_io.locked()):
+                # SRV-779: the spill's I/O is held, maybe by this very thread (a side slot's
+                # restore whose page gate asks): the save would wait for it, so slot 0 stays
+                return 0
             if res._stash is not None:
                 res.settle_guest(eng)
-            if res.spiller is not None and res.valid >= getattr(res.spiller, "min_tokens", 1 << 30):
+            if sp is not None and res.valid >= getattr(sp, "min_tokens", 1 << 30):
                 res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
             res.clear()
         eng.kv.length = 0
@@ -6079,32 +6333,114 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
         LOCK._lk.release()
 
 
+def _kv_reclaim_graphs(want: int, owner) -> int:
+    """SRV-E6 (`QSE_RECLAIM_GRAPHS=on`, off by default): the captured graphs of idle slots' engines
+    (their private pools, 6.96 GiB of free scratch on 2026-11-05), through the model family's own
+    `drop_idle_graphs()` (bytes given back), then the allocator's free blocks. A slot pays the
+    re-capture at its next turn in a class (unmeasured per slot); a family without the method
+    gives nothing back here. Each engine only while its slot is idle and no capture runs."""
+    pool = dict.get(STATE, "pool")
+    held = [(LOCK._lk, dict.get(STATE, "engine"))] + [
+        (s.lock, (s.values or {}).get("engine")) for s in (pool.side() if pool is not None else ())
+        if f"slot{s.index}" != owner]
+    got = 0
+    for lk, eng in held:
+        drop = getattr(eng, "drop_idle_graphs", None)
+        if got >= want or drop is None or not lk.acquire(blocking=False):
+            continue
+        try:
+            if capture_lock.GUARD.acquire(blocking=False):
+                try:
+                    got += int(drop() or 0)
+                finally:
+                    capture_lock.GUARD.release()
+        finally:
+            lk.release()
+    mem = dict.get(STATE, "mem")
+    if got and mem is not None and capture_lock.GUARD.acquire(blocking=False):
+        try:
+            got += int(mem.empty("graphs") or 0)
+        finally:
+            capture_lock.GUARD.release()
+    return got
+
+
+#: SRV-E6: the host heap is trimmed after a reclaim at most this often (s): `malloc_trim` holds the heap's
+#: arenas while it walks them, and the admission's ladder may run every second while a request waits
+TRIM_HOST_EVERY_S = 30.0
+_TRIM = {"t": -1e18, "calls": 0, "ms": 0.0}
+
+
+def _trim_host(why: str) -> None:
+    """SRV-E6 (plan 2.5): after a reclaim gave memory back, glibc's free pages to the system
+    (`malloc_trim(0)`): what the host side of the freed caches and conversations held stays in
+    the heap's arenas otherwise (host RSS 15.0 GiB before the 2026-11-05 23:07 restart, 9.19 after).
+    Linux only, at most every TRIM_HOST_EVERY_S; RSS before and after in the log line."""
+    now = time.monotonic()
+    if not sys.platform.startswith("linux") or now - _TRIM["t"] < TRIM_HOST_EVERY_S:
+        return
+    _TRIM["t"] = now
+
+    def rss() -> int:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    try:
+        import ctypes
+        before, t0 = rss(), time.perf_counter()
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+        ms = (time.perf_counter() - t0) * 1e3
+        after = rss()
+    except Exception:                                              # noqa: BLE001
+        return
+    _TRIM["calls"] += 1
+    _TRIM["ms"] += ms
+    print(f"[memory] malloc_trim after the {why} reclaim: RSS {_gib(before)} -> {_gib(after)} GiB "
+          f"({ms:.0f} ms)", flush=True)
+
+
 def _kv_reclaim_idle(d: dict, owner) -> int:
-    """SRV-307, before a request waits for memory: the pages idle conversations keep (idle side
-    slots, then slot 0's idle one, to the NVMe first), as much as the admission is short. Not the
-    caches: the admission already counts their growth, and shedding them leaves it unchanged."""
+    """SRV-307, before a request waits for memory: the KV pool's ladder (`_add_kv_reclaimers`), in
+    its order, as much as the admission is short (`want`, from the admission's sum; nothing when it
+    passes): the caches' safe levels and the allocator's free blocks, the small models, the idle
+    side conversations already current on the NVMe (SRV-E6: trimmed only), those not written yet
+    (saved, then trimmed), slot 0's idle conversation, the graphs (a knob, off), the side
+    conversations no save could write, the kept park. SRV-E6: the caches' level runs here too (it
+    was skipped, as the admission counts the caches' growth; the allocator's free blocks that
+    `empty` gives back are MemAvailable the sum never counted). Each level that gives something
+    back says how much and in how many ms; then the host heap is trimmed (`_trim_host`)."""
     pool = kvpool.POOL
     if pool is None or d.get("after") is None:
         return 0
     want = int(d.get("floor", 0)) - int(d["after"])
+    if want <= 0:
+        return 0
     rm = dict.get(STATE, "role_mem")
-    if rm is not None and want > 0:
+    if rm is not None:
         rm.note_pressure("admission")
     got = 0
-    for name, fn in list(pool.reclaimers):
-        if name == "caches" or got >= want:
-            continue
-        try:
-            n = int(fn(want - got, owner) or 0)
-        except Exception:                                          # noqa: BLE001
-            logbuf.print_exc()
-            n = 0
-        if n:
-            got += n
-            pool.stats["reclaims"] += 1
-            pool.stats["reclaimed_bytes"] += n
-            print(f"[kv-pool] reclaim for admission level={name} bytes={n} owner={owner}",
-                  flush=True)
+    _RECLAIM.wait = True                   # a request's own thread, before it waits: no restore
+    try:
+        for name, fn in list(pool.reclaimers):
+            if got >= want:
+                break
+            t0 = time.perf_counter()
+            try:
+                n = int(fn(want - got, owner) or 0)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+                n = 0
+            if n:
+                got += n
+                pool.stats["reclaims"] += 1
+                pool.stats["reclaimed_bytes"] += n
+                # SRV-779: one line for each conversation taken, its victim named
+                _reclaim_lines("[kv-pool] reclaim for admission",
+                               {"level": name, "bytes": n,
+                                "ms": round((time.perf_counter() - t0) * 1e3), "owner": owner})
+    finally:
+        _RECLAIM.wait = False
+    if got:
+        _trim_host("admission")
     return got
 
 
@@ -6119,6 +6455,8 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
     and what MemAvailable is now."""
     before = memsplit.mem_available()
     got, levels = 0, {}
+    if why == "sandbox":
+        _SANDBOX_CLAIM[:] = [max(0, int(want)), time.monotonic()]      # SRV-785: the guard counts it
     if want > 0 and _lock_when_idle():
         try:
             n = _kv_reclaim_caches(want, "release")
@@ -6137,18 +6475,26 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
     rm = dict.get(STATE, "role_mem")
     if rm is not None and got < want:
         rm.note_pressure(why)
-    for name, fn in list(pool.reclaimers) if pool is not None else []:
-        if name == "caches" or got >= want:
-            continue
-        try:
-            n = int(fn(want - got, "release") or 0)
-        except Exception:                                          # noqa: BLE001
-            logbuf.print_exc()
-            n = 0
-        if n:
-            got, levels[name] = got + n, n
-            pool.stats["reclaims"] += 1
-            pool.stats["reclaimed_bytes"] += n
+    _RECLAIM.wait = True
+    try:
+        for name, fn in list(pool.reclaimers) if pool is not None else []:
+            if name == "caches" or got >= want:
+                continue
+            try:
+                n = int(fn(want - got, "release") or 0)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+                n = 0
+            if n:
+                got, levels[name] = got + n, n
+                pool.stats["reclaims"] += 1
+                pool.stats["reclaimed_bytes"] += n
+                _reclaim_lines(f"[kv-pool] reclaim for {why}",
+                               {"level": name, "bytes": n, "owner": "release"})
+    finally:
+        _RECLAIM.wait = False
+    if got:
+        _trim_host(why)
     after = memsplit.mem_available()
     print(f"[memory] release for {why}: asked {_gib(want)} GiB, gave back {_gib(got)} GiB "
           f"({', '.join(levels) or 'nothing idle'}), MemAvailable {_gib(before)} -> "
@@ -6912,7 +7258,9 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
     """
     now = time.perf_counter()
     ms = (now - t0) * 1e3
-    rate = (n_out - 1) / (ms / 1e3) if n_out > 1 and ms > 0 else 0.0
+    # SRV-787: a wait for memory is no part of the rate (a 460 s wait and 2 s of decode read 0.30 tok/s)
+    wait_mem = float(getattr(rec, "wait_mem_ms", None) or 0.0) if rec is not None else 0.0
+    rate = (n_out - 1) / ((ms - wait_mem) / 1e3) if n_out > 1 and ms > wait_mem else 0.0
     with QUEUE:
         if finish == "error":
             INFLIGHT["errors"] += 1
@@ -6954,6 +7302,8 @@ def _log_request(cid: str, n_prompt: int, n_out: int, finish: str, t0: float, *,
         ws_s = f" fwd={'-' if fwd is None else fwd} ws_rows={rec.ws_rows} ws_gib={rec.ws_gib:.2f}"
     if REQ_PEAK:
         ws_s += _req_peak_field()
+    if wait_mem:
+        ws_s += f" wait_mem_ms={wait_mem:.0f}"
     print(f"[req] {cid} {'stream' if stream else 'json'} prompt={n_prompt} "
           f"completion={n_out} finish={finish} {ms:.0f} ms {rate:.2f} tok/s{temp_s}{pen_s}{pat_s}"
           f"{slot_s}{tools_s}{blk_s}{ws_s}{cache.req_ms_fields(getattr(rec, 'req_ms', None))}{tail}", flush=True)
@@ -8006,7 +8356,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
                    stream: bool = False, rows: int | None = None, respond: bool = True,
-                   cold: bool = False) -> bool:
+                   cold: bool = False, home: int = 0, priority: int = 1) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8026,7 +8376,8 @@ class Handler(BaseHTTPRequestHandler):
         each prefill it admits under the peak), less the KV pages still to commit and its own, stays at
         the floor, alone too; a request admitted over the peak counts its workspace past the room, in full
         less the allocator's free default-pool blocks, which it takes before any new memory (`_par_spare`),
-        so the floor alone bounds it. The idle conversations' pages come back only for a request this
+        so the floor alone bounds it (the larger of that and the room's charge, SRV-787: no cache grows
+        while it runs). The idle conversations' pages come back only for a request this
         floor holds back, never for one the gate refuses while other prefills run. A wait is in
         one-second slices with the GPU turn given up; a request that waits leaves the prefill burst
         (it prefills alone once admitted, and the burst's others go on without it), and one waiting for
@@ -8044,9 +8395,13 @@ class Handler(BaseHTTPRequestHandler):
 
         SRV-305 (2026-10-10): a wait for memory is never a silent refusal. The request waits in
         state `waiting_memory` (the dashboard counts it, `rec.wait_reason` is "memory"), its line
-        says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
-        (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
-        `Retry-After` and the code `memory_wait_timeout`.
+        says so every `MEM_LINE_EVERY_S`, and after its bound it gets a 503 with `Retry-After` and
+        the code `memory_wait_timeout`. SRV-787: the bound is `MEM_WAIT_S`, streamed or not (at most
+        `--queue-timeout` without a stream; a streamed one waited `--request-timeout`, an hour live),
+        the refusal names what it needed and what was free above the guard, the log repeats why
+        every `MEM_LINE_EVERY_S`, and `rec.mem_wait` is what the live view says meanwhile; a stream
+        the wait opened (`say`: the handler's keepalive comment) ends with the refusal as an error
+        event.
 
         SRV-629: `rows`, the prompt's rows once its images are expanded (`_mm_rows`), where the
         text prompt has one placeholder an image: the workspace and the KV pages are reserved for
@@ -8054,7 +8409,14 @@ class Handler(BaseHTTPRequestHandler):
 
         SRV-709: the KV pages are reserved for at most `KV_ADMIT_ROWS` of `max_new` while lanes
         that outgrow it give way (`KV_RECOMPUTE`), so more lanes start; `respond=False` (a lane
-        resuming inside its own answer) sends nothing on a refusal."""
+        resuming inside its own answer) sends nothing on a refusal.
+
+        SRV-787: `home`, on the side slot that holds this conversation (`_side_home`), the tokens of the
+        prompt its rows hold: the rows from there, at most from the slot's valid rows, are what is
+        charged, not the whole prompt. This gate runs on the client's tokens, which part from the slot's
+        rows at the first router note the prefill puts back (`_end_replay`), so where it resumes in place
+        said nothing there: 35 side-slot turns of 2026-11-05 were charged the whole prompt (5.2-8.5 GiB)
+        and forwarded 23-5,331 rows."""
         self._mem_wait = False
         adm = pool.admission
         if adm is None:
@@ -8079,6 +8441,26 @@ class Handler(BaseHTTPRequestHandler):
             moves the resume point down, and the charge priced before it is the smaller one."""
             start, kind = ((0, None) if full or res_ is None or cold
                            else res_.resume_estimate(keys, n, mm_ok))
+            if home and not full and not cold and res_ is not None:
+                # SRV-787: its home side slot's rows, read again at every pass (a reclaim empties them)
+                held = min(int(home), int(getattr(res_, "valid", 0) or 0))
+                if held > int(start):
+                    start, kind = held, "home"
+            if not full and not cold and res_ is not None and int(start) < n - 1:
+                # a conversation the pool's reclaim wrote to the NVMe is read back in place before its prefill
+                # (`_spill_restore`): the rows its entry serves are not forwarded. Asked as the restore asks
+                # (`SessionSpill.candidate`, host work only). 2026-11-06: turns whose rows had been swapped out were
+                # charged a cold prefill (ws_rows=183,849, 10.75 GiB) and waited up to 10 minutes; they forwarded
+                # 217 rows. A restore that fails forwards more than was charged: the prefill's own gate holds it
+                sp_ = getattr(res_, "spiller", None)
+                if sp_ is not None:
+                    try:
+                        got = sp_.candidate(res_, keys, n - 1, True, mm_ok=mm_ok)
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()
+                        got = None
+                    if got is not None and int(got[1]) > int(start):
+                        start, kind = min(int(got[1]), n - 1), "spill"
             fwd = max(1, n - int(start))
             ws = mem.workspace_rows(n, fwd) if mem is not None else max(
                 cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
@@ -8160,15 +8542,29 @@ class Handler(BaseHTTPRequestHandler):
             """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
             workspace past the engine's room, in full less the allocator's free default-pool blocks
             (`Admission.check`)."""
-            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")))
+            return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")),
+                               rows=n)
+        # the chat's priority (`tandem.priority`): the line for memory is by it, and the pool's reclaim takes the
+        # idle conversations of lower-priority chats first (`_kv_reclaim_side`)
+        slot_now = slots_mod.current()
+        if slot_now is not None:
+            slot_now.prio = int(priority)
+        else:
+            STATE["slot0_prio"] = int(priority)
         d = gate()
         gate_again = d is not None
         if gate_again:
             adm.stats["peak_waits"] += 1
-        else:
+        freed = 0                     # SRV-787: what the reclaims gave back for it, for the live view
+        if not gate_again and adm.outranked(priority):
+            # a chat of a higher priority waits for memory: this request joins the line behind it
+            _, d = adm.check(est["ws_r1"] + kv, count=False, kv=kv, over_peak=bool(est.get("over_peak")), rows=n)
+        elif not gate_again:
             ok, d = reserve()
-            if not ok and _kv_reclaim_idle(d, owner):
+            got = _kv_reclaim_idle(d, owner) if not ok else 0
+            if got:
                 # SRV-307: the pages idle conversations keep come back before anyone waits
+                freed += got
                 ok, d = reserve()
             if ok:
                 return True
@@ -8190,12 +8586,25 @@ class Handler(BaseHTTPRequestHandler):
         e0 = (int(st0.get("empties") or 0), float(st0.get("empty_ms") or 0.0)) if isinstance(st0, dict) else None
         # SRV-775: the prefills in flight and the time at the gate's last refusal (`PEAK_REGATE_S`)
         seen, t_gate = adm.ws_in_flight(), time.monotonic()
-        limit = (float(STATE.get("request_timeout") or 3600.0) if stream
-                 else float(STATE.get("queue_timeout", 120.0)))
+        # SRV-787: a wait has an end, streamed or not (a streamed one waited `--request-timeout`, an hour live)
+        limit = (MEM_WAIT_S if stream else min(MEM_WAIT_S, float(STATE.get("queue_timeout", 120.0))))
         until = time.monotonic() + limit
         said = -1e9
         try:
             while time.monotonic() < until:
+                if STATE.get("draining"):
+                    # a planned stop: the wait ends now with a retryable 503 (the client sends it again after
+                    # the restart), not at the stop's grace and its SIGKILL (2026-11-06 13:05: 120 s, then killed)
+                    print(f"[parallel] {cid} stops waiting for memory: the engine is stopping", flush=True)
+                    if rec is not None:
+                        rec.stop_detail = "draining"
+                    if respond:
+                        self._busy(503, "The engine is restarting; send the request again in a moment.", retry=30)
+                    return False
+                if rec is not None:
+                    # SRV-787: what the live view says while it waits (server/activity.py `memory_of`)
+                    rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid, priority), freed)
+                    rec.mem_wait["higher"] = adm.ahead_higher(cid)
                 if self._client_gone():
                     if respond:
                         # SRV-777: no response has started, so nothing else books this end: abandoned, as the
@@ -8211,9 +8620,15 @@ class Handler(BaseHTTPRequestHandler):
                             rec.wait_mem_ms = round(waited * 1e3, 1)
                         print(f"[req] {cid} left while waiting for memory ({waited * 1e3:.0f} ms)", flush=True)
                     raise ClientGone("client left while waiting for memory")
-                place = adm.wait(cid)
-                if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
+                place = adm.wait(cid, priority)
+                line = time.monotonic() - said >= MEM_LINE_EVERY_S
+                if line and said > 0:
+                    # SRV-787: the engine log says why every MEM_LINE_EVERY_S, the guard's inputs with it
+                    print(f"[parallel] {cid} still waits for memory ({time.perf_counter() - t0:.0f} s of "
+                          f"{limit:.0f}): {slots_mod.Admission.describe(d)}", flush=True)
+                if line:
                     said = time.monotonic()
+                if line and say is not None:
                     gap = ((d.get("over") or 0) if d.get("peak_wait")       # SRV-775: over the peak
                            else d.get("floor", 0) - (d.get("after") or 0))
                     short = max(0.0, gap / slots_mod.GiB)
@@ -8249,7 +8664,9 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     gate_again = False
                 ok, d = reserve()
-                if not ok and _kv_reclaim_idle(d, owner):
+                got = _kv_reclaim_idle(d, owner) if not ok else 0
+                if got:
+                    freed += got
                     ok, d = reserve()
                 if ok:
                     waited = time.perf_counter() - t0
@@ -8270,16 +8687,16 @@ class Handler(BaseHTTPRequestHandler):
                 rec.waiting_memory = False
         adm.stats["refused"] += 1
         adm.stats["timeouts"] += 1
-        running = pool.running()
         print(f"[parallel] {cid} REFUSED after {limit:.0f} s waiting for memory: "
               f"{slots_mod.Admission.describe(d)}", flush=True)
         if rec is not None:
             rec.stop_detail = "memory_wait_timeout"
+            rec.wait_mem_ms = round((time.perf_counter() - t0) * 1e3, 1)
         if not respond:
             return False
+        # SRV-787: the reason in words; a stream opened while it waited ends with it as an error event
         self._send_bytes(503, json.dumps({"error": {
-            "message": (f"memory is almost full; {running} request(s) are running; "
-                        f"try again in about 30 s"),
+            "message": activity_mod.refusal_words(_mem_wait_of(d, est["fwd"], t0, limit, 1, freed)),
             "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
             extra_headers=(("Retry-After", "30"),))
         return False
@@ -9492,7 +9909,20 @@ class Handler(BaseHTTPRequestHandler):
         def mem_wait(short: float, place: int = 1) -> None:
             """SRV-250/SRV-305: the waiting line while the parallel admission holds this request
             for memory. Shown on every stream with lines (not only with the progress lines on):
-            a wait for memory must never look like a hang."""
+            a wait for memory must never look like a hang. SRV-787: a streamed chat request opens
+            its stream at once and gets an SSE comment every call (`MEM_LINE_EVERY_S`), with lines
+            or not, so a client's read timeout never cuts the wait (`qwait.mem_comment`)."""
+            m = rec.mem_wait
+            if stream and chat and n_choices == 1 and m is not None:
+                waited = time.perf_counter() - m["t0"]
+                try:
+                    self._open_early(cid, model, created, plan)
+                    self.wfile.write(qwait.mem_comment(place, short, waited, m["bound_s"] - waited))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    if rec.client_gone_at is None:
+                        rec.client_gone_at = time.perf_counter()     # the wait's loop sees it next
+                    return
             if ui is None or not stream:
                 return
             ui.add("queue", reason=(f"memory is almost full, your request starts when a running "
@@ -9811,7 +10241,10 @@ class Handler(BaseHTTPRequestHandler):
                     "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
-                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold):
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold,
+                    home=(int(par_why.get("home_share") or 0)
+                          if side is not None and par_why.get("home") == side.index else 0),
+                    priority=_priority_of(body)):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -12078,6 +12511,14 @@ def parser() -> argparse.ArgumentParser:
                          "writes stop (the tier's, and the spill's but a drain and evictions of "
                          "32k+ tokens; past 1.5x only the drain); 0 = no budget; "
                          "settings.memory.disk_writes.budget_gb overrides it live")
+    ap.add_argument("--session-spill-idle", default="on", choices=("on", "off"),
+                    help="write every slot's conversation of 4,096+ tokens to the NVMe once it is "
+                         "idle (its rows stay in RAM), so a later reclaim under memory pressure "
+                         "only trims it; optional under the day's write budget (SRV-E6)")
+    ap.add_argument("--session-spill-idle-s", type=float, default=20.0,
+                    help="how long a conversation is idle before the idle backfill writes it")
+    ap.add_argument("--session-spill-idle-every-s", type=float, default=60.0,
+                    help="the least time between two idle writes of one conversation")
     ap.add_argument("--session-spill-min-tokens", type=int, default=16384,
                     help="the shortest resident conversation an eviction writes to the NVMe "
                          "(shorter ones are the RAM park's)")
@@ -12641,9 +13082,10 @@ def _kv_pool_open(a) -> None:
     allocates its window (a builder asks for it: the 27B's, and any other's through `ctx.kv_pool`)."""
     if getattr(a, "kv_pool", "off") != "on" or kvpool.POOL is not None:
         return
-    kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
-                                margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
-                                on_event=_kv_pool_event)
+    # SRV-785: its hard floor reads the admission's live guard once the side slots are built (`_build_side_slots`)
+    kvpool.POOL = slots_mod.GuardedPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
+                                        margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
+                                        on_event=_kv_pool_event)
     kvpool.OWNER = "slot0"
     if kvpool.Driver.get() is None:
         print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
@@ -12777,6 +13219,49 @@ def _par_room() -> int | None:
     return max(0, int(mem.peak) - int(reserved))
 
 
+def _guard(rows: int, cap: int) -> tuple[int, dict] | None:
+    """SRV-785: the admission's and the KV pool's floor from the live state (server/slots.py `guard`): one prefill
+    chunk's workspace at the class of `rows` (the longest prefill in flight or the one checked; `Budget.workspace_rows`
+    of a resumed chunk), one KV commit of a chunk's rows (`slots.kv_step`), the last ask of a chat's sandbox
+    for `SANDBOX_CLAIM_S`, and `GUARD_MARGIN_GB`, at most `cap`. None without a memory policy: the floor as
+    configured. Every part is slot 0's: the side slots run the same model."""
+    mem = dict.get(STATE, "mem")
+    if mem is None or not getattr(mem, "on", False):
+        return None
+    chunk = int(dict.get(STATE, "prefix_chunk") or 0) or 4096
+    rows = int(rows)
+    step = int(mem.workspace_rows(rows, min(rows, chunk), line=False)) if rows > 0 else 0
+    kv = slots_mod.kv_step(getattr(getattr(dict.get(STATE, "engine"), "kv", None), "pages", None), chunk)
+    claim, at = _SANDBOX_CLAIM
+    sandbox = claim if time.monotonic() - at < SANDBOX_CLAIM_S else 0
+    return slots_mod.guard(cap, step=step, kv=kv, sandbox=sandbox, margin=int(GUARD_MARGIN_GB * (1 << 30)))
+
+
+def _priority_of(body) -> int:
+    """A chat's priority for memory, from the request's `tandem.priority` ("high", "normal", "low"): 2, 1, 0.
+    Anything else, and a request without the field: normal."""
+    t = body.get("tandem") if isinstance(body, dict) else None
+    p = t.get("priority") if isinstance(t, dict) else None
+    return {"high": 2, "low": 0}.get(p, 1) if isinstance(p, str) else 1
+
+
+def _mem_wait_of(d: dict, fwd: int, t0: float, limit: float, place: int, freed: int) -> dict:
+    """SRV-787: a request's wait for memory as the live view reads it (server/activity.py `memory_of`), in bytes,
+    from the admission's last check `d` (the gate's peak wait: its workspace and how far over the peak): what the
+    turn needs past the floor's sum, the rows it reads, MemAvailable, the guard and its inputs, how short it is;
+    `t0` the wait's start (perf_counter), `limit` its bound (s), `place` in line, `freed` what reclaims gave back."""
+    if d.get("peak_wait"):
+        need, free, floor, short = int(d.get("ws") or 0), None, None, int(d.get("over") or 0)
+    else:
+        avail, after, floor = d.get("avail"), d.get("after"), d.get("floor")
+        need = int(avail - after) if avail is not None and after is not None else int(d.get("need") or 0)
+        free = avail
+        short = max(0, int(floor) - int(after)) if after is not None and floor is not None else None
+    return {"need": need, "rows": int(fwd), "free": free, "guard": floor, "short": short,
+            "peak_wait": bool(d.get("peak_wait")), "guard_inputs": d.get("guard"), "freed": int(freed),
+            "t0": float(t0), "bound_s": float(limit), "place": int(place)}
+
+
 def _par_spare() -> int:
     """SRV-775: the free default-pool bytes a prefill's workspace takes before any new memory from the box
     (`Budget.workspace_spare`), for the admission's count of a prefill admitted over the peak (`Admission.check`);
@@ -12786,21 +13271,33 @@ def _par_spare() -> int:
 
 
 def _par_growth() -> int:
-    """What the long-lived caches may still take: each one's budget less what it holds."""
+    """What the long-lived caches may still take: each one's budget less what it holds. SRV-787: the engine's caches
+    at most what their policy still lets them allocate (`Budget.admit`): `ceiling - slack` less what is allocated, and
+    nothing while the reserve and the largest prefill admitted (`ws_now`) are at the peak, as with an over-peak prefill
+    in flight (2026-11-05: the budgets counted 13.6 GiB where admit allowed 4.5, and 0 for the turn over the peak). The
+    response cache holds token ids in host memory, outside the policy: its budget counts as it is."""
     g = 0
     store, res, rc = (dict.get(STATE, "state_store"), dict.get(STATE, "resident"),
                       dict.get(STATE, "response_cache"))
-    for obj, budget in ((store, "budget"), (rc, "budget")):
-        if obj is not None:
-            try:
-                g += max(0, int(getattr(obj, budget)) - int(getattr(obj, "bytes", 0)))
-            except Exception:                                      # noqa: BLE001
-                pass
+    if store is not None:
+        try:
+            g += max(0, int(store.budget) - int(getattr(store, "bytes", 0)))
+        except Exception:                                          # noqa: BLE001
+            pass
     if res is not None:
         try:
             total = sum(int(getattr(res, k, 0) or 0) for k in ("budget", "stash_budget",
                                                                "pin_budget", "park_budget"))
             g += max(0, total - int(getattr(res, "bytes", 0) or 0))
+        except Exception:                                          # noqa: BLE001
+            pass
+    mem = dict.get(STATE, "mem")
+    if mem is not None and getattr(mem, "on", False):
+        alloc, reserved = mem.memory()
+        g = 0 if reserved + mem.ws_now >= mem.peak else min(g, max(0, mem.ceiling - mem.slack - alloc))
+    if rc is not None:
+        try:
+            g += max(0, int(rc.budget) - int(getattr(rc, "bytes", 0)))
         except Exception:                                          # noqa: BLE001
             pass
     return g
@@ -12898,7 +13395,8 @@ def _side_resident(a, tok):
     """FX16: a side slot's own resident prefix (engine/cache.py `ResidentPrefix`), or None with
     `QSE_SIDE_RESIDENT_GB=0` or when slot 0 has none. The anchors it holds, its stash for a guest
     and its end anchor are sized by `SIDE_RESIDENT_GB` / `SIDE_STASH_GB`; no pin, no park, no
-    disk tier and no NVMe spill of its own (`OVERLAY` keeps those None on a side slot). Its
+    disk tier and no NVMe spill of its own (`OVERLAY` keeps those None on a side slot); SRV-779:
+    it writes to and reads from slot 0's spill (`_side_spills`). Its
     buffers are given back under the memory policy's levels with slot 0's, the side's after.
 
     Before 0.4.8 a side slot kept no conversation: the next turn of a chat that ran there was
@@ -12937,6 +13435,86 @@ def _side_resident(a, tok):
                     return n
             mem.register(level, both)
     return res
+
+
+class _SideSpill:
+    """SRV-779: a side slot's view of slot 0's session spill (engine/spill.py `SessionSpill`), its
+    resident prefix's `spiller`: the slot's prefill reads the slot's own conversation back in
+    place from the NVMe (`maybe_restore` into the side engine's buffers, as `SideReader` reads the
+    disk tier), and another session's prefill writes the slot's long conversation there first, as
+    slot 0's does. Its saves and reads run on the side slot's thread outside the engine lock, so
+    their device work holds `capture_lock.GUARD` (no CUDA call inside slot 0's graph capture, as
+    `_keep_parent`). SRV-E6: the spill takes the guard inside its own I/O lock (`guard=`): a save
+    around each device step only, a read throughout; never the guard while that lock is waited
+    for, as the idle backfill holds the lock and then waits for the guard. Everything else is the
+    spill's own."""
+
+    def __init__(self, sp):
+        self.sp = sp
+
+    def __getattr__(self, k):
+        return getattr(self.sp, k)
+
+    def save_resident(self, *a, **kw):
+        return self.sp.save_resident(*a, guard=capture_lock.GUARD, **kw)
+
+    def maybe_restore(self, *a, **kw):
+        return self.sp.maybe_restore(*a, guard=capture_lock.GUARD, **kw)
+
+    def restore(self, *a, **kw):
+        return self.sp.restore(*a, guard=capture_lock.GUARD, **kw)
+
+
+def _side_spills(sp) -> int:
+    """SRV-779: after the spill starts (`start_spill`), every side slot's resident prefix reads and
+    writes it (`_SideSpill`), and an entry's end-alignment regions are its own slot's
+    (`wire_end_align` with the slot's `EndAlign`: `extra_of` and `on_adopt` resolve it from the
+    prefix). A conversation the KV pool's reclaim wrote from a side slot then comes back on that
+    slot (`_spill_home`), not through slot 0. The side slots wired."""
+    pool = dict.get(STATE, "pool")
+    if sp is None or pool is None:
+        return 0
+    n = 0
+    for s in pool.side():
+        vals = s.values or {}
+        r, al = vals.get("resident"), vals.get("end_align")
+        if r is None:
+            continue
+        if al is not None:
+            diskcache_mod.wire_end_align(None, al, r)
+        r.spiller = _SideSpill(sp)
+        n += 1
+    return n
+
+
+def _slot_residents() -> list:
+    """SRV-E6: every slot's resident prefix (slot 0's, then each side slot's): the session spill's
+    sweeps never evict the entry of a conversation still in RAM (`SessionSpill.residents`)."""
+    pool = dict.get(STATE, "pool")
+    return [dict.get(STATE, "resident")] + [(s.values or {}).get("resident")
+                                             for s in (pool.side() if pool is not None else ())]
+
+
+def _spill_idle_slots() -> list:
+    """SRV-E6: the idle backfill's view of every slot (engine/spill.py `SessionSpill.backfill`):
+    its conversation, engine and drafter, and how to hold it without waiting. Slot 0 by the
+    engine lock's own lock, without the GPU turn, as the KV pool's reclaim takes it (its next
+    request waits at most the save); a side slot by its lock (`take_slot` finds it busy meanwhile).
+    None while a planned stop drains."""
+    if STATE.get("draining"):
+        return []
+    lk = LOCK._lk
+    out = [types.SimpleNamespace(key=0, res=dict.get(STATE, "resident"),
+                                 eng=dict.get(STATE, "engine"), drafter=dict.get(STATE, "drafter"),
+                                 take=lambda: lk.acquire(blocking=False), give=lk.release)]
+    pool = dict.get(STATE, "pool")
+    for s in (pool.side() if pool is not None else ()):
+        v = s.values or {}
+        out.append(types.SimpleNamespace(key=s.index, res=v.get("resident"), eng=v.get("engine"),
+                                         drafter=v.get("drafter"),
+                                         take=lambda s=s: s.lock.acquire(blocking=False),
+                                         give=s.lock.release))
+    return out
 
 
 def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
@@ -13081,6 +13659,11 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         dmeet = slots_mod.Meeting(a.parallel_draft_rows, a.batch_timeout_ms / 1e3)
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
+    # SRV-785: the slots are built under the configured floor; from now on both checks read the live guard
+    adm.guard = lambda rows: _guard(rows, adm.cap)
+    kp = kvpool.POOL
+    if isinstance(kp, slots_mod.GuardedPool):
+        kp.guard = lambda: (_guard(adm.ctx_rows(), kp.hard_floor_cfg) or (None,))[0]
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
@@ -13104,7 +13687,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(max_rows) + ' rows, cut ' + cut if meet else 'off'}; packed draft "
           f"{'on' if dmeet is not None else 'off'}; admission floor "
-          f"{a.parallel_floor_gb:g} GiB MemAvailable", flush=True)
+          f"{a.parallel_floor_gb:g} GiB MemAvailable at most (the guard: a chunk + a KV commit + a sandbox's ask + "
+          f"margin {GUARD_MARGIN_GB:g} GiB); a wait for memory ends after {MEM_WAIT_S:g} s", flush=True)
 
 
 def _gib(b) -> str:
@@ -13321,6 +13905,16 @@ def _serve(a, led) -> None:
     # Live conversations on the NVMe (engine/spill.py), and the one the last planned
     # stop wrote read back before the first request
     STATE["spill"] = diskcache_mod.start_spill(STATE, a, STATE["disk_cache"], journal)
+    if _side_spills(STATE["spill"]):
+        print("[spill] side slots read and write it: a conversation reclaimed on its slot comes "
+              "back there", flush=True)
+    if STATE["spill"] is not None:
+        sp = STATE["spill"]
+        sp.residents = _slot_residents
+        if sp.start_idle(_spill_idle_slots) is not None:
+            print(f"[spill] idle backfill on: a conversation of {sp.cfg['drain_min_tokens']}+ tokens "
+                  f"idle {sp.cfg['idle_s']:g} s is written (at most every {sp.cfg['idle_every_s']:g} s), "
+                  f"its rows stay; a reclaim then only trims it", flush=True)
     spill_startup()
     # Compaction as a continuation, and the summary prepared ahead
     STATE["compaction"] = dict(compaction_mod.SETTINGS, mode=a.compaction,

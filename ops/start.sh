@@ -207,6 +207,10 @@ done
 [ -n "${SESSION_SPILL_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-gb $SESSION_SPILL_GB"
 [ -n "${SESSION_SPILL_CODEC:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-codec $SESSION_SPILL_CODEC"
 [ -n "${DISK_WRITE_BUDGET_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --disk-write-budget-gb $DISK_WRITE_BUDGET_GB"
+# SRV-E6: idle conversations written to the NVMe while their rows stay (on unless serve.env or the
+# profile says off), and how long one is idle first (unset: the server's 20 s)
+[ "${SESSION_SPILL_IDLE:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-idle off"
+[ -n "${SESSION_SPILL_IDLE_S:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-idle-s $SESSION_SPILL_IDLE_S"
 # The vision tower, on unless serve.env says off, and the response cache, off unless it says on
 # (the setup guide's two switches for them, docs/setup.md)
 [ "${VISION:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --vision off"

@@ -22,8 +22,8 @@ a lock.
 
 Definitions (also in docs/contract/dashboard-v1, live.schema.json):
 
-    state            queued, prefilling, replaying, thinking, closing_reasoning, writing,
-                     tool_call, finishing, done
+    state            queued, waiting_memory, prefilling, replaying, thinking, closing_reasoning,
+                     writing, tool_call, finishing, done
     engine state     idle, busy, waiting_for_client, draining, starting
     stop.reason      stop, length, tool_calls, timeout, abandoned, error, refused, rejected,
                      cancelled; `detail` refines it (eos, stop_string, pattern_guard; the error
@@ -40,6 +40,11 @@ Definitions (also in docs/contract/dashboard-v1, live.schema.json):
                      enum; the label says "Supervising: ..." meanwhile. VIS-44 adds `shadow` (the
                      shadow decisions that were not a pass) and the decisions' `score`, `tier`
                      and `at_tokens` (the reasoning tokens at the decision), for the banner
+    memory           (SRV-787) while the state is `waiting_memory`: what the turn needs, the rows it
+                     reads, MemAvailable and the guard that must stay free, how short it is, what
+                     the reclaims gave back, the prefill in its way, the time waited and when the
+                     wait ends (`bound_s`), and `lines`, the three sentences the UIs show; never a
+                     rate (`prefill` and `decode` are null while it waits)
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ import time
 #: nothing of the server's)
 REPLAY = ("response", "prepared")
 
-STATES = ("queued", "prefilling", "replaying", "thinking", "closing_reasoning", "writing",
+STATES = ("queued", "waiting_memory", "prefilling", "replaying", "thinking", "closing_reasoning", "writing",
           "tool_call", "finishing", "done")
 ENGINE_STATES = ("idle", "busy", "waiting_for_client", "draining", "starting")
 STOP_REASONS = ("stop", "length", "tool_calls", "timeout", "abandoned", "error", "refused",
@@ -114,6 +119,8 @@ def state_of(rec, *, ignore_step: bool = False) -> str:
         return "queued"
     if rec.cache_source in REPLAY:
         return "replaying"
+    if rec.t_first is None and getattr(rec, "waiting_memory", False):
+        return "waiting_memory"          # SRV-787: the admission holds it on its slot; nothing runs
     if rec.t_first is None:
         return "prefilling"
     if not ignore_step and getattr(rec, "step", None) is not None:
@@ -317,6 +324,8 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
     pull it."""
     if rec.t_lock is None or rec.cache_source in REPLAY or rec.prompt_tokens is None:
         return None
+    if rec.t_first is None and getattr(rec, "waiting_memory", False):
+        return None                      # SRV-787: nothing prefills while it waits for memory: no rate
 
     def read():
         # the served prompt (the client's tokens and the hidden ones), as the hook's marks and
@@ -448,7 +457,15 @@ def events_of(rec) -> list[tuple]:
         else:
             info = getattr(rec, "prefill_info", None) or {}
             start = _safe(lambda: info.get("start"))
-            ev.append((rec.t_lock, "prefilling", f"{start} cached" if start else None))
+            t_pre = rec.t_lock
+            m = getattr(rec, "mem_wait", None)
+            if m:
+                # SRV-787: the wait for memory, and the prefill once it was admitted
+                ev.append((m["t0"], "waiting_memory", None))
+                t_pre = (None if getattr(rec, "waiting_memory", False)
+                         else max(rec.t_lock, m["t0"] + (getattr(rec, "wait_mem_ms", None) or 0) / 1e3))
+            if t_pre is not None:
+                ev.append((t_pre, "prefilling", f"{start} cached" if start else None))
     think, tbuf = _refs(rec)
     if rec.t_first is not None and rec.cache_source not in REPLAY:
         closed = _safe(lambda: think.t_closed) if think is not None else None
@@ -527,6 +544,8 @@ def stop_of(rec, end_p: float) -> dict:
     state = getattr(rec, "end_state", None)
     if reason == "tool_calls":
         state = "tool_call"
+    elif state is None and detail in ("memory_wait_timeout", "left_while_waiting_memory"):
+        state = "waiting_memory"         # SRV-787: it ended in the wait, never prefilled
     elif state is None:
         state = "queued" if rec.t_lock is None else state_of(rec, ignore_step=True)
     last = rec.t_last if rec.t_last is not None else rec.t_lock
@@ -560,7 +579,7 @@ def _ordinal(n: int) -> str:
     return f"{n}{suf}"
 
 
-_SILENT = {"queued": "in the queue", "prefilling": "of silent prefill",
+_SILENT = {"queued": "in the queue", "waiting_memory": "waiting for memory", "prefilling": "of silent prefill",
            "replaying": "while replaying", "thinking": "while thinking",
            "closing_reasoning": "while closing the reasoning", "writing": "while writing",
            "tool_call": "while writing a tool call", "finishing": "while finishing"}
@@ -600,6 +619,10 @@ def sentence(stop: dict, rec=None, end_p: float | None = None) -> str:
             return "refused: queue full"
         if detail == "queue_timeout":
             return f"refused: timed out in the queue after {_dur(elapsed)}"
+        if detail == "memory_wait_timeout":
+            # SRV-787: the wait for memory reached its end
+            waited = getattr(rec, "wait_mem_ms", None) if rec is not None else None
+            return f"refused: not enough memory after {_dur(waited if waited is not None else elapsed)} of waiting"
         return "refused: the engine is busy"
     if reason == "rejected":
         if detail == "prompt_too_long":
@@ -628,6 +651,8 @@ def label(act: dict) -> str:
         base = f"Queued, about {_ordinal(place)} in line" if place else "Queued"
         # 0.8.2: what it waits for (server/app.py `_queue_why`), e.g. "all 3 slots are busy"
         return f"{base}: {q['reason']}" if q.get("reason") else base
+    if state == "waiting_memory":
+        return "Waiting for memory"
     if state == "prefilling":
         p = act.get("prefill") or {}
         done, total, pct = p.get("done"), p.get("total"), p.get("pct")
@@ -667,6 +692,88 @@ def encoding_label(rec) -> str | None:
         i, n = enc
         return f"Encoding image {int(i)} of {int(n)}" if int(n) > 1 else "Encoding image"
     return _safe(read)
+
+
+# ------------------------------------------------------------------ the wait for memory (SRV-787)
+_GiB = float(1 << 30)
+
+
+def _gb(b) -> str:
+    """GiB in words: "8.4" under 10, "25" from there."""
+    x = float(b) / _GiB
+    return f"{x:.0f}" if x >= 9.95 else f"{x:.1f}"
+
+
+def _span(s: float) -> str:
+    """"45 s", "1 m 20 s", "2 min"; from an hour "3 h", "2 h 15 min" (whole minutes)."""
+    s = max(0, int(round(s)))
+    if s >= 3600:
+        h, m = divmod(s // 60, 60)
+        return f"{h} h" if m == 0 else f"{h} h {m} min"
+    return f"{s} s" if s < 60 else f"{s // 60} min" if s % 60 == 0 else f"{s // 60} m {s % 60} s"
+
+
+def memory_of(m: dict | None, now_p: float, way: dict | None = None) -> dict | None:
+    """The `memory` block of a request that waits for memory, from its record's `mem_wait` (server/app.py
+    `_mem_wait_of`, bytes) at `now_p`; `way`: the prefill in its way, `{"request_id", "tokens", "eta_ms"}`, the
+    longest one running (server/live.py). Sizes in GiB, the time waited and left in ms, and the three lines the UIs
+    show: what and why, what happens meanwhile, and how it ends."""
+    if not m:
+        return None
+
+    def gib(b):
+        return _r(b / _GiB) if b is not None else None
+    waited = max(0.0, now_p - m["t0"])
+    left = max(0.0, m["bound_s"] - waited)
+    g = m.get("guard_inputs")
+    out = {"need_gib": gib(m["need"]), "rows": m["rows"], "free_gib": gib(m.get("free")),
+           "guard_gib": gib(m.get("guard")), "short_gib": gib(m.get("short")),
+           "peak_wait": bool(m.get("peak_wait")),
+           "guard": ({k: gib(g[k]) for k in ("step", "kv", "sandbox", "margin", "cap")} if g else None),
+           "freed_gib": gib(m.get("freed") or 0), "in_the_way": way,
+           "waited_ms": _r(waited * 1e3, 1), "bound_s": _r(m["bound_s"], 1), "ends_in_ms": _r(left * 1e3, 1),
+           "place": m.get("place")}
+    out["lines"] = memory_lines(m, waited, left, way)
+    return out
+
+
+def memory_lines(m: dict, waited: float, left: float, way: dict | None = None) -> list[str]:
+    """The three lines of a wait for memory (memwait plan, section 5), from `_mem_wait_of`'s bytes."""
+    rows = f"{int(m['rows']):,}"
+    if m.get("peak_wait"):
+        why = (f"This turn needs about {_gb(m['need'])} GiB to read {rows} new tokens, {_gb(m.get('short') or 0)} "
+               f"GiB more than the engine's peak allows while another turn reads")
+    else:
+        why = (f"This turn needs about {_gb(m['need'])} GiB to read {rows} new tokens; "
+               f"{_gb(m.get('free') or 0)} GiB is free and {_gb(m.get('guard') or 0)} must stay free for the system")
+    if m.get("higher"):
+        k = int(m["higher"])
+        now = (f"{k} chat{'s' if k > 1 else ''} with a higher priority {'are' if k > 1 else 'is'} ahead in the "
+               f"line for memory")
+    elif way:
+        eta = way.get("eta_ms")
+        now = (f"A {round(int(way.get('tokens') or 0) / 1000):,}k turn on another chat is reading ("
+               + (f"about {_span(eta / 1e3)} left)" if eta is not None else "no estimate yet)"))
+    elif m.get("freed"):
+        now = f"Freeing idle cache ({_gb(m['freed'])} GiB given back)"
+    else:
+        now = f"Waiting for memory to free (re-checked every second, {_span(waited)} so far)"
+    # 2026-11-06: the chat is paused, not stopped: it continues by itself; the bound (3 h) is the last resort
+    end = (f"Memory is tight: this chat waits and continues by itself as soon as memory frees. "
+           f"Stop cancels; it gives up only after {_span(m['bound_s'])} without memory ({_span(left)} left)")
+    return [why, now, end]
+
+
+def refusal_words(m: dict) -> str:
+    """A refusal after the wait's bound, from `_mem_wait_of`'s bytes: what it needed and what was free above the
+    guard (the peak's excess for a wait at the engine's peak)."""
+    if m.get("peak_wait"):
+        what = f"needed {_gb(m['need'])} GiB, {_gb(m.get('short') or 0)} over the engine's peak"
+    else:
+        what = (f"needed {_gb(m['need'])} GiB, "
+                f"{_gb(max(0, (m.get('free') or 0) - (m.get('guard') or 0)))} free above the guard")
+    return (f"Memory stayed full for {_span(m.get('bound_s') or 0)}, so this turn did not start ({what}). "
+            f"Continue tries again; a shorter conversation or fewer chats at once needs less.")
 
 
 def waiting_label(w: dict) -> str:

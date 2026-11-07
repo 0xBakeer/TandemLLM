@@ -421,6 +421,147 @@ def test_srv775_an_over_peak_admit_is_credited_the_allocators_free_blocks():
     return "after " + ", ".join(rows) + " GiB (spare 2.3, 0, 10, raising, none)"
 
 
+def test_srv787_a_cold_128k_turn_is_not_charged_the_room_and_its_workspace():
+    """SRV-787 (2026-11-05): a turn the gate admitted over the peak was charged the engine's room to its peak AND its
+    workspace, though the policy grows no cache while that workspace is in flight. 22:41, the 128k turn that waited
+    900 s with the engine idle: floor 10, MemAvailable 25.0, room 8.5, cache growth 13.6, a workspace of 9.47 with
+    1.44 in free blocks, 0.355 of KV pages and 0.457 in flight. The sum said 7.7 < 10; the larger of the two says
+    15.7 on today's growth, 16.2 on the growth the policy allows (`_par_growth`). 23:00 (82k on slot 5, 9.3 < 10 and
+    34 s of wait) and 23:03 (9.9 < 10) start at once; the cold 128k turn of 23:03 (4.1 GiB of KV pages to commit)
+    still waits, at 9.6 instead of 5.5. Every figure as its log line printed it."""
+    rows = []
+
+    def case(avail, room, growth, ws, spare, kv, kv_in=0.0):
+        a = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": int(avail * GiB)},
+                            growth=lambda: int(growth * GiB), room=lambda: int(room * GiB),
+                            spare=lambda: int(spare * GiB))
+        if kv_in:
+            assert a.reserve("decoding", int(kv_in * GiB), kv=int(kv_in * GiB))[0]   # its KV pages only
+        w, s, k = int(ws * GiB), int(spare * GiB), int(kv * GiB)
+        ok, d = a.reserve("turn", w + k, kv=k, over_peak=True)
+        summed = int(avail * GiB) - min(int(room * GiB), int(growth * GiB)) - (w - s) - k - int(kv_in * GiB)
+        assert d["after"] == int(avail * GiB) - max(min(int(room * GiB), int(growth * GiB)), w - s) - k \
+            - int(kv_in * GiB), d
+        assert d["after"] != summed and ok is (d["after"] >= 10 * GiB) and ("turn" in a.held) is ok, d
+        rows.append(f"{summed / GiB:.1f} -> {d['after'] / GiB:.1f}")
+        return ok, d, summed
+    ok, d, summed = case(25.0, 8.5, 13.6, 9.47, 1.44, 0.355, 0.457)               # 22:41, today's growth
+    assert f"{summed / GiB:.1f}" == "7.7" and ok and f"{d['after'] / GiB:.1f}" == "15.7", d
+    text = slots.Admission.describe(d)
+    assert text.startswith("MemAvailable 25.0 GiB - the larger of the engine's room to its peak 8.5 (under the room: "
+                           "cache growth 13.6, workspaces in flight 0.0) and this request over the peak 8.0 new (1.4 "
+                           "of its 9.5 in the allocator's free blocks) = 15.7 GiB (>= floor 10.0)"), text
+    ok, d, _ = case(25.0, 8.5, 1.7, 9.47, 1.44, 0.355, 0.457)                     # 22:41, the policy's growth
+    assert ok and f"{d['after'] / GiB:.1f}" == "16.2", d
+    text = slots.Admission.describe(d)
+    assert ("the larger of cache growth 1.7 + workspaces in flight 0.0 and this request over the peak 8.0 new "
+            "(1.4 of its 9.5 in the allocator's free blocks) = 16.2 GiB (>= floor 10.0)") in text, text
+    ok, d, summed = case(21.1, 4.1, 13.6, 8.46, 1.4, 0.6)                         # 23:00, slot 5
+    assert f"{summed / GiB:.1f}" == "9.3" and ok and f"{d['after'] / GiB:.1f}" == "13.4", d
+    assert slots.Admission.describe(d).startswith("alone: MemAvailable 21.1 GiB - the larger of"), d
+    ok, d, summed = case(21.82, 4.06, 13.6, 8.62, 1.36, 0.64)                      # 23:03
+    assert f"{summed / GiB:.1f}" == "9.9" and ok and f"{d['after'] / GiB:.1f}" == "13.9", d
+    ok, d, summed = case(21.8, 4.1, 13.6, 9.47, 1.4, 4.1)                          # 23:03, the cold 128k turn
+    assert f"{summed / GiB:.1f}" == "5.5" and not ok and f"{d['after'] / GiB:.1f}" == "9.6", d
+    return "summed -> the larger: " + ", ".join(rows)
+
+
+def test_srv787_under_the_peak_and_without_a_policy_the_count_is_as_before():
+    """SRV-787 changes only an over-peak admit under a policy: a prefill under the peak is capped by the room with the
+    growth and the workspaces in flight, as before, and with no room (no policy) the over-peak workspace adds to the
+    growth, as before. Another prefill's workspace in flight counts with the over-peak one."""
+    def adm(room):
+        return slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 30 * GiB}, growth=lambda: 4 * GiB,
+                               room=room)
+    ok, d = adm(lambda: 6 * GiB).reserve("u", 5 * GiB)                            # under: min(6, 4 + 5)
+    assert ok and d["after"] == 24 * GiB, d
+    ok, d = adm(None).reserve("n", 5 * GiB, over_peak=True)                       # no policy: 4 + 5
+    assert ok and d["after"] == 21 * GiB, d
+    a = adm(lambda: 6 * GiB)
+    assert a.reserve("other", 3 * GiB)[0]                                         # a workspace in flight
+    ok, d = a.reserve("o", 5 * GiB, over_peak=True)                               # max(min(6, 4 + 3), 3 + 5)
+    assert ok and d["after"] == 22 * GiB, d
+    assert "+ workspaces in flight 3.0 = 22.0 GiB" in slots.Admission.describe(d), slots.Admission.describe(d)
+    return "under 24, no policy 21, beside a workspace in flight 22"
+
+
+def test_srv785_the_guard_is_the_live_sum_and_never_above_the_floor():
+    """SRV-785: the floor a check holds is the live guard, one prefill chunk's workspace at the longest prefill's class
+    + one KV commit + a sandbox's ask + the kernel's margin, never above the configured floor. A short turn's guard is
+    lower than the floor (MemAvailable 12, a 4 GiB turn: 8 >= 6.95 admits, where the floor of 10 held it); a guard
+    above the floor, one that fails, or none leave the floor as configured. The class is the longest prefill in
+    flight until it has run (`prefilled`), and the wait line names the inputs."""
+    g, gin = slots.guard(10 * GiB, step=int(1.65 * GiB), kv=int(0.3 * GiB), margin=5 * GiB)
+    assert g == int(6.95 * GiB) and gin == {"step": int(1.65 * GiB), "kv": int(0.3 * GiB), "sandbox": 0,
+                                           "margin": 5 * GiB, "cap": 10 * GiB, "guard": g}, gin
+    for step, sandbox in ((int(8.4 * GiB), 0), (0, 6 * GiB), (40 * GiB, 40 * GiB)):
+        assert slots.guard(10 * GiB, step=step, kv=int(0.3 * GiB), sandbox=sandbox, margin=5 * GiB)[0] == 10 * GiB
+
+    seen = []
+
+    def live(rows):
+        seen.append(rows)
+        step = int(1.65 * GiB) if rows <= 8192 else int(6.25 * GiB)        # the chunk's class grows with the rows
+        return slots.guard(10 * GiB, step=step, kv=int(0.3 * GiB), margin=5 * GiB)
+    a = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}, guard=live)
+    ok, d = a.reserve("short", 4 * GiB, rows=2_000)
+    assert ok and d["floor"] == int(5.3 * GiB) and d["after"] == 8 * GiB and seen[-1] == 2_000, d
+    text = slots.Admission.describe(d)
+    assert text.endswith("= 8.0 GiB (>= floor 5.3 = chunk 0.0 (this request's 1.6 counted above) + KV commit 0.3 "
+                         "+ sandbox 0.0 + margin 5.0, at most 10.0)"), text
+    assert a.ctx_rows() == 2_000 and a.report()["guard_gib"] == 6.95 and a.report()["floor_gib"] == 10.0
+    a.prefilled("short")
+    assert a.ctx_rows() == 0
+    a.release("short")
+    assert a.reserve("long", 0, rows=128_343)[0] and a.ctx_rows() == 128_343
+    assert a.floor_at(2_000)[0] == 10 * GiB and seen[-1] == 128_343, "the longest prefill in flight sets the class"
+    a.release("long")
+    assert a.ctx_rows() == 0 and a.floor == int(6.95 * GiB)
+    for bad in (lambda rows: 1 / 0, lambda rows: None, lambda rows: (40 * GiB, {})):
+        b = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}, guard=bad)
+        ok, d = b.reserve("short", 4 * GiB, rows=2_000)
+        assert not ok and d["floor"] == 10 * GiB and "guard" not in d, d
+    ok, d = slots.Admission(10 * GiB, meminfo=lambda: {"MemAvailable": 12 * GiB}).reserve("short", 4 * GiB)
+    assert not ok and d["floor"] == 10 * GiB and slots.Admission.describe(d).endswith("(< floor 10.0)"), d
+    return "6.95 for a short turn, 10 at 128k and for a sandbox's ask, 10 without a guard"
+
+
+def test_srv785_an_admit_is_not_held_for_its_own_chunk_twice():
+    """2026-11-06 live: a 142,692-token turn the gate admitted over the peak (workspace 10.8 GiB, 0.8 of it in the
+    allocator's free blocks, KV 0.5) found MemAvailable 19.9 - growth 0.2 - its 10.0 new - KV 0.5 = 9.2 against a
+    floor of 10 (chunk 10.8 + KV 0.4 + margin 5.0, capped): its own chunk counted twice, a 17 s wait. Its workspace
+    is that chunk: the floor keeps the KV commit and the margin, 5.4, and it starts. Under the peak the same: its
+    workspace is charged inside the room."""
+    gib = lambda x: int(x * GiB)                                                  # noqa: E731
+    live = lambda rows: slots.guard(gib(10), step=gib(10.8), kv=gib(0.4), margin=gib(5))   # noqa: E731
+
+    def adm():
+        return slots.Admission(gib(10), meminfo=lambda: {"MemAvailable": gib(19.9)}, growth=lambda: gib(0.2),
+                               room=lambda: 0, spare=lambda: gib(0.8), guard=live)
+    ok, d = adm().reserve("t", gib(10.8) + gib(0.5), kv=gib(0.5), over_peak=True, rows=142_692)
+    assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(10.8), d
+    assert abs(d["after"] - gib(9.4)) < GiB // 100, d
+    text = slots.Admission.describe(d)
+    assert "chunk 0.0 (this request's 10.8 counted above) + KV commit 0.4" in text, text
+    # under the peak (live 12:55): room 8.8 of growth 4.3 + its 5.6, KV 2.1 + 0.4 in flight; chunk 3.9
+    live = lambda rows: slots.guard(gib(10), step=gib(3.9), kv=gib(0.4), margin=gib(5))  # noqa: E731
+    b = slots.Admission(gib(10), meminfo=lambda: {"MemAvailable": gib(17.6)}, growth=lambda: gib(4.3),
+                        room=lambda: gib(8.8), guard=live)
+    ok, d = b.reserve("u", gib(5.6) + gib(2.1), kv=gib(2.1), rows=60_000)
+    assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(3.9), d
+    assert abs(d["after"] - gib(6.7)) < GiB // 100, d
+    # live 15:14: the guard's full chunk at a 177k class (10.8) above the request's own workspace (7.6); with no
+    # longer prefill in flight the request's rows set the class and its workspace is the chunk: floor 5.4, not 8.5
+    live = lambda rows: slots.guard(gib(10), step=gib(10.8), kv=gib(0.4), margin=gib(5))  # noqa: E731
+    c = slots.Admission(gib(10), meminfo=lambda: {"MemAvailable": gib(16.7)}, growth=lambda: gib(0.2), guard=live)
+    ok, d = c.reserve("v", gib(7.6) + gib(0.3), kv=gib(0.3), rows=176_693)
+    assert ok and d["floor"] == gib(0.4) + gib(5) and d["guard"]["own"] == gib(10.8), d
+    c.held["w"], c.rows["w"] = 0, 200_000                                          # a longer prefill admitted
+    ok, d = c.check(gib(7.6) + gib(0.3), kv=gib(0.3), rows=176_693)
+    assert d["guard"]["own"] == gib(7.6), "a longer prefill in flight: only the request's own part of the chunk"
+    return text
+
+
 def test_srv775_describe_names_a_peak_wait():
     d = {"peak_wait": True, "need": int(76.8 * GiB), "peak": int(75.8 * GiB), "ws": int(2.8 * GiB),
          "reserved": int(74.0 * GiB), "over": int(1.0 * GiB)}

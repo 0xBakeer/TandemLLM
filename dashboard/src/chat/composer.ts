@@ -390,6 +390,10 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-group"><div class="ch-pop-title">Checks</div>
         <label class="ch-pop-check" data-pop-verify><input type="checkbox" .checked=${s.verify !== false} @change=${() => this.patch({ verify: s.verify === false })} /><code>verify apps</code><span class="ch-pop-desc">a run that builds or changes a page or app loads it in a browser before it ends, and the model reads what the check found</span></label>
       </div>
+      <div class="ch-pop-group" data-pop-priority><div class="ch-pop-title">Memory priority</div>
+        <div class="seg" role="radiogroup" aria-label="memory priority">${(['high', 'normal', 'low'] as const).map((p) => html`<button type="button" class="seg-btn ${(s.priority ?? 'normal') === p ? 'is-on' : ''}" role="radio" aria-checked=${(s.priority ?? 'normal') === p} title=${p === 'high' ? 'first in line when memory is tight; its cache is given up last' : p === 'low' ? 'waits behind the other chats; its idle cache is given up first' : 'in line by arrival'} @click=${() => this.patch({ priority: p })}>${p}</button>`)}</div>
+        <span class="ch-pop-desc">when several chats need more memory than the box has, the higher one goes first; a waiting chat moves up a step every 30 minutes</span>
+      </div>
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}
         ${this.resources.map((r) => html`<button type="button" class="ch-pop-item" @click=${() => (this.fire('ch-mcp-resource', { serverId: r.server, uri: r.uri }), (this.pop = 'none'))}><span class="ch-pop-name">${icon('file')} ${r.name}</span><span class="ch-pop-desc">attach, from ${r.serverName}</span></button>`)}

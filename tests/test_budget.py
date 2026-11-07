@@ -522,20 +522,20 @@ def test_srv773_a_continuation_is_charged_its_rows_not_its_context():
     return "21 rows: 1 GiB admitted; the context: 21 GiB refused; at 16.5 the message names the 21 rows"
 
 
-#: SRV-773, measured 2026-11-02 on Flash-Next 3.05 (one DGX Spark, raw requests alone): a resumed
-#: prefill's (served rows n, forwarded rows, the larger of its prefill's peak and its request end's peak, GiB)
+#: A resumed prefill's (served rows n, forwarded rows, the allocator's peak over the request, GiB), raw requests alone
+#: on one DGX Spark (Flash-Next 3.05, `QSE_REQ_PEAK=1`). The rows under 64k of context are 2026-11-02's (SRV-773);
+#: the rest 2026-11-06's, after the indexer's scores and the PLE decode went into row tiles (a 4,095-row tail at 138k
+#: took 8.36 GiB before, 2.19 after)
 FN_RESUMED = [(58_020, 20, 0.10), (8_319, 20, 0.41), (8_575, 256, 0.22), (9_598, 1_023, 0.60), (13_693, 4_095, 1.59),
               (26_019, 20, 0.10), (26_275, 256, 0.22), (27_299, 1_024, 0.69), (31_395, 4_096, 1.62),
-              (58_020, 20, 0.10), (58_276, 256, 0.25), (59_300, 1_024, 0.98), (63_395, 4_095, 2.02),
-              (100_019, 20, 0.10), (100_274, 255, 0.40), (101_298, 1_024, 1.55), (105_394, 4_096, 4.48),
-              (125_020, 20, 0.10), (125_276, 256, 0.40), (126_300, 1_024, 1.55), (130_396, 4_096, 5.10),
-              (133_019, 20, 0.10), (133_275, 256, 0.70), (134_298, 1_023, 2.68), (138_393, 4_095, 8.36),
-              (142_489, 4_096, 8.27), (146_202, 3_713, 8.63), (146_222, 20, 0.11)]
-#: and the cold or seeded ones: (n, rows, slot, the allocated delta or the request end's when larger, the policy's
-#: workspace plus the rows' streams, GiB); slot 0's delta holds its anchors, admitted apart (`Budget.admit`)
-FN_COLD = [(58_000, 58_000, 0, 6.71, 4.85), (8_299, 4_151, 1, 2.66, 2.28), (25_999, 17_630, 2, 3.05, 2.71),
-           (58_000, 49_641, 3, 5.13, 4.80), (99_999, 91_611, 4, 8.16, 7.81), (125_000, 116_637, 5, 8.63, 8.27),
-           (132_999, 124_630, 6, 8.78, 8.60)]
+              (58_276, 256, 0.25), (59_300, 1_024, 0.98), (63_395, 4_095, 2.02),
+              (106_530, 14, 0.13), (106_800, 266, 0.26), (107_898, 1_094, 0.98), (112_308, 4_406, 2.21),
+              (134_592, 14, 0.10), (134_862, 266, 0.32), (135_960, 1_094, 0.95), (140_370, 4_406, 2.19),
+              (201_443, 16, 0.10), (201_728, 282, 0.42), (202_887, 1_156, 1.51), (207_542, 4_652, 2.18),
+              (249_247, 282, 0.47), (250_406, 1_156, 0.98), (255_061, 4_652, 2.65)]
+#: 2026-11-06, forwards of more than a chunk: (n, rows, the peak, GiB); the first is a cold prompt past a 6.7k head
+#: on slot 0 (its peak holds the anchors it wrote)
+FN_COLD = [(106_512, 99_818, 6.39), (134_574, 22_262, 2.56), (201_424, 61_050, 3.77), (248_962, 41_417, 3.46)]
 
 
 def test_srv773_the_flashnext_model_covers_the_measured_rows():
@@ -552,9 +552,10 @@ def test_srv773_the_flashnext_model_covers_the_measured_rows():
         return FS.FlashNextServing._workspace_rows(stub, n, rows) / GIB
     worst = min(charge(n, r) - took for n, r, took in FN_RESUMED)
     assert worst >= 0.38, [(n, r, took, round(charge(n, r), 2)) for n, r, took in FN_RESUMED]
-    for n, r, slot, delta, ws_stack in FN_COLD:
-        assert charge(n, r) >= ws_stack + 0.45, (n, r, charge(n, r))
-        assert slot == 0 or charge(n, r) >= delta, (n, r, charge(n, r), delta)
+    for n, r, took in FN_COLD:
+        assert charge(n, r) >= took + 0.45, (n, r, charge(n, r), took)
+    # a resumed forward of more than a chunk is charged by its rows, not the context's line (10.75 at 141k and past)
+    assert charge(201_424, 61_050) < 7.0 and charge(207_542, 4_652) < 5.0, (charge(201_424, 61_050), charge(207_542, 4_652))
     assert charge(62_886, 21) <= 1.0 and charge(135_083, 3_714) <= 10.75
     line = budget(FakeAlloc(50), peak=90, ws_floor=FS.WS_LINE_FLOOR, ws_per_token=FS.WS_LINE_ROW, ws_cap=FS.WS_CAP)
     for n in (2_000, 30_000, 85_549, 262_144):
@@ -564,7 +565,7 @@ def test_srv773_the_flashnext_model_covers_the_measured_rows():
     m = budget(FakeAlloc(50), peak=90, ws_floor=FS.WS_LINE_FLOOR, ws_per_token=FS.WS_LINE_ROW, ws_cap=FS.WS_CAP,
                ws_rows=model)
     assert m.workspace_rows(62_886, 21) == model(62_886, 21) and m.workspace_rows(2_000) == m.workspace(2_000)
-    return (f"28 resumed rows covered (least +{worst:.2f} GiB), 7 cold; g8 {charge(62_886, 21):.2f} GiB, "
+    return (f"{len(FN_RESUMED)} resumed rows covered (least +{worst:.2f} GiB), {len(FN_COLD)} past a chunk; g8 {charge(62_886, 21):.2f} GiB, "
             f"g2 {charge(135_083, 3_714):.2f}, 262k cold {charge(262_144, 262_144):.2f}")
 
 
@@ -582,9 +583,11 @@ def test_srv775_the_admission_counts_a_cold_prompt_by_its_rows():
     m = budget(FakeAlloc(50), peak=90, ws_rows=model, **kw)
     for n, took in ((205, 0.67), (215, 0.33), (1_640, None), (4_096, None)):
         bare = m.workspace_rows(n, n, line=False) / GIB
-        assert m.workspace_rows(n, n) == FS.WS_LINE_FLOOR, "the gate: the line's floor"
+        gate = m.workspace_rows(n, n)
+        # the line's floor; a whole cold chunk a little over it since its rows count 400 kB each (2026-11-06)
+        assert gate == FS.WS_LINE_FLOOR or (n == 4_096 and FS.WS_LINE_FLOOR < gate < 3.2 * GIB), (n, gate / GIB)
         assert bare < FS.WS_LINE_FLOOR / GIB and (took is None or bare >= took + 0.1), (n, bare)
-    assert m.workspace_rows(5_767, 5_767, line=False) < m.workspace_rows(5_767, 5_767)
+    assert m.workspace_rows(5_767, 5_767, line=False) <= m.workspace_rows(5_767, 5_767)
     for n, r in ((62_886, 21), (135_083, 3_714), (102_614, 102_614)):
         assert m.workspace_rows(n, r, line=False) <= m.workspace_rows(n, r), (n, r)
     assert m.workspace_rows(62_886, 21, line=False) == m.workspace_rows(62_886, 21), "a continuation: no line"

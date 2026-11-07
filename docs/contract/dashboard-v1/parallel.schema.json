@@ -721,6 +721,13 @@
           "type": "integer",
           "minimum": 0,
           "description": "the engine's sequence slot this request runs on (server --parallel N); absent on a server without side slots"
+        },
+        "memory": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "SRV-787: while the state is waiting_memory, why it waits and how the wait ends (the live view's activity.memory); absent otherwise"
         }
       },
       "required": [

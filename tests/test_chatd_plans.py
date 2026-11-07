@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 
+import fake_mcp
 from chatd_util import Chat, run_all
 from test_chatd_agent import calls, requests, small_window
 
@@ -299,3 +300,27 @@ def test_plan_items_from_an_answer():
 
 if __name__ == "__main__":
     run_all(globals())
+
+
+def test_plan_mode_runs_a_read_only_mcp_tool():
+    """An MCP tool marked readOnlyHint is a read tool in plan mode; one without the mark is
+    refused as before."""
+    httpd, port = fake_mcp.start_http()
+    httpd.fake.tools[0]["annotations"] = {"readOnlyHint": True}          # echo
+    httpd.fake.tools[1]["annotations"] = {"readOnlyHint": False}         # add
+    c = Chat()
+    try:
+        c.ok("POST", "/mcp/servers", {"name": "ro", "transport": "http",
+                                      "url": f"http://127.0.0.1:{port}/mcp"})
+        c.wait(lambda: c.ok("GET", "/mcp/servers")[0]["status"] == "connected", 10)
+        cid = c.new()
+        c.ok("PATCH", f"/conversations/{cid}/settings", {"plan_mode": True})
+        c.send(cid, calls(("mcp__ro__echo", {"text": "looked up"}), ("mcp__ro__add", {"a": 1, "b": 2})))
+        s = c.wait_idle(cid, 30)
+        echo, add = parts(s, "tool_call")
+        assert echo["status"] == "done" and echo["output"]["content"] == "looked up"
+        assert add["status"] == "failed" and add["output"]["content"] == PLAN_REFUSAL
+        assert s["messages"][-1]["status"] == "done"
+    finally:
+        c.close()
+        httpd.shutdown()

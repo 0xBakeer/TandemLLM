@@ -18,7 +18,7 @@ import time
 
 from chatd_util import KEY, Chat, is_done, run_all, text_of
 
-from chatd import egress, sandbox as sb_mod, tools as T
+from chatd import compaction as comp, egress, sandbox as sb_mod, tools as T
 from chatd.snapshots import Snapshots
 from chatd.workspace import ChangedError, PathError, Workspace, etag
 
@@ -487,6 +487,72 @@ def test_compaction_summarizes_older_turns_and_the_model_gets_the_summary():
         # the thread's divider sits above the first message the model still reads in full
         kept = next(m for m in s["messages"] if m["id"] == cp["boundary_id"])
         assert kept["role"] == "user" and kept["parts"][0]["text"].startswith("turn 2")
+    finally:
+        c.close()
+
+
+def test_a_compactions_summary_is_one_more_turn_of_the_chats_own_request():
+    """2026-11-06 live: five compactions at 210k read 100k to 194k tokens again (114 to 261 s each): the summary's
+    request had its own system block, no tools and the history to the cut, 3 tokens in common with the conversation
+    the engine held. Where the chat's request and a summary fit the window, the summary is asked as one more turn
+    of that request: the same system block, tools, messages, `tandem` field and thinking setting, then the
+    instruction, with a short reasoning budget (thinking off, or marked a compaction, the engine renders another
+    head and reads everything again). Live after it: a 41k chat's compaction in 17 s, on its own slot.
+    In a window too small for that (the test above) the smaller request goes, as before."""
+    c = Chat()
+    try:
+        small_window(c, window=40_000)
+        c.svc.learn_ratio = lambda *a: None                 # the fake counts words, not tokens
+        cid = c.new()
+        c.svc.conv(cid).tok_ratio = 0.5
+        long = "lorem ipsum dolor " * 480                          # ~4,300 tokens a turn at the ratio
+        for i in range(8):
+            c.send(cid, f"turn {i}: {long}")
+            c.wait_idle(cid, 20)
+        c.send(cid, "and now?")
+        s = c.wait_idle(cid, 30)
+        assert len(s["compactions"]) == 1, [x["before_tokens"] for x in s["compactions"]]
+        bodies = c.fake.bodies
+        at = [i for i, b in enumerate(bodies) if b.get("stream") is False
+              and b["messages"][-1] == {"role": "user", "content": comp.INSTRUCTIONS}]
+        assert len(at) == 1
+        body = bodies[at[0]]
+        before = [b for b in bodies[:at[0]] if b.get("stream")][-1]      # the chat's last request before it
+        n = len(before["messages"])
+        assert body["messages"][0] == before["messages"][0] and body["messages"][0]["role"] == "system"
+        assert body.get("tools") == before.get("tools") and body.get("tools"), "the chat's own tools"
+        assert body["messages"][:n] == before["messages"], "its history as the engine read it"
+        assert [m["role"] for m in body["messages"][n:]] == ["assistant", "user", "user"], "the answer, the new turn"
+        assert body["tandem"] == before["tandem"] == {"compaction": False}, "a turn of the chat, not a marked one"
+        assert body.get("chat_template_kwargs") == before.get("chat_template_kwargs"), "the chat's thinking setting"
+        assert body["max_reasoning_tokens"] == comp.SUMMARY_REASONING and "stream_options" not in body
+        assert body["max_tokens"] == comp.SUMMARY_TOKENS + comp.SUMMARY_REASONING
+        after = [b for b in bodies[at[0] + 1:] if b.get("stream")][0]
+        assert "Summary of the earlier part" in after["messages"][0]["content"]
+        return f"{len(body['messages'])} messages: the chat's {n}, its answer, the new turn, the instruction"
+    finally:
+        c.close()
+
+
+def test_a_chats_priority_goes_to_the_engine_and_only_the_three_words_are_taken():
+    """The chat's priority for the engine's memory (`settings.priority`: high, normal, low): chatd sends it in the
+    body's `tandem` field when it is not normal; any other word is a 400 and nothing changes."""
+    c = Chat()
+    try:
+        small_window(c, window=100_000)                     # our engine's model: the body carries `tandem`
+        cid = c.new()
+        assert c.ok("GET", f"/conversations/{cid}")["settings"]["priority"] == "normal"
+        c.send(cid, "hello")
+        c.wait_idle(cid, 20)
+        assert requests(c)[-1]["tandem"] == {"compaction": False}
+        for word in ("high", "low"):
+            c.ok("PATCH", f"/conversations/{cid}/settings", {"priority": word})
+            c.send(cid, f"again, {word}")
+            c.wait_idle(cid, 20)
+            assert requests(c)[-1]["tandem"] == {"compaction": False, "priority": word}
+        st, err, _ = c.call("PATCH", f"/conversations/{cid}/settings", {"priority": "urgent"})
+        assert st == 400 and "priority must be one of high, normal, low" in err["error"]["message"], err
+        assert c.ok("GET", f"/conversations/{cid}")["settings"]["priority"] == "low"
     finally:
         c.close()
 

@@ -32,6 +32,8 @@ import os
 import threading
 import time
 
+from engine import kvpool
+
 GiB = 1 << 30
 MiB = 1 << 20
 
@@ -63,6 +65,10 @@ def read_meminfo(path: str = "/proc/meminfo") -> dict | None:
         return None
 
 
+#: a request that waits for memory counts one priority step higher for every this many seconds it has waited
+WAIT_AGE_S = 1800.0
+
+
 def slot_bytes(max_len: int, *, per_token: int = 106_752, constant: int = 7 * GiB + GiB // 2) -> int:
     """What one side slot costs before it serves anything: 64 KiB of engine KV, 2 x 20 KiB of
     draft KV (two drafter arms) and 256 B of rotary table a token of window, plus a constant for
@@ -70,6 +76,54 @@ def slot_bytes(max_len: int, *, per_token: int = 106_752, constant: int = 7 * Gi
     buffers: 6.9 to 7.5 GiB allocated measured on 2026-10-05 for an 8,192-token slot (MemAvailable
     fell 5.9 to 9.4 GiB a slot), most of it the pools of the 121 verify graphs a slot captures."""
     return int(max_len) * int(per_token) + int(constant)
+
+
+def guard(cap: int, *, step: int = 0, kv: int = 0, sandbox: int = 0, margin: int = 0) -> tuple[int, dict]:
+    """SRV-785: the last line under the admission and the KV pool, from the live state: the most the engine
+    may allocate between two checks (one prefill chunk's workspace at the class of the longest prefill in flight,
+    `step`, and one KV commit, `kv`), what a chat's sandbox claims (`sandbox`), and what the kernel keeps free
+    (`margin`). Never above the configured floor (`cap`): a short turn's line is lower, a 192k prefill's reaches
+    the floor. Returns (bytes, its inputs) for the wait line."""
+    parts = {"step": max(0, int(step)), "kv": max(0, int(kv)), "sandbox": max(0, int(sandbox)),
+             "margin": max(0, int(margin))}
+    g = min(int(cap), sum(parts.values()))
+    return g, dict(parts, cap=int(cap), guard=g)
+
+
+def kv_step(pages, rows: int) -> int:
+    """SRV-785: the most one commit of `rows` rows (and the pool's margin) maps in a set of paged buffers
+    (engine/kvpool.py `PagedSet`): in every region of every buffer the pages those rows cover, one more where they
+    straddle a page. 0 for KV that is not paged."""
+    bufs = getattr(pages, "bufs", None)
+    if not bufs:
+        return 0
+    want = int(rows) + int(pages.margin())
+    return sum(b.outer * (-(-want * b.row_bytes // b.page) + 1) * b.page for b in bufs)
+
+
+class GuardedPool(kvpool.KVPool):
+    """SRV-785: the shared KV pool whose hard floor is the admission's live guard (`guard`, () -> bytes or None),
+    never above the configured value (`hard_floor_cfg`); the configured value without an answer. Here, not in
+    engine/kvpool.py: that file counts in the spill's and the disk tier's fingerprints, and new bytes there would
+    leave every entry on the NVMe unreadable."""
+    guard = None
+
+    @property
+    def hard_floor(self) -> int:
+        if self.guard is None or self.hard_floor_cfg <= 0:
+            return self.hard_floor_cfg
+        try:
+            g = self.guard()
+        except Exception:                                          # noqa: BLE001
+            g = None
+        return self.hard_floor_cfg if g is None else min(self.hard_floor_cfg, max(0, int(g)))
+
+    @hard_floor.setter
+    def hard_floor(self, value: int) -> None:
+        self.hard_floor_cfg = int(value)
+
+    def report(self) -> dict:
+        return dict(super().report(), hard_floor_cfg_gib=round(self.hard_floor_cfg / GiB, 2))
 
 
 class Admission:
@@ -85,14 +139,19 @@ class Admission:
     what the long-lived caches may still take (their budgets minus what they hold). The engine's
     room to its peak (`room`) caps the cache growth, the workspaces in flight and this request's
     together; a prefill the memory gate admitted over the peak counts its workspace past that cap,
-    in full less the allocator's free default-pool blocks it takes first (`spare`). A prefill's
+    in full less the allocator's free default-pool blocks it takes first (`spare`), and the larger of
+    the two counts, never their sum: the policy grows no cache while it runs (SRV-787). A prefill's
     workspace leaves the reservation when it has run (`prefilled`), its KV part stays until the
     release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
-    request is admitted and says so."""
+    request is admitted and says so. SRV-785: the floor is the live guard (`guard`, `floor_at`), never above the
+    configured one (`cap`)."""
 
     def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None,
-                 spare=None, committed=None):
-        self.floor = int(floor_bytes)
+                 spare=None, committed=None, guard=None):
+        self.cap = int(floor_bytes)
+        # SRV-785: (rows) -> (bytes, inputs) or None, the floor from the live state (`guard`) at the class of the
+        # longest prefill in flight or this one (`rows`); never above `cap`. None, or no answer: `cap`, as before
+        self.guard = guard
         self.meminfo = meminfo
         self.growth = growth or (lambda: 0)
         # SRV-250: the most the engine may still take under its memory policy (its room to
@@ -119,7 +178,9 @@ class Admission:
         self._admit = threading.Lock()
         self.held: dict = {}
         self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
+        self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
+        self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
         self.last_refused: dict | None = None   # 0.8.2: the last check that said no (`check`'s d)
         self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
                       "timeouts": 0, "alone": 0, "lone_checked": 0, "peak_waits": 0}
@@ -153,14 +214,55 @@ class Admission:
         """SRV-775: the workspaces of the admitted requests whose prefill has not run yet (`prefilled`)."""
         return self._held()[0]
 
-    def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False) -> tuple[bool, dict]:
+    def ctx_rows(self) -> int:
+        """SRV-785: the rows of the longest admitted prefill that has not run yet (0: none)."""
+        with self.lock:
+            return max(self.rows.values(), default=0)
+
+    def floor_at(self, rows: int = 0) -> tuple[int, dict | None]:
+        """SRV-785: the floor a check holds, (bytes, the guard's inputs): the live guard at the class of the
+        longest prefill in flight or `rows`, at most `cap`; `cap` without a guard or an answer from it."""
+        if self.guard is None:
+            return self.cap, None
+        try:
+            got = self.guard(max(int(rows), self.ctx_rows()))
+        except Exception:                                          # noqa: BLE001
+            got = None
+        if not got:
+            return self.cap, None
+        g, inputs = got
+        return min(self.cap, max(0, int(g))), inputs
+
+    @property
+    def floor(self) -> int:
+        return self.floor_at()[0]
+
+    def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False,
+              rows: int = 0) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
         it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
-        the allocator's free default-pool blocks it takes before any new memory (`spare`)."""
+        the allocator's free default-pool blocks it takes before any new memory (`spare`), against the room's
+        charge, the larger of the two (SRV-787). `rows`: its prompt's rows, the class of the guard's chunk
+        (SRV-785, `floor_at`)."""
+        floor, gin = self.floor_at(rows)
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
         held_ws, held_kv = self._held()
         need_ws = max(0, int(need) - int(kv))
+        if gin and need_ws > 0:
+            # the guard's chunk is the most one prefill allocates between two checks. This request's workspace is
+            # that allocation and is charged below: in full over the peak, under it inside the room, which bounds
+            # all the engine may still allocate. The floor holds only what is left of the chunk (2026-11-06: a 142k
+            # turn's 10.8 GiB counted as its workspace and again as the floor's chunk waited 17 s at MemAvailable
+            # 19.9 GiB; under the peak, four chats' turns waited 10 to 65 s on a 3.9 GiB chunk counted twice)
+            # the chunk's class is this request's own rows unless a longer prefill is in flight: then its workspace
+            # is the chunk, all of it (the guard's estimate of a full chunk at its class ran 3.2 GiB above the
+            # request's own and held a 177k turn 176 s at 0.1 GiB short, 2026-11-06 15:14)
+            own = int(gin["step"]) if int(rows) >= self.ctx_rows() else min(int(gin["step"]), need_ws)
+            if own:
+                gin = dict(gin, step=int(gin["step"]) - own, own=own)
+                gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
+                floor = min(self.cap, gin["guard"])
         spare = 0
         if over_peak and self.spare is not None:
             try:
@@ -168,10 +270,11 @@ class Admission:
             except Exception:                                      # noqa: BLE001
                 spare = 0                  # no reading: the whole workspace is new memory
         new_ws = need_ws - spare
-        d = {"floor": self.floor, "grow_left": grow, "reserved": held_ws + held_kv,
+        d = {"floor": floor, "grow_left": grow, "reserved": held_ws + held_kv,
              "need": int(need), "kv": int(kv), "kv_reserved": held_kv, "in_flight_ws": held_ws,
-             **({"over_peak": True, "spare": spare, "new_ws": new_ws} if over_peak else {})}
-        if not mi or "MemAvailable" not in mi or self.floor <= 0:
+             **({"over_peak": True, "spare": spare, "new_ws": new_ws} if over_peak else {}),
+             **({"guard": gin} if gin else {})}
+        if not mi or "MemAvailable" not in mi or self.cap <= 0:
             d.update(avail=None, after=None, ok=True)
             return True, d
         avail = int(mi["MemAvailable"])
@@ -183,15 +286,23 @@ class Admission:
                 room = None
         # SRV-775: the room caps the caches' growth, the workspaces of the prefills in flight and this one's:
         # the gate bounds every prefill it admits under the peak to the room. One it admitted over
-        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first
+        # the peak counts its workspace past the room: in full, less the free default-pool blocks it takes first.
+        # SRV-787: the larger of the two, not their sum: the policy lets no cache grow while that workspace is in
+        # flight, nor once the reserve is at the peak (`Budget.admit`: reserve + bytes + `ws_now` <= peak), so the
+        # room and the over-peak workspace never leave MemAvailable together (2026-11-05: a lone 128k turn found
+        # 25.0 - 8.5 - 8.0 - 0.8 = 7.7 < 10 and waited 900 s with the engine idle). Without a policy, the sum
         under = grow + held_ws + (0 if over_peak else need_ws)
-        take = min(room, under) if room is not None else under
-        take += new_ws if over_peak else 0
+        if room is None:
+            take = under + (new_ws if over_peak else 0)
+        elif over_peak:
+            take = max(min(room, under), held_ws + new_ws)
+        else:
+            take = min(room, under)
         # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
         # its room, always counted
         take += held_kv + int(kv)
         after = avail - take
-        d.update(avail=avail, after=after, ok=after >= self.floor, room=room, under=under)
+        d.update(avail=avail, after=after, ok=after >= floor, room=room, under=under)
         if not d["ok"]:
             self.last_refused = d
         if count:
@@ -200,7 +311,8 @@ class Admission:
             self.stats["min_after"] = after if m is None else min(m, after)
         return d["ok"], d
 
-    def reserve(self, key, need: int, kv: int = 0, owner=None, over_peak: bool = False) -> tuple[bool, dict]:
+    def reserve(self, key, need: int, kv: int = 0, owner=None, over_peak: bool = False,
+                rows: int = 0) -> tuple[bool, dict]:
         """Check and record in one step, so two requests cannot both take the last bytes. SRV-775: a
         request with nothing else in flight is checked as well (`alone` and `lone_checked` count it):
         the engine's memory policy keeps it under the declared peak, not the box above its floor
@@ -210,7 +322,8 @@ class Admission:
         workspace counts in full less the free default-pool blocks it takes first (`spare`), and the
         floor is what bounds it.
 
-        `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit."""
+        `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit. `rows`: its prompt's
+        rows, kept until its prefill has run (`prefilled`): the class of the guard's chunk (SRV-785)."""
         with self._admit:
             with self.lock:
                 alone = not self.held
@@ -220,7 +333,7 @@ class Admission:
                     base = int(self.committed(owner))
                 except Exception:                                  # noqa: BLE001
                     base = 0
-            ok, d = self.check(need, kv=kv, over_peak=over_peak)
+            ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows)
             if alone:
                 self.stats["alone"] += 1
                 self.stats["lone_checked"] += 1
@@ -229,7 +342,10 @@ class Admission:
                 with self.lock:
                     self.held[key] = int(need)
                     self.kv[key] = (int(kv), owner, base)
+                    if rows:
+                        self.rows[key] = int(rows)
                     self.waiting.pop(key, None)
+                    self.prio.pop(key, None)
                 self.stats["admitted"] += 1
         return ok, d
 
@@ -237,15 +353,45 @@ class Admission:
         """SRV-775: `key`'s prefill has run: its workspace leaves the reservation, its KV part stays until
         `release`."""
         with self.lock:
+            self.rows.pop(key, None)
             if key in self.held:
                 self.held[key] = self.kv.get(key, (0,))[0]
 
-    def wait(self, key) -> int:
-        """SRV-305: `key` waits for memory; returns its place in line (1 = next)."""
+    def wait(self, key, prio: int = 1) -> int:
+        """SRV-305: `key` waits for memory; returns its place in line (1 = next). The line is by the chat's priority
+        (`prio`: 0 low, 1 normal, 2 high), then by arrival; a waiter counts one step higher for every `WAIT_AGE_S` it
+        has waited, so a low one is not passed for ever."""
         with self.lock:
-            self.waiting.setdefault(key, time.monotonic())
-            t = self.waiting[key]
-            return 1 + sum(1 for v in self.waiting.values() if v < t)
+            now = time.monotonic()
+            if key not in self.waiting:
+                self.waiting[key] = now
+                self.prio[key] = max(0, min(2, int(prio)))
+            mine = self._rank(key, now)
+            return 1 + sum(1 for k in self.waiting if k != key and self._rank(k, now) < mine)
+
+    def _rank(self, key, now: float) -> tuple:
+        """Where `key` stands in the line (smaller first); under the lock. A lane `first` put at the head (a
+        negative arrival) stays before every priority."""
+        t = self.waiting[key]
+        if t < 0:
+            return (-9, t)
+        return (-min(2, self.prio.get(key, 1) + int(max(0.0, now - t) // WAIT_AGE_S)), t)
+
+    def outranked(self, prio: int = 1) -> bool:
+        """Does a request wait for memory whose priority (aged) is above `prio`? A new request then joins the
+        line instead of taking the bytes the waiter is held for."""
+        with self.lock:
+            now = time.monotonic()
+            return any(self._rank(k, now)[0] < -int(prio) for k in self.waiting)
+
+    def ahead_higher(self, key) -> int:
+        """The waiters ahead of `key` because their chat's priority is higher (not because they came first)."""
+        with self.lock:
+            if key not in self.waiting:
+                return 0
+            now = time.monotonic()
+            mine = self._rank(key, now)
+            return sum(1 for k in self.waiting if k != key and self._rank(k, now)[0] < mine[0])
 
     def first(self, key) -> None:
         """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
@@ -257,12 +403,15 @@ class Admission:
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
+            self.prio.pop(key, None)
 
     def release(self, key) -> None:
         with self.lock:
             self.held.pop(key, None)
             self.kv.pop(key, None)
+            self.rows.pop(key, None)
             self.waiting.pop(key, None)
+            self.prio.pop(key, None)
 
     @staticmethod
     def describe(d: dict) -> str:
@@ -281,26 +430,49 @@ class Admission:
         spare = int(d.get("spare") or 0)
         # SRV-775: an over-peak admit's workspace is new memory past the allocator's free default-pool blocks
         free = f" ({g(spare)} of its {g(need_ws)} in the allocator's free blocks)" if spare else ""
-        # SRV-775: the room caps the growth and the workspaces under the peak; an over-peak admit's is out of it
-        mid = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
-               f"workspaces in flight {g(d.get('in_flight_ws') or 0)}"
-               + ("" if over else f", this request's {g(need_ws)}") + ")"
-               + (f" - this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
-                  if over else "")
-               if capped else
-               f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
-               f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
+        held_ws = d.get("in_flight_ws") or 0
+        # SRV-775: the room caps the growth and the workspaces under the peak
+        roomed = (f"the engine's room to its peak {g(room)} (under the room: cache growth {g(d['grow_left'])}, "
+                  f"workspaces in flight {g(held_ws)}" + ("" if over else f", this request's {g(need_ws)}") + ")"
+                  if capped else "")
+        if over and room is not None:
+            # SRV-787: an over-peak admit's workspace is out of the room, and counts as the larger of the two
+            mid = (f"the larger of "
+                   + (roomed or f"cache growth {g(d['grow_left'])} + workspaces in flight {g(held_ws)}")
+                   + f" and this request over the peak {g(need_ws - spare)}" + (" new" if spare else "") + free
+                   + (f" + workspaces in flight {g(held_ws)}" if held_ws else ""))
+        elif capped:
+            mid = roomed
+        else:
+            mid = (f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
+                   f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
         return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
-                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})"
+                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])}"
+                + Admission.guard_words(d.get("guard")) + ")"
                 + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"
                    if d.get("kv") or d.get("kv_reserved") else ""))
+
+    @staticmethod
+    def guard_words(gin: dict | None) -> str:
+        """SRV-785: the guard's inputs on the wait line: " = chunk 1.2 + KV commit 0.4 + sandbox 0.0 + margin 5.0,
+        at most 10.0"; empty without a guard."""
+        if not gin:
+            return ""
+        g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731
+        own = f" (this request's {g(gin['own'])} counted above)" if gin.get("own") else ""
+        return (f" = chunk {g(gin['step'])}{own} + KV commit {g(gin['kv'])} + sandbox {g(gin['sandbox'])} + margin "
+                f"{g(gin['margin'])}, at most {g(gin['cap'])}")
 
     def report(self) -> dict:
         with self.lock:
             held = dict(self.held)
             waiting = len(self.waiting)
         ws, kv = self._held()
-        return {"floor_gib": round(self.floor / GiB, 2), "in_flight": len(held),
+        floor, gin = self.floor_at()
+        return {"floor_gib": round(self.cap / GiB, 2), "in_flight": len(held),
+                # SRV-785: the floor a check holds now, and its inputs (null: the configured floor)
+                "guard_gib": round(floor / GiB, 2),
+                "guard": ({k: round(v / GiB, 3) for k, v in gin.items()} if gin else None),
                 "reserved_gib": round(sum(held.values()) / GiB, 3),
                 "ws_in_flight_gib": round(ws / GiB, 3),     # SRV-775: the workspaces not yet prefilled
                 "kv_to_commit_gib": round(kv / GiB, 3), "waiting_memory": waiting, **self.stats}
@@ -470,6 +642,10 @@ class Slot:
         # other request has written the slot's buffers since
         self.gen = 0
         self.carry: dict | None = None
+        # SRV-779: the NVMe entry this slot's last conversation was written to before its rows
+        # went (`eid`, `owner`; server/app.py `_write_rows`): while the slot holds no other
+        # conversation, that conversation's next turn comes back here (`_spill_home`)
+        self.written: dict | None = None
 
     @property
     def busy(self) -> bool:

@@ -561,8 +561,11 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
+            # plan mode: the read tools, plus a tool that says it changes nothing (an MCP tool
+            # marked readOnlyHint, an Open WebUI tool with no network or process import)
             if settings.get("plan_mode") and part.get("name") not in PLAN_TOOLS and (
-                    tool is not None or self.tool(part.get("name") or "")):
+                    tool is not None or self.tool(part.get("name") or "")) and not (
+                    tool is not None and tool.side_effects is False):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
             if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
@@ -896,7 +899,7 @@ class AgentMixin:
         run.compact_cut = False
         if (force or at and est > at) and run.compacted != run.step:
             run.compacted = run.step            # once a step: a long run compacts again later
-            if self.compact(conv, run, [m for m in path if m.get("id")], tools=tools):
+            if self.compact(conv, run, [m for m in path if m.get("id")], tools=tools, refused=force):
                 run.compact_cut = True
                 body = build()
                 est = comp.estimate(body, conv.tok_ratio)
@@ -960,7 +963,7 @@ class AgentMixin:
 
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False,
-                tools: list | None = None) -> bool:
+                tools: list | None = None, refused: bool = False) -> bool:
         """Summarize the earlier part of the conversation (chatd/compaction.py): everything before
         the last two user turns, or a long run's steps but its last ones, as deep as it takes for
         the next request to land under TARGET_SHARE of the guard's limit."""
@@ -993,7 +996,8 @@ class AgentMixin:
                 cuts.append((sb[0], sb))
         if not cuts:
             return False
-        before = comp.estimate(self._request(settings, info, tools, path, prior, head), ratio)
+        req = self._request(settings, info, tools, path, prior, head)
+        before = comp.estimate(req, ratio)
         # the first cut whose request (with a summary at its longest) lands under the target,
         # else the deepest. Live (2026-10-17) a compaction at 162k tokens kept 138,673, three
         # steps of shader and JS texts, and the engine read 131,505 of them again for a 15 % cut
@@ -1005,6 +1009,16 @@ class AgentMixin:
             if not target or after + comp.SUMMARY_TOKENS <= target:
                 break
         start = prior[1] if prior else 0
+        # 2026-11-06: on our engine the summary is asked as one more turn of the chat's own request (its system
+        # block, tools and whole history as the engine read them), so the engine continues the conversation it
+        # holds and reads the instruction only. The request below (its own system block, no tools, the history to
+        # the cut) shared 3 tokens with the cached conversation: five compactions read 100k to 194k tokens again,
+        # 114 to 261 s each. The summary then covers the kept turns too; they follow it verbatim anyway
+        # (not after the engine refused the chat's request, for memory or as over the window (`refused`): the
+        # summary's request must then be the smaller one below)
+        cont = (info.get("backend") == "engine" and window and not refused and not conv.memory_limit
+                and not (run is not None and run.continue_final)
+                and before + comp.SUMMARY_TOKENS + 1024 <= window and bool(req.get("messages")))
         system = render.system_block(today=None, tools=False, summary=prior[0] if prior else None)
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
         fold = prior[3] if prior else None
@@ -1034,6 +1048,17 @@ class AgentMixin:
                 "chat_template_kwargs": {"enable_thinking": False}}
         if info.get("backend") == "engine":
             body["tandem"] = {"compaction": True}
+        if cont:
+            # the chat's own request as it is (its `tandem` field with `compaction` false, its thinking setting),
+            # plus the instruction. Two things made the prompt part from the conversation the engine holds at its
+            # third token (live 2026-11-06, 192,454 and 73,023 tokens read again): marked a compaction, the engine
+            # leaves out the router's notes at the head; with thinking off, the template writes another system
+            # block. So the summary may reason: a short budget, which no prompt token carries
+            body = {k: v for k, v in req.items() if k not in (
+                "stream_options", "continue_final_message", "add_generation_prompt", "max_reasoning_tokens")}
+            body.update(messages=list(req["messages"]) + [{"role": "user", "content": comp.INSTRUCTIONS}],
+                        stream=False, max_tokens=comp.SUMMARY_TOKENS + comp.SUMMARY_REASONING,
+                        max_reasoning_tokens=comp.SUMMARY_REASONING)
         if run is not None:
             run.set_phase("prefill", "Compacting the conversation")
         t0 = time.monotonic()

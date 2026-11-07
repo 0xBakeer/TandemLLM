@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ActivityState, Live, LiveActivity, LiveEngine, LiveRequest, LiveStop, StopReason } from '../src/api/types';
-import { activityCell, clientFlag, continuesText, etaWord, isMoving, nowLine, ordinal, pathSegments, pickRunning, roundWords, secs, stateWord, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit } from '../src/lib/activity';
+import { activityCell, clientFlag, continuesText, etaWord, isMoving, memoryLines, nowLine, ordinal, pathSegments, pickRunning, roundWords, secs, stateWord, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit } from '../src/lib/activity';
 
 const recentRows = (r: Live['recent'], n = 20) => (r ?? []).slice(0, n);
 import { emptyRing, push } from '../src/lib/live';
@@ -209,9 +209,31 @@ function dec(over: Partial<NonNullable<LiveActivity['decode']>> = {}): NonNullab
   return { tokens: 100, thinking_tokens: 0, content_tokens: 0, tool_tokens: 0, tps_now: null, tps_avg: null, rounds: 20, tokens_per_round: 4.1, tokens_per_round_now: 4.4, ms_per_round: 91.8, ms_per_round_now: 90.9, accept_mean: 3, ...over };
 }
 
+describe('SRV-787: a request held for memory', () => {
+  const lines = ['This turn needs about 9.3 GiB to read 70,520 new tokens; 25 GiB is free and 10 must stay free for the system', 'A 131k turn on another chat is reading (about 2 min left)', 'Starts automatically; Stop cancels. Will be refused in 8 m 40 s unless memory frees'];
+  const memory = { need_gib: 9.3, rows: 70520, free_gib: 25, guard_gib: 10, short_gib: 0, peak_wait: false, guard: { step: 6.25, kv: 0.3, sandbox: 0, margin: 5, cap: 10 }, freed_gib: 0, in_the_way: { request_id: 'chatcmpl-o', tokens: 131073, eta_ms: 120000 }, waited_ms: 80000, bound_s: 600, ends_in_ms: 520000, place: 1, lines };
+  const held = () => req('waiting_memory', { label: 'Waiting for memory', memory }, { phase: 'prefill', ttft_ms: null, decode_tps: null, decode_tps_now: null, prefill_tps: null, tokens: 0 });
+  it('the Now line: the label and the server\'s three lines, never a rate or a bar', () => {
+    const n = nowLine(engine('busy'), [held()])!;
+    expect(n).toMatchObject({ headline: 'Waiting for memory', glyph: '◌', tone: 'wait', moving: false, progress: null });
+    expect(n.numbers).toEqual(lines);
+    expect(n.numbers.join(' ')).not.toMatch(/tok\/s/);
+  });
+  it('the cell: waiting for memory and the time waited; the lines only for this state', () => {
+    expect(activityCell(held().activity)).toMatchObject({ glyph: '◌', word: 'waiting for memory', detail: secs(80000), tone: 'wait', moving: false });
+    expect(memoryLines(held().activity)).toEqual(lines);
+    expect(memoryLines(req('prefilling', { memory }).activity)).toEqual([]);
+    expect(isMoving('waiting_memory')).toBe(false);
+  });
+  it('a running request goes first on the Now line, the held one before the queue', () => {
+    expect(pickRunning([req('queued'), held()])?.activity?.state).toBe('waiting_memory');
+    expect(pickRunning([held(), req('prefilling')])?.activity?.state).toBe('prefilling');
+  });
+});
+
 describe('the activity cell, one per state', () => {
   it('has a glyph and a word for every state', () => {
-    const states: ActivityState[] = ['queued', 'prefilling', 'replaying', 'thinking', 'closing_reasoning', 'writing', 'tool_call', 'finishing', 'done'];
+    const states: ActivityState[] = ['queued', 'waiting_memory', 'prefilling', 'replaying', 'thinking', 'closing_reasoning', 'writing', 'tool_call', 'finishing', 'done'];
     const seen = new Set<string>();
     for (const s of states) {
       const c = activityCell(req(s, s === 'done' ? { stop: stop('stop') } : {}).activity);

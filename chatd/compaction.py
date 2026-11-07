@@ -59,6 +59,8 @@ DEFAULT_RATIO = 0.3                 # tokens per character until the engine has 
 MIN_ANSWER = 1024                   # the room an answer needs, at least
 KEEP_USER_TURNS = 2
 SUMMARY_TOKENS = 2048
+#: the reasoning a summary asked as one more turn of the chat's request may take (chatd/agent.py `compact`)
+SUMMARY_REASONING = 256
 INSTRUCTIONS = (
     "Write a summary of the conversation above, for yourself, so that you can continue it without "
     "the earlier messages. Keep: what the user wants and every decision they made; facts, names, "
