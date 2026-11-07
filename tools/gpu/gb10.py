@@ -37,7 +37,7 @@ class GB10(GpuProfile):
 
     def moe_launch(self) -> tuple[int, int]:
         from engine.settings import SETTINGS as _S
-        return int(_S.get("FN_MOE_ST")), int(_S.get("FN_MOE_WARPS"))
+        return int(_S.get("FN_MOE_ST") or "3"), int(_S.get("FN_MOE_WARPS") or "4")
 
     def dense_split(self, N: int, Kin: int, kb: int, table: dict) -> tuple[int, int]:
         got = table.get((N, Kin, kb))

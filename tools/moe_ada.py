@@ -25,6 +25,24 @@ import triton.language as tl
 
 from tools.exl3_ada import MUL1, _devkey, _k_bias, _k_inv
 
+# The two split kernels run their masked-load variants by default wherever they are
+# bitwise-identical to the addressed-load originals: a tile's window words come from one
+# contiguous [8,W2P] masked load plus a u64 pair-gather + rotate (the form `_moe_trellis`/
+# `_moe_gtrellis` already use) instead of two scattered [8,256] addressed loads. ~8x less L1
+# traffic a k-step; measured 1.5-4x on the split kernels. Identity holds exactly when the
+# launch's bound on the packed word width is W2P=32 -- banks whose widest tile is <= 32 u32
+# words, i.e. every kb in {2,3,4,15,25,35} -- because the u64 gather's output layout keeps the
+# addressed load's element-to-lane map there (verified torch.equal on every rate, grouped and
+# ungrouped, deployed dims and tails). At W2P=64 (kb 5..8) the gather re-associates `tl.sum`'s
+# tree (~ulp drift), so those banks keep the addressed kernels and the masked form stays an
+# opt-in via QWEN38_MOE_GATHER=1 -- a numerics class, with the flag's state in every tier
+# fingerprint. The identity is a Triton-lowering property, not an algebra identity, so it is
+# proved per device: the load probe latches `_MASKED_EQ`, and an unproven device falls back to
+# the addressed kernels (still correct, just slower). Grouped and ungrouped variants decode
+# identically, so a pair's bits never depend on its group. Flag latched at import.
+from engine.settings import SETTINGS as _S
+MOE_GATHER = _S.get("MOE_GATHER") == "1"
+
 RSQRT128 = tl.constexpr(0.08838834764831845)
 
 
@@ -355,6 +373,27 @@ def _pinv(device) -> torch.Tensor:
 
 
 _OK: dict = {}          # device -> verdict, recorded by `probe` at MoEBank load
+_MASKED_EQ: dict = {}   # device -> probe verdict: the masked split kernels == addressed, bitwise
+_FORCE_MASKED = None    # None: `_use_masked`'s rule; True/False: probe/test override
+
+
+def _bank_wmax(bank) -> int:
+    """The widest tile in the bank, in u32 words: `tile_width(kb) // 2` == the kernels' `W2v`
+    (`kb * 8` for kb < 10, `(kb // 10) * 8 + 4` for the half-integer rates). The admitted
+    default-masked set `wmax <= 32` is exactly kb in {2,3,4,15,25,35}; kb 5..8 give 40..64."""
+    return max(k * 8 if k < 10 else (k // 10) * 8 + 4 for k in bank.ks)
+
+
+def _use_masked(wmax: int, dev) -> bool:
+    """Whether `moe_experts` runs the masked-load split kernels for a bank whose widest tile is
+    `wmax` u32 words. Default where the masked form is bitwise-identical to the addressed form
+    on this device (wmax <= 32 and the probe latched `_MASKED_EQ`); the flag keeps it
+    selectable beyond that -- W2P=64 re-associates the partial sums, a numerics opt-in."""
+    if _FORCE_MASKED is not None:
+        return _FORCE_MASKED
+    if MOE_GATHER:
+        return True
+    return wmax <= 32 and _MASKED_EQ.get(_devkey(dev), False)
 
 
 def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | None = None):
@@ -366,6 +405,13 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     dev = x.device
     flat = ids.reshape(-1).to(torch.int32).contiguous()
     pinv = _pinv(dev)
+    wmax = _bank_wmax(bank)
+    masked = _use_masked(wmax, dev)
+    split = _moe_trellis_split_m if masked else _moe_trellis_split
+    split_g = _moe_trellis_split_g_m if masked else _moe_trellis_split_g
+    # the masked variants bound their window load by the bank's widest rate (32 covers K <= 4
+    # plus 1.5/2.5/3.5; 64 covers K 5..8 -- a bank mixing both classes takes 64)
+    w2p = {"W2P": 32 if wmax <= 32 else 64} if masked else {}
 
     if not x.is_contiguous():
         x = x.contiguous()
@@ -386,15 +432,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     if ks_gu > 1:
         ygu_pp = torch.empty(P, 2 * ks_gu, I, dtype=torch.float32, device=dev)
         if grouped:
-            _moe_trellis_split_g[(P, 2, (I // 128) * ks_gu)](
+            split_g[(P, 2, (I // 128) * ks_gu)](
                 xh, order, es, lead, glen, gc, bank.tr, bank.kb, pinv, ygu_pp,
                 H, H // 16, I // 16, I // 128, ks_gu, J=2, TJ=-1,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1, **w2p)
         else:
-            _moe_trellis_split[(P, 2, (I // 128) * ks_gu)](
+            split[(P, 2, (I // 128) * ks_gu)](
                 xh, flat, bank.tr, bank.kb, pinv, ygu_pp,
                 H, H // 16, I // 16, I // 128, ks_gu, J=2, TJ=-1,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1, **w2p)
         xd = torch.empty(P, I, dtype=torch.float16, device=dev)
         _moe_combine_rotdown[(P, I // 128)](ygu_pp, flat, bank.sv, bank.su, xd, I,
                                            KS=ks_gu, num_warps=4)
@@ -415,15 +461,15 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank, yd: torch.Tensor | Non
     if ks_dn > 1:
         yd_pp = torch.empty(P, ks_dn, H, dtype=torch.float32, device=dev)
         if grouped:
-            _moe_trellis_split_g[(P, 1, (H // 128) * ks_dn)](
+            split_g[(P, 1, (H // 128) * ks_dn)](
                 xd, order, es, lead, glen, gc, bank.tr, bank.kb, pinv, yd_pp,
                 I, I // 16, H // 16, H // 128, ks_dn, J=1, TJ=2,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), G=2, num_warps=1, num_stages=1, **w2p)
         else:
-            _moe_trellis_split[(P, 1, (H // 128) * ks_dn)](
+            split[(P, 1, (H // 128) * ks_dn)](
                 xd, flat, bank.tr, bank.kb, pinv, yd_pp,
                 I, I // 16, H // 16, H // 128, ks_dn, J=1, TJ=2,
-                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1)
+                K_INV=_k_inv(), K_BIAS=_k_bias(), num_warps=1, num_stages=1, **w2p)
         _moe_combine_rot[(P, H // 128)](yd_pp, flat, bank.sv, yd.view(P, H), H,
                                        KS=ks_dn, TJ=2, num_warps=4)
         del yd_pp
@@ -491,30 +537,46 @@ def moe_grouped_ada(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:
 
 
 @triton.jit
+def _scan_max(a, b):
+    return tl.maximum(a, b)
+
+
+@triton.jit
+def _scan_min(a, b):
+    return tl.minimum(a, b)
+
+
+@triton.jit
 def _moe_groups_fused(FLAT, ORD, ES, LEAD, LEN, GC, P, G: tl.constexpr):
-    """The whole pair->group build in one launch: stable-sort the P pair expert ids (rank sort,
-    P <= 128 fits one program), write the sorted order and ids, then mark the group leads (a new
-    expert run or every G inside a run), compact them into LEAD/LEN, and store the count.
-    Identical output to argsort+index_select+_moe_groups_build."""
+    """The whole pair->group build in one launch: stable-sort the P pair expert ids (packed
+    key e*128+i through tl.sort, P <= 128 fits one program), write the sorted order and ids,
+    then mark the group leads (a new expert run or every G inside a run), compact them into
+    LEAD/LEN, and store the count. Expert ids must satisfy 0 <= e < 2**24 so keys stay
+    positive i32 under the 0x7FFFFFFF dead-lane sentinel (router top-k ids are in [0, n),
+    n <= 512). Identical output to argsort+index_select+_moe_groups_build."""
     r = tl.arange(0, 128)
     im = r < P
-    e = tl.load(FLAT + r, mask=im, other=0x3FFFFFFF)
-    # stable rank: elements sorting before i are (ej < ei) or (ej == ei and j < i)
-    ej = e[None, :]
-    ei = e[:, None]
-    before = (ej < ei) | ((ej == ei) & (tl.arange(0, 128)[None, :] < r[:, None]))
-    rank = tl.sum(before.to(tl.int32), axis=1)
-    tl.store(ORD + rank, r, mask=im)
-    tl.store(ES + rank, e, mask=im)
-    # sorted expert at position q = the e_i whose rank == q
-    esv = tl.sum(tl.where(rank[None, :] == r[:, None], e[None, :], 0), axis=1)
-    prev = tl.sum(tl.where(rank[None, :] == r[:, None] - 1, e[None, :], 0), axis=1)
-    prev = tl.where(r == 0, -1, prev)
-    run0 = tl.min(tl.where(esv[None, :] == esv[:, None], r[None, :], P), axis=1)
-    is_lead = im & ((r == 0) | (esv != prev) | ((r - run0) % G == 0))
+    e = tl.load(FLAT + r, mask=im, other=0)
+    # stable argsort in one sort: e*128+i keeps equal experts in input order
+    sk = tl.sort(tl.where(im, e * 128 + r, 0x7FFFFFFF))
+    ord_v = sk % 128
+    es_v = sk // 128
+    tl.store(ORD + r, ord_v, mask=im)
+    tl.store(ES + r, es_v, mask=im)
+    # group leads: a new expert run, or every G inside one (sorted order => a run
+    # starts wherever ES differs from its predecessor)
+    es_prev = tl.gather(es_v, tl.maximum(r - 1, 0), axis=0)
+    new_run = (r == 0) | (es_v != es_prev)
+    # run0[i] = last run boundary at or before i (forward max-scan)
+    run0 = tl.associative_scan(tl.where(new_run, r, 0), 0, _scan_max)
+    is_lead = im & (new_run | ((r - run0) % G == 0))
     gidx = tl.cumsum(is_lead.to(tl.int32), axis=0) - 1
     tl.store(LEAD + gidx, r, mask=is_lead)
-    nxt = tl.min(tl.where(is_lead[None, :] & (r[None, :] > r[:, None]), r[None, :], P), axis=1)
+    # nxt[i] = first lead after i: reverse min-scan over the lead positions shifted
+    # one lane left, so the last group's nxt is P for every group count (incl. 128)
+    lp = tl.where(is_lead, r, P)
+    sh = tl.where(r == 127, P, tl.gather(lp, tl.minimum(r + 1, 127), axis=0))
+    nxt = tl.associative_scan(sh, 0, _scan_min, reverse=True)
     tl.store(LEN + gidx, nxt - r, mask=is_lead)
     tl.store(GC, tl.sum(is_lead.to(tl.int32)))
 
@@ -610,6 +672,131 @@ def _moe_trellis_split_g(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
                  yp, mask=(g < ln) & (cols >= 0))
 
 
+@triton.jit
+def _moe_trellis_split_m(XH, IDS, TR, KBt, PINV, YPP,
+                         K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
+                         K_INV, K_BIAS, W2P: tl.constexpr):
+    """`_moe_trellis_split` reading the window words through one masked [8,W2P] load + a u64
+    pair-gather + rotate (the `_moe_trellis`/`_moe_gtrellis` load form; W2P is the launch's
+    bound on W2v, 32 or 64 by the bank's rates) instead of two scattered [8,256] addressed
+    loads. At W2P=32 the u64 gather keeps the addressed form's element-to-lane map, so the
+    outputs are bitwise-identical (the default on wmax<=32 banks once the probe latches it);
+    at W2P=64 the gather re-associates `tl.sum`'s tree -- ~ulp drift, MOE_GATHER opt-in only."""
+    p = tl.program_id(0)
+    j = tl.program_id(1)
+    nb = tl.program_id(2) % NBS
+    ks = tl.program_id(2) // NBS
+    e = tl.load(IDS + p)
+    tj = j if TJ < 0 else TJ
+    T = tl.load(TR + e * 3 + tj).to(tl.pointer_type(tl.int32))
+    kb = tl.load(KBt + e * 3 + tj)
+    W2v = tl.where(kb < 10, kb * 8, (kb // 10) * 8 + 4)
+    nbits = W2v * 32
+
+    s = tl.arange(0, 256)
+    pinv = tl.load(PINV + s)
+    pos = pinv + 1
+    end = tl.where(kb < 10, pos * kb, pos * (kb // 10) + pos // 2)
+    a0 = end - 16
+    a = tl.where(a0 < 0, a0 + nbits, a0)
+    off = a % 32
+    w0i = a // 32
+
+    t8 = tl.arange(0, 8)
+    wrd = tl.arange(0, W2P)
+    nxt = (wrd + 1) % W2v                                  # cyclic pair word (wrap = w0i=W2v-1 -> w[0])
+    xh_off = tl.arange(0, 16)
+    KC = (KT + KS - 1) // KS
+    kt0 = ks * KC
+    kt1 = tl.minimum(kt0 + KC, KT)
+    acc = tl.zeros([8, 16], dtype=tl.float32)
+    for kt in range(kt0, kt1):
+        base = (kt * NT + nb * 8) * W2v
+        w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
+                    mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
+        wn = tl.gather(w, tl.broadcast_to(nxt[None, :], (8, W2P)), axis=1)
+        w64 = (w.to(tl.uint64) & 0xFFFFFFFF) | (wn.to(tl.uint64) << 32)
+        pair = tl.gather(w64, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        s64 = ((off - 16) & 63)[None, :].to(tl.uint64)
+        v = (((pair << s64) | (pair >> ((64 - s64) & 63))) & 0xFFFF).to(tl.int32)
+        s1024 = tl.inline_asm_elementwise(
+            "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
+            "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
+        val = (s1024.to(tl.float32) * K_INV + K_BIAS).to(tl.float16).to(tl.float32)
+        xh = tl.load(XH + (p * J + j) * K + kt * 16 + xh_off).to(tl.float32)
+        acc += tl.sum(tl.reshape(val, (8, 16, 16)) * xh[None, :, None], axis=1)
+    tl.store(YPP + ((p * J + j) * KS + ks) * (NT * 16) + nb * 128 + tl.arange(0, 128),
+             tl.reshape(acc, (128,)))
+
+
+@triton.jit
+def _moe_trellis_split_g_m(XH, ORD, ES, LEAD, LEN, GC, TR, KBt, PINV, YPP,
+                           K, KT, NT, NBS, KS, J: tl.constexpr, TJ: tl.constexpr,
+                           K_INV, K_BIAS, G: tl.constexpr, W2P: tl.constexpr):
+    """`_moe_trellis_split_g` with `_moe_trellis_split_m`'s masked load + u64 gather. The two
+    masked variants re-associate `tl.sum` identically (and, at W2P=32, identically to the
+    addressed kernels), so a pair's bits still do not depend on how many partners share its
+    expert."""
+    gi = tl.program_id(0)
+    j = tl.program_id(1)
+    nb = tl.program_id(2) % NBS
+    ks = tl.program_id(2) // NBS
+    ng = tl.load(GC)
+    if gi >= ng:
+        return
+    lead = tl.load(LEAD + gi)
+    ln = tl.load(LEN + gi)
+    tj = j if TJ < 0 else TJ
+    e = tl.load(ES + lead)
+    T = tl.load(TR + e * 3 + tj).to(tl.pointer_type(tl.int32))
+    kb = tl.load(KBt + e * 3 + tj)
+    W2v = tl.where(kb < 10, kb * 8, (kb // 10) * 8 + 4)
+    nbits = W2v * 32
+
+    s = tl.arange(0, 256)
+    pinv = tl.load(PINV + s)
+    pos = pinv + 1
+    end = tl.where(kb < 10, pos * kb, pos * (kb // 10) + pos // 2)
+    a0 = end - 16
+    a = tl.where(a0 < 0, a0 + nbits, a0)
+    off = a % 32
+    w0i = a // 32
+
+    t8 = tl.arange(0, 8)
+    wrd = tl.arange(0, W2P)
+    nxt = (wrd + 1) % W2v                                  # cyclic pair word (wrap = w0i=W2v-1 -> w[0])
+    ga = tl.arange(0, G)
+    gm = ga < ln
+    pair = tl.load(ORD + lead + ga, mask=gm, other=0)          # [G] pair ids
+    xh_off = tl.arange(0, 16)
+    KC = (KT + KS - 1) // KS
+    kt0 = ks * KC
+    kt1 = tl.minimum(kt0 + KC, KT)
+    acc = tl.zeros([8, 16, G], dtype=tl.float32)
+    for kt in range(kt0, kt1):
+        base = (kt * NT + nb * 8) * W2v
+        w = tl.load(T + base + t8[:, None] * W2v + wrd[None, :],
+                    mask=(wrd < W2v)[None, :], other=0)              # [8,W2P]
+        wn = tl.gather(w, tl.broadcast_to(nxt[None, :], (8, W2P)), axis=1)
+        w64 = (w.to(tl.uint64) & 0xFFFFFFFF) | (wn.to(tl.uint64) << 32)
+        wpair = tl.gather(w64, tl.broadcast_to(w0i[None, :], (8, 256)), axis=1)
+        s64 = ((off - 16) & 63)[None, :].to(tl.uint64)
+        v = (((wpair << s64) | (wpair >> ((64 - s64) & 63))) & 0xFFFF).to(tl.int32)
+        s1024 = tl.inline_asm_elementwise(
+            "dp4a.u32.u32 $0, $1, 0x01010101, 1024;",
+            "=r,r", [v * MUL1], dtype=tl.int32, is_pure=True, pack=1)
+        val = (s1024.to(tl.float32) * K_INV + K_BIAS).to(tl.float16).to(tl.float32)
+        xh = tl.load(XH + (pair[None, :] * J + j) * K + kt * 16 + xh_off[:, None],
+                     mask=gm[None, :], other=0.0).to(tl.float32)   # [16, G]
+        acc += tl.sum(tl.reshape(val, (8, 16, 16, 1)) * xh[None, :, None, :], axis=1)
+    cols = nb * 128 + tl.arange(0, 128)
+    for g in tl.static_range(G):
+        yp = tl.reshape(tl.sum(acc * (ga[None, None, :] == g), axis=2), (128,))
+        pg = tl.sum(tl.where(ga == g, pair, 0), 0)
+        tl.store(YPP + ((pg * J + j) * KS + ks) * (NT * 16) + cols,
+                 yp, mask=(g < ln) & (cols >= 0))
+
+
 def _say(msg: str) -> None:
     print(f"[moe_ada] {msg}", file=sys.stderr, flush=True)
 
@@ -650,21 +837,38 @@ def probe(device) -> None:
         ids8 = torch.randint(0, bank.n, (8, 2), generator=g).to(dev)
         x4 = torch.randn(4, 128, dtype=torch.bfloat16, generator=g).to(dev)
         ids4 = torch.randint(0, bank.n, (4, 2), generator=g).to(dev)
-        yd = torch.randn(8, 128, dtype=torch.float32, generator=g).to(dev)
-        w4 = torch.rand(4, 2, dtype=torch.float32, generator=g).to(dev)
-        order = ids4.argsort(dim=1, stable=True)
-        rows = torch.arange(4, device=dev)[:, None]
-        ref = (yd.view(4, 2, 128)[rows, order]
-               * w4[rows, order][..., None]).sum(1).to(torch.bfloat16)
-        got = try_moe_combine(yd, ids4, w4)
         _OK[dk] = bool(
             torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
                            moe_experts(x8, ids8, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x4, ids4, bank),
                                moe_experts(x4, ids4, bank), atol=4e-2, rtol=4e-2)
             and torch.allclose(PK.moe_grouped_reference(x8, ids8, bank),
-                               moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2)
-            and got is not None and torch.allclose(ref, got, atol=1e-2, rtol=1e-2))
+                               moe_grouped_ada(x8, ids8, bank), atol=4e-2, rtol=4e-2))
+        # The masked split kernels' bitwise identity vs the addressed ones is a Triton
+        # lowering property, not an algebra identity (W2P=64 re-associates `tl.sum`), so it is
+        # proved on THIS device before becoming the wmax<=32 default: force both arms through
+        # `moe_experts`'s own dispatch -- x4 (P=8) covers ungrouped `_split_m`, x8 (P=16) the
+        # grouped `_split_g_m`; one W2v instantiation serves every rate <= 32, so the {2,25}
+        # bank's verdict covers the whole admitted class.
+        global _FORCE_MASKED
+        try:
+            _FORCE_MASKED = False
+            d4, d8 = moe_experts(x4, ids4, bank).clone(), moe_experts(x8, ids8, bank).clone()
+            _FORCE_MASKED = True
+            _MASKED_EQ[dk] = bool(
+                torch.equal(d4, moe_experts(x4, ids4, bank))
+                and torch.equal(d8, moe_experts(x8, ids8, bank)))
+        finally:
+            _FORCE_MASKED = None
+        # ...and the residual default arm stays exercised: a W2v>32 bank dispatches the
+        # addressed kernels (or, flag-on, the drifting masked opt-in -- allclose can't gate
+        # that drift, it only proves the arm still serves).
+        bank_w = FK.MoEBank([
+            ((tre(8), su(128), su(128)), (tre(8), su(128), su(128)),
+             (tre(8), su(128), su(128))) for _ in range(8)], dev)
+        _OK[dk] = _OK[dk] and torch.allclose(
+            PK.moe_grouped_reference(x4, ids4, bank_w),
+            moe_experts(x4, ids4, bank_w), atol=4e-2, rtol=4e-2)
     except Exception as e:
         _OK[dk] = False
         _say(f"probe failed on {dev}: {e!r}")
@@ -708,8 +912,8 @@ def try_moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor,
     """ on the Ada kernels; None when yd/ids shapes do not fit."""
     M, S = ids.shape
     H = yd.shape[1]
-    if S & (S - 1) or yd.shape[0] != M * S or H % 128 or yd.dtype != torch.float32:
-        return None                       # tl.arange(0, S) takes a power-of-two slot count
+    if yd.shape[0] != M * S or H % 128 or yd.dtype != torch.float32:
+        return None
     if out is None:
         out = torch.empty(M, H, dtype=torch.bfloat16, device=yd.device)
     _moe_combine_ada[(M, H // 128)](yd, ids.contiguous(), wts.contiguous(), out, H,

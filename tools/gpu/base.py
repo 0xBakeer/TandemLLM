@@ -88,6 +88,21 @@ class GpuProfile:
         """Programmatic dependent launch (griddepcontrol, sm_90 and later) compiled into the extensions."""
         return False
 
+    def cluster(self) -> bool:
+        """Threadblock clusters with distributed shared memory (sm_90 and later): the dense kernels'
+        K split reduces the ranks through DSMEM there; below it the split is emulated -- plain CTAs
+        and a python-side partials buffer (tools/fn_kernels.py `dense`)."""
+        return self.cap is not None and self.cap >= (9, 0)
+
+    def e2m1(self) -> bool:
+        """The hardware e2m1 (NVFP4) converters, cvt.*.e2m1x2 (sm_100a and the sm_120 family)."""
+        return self.cap is not None and self.cap >= (12, 0)
+
+    def sm89(self) -> bool:
+        """Ada sm_89 itself: the sites whose Triton or asm path is written for that arch alone
+        (the IQ2 tl.dot decode, the nvfp4_relu2 row tile and launch table)."""
+        return False
+
     # -- launch shapes ----------------------------------------------------------------------
     def moe_launch(self) -> tuple[int, int]:
         """(cp.async stages, warps a CTA splits its K range over) of the fused MoE kernels

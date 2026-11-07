@@ -47,12 +47,19 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from tools import gpu as _gpu
+
 try:
     import triton
     import triton.language as tl
     HAVE_TRITON = True
 except Exception:          # noqa: BLE001
     HAVE_TRITON = False
+
+try:
+    from triton.language.extra import libdevice as ld
+except Exception:          # noqa: BLE001
+    ld = None
 
 QK = 256
 BLOCK_BYTES = 66
@@ -98,6 +105,16 @@ def ksigns_table() -> np.ndarray:
 
 GRID = grid_table()
 KSIGNS = ksigns_table()
+
+_ADA89 = None
+
+
+def _ada89() -> bool:
+    """True on Ada (sm_89): IQ2Linear's tl.dot path there; sm_121a keeps _iq2_gemm."""
+    global _ADA89
+    if _ADA89 is None:
+        _ADA89 = ld is not None and _gpu.profile().sm89()
+    return _ADA89
 #: the grid with an entry's 8 magnitudes as the bytes of one int64 (byte j = magnitude j)
 GRID8 = (GRID.astype(np.int64) << (8 * np.arange(8, dtype=np.int64))[None, :]).sum(1)
 
@@ -237,6 +254,59 @@ if HAVE_TRITON:
         tl.store(Y + (r * NB + b) * 256 + tl.arange(0, 256), w.to(tl.bfloat16))
 
 
+    @triton.jit
+    def _iq2xxs_gemm2(X, s_x, D, QW, GR, PART, M, N, NB: tl.constexpr, RP, BN: tl.constexpr,
+                      P: tl.constexpr, NBPC: tl.constexpr):
+        # Ada split-K partial: program (rowtile, coltile, split pz) accumulates kb in
+        # [pz*NBPC, min((pz+1)*NBPC, NB)) into fp32 PART[pz]; _iq2xxs_red sums the P splits
+        # in order -> a row's bits do not depend on M.
+        pm, pn, pz = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        t = tl.arange(0, 32)
+        e4 = tl.arange(0, 4)
+        e2 = tl.arange(0, 2)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(pz * NBPC, tl.minimum((pz + 1) * NBPC, NB)):
+            b = cols * NB + kb
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
+            for g in tl.static_range(8):
+                q0 = tl.load(QW + b * 16 + 2 * g, mask=cm, other=0)                    # [BN]
+                q1 = tl.load(QW + b * 16 + 2 * g + 1, mask=cm, other=0)
+                idx = (q0[:, None] >> (8 * e4[None, :])) & 0xFF                        # [BN,4]
+                ge = tl.load(GR + idx[:, :, None] * 2 + e2[None, None, :])             # [BN,4,2] i32 halves
+                si = (q1[:, None] >> (7 * e4[None, :])) & 0x7F                         # [BN,4]
+                ks = si | ((ld.popc(si) & 1) << 7)
+                sn = (ks[:, :, None] >> (4 * e2)[None, None, :]) & 0xF                 # [BN,4,2] 4 sign bits
+                tm = (sn * 0x01010101) & 0x08040201                                  # bit i -> byte i
+                msk = (((tm + 0x7F7F7F7F) | tm) >> 7 & 0x01010101) * 0xFF            # byte mask per half
+                gs = (ge ^ msk) + (msk & 0x01010101)                                 # signed grid bytes
+                c = (((gs[:, :, :, None] >> (8 * e4)[None, None, None, :]) & 0xFF) ^ 0x80) - 64
+                w = tl.reshape(((c | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True), (BN, 32))
+                dl = d * (0.5 + ((q1 >> 28) & 0xF).to(tl.float32)) * 0.25
+                x = tl.load(X + rows[:, None] * s_x + kb * 256 + g * 32 + t[None, :],
+                            mask=rows[:, None] < M, other=0.0)
+                sx = tl.sum(x.to(tl.float32), 1)
+                acc += tl.dot(x, tl.trans(w)) * dl[None, :] - (192.0 * dl)[None, :] * sx[:, None]
+        tl.store(PART + (pz * RP + rows[:, None]) * N + cols[None, :], acc,
+                 mask=(rows[:, None] < RP) & cm[None, :])
+
+
+    @triton.jit
+    def _iq2xxs_red(PART, Y, s_y, M, N, RP, P: tl.constexpr, BC: tl.constexpr, F32: tl.constexpr):
+        # fixed-order sum of the P partial tiles -> identical bits at every M
+        pm, pn = tl.program_id(0), tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BC + tl.arange(0, BC)
+        acc = tl.zeros([16, BC], dtype=tl.float32)
+        for p in tl.static_range(P):
+            acc += tl.load(PART + (p * RP + rows[:, None]) * N + cols[None, :],
+                           mask=(rows[:, None] < RP) & (cols[None, :] < N), other=0.0)
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out,
+                 mask=(rows[:, None] < M) & (cols[None, :] < N))
+
 def dequant_bf16(d: torch.Tensor, qs: torch.Tensor, g8: torch.Tensor, ks: torch.Tensor) -> torch.Tensor:
     """Split IQ2_XXS blocks (d [R, nb], qs [R, nb, 16]) on the GPU -> bf16 [R, nb 256]: the twin's values
     rounded once, for a prompt chunk's cuBLAS."""
@@ -338,6 +408,7 @@ class IQ2Linear:
         self.qs = torch.from_numpy(qs).to(device)
         self.nbytes = N * (K // QK) * BLOCK_BYTES
         self._g8 = torch.from_numpy(GRID8).to(device)
+        self._g832 = self._g8.view(torch.int32)
         self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
 
     def dequant(self) -> torch.Tensor:
@@ -357,6 +428,17 @@ class IQ2Linear:
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+        if _ada89():
+            nb = self.K // QK
+            RP = triton.cdiv(M, 16) * 16
+            part = torch.empty(8, RP, self.N, dtype=torch.float32, device=x2.device)
+            _iq2xxs_gemm2[(triton.cdiv(M, 16), triton.cdiv(self.N, 16), 8)](
+                x2, x2.stride(0), self.d, self.qs, self._g832, part, M, self.N,
+                nb, RP, BN=16, P=8, NBPC=triton.cdiv(nb, 8), num_warps=1, num_stages=1)
+            _iq2xxs_red[(triton.cdiv(M, 16), triton.cdiv(self.N, 128))](
+                part, out, out.stride(0), M, self.N, RP, P=8, BC=128, F32=f32,
+                num_warps=4, num_stages=1)
+            return out.view(*x.shape[:-1], self.N)
         # 8 outputs and 4 groups a step, one warp; the rows a program by the call's row count (the builds give
         # a row the same bits): a 5,376 x 4,096 weight takes 0.10 ms for one row, 0.36 for 8, 0.47 for 16 on GB10
         R = 1 if M == 1 else 4 if M <= 4 else 8 if M <= 8 else 16

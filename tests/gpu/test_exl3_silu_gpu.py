@@ -14,7 +14,8 @@ import torch.nn.functional as F
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
-from tools import exl3_linear as X  # noqa: E402
+from tools import exl3_linear as X
+from tools import gpu as _gpu  # noqa: E402
 
 ROWS = (1, 2, 7, 16, 17, 24, 32, 33, 64, 100, 128, 129, 300, 1024)
 KIN = 17408
@@ -55,7 +56,9 @@ def test_down_silu_bit_identical():
 
 
 if __name__ == "__main__":
-    passed = 0
+    if not _gpu.profile(torch.device("cuda")).inline("exl3_linear"):
+        sys.exit("skipped: the inline bit contract is the GB10 dispatch; this arch takes the non-inline paths")
+        passed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             print(f"  {name:40s} ok   {fn() or ''}", flush=True)

@@ -14,7 +14,8 @@ import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
-from tools import exl3_linear as X  # noqa: E402
+from tools import exl3_linear as X
+from tools import gpu as _gpu  # noqa: E402
 from tools import exl3_slab_gemm as S  # noqa: E402
 
 SHAPES = ((5120, 16384), (5120, 10240), (5120, 6144), (5120, 12288), (5120, 1024), (17408, 5120),
@@ -101,7 +102,9 @@ def test_norm_rot_bits():
 
 
 if __name__ == "__main__":
-    test_slab_rot_bits()
+    if not _gpu.profile(torch.device("cuda")).inline("exl3_linear"):
+        sys.exit("skipped: the inline bit contract is the GB10 dispatch; this arch takes the non-inline paths")
+        test_slab_rot_bits()
     test_mlp_bits()
     test_norm_rot_bits()
     test_add_norm_rot_store_y()

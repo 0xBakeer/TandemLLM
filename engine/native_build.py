@@ -56,4 +56,22 @@ def load(name: str, **kw):
     venv_bin = os.path.dirname(sys.executable)
     if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
+    if _nvcc_any():
+        if not getattr(load, "_nvcc_any_logged", False):
+            load._nvcc_any_logged = True
+            print("[native-build] NATIVE_NVCC_ANY: nvcc/CUDA version check skipped", flush=True)
+        # the toolkit nvcc and the build CUDA differ (e.g. nvcc 12 beside a cu13 wheel): an
+        # opt-in for boxes whose nvcc still emits the archs the kernels compile (sm_89 needs 11.8+)
+        from torch.utils import cpp_extension as ce
+        check = ce._check_cuda_version
+        ce._check_cuda_version = lambda *a, **k: None
+        try:
+            return load_inline(name=name, **kw)
+        finally:
+            ce._check_cuda_version = check
     return load_inline(name=name, **kw)
+
+
+def _nvcc_any() -> bool:
+    from engine.settings import SETTINGS
+    return SETTINGS.get("NATIVE_NVCC_ANY") == "1"

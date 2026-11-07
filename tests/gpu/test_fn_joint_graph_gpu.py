@@ -109,8 +109,8 @@ def test_grouped_experts_skip_pad_rows():
             g0 = torch.zeros(n * S, 2 + 8, dtype=torch.int32, device=DEV)
             ngp = torch.zeros(1, dtype=torch.int32, device=DEV)
             ng0 = torch.zeros(1, dtype=torch.int32, device=DEV)
-            mod.fn_moe_groups(flat_p, K.expert_order(ids_p), gp, ngp)
-            mod.fn_moe_groups(flat, K.expert_order(ids[:n]), g0, ng0)
+            mod.fn_moe_groups(flat_p, K.expert_order(ids_p), gp, ngp, bank.n)
+            mod.fn_moe_groups(flat, K.expert_order(ids[:n]), g0, ng0, bank.n)
             assert int(ngp) == int(ng0), (n, int(ngp), int(ng0))
             assert torch.equal(gp[:int(ngp)], g0[:int(ng0)]), n
             # the combine over the padded rows: the real rows' bits, the pad rows' slots all ranked (no stray read)

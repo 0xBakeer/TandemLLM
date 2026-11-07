@@ -136,16 +136,33 @@ def test_an_unknown_gpu_and_the_cpu_get_the_base():
     return "no inline build, no skinny rows, no PDL; bf16 from sm_80; the name as the device key"
 
 
-def test_ada_answers_like_the_base_on_main():
+def test_ada_builds_its_extensions_and_keeps_the_base_paths():
     p = gpu.profile_for(*ADA)
-    _base_like(p)
+    for kind in INLINE:
+        if kind in ("fn_kernels", "fn_prefill_kernels"):
+            assert p.arch_flags(kind) == ["-gencode=arch=compute_89,code=sm_89"], kind
+            assert p.inline(kind)
+        else:
+            try:
+                p.arch_flags(kind)
+                raise AssertionError(f"ada built {kind}")
+            except NoInlineBuild:
+                pass
+            assert not p.inline(kind)
+    assert p.moe_launch() == (4, 8)
+    # the emulated split's rule: the table verbatim, else the sm_89 rule's answer
+    assert p.dense_split(2048, 4096, 4, {(2048, 4096, 4): (2, 8)}) == (8, 8)  # the rule's S, the table's warps
+    assert p.dense_split(2048, 4096, 4, {}) == (8, 4)
+    assert p.dense_split(128, 512, 4, {}) == (1, 4)
+    assert not p.pdl() and not p.cluster() and not p.e2m1()
+    assert p.skinny_rows() == 0 and not p.unified_memory
     assert p.bf16() and p.device_key() == "nvidia-geforce-rtx-4090"
     base = gpu.profile_for(*OTHERS[0])
     assert p.fp8_rows(17408, 5120) == (32, 256, 4, 2), "its own launch table"
     assert p.fp8_rows(17408, 5120, 64) == base.fp8_rows(17408, 5120, 64)
     assert p.fp8_rows(2688, 1856) == base.fp8_rows(2688, 1856)
     assert [p.fp8_row_tile(M) for M in (1, 16, 17, 32, 33)] == [16, 16, 32, 32, 64]
-    return "sm_89: the base's answers, bf16"
+    return "sm_89: fn_kernels/fn_prefill_kernels build, the emulated split, no PDL/cluster/e2m1"
 
 
 def test_ada_owns_the_triton_probe_verdicts():

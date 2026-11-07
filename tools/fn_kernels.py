@@ -57,6 +57,27 @@ from tools import gpu as _gpu  # noqa: E402
 from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
+# a non-GB10 arch counts only when the toolchain actually builds the module (a box without
+# a matching nvcc falls back to the Triton paths instead of raising at first use)
+_BUILD_OK: dict = {}
+
+
+def _sm_supported(device=None) -> bool:
+    prof = _gpu.profile(device)
+    if not prof.inline("fn_kernels"):
+        return False
+    if prof.id == "gb10":
+        return True
+    if prof.id not in _BUILD_OK:
+        try:
+            _module()
+            _BUILD_OK[prof.id] = True
+        except Exception as e:
+            _BUILD_OK[prof.id] = False
+            print(f"[fn-kernels] inline build failed for {prof.label()} "
+                  f"({type(e).__name__}): the Triton paths serve", flush=True)
+    return _BUILD_OK[prof.id]
+
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
 # cp.async and the 128-point Hadamard; it ends inside the anonymous namespace
 _HELPERS = X._CUDA[: X._CUDA.index("constexpr float RSQRT128")]
@@ -78,8 +99,8 @@ def _module():
                                   "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_gu_stage", "fn_moe_down_group",
                                   "fn_moe_gu_group_s", "fn_moe_down_stage", "fn_moe_down_group_s", "fn_moe_gud", "fn_set_moe_gpar",
                                   "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
-                                  "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
+                                  "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_st_group", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
+                                  "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm", "fn_set_dense_st", "fn_set_dense_st_rows"],
                        extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_kernels")],
                        verbose=False)
         gpu = _gpu.profile()
@@ -88,6 +109,10 @@ def _module():
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
+        _ada = gpu.id == "ada"
+        _MOD.fn_set_dense_st(int(_S.get("FN_DENSE_ST") or ("4" if _ada else "3")))
+        _MOD.fn_set_dense_st_rows(int(_S.get("FN_DENSE_ST_ROWS") or ("3" if _ada else _S.get("FN_DENSE_ST") or "3")))
+        _MOD.fn_set_moe_st_group(int(_S.get("FN_MOE_ST_GROUP") or ("2" if _ada else _S.get("FN_MOE_ST") or "3")))
         stages, warps = gpu.moe_launch()
         _MOD.fn_set_moe_st(stages)
         _MOD.fn_set_moe_warps(warps)
@@ -131,9 +156,10 @@ class MoEBank:
         if not set(self.ks) <= set(MOE_K):
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
         dev = torch.device(device)
-        if dev.type == "cuda" and not _gpu.profile(dev).inline("fn_kernels"):
+        if dev.type == "cuda" and (not _sm_supported(dev) or not _gpu.profile(dev).inline("fn_prefill_kernels")):
             from tools import moe_ada
-            _gpu.profile(dev).moe_probe(dev)                # once a device: the verdict the dispatch reads
+            moe_ada.probe(dev)                # once a device: the verdict every dispatch reads
+                                              # (the prefill path's arch set is narrower than ours)
 
     @property
     def nbytes(self) -> int:
@@ -154,7 +180,7 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
         q, s = w, None
     if out is None:
         out = torch.empty(x.shape[0], q.shape[0], dtype=torch.float32, device=x.device)
-    if not _gpu.profile(x.device).inline("fn_kernels"):
+    if not _sm_supported(x.device):
         wd = w.dequant() if s is not None else q.float()
         for m in range(x.shape[0]):
             out[m:m + 1] = x[m:m + 1].float() @ wd.t()
@@ -207,29 +233,52 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
     return _gpu.profile().dense_split(N, Kin, kb, DENSE_SPLIT)
 
 
+#: `dense` routes M in [DENSE_ROWS_MIN_M, 32] bf16-contiguous calls to `dense_rows` (the row-group
+#: kernel; same bits a row, amortized tile decode). Set to 33+ to keep the per-row kernel always.
+DENSE_ROWS_MIN_M = 4
+
+
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """x [M <= 32, Kin] bf16 @ EXL3Block^T -> [M, N] (bf16, or fp32 for an `out_fp32` block): the input
-    rotation fused, K over a cluster, programmatic dependent launch; each row its own programs, so an
-    M-row call's rows are its one-row calls' bits."""
+    rotation fused, K over a cluster, programmatic dependent launch; an M-row call's rows are its
+    one-row calls' bits. M in [DENSE_ROWS_MIN_M, 32] is served by `dense_rows` (identical row bits;
+    the tile decode amortizes over the group)."""
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
-    if not _gpu.profile(x.device).inline("fn_kernels"):
-        out.copy_(X._reference_rows(x.to(torch.bfloat16), w).view(out.shape))
-        return out
+    if not _sm_supported(x.device):
+        return X._reference_rows(x.to(torch.bfloat16), w, out=out)
+    M = x.shape[0]
+    if (DENSE_ROWS_MIN_M <= M <= 32 and x.is_contiguous() and x.dtype == torch.bfloat16
+            and not (M <= 4 and (w.tile_n < 2048 or (w.tile_n == 3072 and w.K == 2048)))):
+        # the row-group kernel decodes each trellis tile once for up to 16 rows -- the same
+        # bits row for row (tests/gpu/test_fn_kernels_gpu.py). At M>=4 the amortized decode
+        # beats the per-row-program kernel on every measured pack shape but 3072x2048 at M=4
+        # (-9%, excluded above, as are unmeasured <2048-col blocks at M<=4); at M=2 it is
+        # mixed, so the gate is the MoE grouping's M>=4 too.
+        return dense_rows(x, w, out=out)
     S, warps = dense_split(w.tile_n, w.K, w.kb)
-    _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps)
+    part = None
+    if S > 1 and not _gpu.profile().cluster():
+        part = torch.empty((w.N // 128) * x.shape[0] * S * warps * 128,
+                           dtype=torch.float32, device=x.device)
+    _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps, part)
     return out
 
 
 def dense_rows(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """`dense` for a verify block (SPD-125): each trellis tile decoded once for up to 16 rows (rows
     of the m16n8k16 tile), the inputs rotated once a row first. Every output byte is the one-row
-    `dense` call's on that row (same split, same K slices, warp and rank order); an opt-in for M > 1."""
+    `dense` call's on that row (same split, same K slices, warp and rank order). `dense` routes its
+    own M in [DENSE_ROWS_MIN_M, 32] calls here."""
     S, warps = dense_split(w.tile_n, w.K, w.kb)
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     xh = torch.empty(w.suh.shape[0], x.shape[0], w.K, dtype=torch.float16, device=x.device)
-    _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps)
+    part = None
+    if S > 1 and not _gpu.profile().cluster():
+        part = torch.empty((w.N // 128) * ((x.shape[0] + 15) // 16) * S * warps * 16 * 128,
+                           dtype=torch.float32, device=x.device)
+    _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps, part)
     return out
 
 
@@ -361,6 +410,8 @@ def moe(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, bank: MoEBank, or
     else:
         yd = b["yd"]
     flat = ids.reshape(-1)
+    # MOE_GROUP is scoped to `moe_experts`: this entry's caller-supplied bufs/order plumbing
+    # differs, and every hot row/verify path goes through `moe_experts` anyway.
     mod.fn_moe_gu(x, flat, order, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
     mod.fn_moe_down(ygu, flat, order, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
     if out is None:
@@ -376,19 +427,21 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     """`moe` without its combine: every pair's down-projection output yd [M S, H] fp32 (unweighted),
     for `combine_inject_norm`."""
     M, S = ids.shape
-    if not _gpu.profile(x.device).inline("fn_kernels"):
+    if not _sm_supported(x.device):
         # the batched Triton kernels where the load probe passed (one launch a stage, a pair's
         # bits its own); else the torch reference's per-pair walk. A kernel error after the
         # verdict propagates -- it is a bug, not a reason to change algorithms mid-call.
         from tools import moe_ada
-        if x.is_cuda and _gpu.profile(x.device).moe_ok(x.device):
+        if x.is_cuda and moe_ada.ok(x.device):
             return moe_ada.moe_experts(x, ids, bank)
         from tools import fn_prefill_kernels as PK
         return PK.moe_grouped_reference(x, ids, bank)
+    grouped = MOE_GROUP and M >= 4
     if order is None:
-        if M > 1:
+        if M > 1 and not grouped:
             order = expert_order(ids)
         else:
+            # the grouped path partitions by expert id inside moe_groups -- no sort needed
             order = _EMPTY.get(x.device)
             if order is None:
                 order = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
@@ -396,12 +449,12 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     ygu = torch.empty(M * S, 2, bank.I, dtype=torch.bfloat16, device=x.device)
     yd = torch.empty(M * S, bank.H, dtype=torch.float32, device=x.device)
     flat = ids.reshape(-1)
-    if MOE_GROUP and M > 1:
+    if grouped:
         # ENG-241: the pairs of one expert in groups of MOE_GR, its tiles decoded once a group (a
         # row's bits are its own: the self-check compares them with the decode step's single row)
         g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
         ng = torch.empty(1, dtype=torch.int32, device=x.device)
-        mod.fn_moe_groups(flat, order, g, ng)
+        mod.fn_moe_groups(flat, order, g, ng, bank.n)
         if MOE_AS:
             # SPD-249: the rows staged once a pair and streamed beside the tiles (no rows in shared memory)
             xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
@@ -432,8 +485,9 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
 
 
 #: ENG-241: a block's pairs of one expert share a CTA, up to MOE_GR of them (False: a CTA a pair,
-#: the A/B of tools/fn_moe_group_check.py)
-MOE_GROUP = False
+#: the A/B of tools/fn_moe_group_check.py). On the lfm2.5 verify path at M>=4 the dedup wins
+#: (M=16: -4.5ms of 23.8ms); at M=2 the groups-of-1 prep is a net loss -- hence the M>=4 gate.
+MOE_GROUP = True
 MOE_GR = 8
 #: SPD-249: the grouped gate|up kernel reads rows rotated once a pair (moe_gu_stage) (FN_MOE_STAGE)
 MOE_STAGE = _S.get("FN_MOE_STAGE") == "1"
@@ -451,12 +505,12 @@ def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: tor
     M = ids.shape[0]
     if out is None:
         out = torch.empty(M, yd.shape[1], dtype=torch.bfloat16, device=yd.device)
-    if not _gpu.profile(yd.device).inline("fn_kernels"):
+    if not _sm_supported(yd.device):
         S = ids.shape[1]
         # the fused Ada kernel where the load probe passed and its shapes fit: one launch, the
         # same arithmetic
         from tools import moe_ada
-        if yd.is_cuda and _gpu.profile(yd.device).moe_ok(yd.device):
+        if yd.is_cuda and moe_ada.ok(yd.device):
             got = moe_ada.try_moe_combine(yd, ids, wts, out=out)
             if got is not None:
                 return out

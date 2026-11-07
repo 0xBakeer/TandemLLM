@@ -12,8 +12,13 @@ __device__ __forceinline__ float bf_hi(uint32_t w) { return __uint_as_float(w & 
 // predecessor grid has completed and flushed; a no-op without the attribute). Every kernel here
 // triggers right after its wait, so its successor's CTAs can launch and prefetch their weights while
 // it runs. Neither changes what a thread computes.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+#else
+__device__ __forceinline__ void pdl_wait() {}
+__device__ __forceinline__ void pdl_trigger() {}
+#endif
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" :: "l"(p)); }
 
 // ------------------------------------------------------------------------------------- gemv
@@ -887,7 +892,8 @@ __global__ void __launch_bounds__(128) moe_gu_stage_kernel(const __nv_bfloat16* 
 #define MOE_GR 8
 
 // groups G [P][2 + MOE_GR] (expert, rows, the pairs), NG [1]: the pairs in launch order (ORDER, or 0..P-1),
-// a group the run of one expert, split every MOE_GR pairs. One thread; P is at most a few hundred.
+// a group the run of one expert, split every GR pairs (GR <= MOE_GR: SPD-249's cap). One thread; P is at
+// most a few hundred. A caller with no order (ORDER null) takes the warp kernel below instead.
 __global__ void moe_groups_kernel(const int* __restrict__ IDS, const int* __restrict__ ORDER, int P,
         int* __restrict__ G, int* __restrict__ NG, int GR) {
     pdl_wait();
@@ -908,6 +914,55 @@ __global__ void moe_groups_kernel(const int* __restrict__ IDS, const int* __rest
         g[1] += 1;
     }
     NG[0] = ng;
+}
+
+// the flat-order groups: a pair's group is its expert's, its slot the index-rank among that expert's
+// pairs, a group split every GR slots (GR <= MOE_GR) -- the partition an order's stable sort walks to
+// anyway (the groups differ from the serial kernel's only on a non-sorted order, which no caller sends
+// here). One warp: a shared-memory histogram for the per-expert group bases, then a chunked
+// __match_any scan gives every pair its rank without atomics. Pairs whose expert falls outside [0, E)
+// are skipped (joint-graph pad rows route to no expert).
+__global__ void __launch_bounds__(32) moe_groups_flat_kernel(const int* __restrict__ IDS,
+        int P, int E, int* __restrict__ G, int* __restrict__ NG, int GR) {
+    pdl_wait();
+    pdl_trigger();
+    extern __shared__ int gsm[];
+    int* cnt = gsm;                   // [E] pairs an expert (the histogram; order-free)
+    int* base = gsm + E;              // [E] its groups' first row in G
+    int* cur = gsm + 2 * E;           // [E] slots handed out so far
+    const int lane = threadIdx.x;
+    for (int e = lane; e < E; e += 32) cnt[e] = cur[e] = 0;
+    __syncwarp();
+    for (int i = lane; i < P; i += 32) {
+        const int e = IDS[i];
+        if ((unsigned)e < (unsigned)E) atomicAdd(&cnt[e], 1);
+    }
+    __syncwarp();
+    if (lane == 0) {
+        int s = 0;
+        for (int e = 0; e < E; ++e) { base[e] = s; s += (cnt[e] + GR - 1) / GR; }
+        NG[0] = s;
+    }
+    __syncwarp();
+    for (int c0 = 0; c0 < P; c0 += 32) {
+        const int i = c0 + lane;
+        const int e = i < P ? IDS[i] : -1;
+        const bool ok = (unsigned)e < (unsigned)E;
+        const unsigned same = __match_any_sync(0xffffffffu, e);
+        const int carry = ok ? cur[e] : 0;
+        __syncwarp();
+        if (ok && __ffs(same) - 1 == lane) cur[e] += __popc(same);
+        if (ok) {
+            const int slot = carry + __popc(same & ((1u << lane) - 1));
+            int* g = G + (size_t)(base[e] + slot / GR) * (2 + MOE_GR);
+            const int pos = slot % GR;
+            if (pos == 0) g[0] = e;
+            g[2 + pos] = i;
+            if (pos == GR - 1) g[1] = GR;
+            else if (slot == cnt[e] - 1) g[1] = pos + 1;
+        }
+        __syncwarp();
+    }
 }
 
 // RowGemm over the rows of a group: row r of XH [MOE_GR][Kin] (fp16, shared) in lane group g == r.
@@ -1615,7 +1670,8 @@ __global__ void __launch_bounds__(256) gated_norm_kernel(const __nv_bfloat16* __
 template <int KB, int ST, int WARPS, bool OF32>
 __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, int ldx,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SUH, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S, uint32_t* smem) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S, uint32_t* smem,
+        float* __restrict__ PART, int* __restrict__ CTR) {
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int rank = blockIdx.x % S, t2 = blockIdx.x / S;
     const int row = t2 % M, cb = t2 / M;
@@ -1647,6 +1703,7 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
     rg.run(xh - ka * 16, red);
     float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
     if (S > 1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
         cg::cluster_group cluster = cg::this_cluster();
         cluster.sync();
         if (rank == 0 && warp == 0) {
@@ -1662,6 +1719,32 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
         }
         cluster.sync();
         if (rank != 0) return;
+#else
+        // no distributed shared memory: the rank's warp partials go to global; the last of the
+        // column's ranks to land adds them in the same rank-major, warp order the rank-0 warp of
+        // a cluster would (the ticket order never enters the sums: a fixed order over PART)
+        float* p = PART + ((size_t)t2 * S + rank) * WARPS * 128;
+        *reinterpret_cast<float4*>(p + warp * 128 + 4 * lane) =
+            *reinterpret_cast<const float4*>(red + warp * 128 + 4 * lane);
+        __shared__ int last;
+        __threadfence();
+        __syncthreads();
+        if (threadIdx.x == 0) last = atomicAdd(CTR + t2, 1) == S - 1;
+        __syncthreads();
+        if (!last) return;
+        __threadfence();
+        if (warp == 0) {
+            const float* pt = PART + (size_t)t2 * S * WARPS * 128;
+            const int c = 4 * lane;
+            v0 = pt[c]; v1 = pt[c + 1]; v2 = pt[c + 2]; v3 = pt[c + 3];
+            for (int i = 1; i < S * WARPS; ++i) {
+                const float* r = pt + (size_t)i * 128;
+                v0 += r[c]; v1 += r[c + 1]; v2 += r[c + 2]; v3 += r[c + 3];
+            }
+            wht128(v0, v1, v2, v3, lane);
+            if (lane == 0) CTR[t2] = 0;                       // the column's next launch starts at 0
+        }
+#endif
     } else if (warp == 0) {
         red_rot<WARPS>(red, lane, v0, v1, v2, v3);
     }
@@ -1684,10 +1767,12 @@ __device__ __forceinline__ void dense_body(const __nv_bfloat16* __restrict__ X, 
 template <int KB, int ST, int WARPS, bool OF32>
 __global__ void __launch_bounds__(256) dense_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SUH, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S,
+        float* __restrict__ PART, int* __restrict__ CTR) {
     extern __shared__ uint32_t smem[];
-    dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem);
+    dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem, PART, CTR);
 }
+
 
 // SPD-125: the same projection for M > 1 rows with each trellis tile decoded once for 16 rows. First
 // every (member, row)'s input rotated once (dense_rot_kernel: dense_body's arithmetic, into XH [G, M,
@@ -1725,7 +1810,8 @@ __global__ void __launch_bounds__(128) dense_rot_kernel(const __nv_bfloat16* __r
 template <int KB, int ST, int WARPS, bool OF32>
 __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restrict__ XH,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S) {
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S,
+        float* __restrict__ PART, int* __restrict__ CTR) {
     extern __shared__ uint32_t smem[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
@@ -1795,8 +1881,54 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
             }
         }
     __syncthreads();
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     cg::cluster_group cluster = cg::this_cluster();
     if (S > 1) cluster.sync();
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+    if (S > 1) {
+        // this rank's [WARPS][R][128] partials to global; the column's last rank adds every row's
+        // sums rank-major then warp order -- the order the cluster's warps make them in
+        float* p = PART + ((size_t)t2 * S + rank) * WARPS * 16 * 128;
+        for (int i4 = threadIdx.x; i4 < WARPS * R * 32; i4 += WARPS * 32) {
+            const int i = i4 * 4, w = i / (R * 128), rm = i % (R * 128), r = rm / 128, c = rm % 128;
+            *reinterpret_cast<float4*>(p + (w * 16 + r) * 128 + c) =
+                *reinterpret_cast<const float4*>(red + (w * R + r) * 128 + c);
+        }
+        __shared__ int last;
+        __threadfence();
+        __syncthreads();
+        if (threadIdx.x == 0) last = atomicAdd(CTR + t2, 1) == S - 1;
+        __syncthreads();
+        if (!last) return;
+        __threadfence();
+        const float* pt = PART + (size_t)t2 * S * WARPS * 16 * 128;
+        const int c = 4 * lane, n = cb * 128 + 4 * lane;
+        const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+        for (int r = warp; r < R; r += WARPS) {
+            float v0 = pt[r * 128 + c], v1 = pt[r * 128 + c + 1], v2 = pt[r * 128 + c + 2], v3 = pt[r * 128 + c + 3];
+            for (int i = 1; i < S * WARPS; ++i) {
+                const float* q = pt + (size_t)i * 16 * 128 + r * 128;
+                v0 += q[c]; v1 += q[c + 1]; v2 += q[c + 2]; v3 += q[c + 3];
+            }
+            wht128(v0, v1, v2, v3, lane);
+            v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+            v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+            const size_t m = (size_t)(r0 + r);
+            if constexpr (OF32) {
+                *reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + m * ldy + n) = make_float4(v0, v1, v2, v3);
+            } else {
+                __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+                uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+                *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + m * ldy + n) = o;
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) CTR[t2] = 0;                    // the column's next launch starts at 0
+        return;
+    }
+#endif
     {
         const int c = 4 * lane, n = cb * 128 + 4 * lane;
         const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
@@ -1806,7 +1938,11 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
         for (int r = rank * WARPS + warp; r < R; r += S * WARPS) {
             float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
             for (int q = 0; q < S; ++q) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
                 const float* rr = S == 1 ? red : cluster.map_shared_rank(red, q);
+#else
+                const float* rr = red;
+#endif
                 float4 p[WARPS];
 #pragma unroll
                 for (int w = 0; w < WARPS; ++w) p[w] = *reinterpret_cast<const float4*>(rr + ((size_t)w * R + r) * 128 + c);
@@ -1829,7 +1965,9 @@ __global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restric
             }
         }
     }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     if (S > 1) cluster.sync();                         // every rank keeps its RED until the others have read it
+#endif
 }
 
 // ------------------------------------------------------------------------- attention, a row's inputs
@@ -1992,6 +2130,8 @@ static int g_gemv_nb = 0;      // fn_set_gemv_nb: SPD-231, M > 1 on gemv_split_n
 // 3 CTAs. A row's sums are the same chunks in the same order whatever the rows a pass (its bits)
 static int g_gemv_mc = 0;
 static int g_mixer_mma = 0;    // fn_set_mixer_mma: SPD-241, the mixers' int8 GEMV and mix_up on tensor cores (QWEN38_FN_MIXER_MMA)
+static int g_dense_st = 3;     // fn_set_dense_st: cp.async stages of the dense kernels (QWEN38_FN_DENSE_ST; bits do not depend on it)
+static int g_dense_st_rows = 3; // fn_set_dense_st_rows: the dense_rows stages (QWEN38_FN_DENSE_ST_ROWS)
 
 // the tensor-core GEMV's tickets: an int a column block, zero between launches (each launch's last CTA of a
 // column sets its ticket back), one buffer a device
@@ -1999,6 +2139,17 @@ static int* mix_tickets(c10::Device dev, int n) {
     static torch::Tensor t;
     if (!t.defined() || t.numel() < n || t.device() != dev)
         t = torch::zeros({std::max(n, 256)}, torch::TensorOptions().dtype(torch::kInt).device(dev));
+    return (int*)t.data_ptr();
+}
+
+// the dense K-split's last-rank tickets below sm_90: an int a (column block, row / row group), reset to
+// 0 by the rank that reduces, one buffer a device (mix_tickets' pattern, with a floor: a bigger call
+// later must never move a pointer a captured graph already holds, so the first alloc covers any
+// (column block, row) a 32-row call can name)
+static int* dense_tickets(c10::Device dev, int n) {
+    static torch::Tensor t;
+    if (!t.defined() || t.numel() < n || t.device() != dev)
+        t = torch::zeros({std::max(n, 262144)}, torch::TensorOptions().dtype(torch::kInt).device(dev));
     return (int*)t.data_ptr();
 }
 
@@ -2019,7 +2170,7 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
     cudaLaunchAttribute at[1];
     at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     at[0].val.programmaticStreamSerializationAllowed = g_pdl;
-    cfg.attrs = at; cfg.numAttrs = 1;
+    cfg.attrs = at; cfg.numAttrs = g_pdl ? 1 : 0;
     cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
     TORCH_CHECK(e == cudaSuccess, "fn_kernels launch: ", cudaGetErrorString(e));
 }
@@ -2029,6 +2180,8 @@ void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
 void fn_set_gemv_nb(int64_t on) { g_gemv_nb = on ? 1 : 0; }
 void fn_set_gemv_mc(int64_t v) { g_gemv_mc = (int)v; }
 void fn_set_mixer_mma(int64_t on) { g_mixer_mma = on ? 1 : 0; }
+void fn_set_dense_st(int64_t v) { TORCH_CHECK(v == 3 || v == 4, "fn_dense stages 3 or 4"); g_dense_st = (int)v; }
+void fn_set_dense_st_rows(int64_t v) { TORCH_CHECK(v == 3 || v == 4, "fn_dense_rows stages 3 or 4"); g_dense_st_rows = (int)v; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -2039,7 +2192,7 @@ static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t sm
     at[0].val.programmaticStreamSerializationAllowed = g_pdl;
     at[1].id = cudaLaunchAttributeClusterDimension;
     at[1].val.clusterDim.x = S; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;
-    cfg.attrs = at; cfg.numAttrs = S > 1 ? 2 : 1;
+    cfg.attrs = at; cfg.numAttrs = S > 1 ? 2 : (g_pdl ? 1 : 0);
     cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
     TORCH_CHECK(e == cudaSuccess, "fn_dense launch: ", cudaGetErrorString(e));
 }
@@ -2047,7 +2200,7 @@ static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t sm
 template <int KB, int ST, int WARPS, bool OF32>
 static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const torch::Tensor& suh,
                          const torch::Tensor& svh, torch::Tensor& y, int M, int Kin, int N, int b1, int b2,
-                         int S, cudaStream_t st) {
+                         int S, cudaStream_t st, float* part, int* ctr) {
     constexpr int TW = tile_u32(KB);
     const int per_r = Kin / 16 / S;
     const size_t smem = (size_t)(per_r * 8 + WARPS * 128) * 4 + (size_t)WARPS * ST * 8 * TW * 4;
@@ -2058,15 +2211,25 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
         cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
         attr = true;
     }
+    if (part) {
+        // a global-memory cluster: S plain CTAs a column block; the last rank to land reduces
+        launch(kern, dim3((N / 128) * M * S), dim3(32 * WARPS), smem, st,
+            (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const uint32_t*)t.data_ptr(),
+            (int)(t.stride(0) / t.stride(1)), (const __half*)suh.data_ptr(), (const __half*)svh.data_ptr(),
+            (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, part, ctr);
+        return;
+    }
     launch_cluster(kern, dim3((N / 128) * M * S), dim3(32 * WARPS), smem, S, st,
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const uint32_t*)t.data_ptr(),
         (int)(t.stride(0) / t.stride(1)), (const __half*)suh.data_ptr(), (const __half*)svh.data_ptr(),
-        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S);
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, (float*)nullptr, (int*)nullptr);
 }
 
 #define DENSE_W(KB, OF32)                                                                         \
-    if (warps == 4) dense_launch<KB, 3, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st);    \
-    else dense_launch<KB, 3, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st);
+    if (warps == 4) { if (g_dense_st == 4) dense_launch<KB, 4, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+        else dense_launch<KB, 3, 4, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }\
+    else { if (g_dense_st == 4) dense_launch<KB, 4, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+        else dense_launch<KB, 3, 8, OF32>(x, t, suh, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }
 #define DENSE_KB(OF32)                                                                            \
     switch (kb) {                                                                                 \
         case 2: { DENSE_W(2, OF32) break; } case 3: { DENSE_W(3, OF32) break; }                     \
@@ -2079,7 +2242,7 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
     }
 
 void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y,
-              int64_t b1, int64_t b2, int64_t S, int64_t warps) {
+              int64_t b1, int64_t b2, int64_t S, int64_t warps, c10::optional<torch::Tensor> part_) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
@@ -2094,12 +2257,21 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
     TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
     TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
+    float* part = (part_.has_value() && part_->defined()) ? (float*)part_->data_ptr() : nullptr;
+    const int cc = at::cuda::getCurrentDeviceProperties()->major * 10
+                 + at::cuda::getCurrentDeviceProperties()->minor;
+    TORCH_CHECK(S == 1 || (cc >= 90) == (part == nullptr),
+                "fn_dense: S > 1 launches as a cluster on sm_90+ and through a partials buffer below it");
+    TORCH_CHECK(part == nullptr || (part_->dtype() == torch::kFloat &&
+                  part_->numel() >= (int64_t)(N / 128) * M * S * warps * 128), "part fp32 scratch");
+    int* ctr = part ? dense_tickets(x.device(), (N / 128) * M) : nullptr;
     if (y.dtype() == torch::kFloat) { DENSE_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_KB(false) }
 }
 
 template <int KB, int ST, int WARPS, bool OF32>
 static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, const torch::Tensor& svh,
-                              torch::Tensor& y, int M, int Kin, int N, int b1, int b2, int S, cudaStream_t st) {
+                              torch::Tensor& y, int M, int Kin, int N, int b1, int b2, int S, cudaStream_t st,
+                              float* part, int* ctr) {
     constexpr int SW = 8 * tile_u32(KB);
     const size_t smem = std::max((size_t)WARPS * ST * SW * 4, (size_t)WARPS * std::min(16, M) * 128 * 4);
     auto kern = dense_rows_kernel<KB, ST, WARPS, OF32>;
@@ -2109,14 +2281,22 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
         cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
         attr = true;
     }
+    if (part) {
+        launch(kern, dim3((N / 128) * ((M + 15) / 16) * S), dim3(32 * WARPS), smem, st,
+            (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (int)(t.stride(0) / t.stride(1)),
+            (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, part, ctr);
+        return;
+    }
     launch_cluster(kern, dim3((N / 128) * ((M + 15) / 16) * S), dim3(32 * WARPS), smem, S, st,
         (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (int)(t.stride(0) / t.stride(1)),
-        (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S);
+        (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S, (float*)nullptr, (int*)nullptr);
 }
 
 #define DENSE_ROWS_W(KB, OF32)                                                                    \
-    if (warps == 4) dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);   \
-    else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);
+    if (warps == 4) { if (g_dense_st_rows == 4) dense_rows_launch<KB, 4, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+        else dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }\
+    else { if (g_dense_st_rows == 4) dense_rows_launch<KB, 4, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr);\
+        else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st, part, ctr); }
 #define DENSE_ROWS_KB(OF32)                                                                       \
     switch (kb) {                                                                                 \
         case 2: { DENSE_ROWS_W(2, OF32) break; } case 3: { DENSE_ROWS_W(3, OF32) break; }           \
@@ -2130,7 +2310,8 @@ static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, c
 
 // xh: fp16 [G, M, Kin] workspace for the rotated inputs (G = suh's members)
 void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh,
-                   torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps) {
+                   torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps,
+                   c10::optional<torch::Tensor> part_) {
     const at::cuda::OptionalCUDAGuard guard(x.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
@@ -2146,6 +2327,15 @@ void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::T
     TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.numel() >= (int64_t)G * M * Kin, "xh fp16 [G, M, Kin]");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
     TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
+    float* part = (part_.has_value() && part_->defined()) ? (float*)part_->data_ptr() : nullptr;
+    const int cc = at::cuda::getCurrentDeviceProperties()->major * 10
+                 + at::cuda::getCurrentDeviceProperties()->minor;
+    TORCH_CHECK(S == 1 || (cc >= 90) == (part == nullptr),
+                "fn_dense_rows: S > 1 launches as a cluster on sm_90+ and through a partials buffer below it");
+    TORCH_CHECK(part == nullptr || (part_->dtype() == torch::kFloat &&
+                  part_->numel() >= (int64_t)(N / 128) * ((M + 15) / 16) * S * warps * 16 * 128),
+                "part fp32 scratch");
+    int* ctr = part ? dense_tickets(x.device(), (N / 128) * ((M + 15) / 16)) : nullptr;
     launch(dense_rot_kernel, dim3((Kin + 511) / 512, M, G), dim3(128), 0, st, (const __nv_bfloat16*)x.data_ptr(),
         (int)x.stride(0), (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
     if (y.dtype() == torch::kFloat) { DENSE_ROWS_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_ROWS_KB(false) }
@@ -2572,6 +2762,13 @@ static void moe_group_attrs(void (*k)(KArgs...), int carve) {
     : (g_moe_st == 2 ? KERN<2, 8, LV> : (g_moe_st == 3 ? KERN<3, 8, LV> : KERN<4, 8, LV>)))
 void fn_set_moe_warps(int64_t w) { TORCH_CHECK(w == 4 || w == 8, "MoE warps 4 or 8"); g_moe_warps = (int)w; }
 
+// stages in the GROUPED kernels only (fn_set_moe_st_group; QWEN38_FN_MOE_ST_GROUP): the group CTAs
+// carry far more shared memory a stage than the pair CTAs, so fewer stages resident wins on Ada
+// (measured ST2 > ST4 for groups while pairs want 4). Warps stay shared with the pair path: the
+// warp count sets the partial-sum order, which must match the decode path's bits.
+static int g_moe_st_group = 2;
+void fn_set_moe_st_group(int64_t st) { TORCH_CHECK(st >= 2 && st <= 4, "MoE group stages 2..4"); g_moe_st_group = (int)st; }
+
 // the input row (fp16), the eight warps' partial rows, and 8 warps x stages x 8 tiles of the bank's
 // widest trellis tile (tile_u32(kbmax) words)
 static size_t moe_smem(int kin, int kbmax) {
@@ -2619,23 +2816,34 @@ void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torc
 // them (gate|up lays them over the rows), then the stages
 static size_t moe_group_smem(int kin, int kbmax, bool red_apart) {
     const size_t rows = (size_t)g_moe_gr * kin * 2, red = (size_t)g_moe_warps * g_moe_gr * 128 * 4;
-    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st * 8 * tile_u32(kbmax) * 4;
+    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st_group * 8 * tile_u32(kbmax) * 4;
 }
 
-void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng) {
+#define MOE_PICK_GROUP_LV(KERN, LV) (g_moe_warps == 4                                                     \
+    ? (g_moe_st_group == 2 ? KERN<2, 4, LV> : (g_moe_st_group == 3 ? KERN<3, 4, LV> : KERN<4, 4, LV>))       \
+    : (g_moe_st_group == 2 ? KERN<2, 8, LV> : (g_moe_st_group == 3 ? KERN<3, 8, LV> : KERN<4, 8, LV>)))
+
+void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng, int64_t E) {
     const at::cuda::OptionalCUDAGuard guard(ids.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int P = ids.numel();
     TORCH_CHECK(ids.dtype() == torch::kInt && (order.numel() == P || order.numel() == 0), "ids/order int32");
     TORCH_CHECK(g.dtype() == torch::kInt && g.size(0) >= P && g.size(1) == 2 + MOE_GR && ng.numel() == 1, "groups");
+    if (order.numel() == 0) {
+        // no order: the caller wants the expert partition, not a walked order's runs -- one warp
+        TORCH_CHECK(E > 0 && E <= 1024, "experts <= 1024 (the shared-memory histogram)");
+        launch(moe_groups_flat_kernel, dim3(1), dim3(32), 3 * E * sizeof(int), st, (const int*)ids.data_ptr(),
+            P, (int)E, (int*)g.data_ptr(), (int*)ng.data_ptr(), g_moe_gr);
+        return;
+    }
     if (g_moe_gpar && P <= 1024) {
         launch(moe_groups_par_kernel, dim3(1), dim3(1024), 0, st, (const int*)ids.data_ptr(),
-            order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
+            (const int*)order.data_ptr(), P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
             g_moe_gr);
         return;
     }
     launch(moe_groups_kernel, dim3(1), dim3(32), 0, st, (const int*)ids.data_ptr(),
-        order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
+        (const int*)order.data_ptr(), P, (int*)g.data_ptr(), (int*)ng.data_ptr(),
         g_moe_gr);
 }
 
@@ -2663,7 +2871,7 @@ void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t
     TORCH_CHECK(xs.numel() == 0 || (xs.dtype() == torch::kHalf && xs.is_contiguous() && xs.size(0) >= P &&
                 xs.size(1) == 2 && xs.size(2) == H), "xs fp16 [P, 2, H] or empty");
     const size_t smem = moe_group_smem(H, (int)kbmax, false);
-    auto kern = moe_levers() ? MOE_PICK_LV(moe_gu_group_kernel, true) : MOE_PICK_LV(moe_gu_group_kernel, false);
+    auto kern = moe_levers() ? MOE_PICK_GROUP_LV(moe_gu_group_kernel, true) : MOE_PICK_GROUP_LV(moe_gu_group_kernel, false);
     TORCH_CHECK(smem <= 96 * 1024, "grouped gate|up shared memory");
     moe_group_attrs(kern, moe_carveout());
     launch(kern, dim3(2 * (I / 128), moe_grid_y(P)), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)x.data_ptr(),
@@ -2678,7 +2886,7 @@ void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, tor
     const int P = ygu.size(0), I = ygu.size(2), H = yd.size(1);
     TORCH_CHECK(yd.dtype() == torch::kFloat && yd.is_contiguous() && yd.size(0) == P, "yd fp32 [P, H]");
     const size_t smem = moe_group_smem(I, (int)kbmax, true);
-    auto kern = moe_levers() ? MOE_PICK_LV(moe_down_group_kernel, true) : MOE_PICK_LV(moe_down_group_kernel, false);
+    auto kern = moe_levers() ? MOE_PICK_GROUP_LV(moe_down_group_kernel, true) : MOE_PICK_GROUP_LV(moe_down_group_kernel, false);
     TORCH_CHECK(smem <= 96 * 1024, "grouped down shared memory");
     moe_group_attrs(kern, moe_carveout());
     launch(kern, dim3(H / 128, moe_grid_y(P)), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)ygu.data_ptr(),

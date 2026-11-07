@@ -304,6 +304,7 @@ def test_graphs_ok_demands_the_probe_verdicts():
     with mock.patch.dict("sys.modules", {"tools.exl3_ada": ada, "tools.moe_ada": moe}), \
          mock.patch.object(_tools, "exl3_ada", ada, create=True), \
          mock.patch.object(_tools, "moe_ada", moe, create=True), \
+         mock.patch.object(type(ada_prof), "inline", lambda self, kind: False), \
          mock.patch.object(_gpu, "profile", lambda d: ada_prof):
         def go(kbs, gemv, rot, moe_ok, banks):
             state["gemv"], state["rot"], state["moe"] = dict(gemv), rot, moe_ok

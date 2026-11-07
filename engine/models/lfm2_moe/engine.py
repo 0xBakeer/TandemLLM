@@ -28,6 +28,7 @@ and the step as a CUDA graph.
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -114,6 +115,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         self.rope_cos, self.rope_sin = cos.contiguous(), sin.contiguous()        # [max_len, D] bf16
         self.classes = K.classes(max_len)
         self._rb: dict = {}
+        self._cptrs: dict = {}
         self.rec: dict = {}
         self.host_ms: dict = {}
         self._wc = {li: W[self.pre(li) + "conv.conv.weight"].reshape(c.hidden_size, -1).to(torch.bfloat16).contiguous()
@@ -199,9 +201,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         y = F.linear(n, w).float()
         return y if out is None else out.copy_(y)
 
-    def moe_rows(self, n: torch.Tensor, li: int) -> torch.Tensor:
-        """The MoE of M <= 32 rows: the router, every (row, slot) pair through its expert, the combine
-        in ascending expert id."""
+    def moe_parts(self, n: torch.Tensor, li: int):
+        """The router and every (row, slot) pair through its expert -> (yd, ids, wts) for the combine."""
         from tools import fn_kernels as FK
         c = self.cfg
         g16 = self._gate16.get(li)
@@ -215,7 +216,19 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             yd = K.moe_bf16(n, ids, e.w13, e.w2)
         if self.route_trace is not None:
             self.route_trace.append((li, ids.long()))
-        return FK.moe_combine(yd, ids, wts) if self.device.type == "cuda" else K.combine_reference(yd, ids, wts)
+        return yd, ids, wts
+
+    def moe_combine_rows(self, yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
+        """The row's slots in ascending expert id (stable), weighted, summed fp32, one rounding."""
+        if self.device.type == "cuda":
+            from tools import fn_kernels as FK
+            return FK.moe_combine(yd, ids, wts)
+        return K.combine_reference(yd, ids, wts)
+
+    def moe_rows(self, n: torch.Tensor, li: int) -> torch.Tensor:
+        """The MoE of M <= 32 rows: the router, every (row, slot) pair through its expert, the combine
+        in ascending expert id."""
+        return self.moe_combine_rows(*self.moe_parts(n, li))
 
     route_trace = None
 
@@ -370,8 +383,15 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                     K.conv_rows(bcx[r], st.conv[li], self._wc[li], rb["d"]["csrc"], rb["bx"][li], y=y[r], write=write)
                 out = self.lin(y, self.W[p + "conv.out_proj.weight"])
             h, n = K.add_rms(h, out, self.W[p + "ffn_norm.weight"], eps)
+            nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
+                else self.W["embedding_norm.weight"]
             if c.is_moe(li):
-                m = self.moe_rows(n, li)
+                yd, ids, wts = self.moe_parts(n, li)
+                got = K.combine_add_rms(h, yd, ids, wts, nxt, eps)
+                if got is None:
+                    h, n = K.add_rms(h, self.moe_combine_rows(yd, ids, wts), nxt, eps)
+                else:
+                    h, n = got
             else:
                 f = p + "feed_forward."
                 gu = self._fused(n, f, "w13", ("w1", "w3"))
@@ -382,9 +402,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 m = (_x3.exl3_down_silu(gu, w2) if type(w2) is _x3.EXL3Block
                      and not _gpu.profile(gu.device).inline("exl3_linear")
                      else self.lin(F.silu(gu[:, :I]) * gu[:, I:], w2))
-            nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
-                else self.W["embedding_norm.weight"]
-            h, n = K.add_rms(h, m, nxt, eps)
+                h, n = K.add_rms(h, m, nxt, eps)
         if one:
             rb = parts[0][1]
             rb["hidden"].copy_(n)
@@ -537,12 +555,53 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         cb["copied"].record()
         return key
 
+    def _commit_ptrs(self, st: LfmState, rbkey, bx: dict):
+        """The data_ptr() buffers the fused commit kernels dereference a layer's tensors through --
+        cached per (state, row-buffer key). Tensor object AND data_ptr are checked, so a state
+        tensor swapped under the same identity refills the same int64 buffer in place (a captured
+        commit graph reads the fresh addresses on replay); None marks the torch fallback."""
+        c = self.cfg
+        ck = (id(st), rbkey)
+        groups = (("pc", [st.conv[li] for li in c.conv_layers]),
+                  ("pb", [bx[li] for li in c.conv_layers]),
+                  ("pk", [st.k[li] for li in c.attention_layers]),
+                  ("pv", [st.v[li] for li in c.attention_layers]))
+        ts = [t for _, tl_ in groups for t in tl_]
+        dps = [t.data_ptr() for t in ts]
+        p = self._cptrs.get(ck)
+        if p is not None and p[0] == dps:
+            return p[1]
+        ok = (all(t.dtype == torch.bfloat16 and t.is_contiguous() for t in ts)
+              and len(set(dps)) == len(ts))                      # no shared storage to snapshot
+        ptrs = p[1] if p is not None else None
+        if ok and ptrs is None:
+            ptrs = {n: torch.empty(len(tl_), dtype=torch.int64, device=self.device)
+                    for n, tl_ in groups}
+        if ok:
+            if torch.cuda.is_current_stream_capturing():
+                return None          # a rebuild can't H2D mid-capture; the torch ops capture fine
+            for n, tl_ in groups:                                # refill in place: graph-safe
+                ptrs[n].copy_(torch.tensor([t.data_ptr() for t in tl_], dtype=torch.int64))
+        self._cptrs[ck] = (dps, ptrs if ok else None)
+        return self._cptrs[ck][1]
+
     def commit_dev(self, st: LfmState, key, rbkey=None) -> None:
         """The device half of `commit` (capturable): every input from `_commit_bufs(key)`, the B * x rows
         from the block's row buffers (`rbkey`, the lone verify's of M rows by default)."""
         c = self.cfg
         d = self._commit_bufs(key)["d"]
-        bx = self._rb[key[0] if rbkey is None else rbkey]["bx"]
+        rbkey = key[0] if rbkey is None else rbkey
+        bx = self._rb[rbkey]["bx"]
+        p = self._commit_ptrs(st, rbkey, bx) if self.device.type == "cuda" else None
+        if (p is not None and key[1] <= 64 and K.HAVE_TRITON
+                and not os.environ.get("TRITON_INTERPRET")
+                and all(d[n].dtype == torch.int64 and d[n].is_contiguous() for n in ("cols", "src", "dst"))):
+            K.commit_conv(p["pc"], p["pb"], d["cols"], c.conv_state_len, c.hidden_size,
+                          len(c.conv_layers))
+            if key[2]:
+                K.commit_kv(p["pk"], p["pv"], d["src"], d["dst"], st.k[c.attention_layers[0]].shape[1],
+                            key[1], c.head_dim, len(c.attention_layers), c.num_key_value_heads)
+            return
         for li in c.conv_layers:
             st.conv[li].copy_(torch.cat([st.conv[li], bx[li]], 0).index_select(0, d["cols"]))
         if key[2]:
