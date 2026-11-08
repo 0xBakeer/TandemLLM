@@ -137,6 +137,7 @@
 \texttt{-{}-image-\allowbreak{}cache-\allowbreak{}mb} & \texttt{512} & encoded images kept on the device by content, so a conversation that sends an image again does not encode it again. \\
 \texttt{-{}-image-\allowbreak{}act-\allowbreak{}gb} & \texttt{6} & admission: an image whose encode would need more than this (the tower's byte math, engine/vision.py) is refused with a 400. \\
 \texttt{-{}-usage-\allowbreak{}default} & \texttt{on (QSE\_\allowbreak{}USAGE\_\allowbreak{}DEFAULT)} & a streamed request that sends no stream\_options gets usage, timings and metrics on its finish chunk (on, the default: Open WebUI asks for include\_usage only when a model's Usage capability is ticked), or nothing, as before (off). ... One of: on, off. \\
+\texttt{-{}-usage-\allowbreak{}context} & \texttt{client (QSE\_\allowbreak{}USAGE\_\allowbreak{}CONTEXT)} & usage.prompt\_tokens counts the client's prompt (client, the default) or the full context occupied after replay (engine). One of: client, engine. \\
 \texttt{-{}-usage-\allowbreak{}ledger} & \texttt{off; served:\allowbreak{} (a path)} & the SQLite usage ledger's path, or off (the default). \\
 \texttt{-{}-conductor-\allowbreak{}config} & \texttt{off} & the conductor's config directory (versioned profiles, router, roles, packages and its journal, server/conductor/), or off (the default). \\
 \texttt{-{}-backends} & \texttt{off} & the proxy's config database (proxy/, docs/proxy.md), or off (the default). \\

@@ -8,11 +8,11 @@ fp32 partials re-associate at ~ulp scale (a numerics class, like FN_GEMV_SPLIT's
 Grouped and ungrouped variants decode identically, so a pair's bits still do not depend on
 how many partners share its expert, and a row's bits still do not depend on M.
 
-Run: python tests/test_moe_gather.py
+Run: python tests/gpu/test_moe_gather_gpu.py
 """
 import sys
 
-sys.path.insert(0, __file__.rsplit("/", 2)[0])
+sys.path.insert(0, __file__.rsplit("/", 3)[0])
 
 import torch
 

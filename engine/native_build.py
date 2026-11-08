@@ -73,5 +73,5 @@ def load(name: str, **kw):
 
 
 def _nvcc_any() -> bool:
-    from engine.settings import SETTINGS
-    return SETTINGS.get("NATIVE_NVCC_ANY") == "1"
+    from engine.settings import SETTINGS as _S
+    return _S.get("NATIVE_NVCC_ANY") == "1"

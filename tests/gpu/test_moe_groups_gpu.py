@@ -9,11 +9,11 @@ no-sentinel-padding boundary), runs of exactly G, runs of G+-1, expert-0 and exp
 n-1 clustering, plus random cells at several expert-domain sizes. Replay equality is
 checked too since the launch is CUDA-graph captured inside moe_experts.
 
-Run: python tests/test_moe_groups.py
+Run: python tests/gpu/test_moe_groups_gpu.py
 """
 import sys
 
-sys.path.insert(0, __file__.rsplit("/", 2)[0])
+sys.path.insert(0, __file__.rsplit("/", 3)[0])
 
 import torch
 
@@ -37,9 +37,11 @@ def oracle(flat, P):
 def fused(flat, P):
     order = torch.empty(P, dtype=torch.int32, device=DEV)
     es = torch.empty(P, dtype=torch.int32, device=DEV)
-    lead = torch.empty(P, dtype=torch.int32, device=DEV)
-    glen = torch.empty(P, dtype=torch.int32, device=DEV)
-    gc = torch.empty(1, dtype=torch.int32, device=DEV)
+    # LEAD/LEN/GC hold `gc` entries -- the unwritten tail stays zero so whole-tensor equality
+    # between launches is honest (the oracle's convention)
+    lead = torch.zeros(P, dtype=torch.int32, device=DEV)
+    glen = torch.zeros(P, dtype=torch.int32, device=DEV)
+    gc = torch.zeros(1, dtype=torch.int32, device=DEV)
     MA._moe_groups_fused[(1,)](flat, order, es, lead, glen, gc, P, G=G, num_warps=1)
     return order, es, lead, glen, gc
 
@@ -118,9 +120,9 @@ def test_replay_equality():
     # capture once, replay twice: integer tables must come out identical
     order = torch.empty(P, dtype=torch.int32, device=DEV)
     es = torch.empty(P, dtype=torch.int32, device=DEV)
-    lead = torch.empty(P, dtype=torch.int32, device=DEV)
-    glen = torch.empty(P, dtype=torch.int32, device=DEV)
-    gc = torch.empty(1, dtype=torch.int32, device=DEV)
+    lead = torch.zeros(P, dtype=torch.int32, device=DEV)
+    glen = torch.zeros(P, dtype=torch.int32, device=DEV)
+    gc = torch.zeros(1, dtype=torch.int32, device=DEV)
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):

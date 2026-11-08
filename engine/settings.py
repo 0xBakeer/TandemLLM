@@ -410,16 +410,16 @@ KNOBS: dict[str, tuple] = {
     'FN_PDL': ('1', 'tools/fn_kernels.py'),
     # cp.async stages of a warp in the MoE kernels on the GB10 (2..4; the bits do not depend on it)
     'FN_MOE_ST': ('3', 'tools/gpu/gb10.py'),
-    # the grouped MoE kernels' own stage count (2..4; group CTAs hold far more smem a stage)
-    'FN_MOE_ST_GROUP': (None, 'tools/fn_kernels.py'),
+    # the grouped MoE kernels' own stage count on Ada (2..4; group CTAs hold far more smem a stage)
+    'FN_MOE_ST_GROUP': (None, 'tools/gpu/ada.py'),
     # warps a MoE CTA splits its K range over on the GB10 (4 or 8; sets the order of the partial sums)
     'FN_MOE_WARPS': ('4', 'tools/gpu/gb10.py'),
-    # cp.async stages of the dense kernels (3 or 4; the bits do not depend on it)
-    'FN_DENSE_ST': (None, 'tools/fn_kernels.py'),
-    # the dense_rows kernels' own stage count (3 or 4)
-    'FN_DENSE_ST_ROWS': (None, 'tools/fn_kernels.py'),
+    # cp.async stages of the dense kernels on Ada (3 or 4; the bits do not depend on it)
+    'FN_DENSE_ST': (None, 'tools/gpu/ada.py'),
+    # the dense_rows kernels' own stage count on Ada (3 or 4)
+    'FN_DENSE_ST_ROWS': (None, 'tools/gpu/ada.py'),
     # DENSE_SPLIT's entries verbatim below sm_90 too (fn_tiles sweeps the emulated split)
-    'FN_DENSE_SPLIT_FORCE': (None, 'tools/fn_kernels.py'),
+    'FN_DENSE_SPLIT_FORCE': (None, 'tools/gpu/ada.py'),
     # SPD-249: grid rows of the grouped MoE kernels (0: one a pair); a CTA then loops over every
     # n-th group, each group's arithmetic unchanged (the bits do not depend on it)
     'FN_MOE_GY': ('0', 'tools/fn_kernels.py'),

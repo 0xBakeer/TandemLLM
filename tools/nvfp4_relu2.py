@@ -42,30 +42,6 @@ FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2
 ROWS_MAX = 32
 
 
-_SM89 = None
-
-
-def _sm89() -> bool:
-    """True on Ada sm_89: the wide row tile and the tuned launch table there; other builds keep 16."""
-    global _SM89
-    if _SM89 is None:
-        _SM89 = _gpu.profile().sm89()
-    return _SM89
-
-
-def _bm(M: int) -> int:
-    # verify-width row tile: one program covers all of the call's rows (M <= 33)
-    return 16 if M <= 16 else 32 if M <= 32 else 64
-
-
-# Ada-only launch tuning for _fp8_rows, (N, K) -> (BN, BK, num_warps, num_stages); every entry was
-# swept warm/interleaved and confirmed >= 1.03x on its shape with no M=33 regression. Shapes not
-# listed keep the default rule below (they still get the verify-width row tile).
-_FP8_CFG_SM89 = {
-    (17408, 5120): (32, 256, 4, 2),
-}
-
-
 def e4m3_table(device) -> torch.Tensor:
     """fp32 value of every e4m3 byte (the scales' decode: a gather, exact)."""
     return torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn).float().to(device)
@@ -238,15 +214,9 @@ class FP8Linear:
         self.N, self.K = self.w.shape
         self.shape = (self.N, self.K)
         self.scale = torch.tensor([float(scale)], dtype=torch.float32, device=self.w.device)
-        cfg = _FP8_CFG_SM89.get((self.N, self.K)) if _sm89() and bn is None else None
-        if cfg is not None:
-            self.bn, self.bk, self.warps, self.stages = cfg
-        else:
-            self.bk = 128 if self.K % 128 == 0 else 64
-            # the N tile, fixed by the shape (never by the row count): narrow enough to fill the board at one row
-            self.bn = bn or (32 if self.N <= 8192 else 64)
-            self.warps, self.stages = 4, None
-        self._bmt = _bm if _sm89() else (lambda M: 16)
+        # the launch is the GPU adapter's answer (tools/gpu `fp8_rows`, `fp8_row_tile`)
+        self._prof = _gpu.profile()
+        self.bn, self.bk, self.warps, self.stages = self._prof.fp8_rows(self.N, self.K, bn)
 
     @property
     def nbytes(self) -> int:
@@ -268,7 +238,7 @@ class FP8Linear:
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        bm = self._bmt(M)
+        bm = self._prof.fp8_row_tile(M)
         kw = dict(num_warps=self.warps)
         if self.stages is not None:
             kw["num_stages"] = self.stages

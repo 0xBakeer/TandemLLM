@@ -42,14 +42,18 @@ its launch shape.
 | `inline(kind)` | modules that check before building | yes, every kind | no |
 | `pdl()` | `fn_kernels`, `fn_seq_kernels`, `exl3_linear`, the 27B's fragment kernels | yes | no |
 | `cluster()` | `fn_kernels.dense`, `fn_kernels.dense_rows`, `exl3_linear` | yes | from `sm_90` |
-| `e2m1()` | `nvfp4_linear`, `nvfp4_linear_v2` | yes | from `sm_120` |
 | `moe_launch()` | `fn_kernels` | `QWEN38_FN_MOE_ST`, `QWEN38_FN_MOE_WARPS` (3, 4) | `NoInlineBuild` |
 | `dense_split(N, Kin, kb, table)` | `fn_kernels.dense_split` | the table, else a cluster of up to 8 CTAs below 96 column blocks, 4 warps | `NoInlineBuild` |
 | `skinny_rows()` | `nvfp4_skinny.use_skinny`, the GGUF NVFP4 linear | 32 | 0 |
 | `bf16()` | the small CUDA models (`engine/decision/laya`) | yes | from `sm_80` |
 | `e2m1()` | the NVFP4 kernels' hardware-converter claim (`nvfp4_linear`, `nvfp4_linear_v2`) | yes | from `sm_100` |
 | `fp8_rows(N, K, bn)`, `fp8_row_tile(M)` | the FP8 row kernel's launch (`nvfp4_relu2.FP8Linear`) | the base's | 32 or 64 columns by N, 128 or 64 by K, 4 warps; 16 rows |
-| `sm89()` | the sm_89-only asm/Triton paths (`iq2_linear._ada89`, `nvfp4_relu2._sm89`) | no | yes |
+| `sm89()` | the sm_89-only asm/Triton paths (`iq2_linear._ada89`) | no | yes |
+| `moe_group()`, `moe_group_min_m()` | the grouped MoE paths' build and rows window (`fn_kernels.moe_experts`, `exl3_relu2`) | the base's | sorted-order groups, off, M > 1 |
+| `dense_rows_min_m()` | `fn_kernels.dense`'s routing to `dense_rows` | the base's | 33 (never; opt-in only) |
+| `dense_st()`, `dense_st_rows()`, `moe_st_group()` | `fn_kernels`' stage counts (`fn_set_dense_st`, `fn_set_dense_st_rows`, `fn_set_moe_st_group`) | the base's | 3, 3, the `moe_launch` stages |
+| `lfm2_fused()` | `lfm2_moe`'s fused combine+add+rms and commit kernels | the base's | no |
+| `verified_build()` | `fn_kernels._sm_supported` | yes | no (a first-use build check) |
 | `exl3_probe(device, kb)`, `exl3_rot_ok`, `exl3_decode_ok`, `exl3_gemv_ok` | the Triton EXL3 kernels' load probes and verdicts (`tools/exl3_ada.py`) | -- | none / raise unprobed |
 | `moe_probe(device)`, `moe_ok(device)` | the Triton MoE kernels' load probe and verdict (`tools/moe_ada.py`) | -- | none / False unprobed |
 | `device_key()` | per-device files (`engine/methods/device.py`, price tables) | `dgx-spark` | the GPU's name with dashes, `cpu` |
@@ -87,7 +91,9 @@ Moved: each now asks the profile.
 |---|---|
 | `tools/fn_kernels.py`, `fn_prefill_kernels.py`, `fn_seq_kernels.py`, `exl3_linear.py`, `exl3_tall.py`, `exl3_relu2.py`, `nvfp4_skinny.py`, `l2_prefetch_bench.py`, `engine/models/qwen3_5/frag.py` | the arch flags of their inline builds |
 | `tools/fn_kernels.py`, `fn_seq_kernels.py`, `exl3_linear.py`, `engine/models/qwen3_5/frag.py` | programmatic dependent launch compiled in |
-| `tools/fn_kernels.py` | the MoE kernels' stages and warps (their knobs now read in `gb10.py`), the dense kernels' K split |
+| `tools/fn_kernels.py` | the MoE kernels' stages and warps (their knobs now read in `gb10.py`), the dense kernels' K split, the grouped path's default and group build, `dense`'s rows window, the dense/grouped stage counts |
+| `tools/exl3_relu2.py` | the grouped path's group build (`moe_group`) |
+| `engine/models/lfm2_moe/engine.py` | the fused combine+add+rms and the commit kernels (`lfm2_fused`) |
 | `tools/nvfp4_skinny.py` `use_skinny`, `tools/iq2_linear.py` `NVFP4Linear.matmul` | the NVFP4 register-fed kernel's rows |
 | `engine/decision/laya/model.py` | BF16 or FP16 autocast |
 | `engine/methods/device.py` `device_id` | the key of per-device files |

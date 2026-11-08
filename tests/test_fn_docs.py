@@ -27,7 +27,7 @@ def test_every_flashnext_switch_is_in_the_manual():
     table = open(os.path.join(ROOT, "manual", "generated", "engine-knobs.tex")).read()
     fn = sorted(k for k in KNOBS if k.startswith("FN_"))
     assert len(fn) >= 10, fn
-    missing = [k for k in fn if f"\\texttt{{QWEN38\\_\\allowbreak{{}}{_tex(k)}}} & \\texttt{{{_tex(KNOBS[k][0])}}}"
+    missing = [k for k in fn if f"\\texttt{{QWEN38\\_\\allowbreak{{}}{_tex(k)}}} & \\texttt{{{_tex(KNOBS[k][0] or 'none')}}}"
                not in table]
     assert not missing, f"not in manual/generated/engine-knobs.tex (run manual/tools/gen_reference.py): {missing}"
     return f"{len(fn)} QWEN38_FN_* switches with their defaults"

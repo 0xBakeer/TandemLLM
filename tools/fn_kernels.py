@@ -66,7 +66,7 @@ def _sm_supported(device=None) -> bool:
     prof = _gpu.profile(device)
     if not prof.inline("fn_kernels"):
         return False
-    if prof.id == "gb10":
+    if prof.verified_build():
         return True
     if prof.id not in _BUILD_OK:
         try:
@@ -109,10 +109,9 @@ def _module():
         _MOD.fn_set_gemv_nb(int(_S.get("FN_GEMV_NB") == "1"))
         _MOD.fn_set_gemv_mc(int(_S.get("FN_GEMV_MC") or 0))
         _MOD.fn_set_mixer_mma(int(_S.get("FN_MIXER_MMA") == "1"))
-        _ada = gpu.id == "ada"
-        _MOD.fn_set_dense_st(int(_S.get("FN_DENSE_ST") or ("4" if _ada else "3")))
-        _MOD.fn_set_dense_st_rows(int(_S.get("FN_DENSE_ST_ROWS") or ("3" if _ada else _S.get("FN_DENSE_ST") or "3")))
-        _MOD.fn_set_moe_st_group(int(_S.get("FN_MOE_ST_GROUP") or ("2" if _ada else _S.get("FN_MOE_ST") or "3")))
+        _MOD.fn_set_dense_st(gpu.dense_st())
+        _MOD.fn_set_dense_st_rows(gpu.dense_st_rows())
+        _MOD.fn_set_moe_st_group(gpu.moe_st_group())
         stages, warps = gpu.moe_launch()
         _MOD.fn_set_moe_st(stages)
         _MOD.fn_set_moe_warps(warps)
@@ -157,8 +156,7 @@ class MoEBank:
             raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
         dev = torch.device(device)
         if dev.type == "cuda" and (not _sm_supported(dev) or not _gpu.profile(dev).inline("fn_prefill_kernels")):
-            from tools import moe_ada
-            moe_ada.probe(dev)                # once a device: the verdict every dispatch reads
+            _gpu.profile(dev).moe_probe(dev)  # once a device: the verdict every dispatch reads
                                               # (the prefill path's arch set is narrower than ours)
 
     @property
@@ -234,8 +232,9 @@ def dense_split(N: int, Kin: int, kb: int) -> tuple[int, int]:
 
 
 #: `dense` routes M in [DENSE_ROWS_MIN_M, 32] bf16-contiguous calls to `dense_rows` (the row-group
-#: kernel; same bits a row, amortized tile decode). Set to 33+ to keep the per-row kernel always.
-DENSE_ROWS_MIN_M = 4
+#: kernel; same bits a row, amortized tile decode). The GPU adapter's default (`dense_rows_min_m`);
+#: 33+ keeps the per-row kernel always.
+DENSE_ROWS_MIN_M = _gpu.profile().dense_rows_min_m()
 
 
 def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -432,16 +431,17 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
         # bits its own); else the torch reference's per-pair walk. A kernel error after the
         # verdict propagates -- it is a bug, not a reason to change algorithms mid-call.
         from tools import moe_ada
-        if x.is_cuda and moe_ada.ok(x.device):
+        if x.is_cuda and _gpu.profile(x.device).moe_ok(x.device):
             return moe_ada.moe_experts(x, ids, bank)
         from tools import fn_prefill_kernels as PK
         return PK.moe_grouped_reference(x, ids, bank)
-    grouped = MOE_GROUP and M >= 4
+    grouped = MOE_GROUP and M >= _gpu.profile(x.device).moe_group_min_m()
     if order is None:
-        if M > 1 and not grouped:
+        if M > 1 and (not grouped or not _gpu.profile(x.device).moe_group()):
             order = expert_order(ids)
         else:
-            # the grouped path partitions by expert id inside moe_groups -- no sort needed
+            # the grouped path partitions by expert id inside moe_groups -- no sort needed. A GPU
+            # without the flat partition still walks a sorted order's runs, as on main.
             order = _EMPTY.get(x.device)
             if order is None:
                 order = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
@@ -487,7 +487,8 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
 #: ENG-241: a block's pairs of one expert share a CTA, up to MOE_GR of them (False: a CTA a pair,
 #: the A/B of tools/fn_moe_group_check.py). On the lfm2.5 verify path at M>=4 the dedup wins
 #: (M=16: -4.5ms of 23.8ms); at M=2 the groups-of-1 prep is a net loss -- hence the M>=4 gate.
-MOE_GROUP = True
+#: The GPU adapter's default (`moe_group`); a caller may still force it for the A/B.
+MOE_GROUP = _gpu.profile().moe_group()
 MOE_GR = 8
 #: SPD-249: the grouped gate|up kernel reads rows rotated once a pair (moe_gu_stage) (FN_MOE_STAGE)
 MOE_STAGE = _S.get("FN_MOE_STAGE") == "1"
@@ -510,7 +511,7 @@ def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: tor
         # the fused Ada kernel where the load probe passed and its shapes fit: one launch, the
         # same arithmetic
         from tools import moe_ada
-        if yd.is_cuda and moe_ada.ok(yd.device):
+        if yd.is_cuda and _gpu.profile(yd.device).moe_ok(yd.device):
             got = moe_ada.try_moe_combine(yd, ids, wts, out=out)
             if got is not None:
                 return out

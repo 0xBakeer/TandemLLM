@@ -32,6 +32,10 @@ class GB10(GpuProfile):
     def inline(self, kind: str) -> bool:
         return kind in INLINE
 
+    def verified_build(self) -> bool:
+        # the reference box's toolchain is known-good: the runtime build check is skipped
+        return True
+
     def pdl(self) -> bool:
         return True
 

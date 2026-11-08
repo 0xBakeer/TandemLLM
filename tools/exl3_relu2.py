@@ -138,12 +138,15 @@ class Relu2Bank:
             # SPD-125: a verify block's pairs of one expert share its tile decode (each pair's bits its lone call's)
             g = torch.empty(P, 2 + FK.MOE_GR, dtype=torch.int32, device=x.device)
             ng = torch.empty(1, dtype=torch.int32, device=x.device)
-            # as fn_kernels' grouped path: the partition is per-expert, so the flat kernel walks it
-            # without a sorted order -- the torch.sort is gone here too
-            empty = _EMPTY.get(x.device)
-            if empty is None:
-                empty = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
-            FK._module().fn_moe_groups(flat, empty, g, ng, len(self.blocks))
+            # as fn_kernels' grouped path: a GPU answering `moe_group` partitions by expert id in
+            # the flat kernel (no sort); the others walk a sorted order's runs, as on main
+            if _gpu.profile(x.device).moe_group():
+                empty = _EMPTY.get(x.device)
+                if empty is None:
+                    empty = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
+                FK._module().fn_moe_groups(flat, empty, g, ng, len(self.blocks))
+            else:
+                mod.nh_relu2_groups(flat, FK.expert_order(flat), g, ng)
             mod.nh_relu2_up_group(x, g, ng, S, tr, kb, su, sv, a, kbmax)
             mod.nh_relu2_down_group(a, g, ng, tr, kb, su, sv, yd, kbmax)
             return yd

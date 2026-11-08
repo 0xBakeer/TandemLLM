@@ -31,6 +31,17 @@
 \texttt{qse\_\allowbreak{}cache\_\allowbreak{}misses\_\allowbreak{}total} & \texttt{counter,\allowbreak{} cache} & prefix lookups that found nothing \\
 \texttt{qse\_\allowbreak{}cache\_\allowbreak{}evictions\_\allowbreak{}total} & \texttt{counter,\allowbreak{} cache} & entries dropped to stay inside the byte budget \\
 \texttt{qse\_\allowbreak{}cache\_\allowbreak{}bytes} & \texttt{gauge,\allowbreak{} cache} & bytes held by each cache \\
+\texttt{qse\_\allowbreak{}ngram\_\allowbreak{}table\_\allowbreak{}cache\_\allowbreak{}hits\_\allowbreak{}total} & \texttt{counter} & n-gram table rows served from the hot-row cache \\
+\texttt{qse\_\allowbreak{}ngram\_\allowbreak{}table\_\allowbreak{}cache\_\allowbreak{}misses\_\allowbreak{}total} & \texttt{counter} & n-gram table rows read from disk (O\_DIRECT) for a hot-row cache miss \\
+\texttt{qse\_\allowbreak{}ngram\_\allowbreak{}table\_\allowbreak{}blocks\_\allowbreak{}read\_\allowbreak{}total} & \texttt{counter} & 4 KiB blocks read from disk for the n-gram table \\
+\texttt{qse\_\allowbreak{}ngram\_\allowbreak{}table\_\allowbreak{}cache\_\allowbreak{}bytes} & \texttt{gauge} & the n-gram table's hot-row cache, in bytes \\
+\texttt{qse\_\allowbreak{}ngram\_\allowbreak{}table\_\allowbreak{}file\_\allowbreak{}bytes} & \texttt{gauge} & the n-gram table's file size, in bytes \\
+\texttt{qse\_\allowbreak{}prepare\_\allowbreak{}runs\_\allowbreak{}total} & \texttt{counter} & summaries the engine prepared ahead of a request \\
+\texttt{qse\_\allowbreak{}prepare\_\allowbreak{}served\_\allowbreak{}total} & \texttt{counter} & prepared summaries a request went on from \\
+\texttt{qse\_\allowbreak{}prepare\_\allowbreak{}yielded\_\allowbreak{}total} & \texttt{counter} & prepare runs that gave the engine to a client request \\
+\texttt{qse\_\allowbreak{}prepare\_\allowbreak{}too\_\allowbreak{}long\_\allowbreak{}total} & \texttt{counter} & prepare runs skipped: the conversation and the summary would not fit the context \\
+\texttt{qse\_\allowbreak{}memory\_\allowbreak{}writer\_\allowbreak{}runs\_\allowbreak{}total} & \texttt{counter} & memory writer turns the engine ran \\
+\texttt{qse\_\allowbreak{}memory\_\allowbreak{}writer\_\allowbreak{}notes\_\allowbreak{}total} & \texttt{counter} & memory notes the writer stored \\
 \texttt{qse\_\allowbreak{}memory\_\allowbreak{}bytes} & \texttt{gauge,\allowbreak{} part} & the engine's memory against its limits, by part \\
 \texttt{qse\_\allowbreak{}memory\_\allowbreak{}shed\_\allowbreak{}total} & \texttt{counter,\allowbreak{} level} & caches given back to keep the engine under its ceiling or its peak, by level \\
 \texttt{qse\_\allowbreak{}cache\_\allowbreak{}entries} & \texttt{gauge,\allowbreak{} cache} & entries held by each cache \\

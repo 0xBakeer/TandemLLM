@@ -387,7 +387,9 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 else self.W["embedding_norm.weight"]
             if c.is_moe(li):
                 yd, ids, wts = self.moe_parts(n, li)
-                got = K.combine_add_rms(h, yd, ids, wts, nxt, eps)
+                # the fused combine+add+rms only where the adapter answers for it (`lfm2_fused`)
+                got = (K.combine_add_rms(h, yd, ids, wts, nxt, eps)
+                       if _gpu.profile(self.device).lfm2_fused() else None)
                 if got is None:
                     h, n = K.add_rms(h, self.moe_combine_rows(yd, ids, wts), nxt, eps)
                 else:
@@ -592,7 +594,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         d = self._commit_bufs(key)["d"]
         rbkey = key[0] if rbkey is None else rbkey
         bx = self._rb[rbkey]["bx"]
-        p = self._commit_ptrs(st, rbkey, bx) if self.device.type == "cuda" else None
+        p = (self._commit_ptrs(st, rbkey, bx)
+             if self.device.type == "cuda" and _gpu.profile(self.device).lfm2_fused() else None)
         if (p is not None and key[1] <= 64 and K.HAVE_TRITON
                 and not os.environ.get("TRITON_INTERPRET")
                 and all(d[n].dtype == torch.int64 and d[n].is_contiguous() for n in ("cols", "src", "dst"))):

@@ -88,6 +88,37 @@ class Ada(GpuProfile):
                 S *= 2
         return S, got[1]
 
+    def moe_group(self) -> bool:
+        """The flat per-expert partition feeding the group kernels: the sorted order and its walk
+        are gone on the 4080 (fn_kernels `moe_experts`, `exl3_relu2`)."""
+        return True
+
+    def moe_group_min_m(self) -> int:
+        # at M=2 the groups-of-1 prep is a net loss; the grouped path wins from 4 (ENG-241)
+        return 4
+
+    def dense_rows_min_m(self) -> int:
+        # the row-group kernel's amortized decode beats the per-row program on every measured pack
+        # shape but 3072x2048 at M=4 (excluded at the call site); at M=2 it is mixed
+        return 4
+
+    def dense_st(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_DENSE_ST") or "4")
+
+    def dense_st_rows(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_DENSE_ST_ROWS") or "3")
+
+    def moe_st_group(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_MOE_ST_GROUP") or "2")
+
+    def lfm2_fused(self) -> bool:
+        """The fused LFM2 paths measured on the 4080: combine+add+rms in one launch and the
+        pointer-table commit kernels."""
+        return True
+
     # The EXL3 and MoE kernels are Triton (fn_kernels/fn_prefill_kernels do build, `arch_flags`). It
     # answers the FP8 row kernel's launch, and owns the load-time probes and verdicts of
     # tools/exl3_ada.py and tools/moe_ada.py -- the dispatch reaches those kernels only through
