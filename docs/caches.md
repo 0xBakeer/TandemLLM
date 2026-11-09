@@ -187,6 +187,51 @@ The end anchor through an eviction (0.3.24-test). On 0.3.23 a conversation read 
 
 Written while idle (SRV-E6). The spill wrote a conversation only when it left, so every reclaim under memory pressure paid the save on the waiting request's path (a 57,823-token chat: 522 ms), and a chat on a side slot went unwritten (SRV-779). Now a thread of the spill's own (`spill-idle`, every 5 s) writes each slot's conversation of at least `drain_min_tokens` (4,096) once it has been idle `--session-spill-idle-s` (20 s), at most every `--session-spill-idle-every-s` (60 s), never while its slot is busy (slot 0 by the engine lock's own lock without the GPU turn, a side slot by its lock: a turn that arrives meanwhile waits at most the save), reason `idle`. Its rows stay where they are, and only the blocks that changed are written. The save records the rows' generation on the prefix (`spill_mark`, `ResidentPrefix.rows_gen`, moved by every prefill, generation end and clear); while nothing moved it, the entry is current (`SessionSpill.current`) and the KV pool's reclaim only trims: its first conversation level (`written_side`) takes those, before any save. The capture guard is held around each block's device work only (its sums and its copy to the staging buffer, `guard_ms` and `guard_max_ms` in the save's line), inside the spill's own I/O lock, never around a write; every other side-slot save and read takes the two in the same order. Past the day's write budget idle saves are skipped and counted (`spill:idle`, `idle.refused` in the spill's report); a pressure save (`kv_pool`) counts as an eviction there. A save never evicts the entry of a conversation a slot still holds (the minimum of SRV-271: `SessionSpill.residents`). `SESSION_SPILL_IDLE=off` in serve.env or the profile writes only when a conversation leaves, as before. `tests/test_session_spill.py` holds the pass, the budget, the keep and the trim-only reclaim.
 
+What the swap changes, and what it does not (0.15.3). The KV pool's room sets how many long chats are resident at once. On one DGX Spark with Flash-Next 3.05 the pool held four chats of 221k to 225k tokens beside slot 0's work, and a fifth has to leave. The swap decides what its return costs. With it off, a chat whose rows went reads its whole context again. With it on, the rows come back from the NVMe and the prefill forwards the turn's new tokens.
+
+The KV pool's reclaim ladder (`[kv-pool] reclaim for admission level=...`, each level with its bytes and ms; [parallel-requests.md](parallel-requests.md#one-window-for-every-lane-srv-707)) takes, in this order:
+
+1. `caches`: the caches' levels and the allocator's free blocks;
+2. `graphs`: idle slots' CUDA graph sets, the least recently used first (SRV-795, `QSE_GRAPH_POOL_GIB`);
+3. `written_side`: side conversations already current on the NVMe, which the idle backfill wrote. Their pages go and nothing is written;
+4. `idle_side`: the other idle side conversations, each written to the NVMe before its pages go (SRV-779). The chat's next turn goes home to its slot and reads the entry back into that slot's buffers;
+5. `idle_slot0`: slot 0's idle conversation, written first unless current;
+6. `unwritten_side`: side conversations no save could write;
+7. `kept_park`: the park.
+
+An older copy of a chat goes first (#170). After a compaction a chat's next request shares only the head with its old rows and takes another slot, so the old rows stay on the first one. The reclaim takes such a copy at the `written_side` level, before every other idle conversation, and does not write it: that save would write over the chat's one entry with rows it no longer continues. Slot 0's older copy is not written either.
+
+The admission prices a turn by the rows it forwards (#167). Before it prices a turn it asks the spill what its entry serves (`SessionSpill.candidate`, host work only), so a turn whose conversation the pool wrote to the NVMe is charged the rows past the entry (`ws_kind=spill` in the `[req]` line) instead of a cold prefill of its whole context. Known gap (SRV-799, open): in the measurement below the two turns served from the NVMe were still charged a cold prefill (`ws_rows` 219,810 and 217,690 against 3,973 and 1,686 forwarded; 10.75 GiB) and waited 21.2 and 16.3 s for memory before their restore. The three resident chats were charged their forwarded rows (`ws_rows` 1,125 against 1,197 forwarded).
+
+Off: `--session-spill off` (`SESSION_SPILL=off` in serve.env, which `ops/start.sh` passes) writes and reads nothing, and the idle backfill does not start. `SESSION_SPILL_IDLE=off` keeps the swap and turns off the idle backfill alone.
+
+Measured 2026-11-09, 0.15.3 (07ffd483). One DGX Spark (GB10), Flash-Next 3.05, 8 slots, through the chat app. Five chats, each filled one at a time with a unique paste of about 190k tokens (221k to 225k tokens in use after the fill), then one short turn per chat with all five sent at once. The KV pool had room for four such chats. Two arms with everything else the same: `SESSION_SPILL=off` against the spill on, the graph cap on in both.
+
+| warm round 1, five turns at once | spill off | spill on |
+|-|-|-|
+| turn s, p50 / max | 764.8 / 894.2 | 64.9 / 68.3 |
+| time to first token s, p50 / max | 659.1 / 879.9 | 49.0 / 61.4 |
+| chats that waited for memory / longest wait s | 4 of 5 / 665.5 | 4 of 5 / 23.5 (the two read back: 21.2 and 16.3, SRV-799) |
+| what the engine did | 4 of 5 read 217k to 220k tokens again, one at a time, a 15.9 GiB workspace each | 3 resident; 2 restored, 4.63 and 4.66 GB in 1.83 and 2.07 s, then 1,686 and 3,973 tokens forwarded |
+| `memory_full` / unfinished turns | 0 / 0 | 0 / 0 |
+
+Why the off arm cascades: to make the 15.9 GiB workspace for one re-read, the ladder evicted another resident chat's rows (`idle_side`, 6.76 GB, `why=no_spill`), and that chat needed the same re-read at its own turn.
+
+| the whole arm | spill off | spill on |
+|-|-|-|
+| fill turn s, p50 / max (cold, unique text; 216,851 and 209,920 tokens forwarded a fill) | 240.8 / 276.9 | 210.7 / 225.8 |
+| fill: chats that waited for memory / longest wait s | 1 / 6.0 | 1 / 6.0 |
+| spill saves n / GB / ms p50 / max | 0 | 27 / 32.3 / 400 / 41,721 |
+| spill restores n / GB / ms p50 / max | 0 | 13 / 23.7 / 362 / 2,072 |
+| KV pool committed, max GiB | 26.4 | 28.5 |
+| MemAvailable GiB, min / median | 9.7 / 20.2 | 7.8 / 17.2 |
+| reclaims by level | caches 28, graphs 7, idle_side 11, idle_slot0 1 | caches 24, graphs 8, idle_side 6 |
+| waits for memory (log lines) / give-way / `memory_full` | 198 / 0 / 0 | 25 / 0 / 0 |
+
+Saves in the on arm: a 221k chat's first save (4.63 to 4.74 GB on the disk from 6.6 GB of rows) took 24.5 to 41.7 s when written idle in the background and 4.3 to 11.1 s on a reclaim's path. A chat already on the NVMe saved again in 0.24 to 0.40 s (0 to 3 blocks written). The ten short restores (21k tokens, the chat app's helper conversations) took 0.25 to 0.47 s each.
+
+Limits of the comparison. Only the first warm round is comparable. The off arm did not reach rounds 2 and 3 inside its 2,700 s budget. In the on arm the chat app compacted four chats in round 2 (219k to 222k tokens summarised to 13k to 15k in 80 to 176 s), because 221k in use plus two turns crossed its 80 % line of the 262,144-token window; round 3 ran on the compacted chats (turns of 24 to 82 s) and is not comparable. Nine agent turns of the chat app (prompts of 4k to 55k tokens) ran during each arm: 37.5 min of engine time in the off arm, 3.5 min in the on arm.
+
 ## Size on the disk, and the drive (0.4.3-test)
 
 Why a chat of 100,000 tokens is gigabytes on the NVMe when its text is a few hundred kilobytes: the spill does not keep the text, it keeps what the model computed for every token, so that the next turn does not compute it again. On 2026-10-07 the 182,000-row Open WebUI chat was a 20.16 GB entry, and reading its 130,000-token copy again from cold took about 4 minutes. From an entry's manifest (the buffers' dtypes and shapes), a row is 106,496 bytes:
@@ -294,9 +339,9 @@ The usage frame carries the split beside the OpenAI fields: `usage.tandem = {"pa
 | `--suffix-store`, `--suffix-store-mb`, `--suffix-store-scope`, `--suffix-store-readonly` | the persistent suffix store |
 | `--response-cache`, `--response-cache-mb`, `--response-cache-ttl` | the response cache |
 | `--disk-cache` (`QSE_DISK_CACHE`), `--disk-cache-min-tokens`, `--disk-cache-head-anchors` | the disk tier's directory (or off), the shortest prefix it writes, a session head's anchors; its budget, TTL, admission and on/off are `settings.memory.disk_cache` |
-| `--session-spill` (`SESSION_SPILL`), `--session-spill-gb` (`SESSION_SPILL_GB`), `--session-spill-min-tokens` | live conversations on the NVMe (on, needs the disk tier), their budget (64 GB), the shortest resident conversation an eviction writes (16,384); `settings.memory.session_spill` overrides the budget live |
+| `--session-spill` (`SESSION_SPILL`), `--session-spill-gb` (`SESSION_SPILL_GB`), `--session-spill-min-tokens` | live conversations on the NVMe (on, needs the disk tier; `off` writes and reads nothing, the idle backfill with it), their budget (64 GB), the shortest resident conversation an eviction writes (16,384); `settings.memory.session_spill` overrides the budget live |
 | `--session-spill-codec` (`SESSION_SPILL_CODEC`) | `zstd` (0.4.3-test): new blocks as byte planes compressed with zstd, lossless; `off`: as they are. Blocks on the disk are read either way |
-| `--session-spill-idle` (`SESSION_SPILL_IDLE`), `--session-spill-idle-s` (`SESSION_SPILL_IDLE_S`), `--session-spill-idle-every-s` | the idle backfill (on): a conversation idle 20 s is written while its rows stay, at most every 60 s |
+| `--session-spill-idle` (`SESSION_SPILL_IDLE`), `--session-spill-idle-s` (`SESSION_SPILL_IDLE_S`), `--session-spill-idle-every-s` | the idle backfill (on): a conversation of 4,096+ tokens idle 20 s is written while its rows stay, changed blocks only, never while its slot is busy, at most every 60 s (no serve.env line for the last); skipped past the day's write budget |
 | `QSE_RECLAIM_GRAPHS` | `on` (the default): idle slots' graph sets are dropped, the least recently used first: by the KV pool's ladder after the caches and the small models and before any conversation's rows, and by an idle window over `QSE_GRAPH_POOL_GIB` (a family whose engine keeps a graph set only: Flash-Next and Ornith); `off` (`0`, `false`): never |
 | `QSE_GRAPH_POOL_GIB` | the growth of the graphs' pools over what they held after the load past which an idle window drops idle slots' graph sets, the least recently used first, down to 3/4 of it, and below which alone it captures graphs ahead (8 GiB; 0: no cap). Without the memory policy's pools probe (the policy off, or no expandable segments) there is no cap. Each drop logs `[graphs] dropped slotN: G graphs, X GiB back (why=cap\|reclaim)`; `/health` `memory.graphs` counts them |
 | `QSE_GRAPH_SET_MIN_IDLE_S` | the cap never drops the graph set of a slot that served in the last this many seconds (300); the KV pool's ladder may |

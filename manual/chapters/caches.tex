@@ -65,7 +65,7 @@ state store & whole state snapshots at prompt boundaries (session cache) and chu
 persistent suffix store & token ids the engine read and wrote, with a suffix array & disk & on, 192 MiB \\
 response cache & the tokens of an identical greedy request & memory & off \\
 disk tier & rows and anchors of prefixes prefilled more than once, and of a session's first long request & NVMe & on, 50 GB \\
-session spill & whole live conversations, at a planned stop and before an eviction & NVMe & on, 40 GB \\
+session spill & whole live conversations, at a planned stop, before an eviction and while idle & NVMe & on, 64 GB \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -141,6 +141,30 @@ The disk tier keeps what a cold grid prefill wrote, which in an agent conversati
 \code{engine/spill.py::SessionSpill} keeps whole conversations on the NVMe: the rows of every position-indexed buffer, the end anchor with its hidden spans, the newest 4 grid anchors, the token ids, \code{taint} and the session key. These are the bytes that were in the engine, so a restore is held to the gate the rows were held to in RAM. It writes at two moments. A planned stop (SIGTERM's drain) writes the resident and the parked conversation, and the next start reads the resident one back before its first request. A request of another session that is not a guest writes the resident conversation first when it has at least 16,384 tokens and the park cannot hold it. The spill writes by content, in blocks of 1,024 rows with two 64-bit sums per buffer computed on the device, so a block that did not change is not written again.
 
 Measured on the board (the 0.4.0 series): a 41,587-token conversation evicted by another session was written in 1.03~s (5.20~GB) and read back in 0.94~s. After a restart through the drain, the next turn of a 41,719-token conversation resumed at its end anchor with a time to first token of 635~ms (\measured). The NVMe's own write cache sets the bound: a sustained write ran at 4 to 5.6~GB/s for the first 16 to 24~GB and then at 0.3 to 1.3~GB/s until the drive rested.
+
+Since 0.15.3 the spill also writes while a conversation stays (the idle backfill, SRV-E6): a thread of its own writes each slot's conversation of 4,096 tokens or more once it has been idle \code{--session-spill-idle-s} (20~s), at most every \code{--session-spill-idle-every-s} (60~s), never while its slot is busy, changed blocks only, and skipped past the day's write budget. The KV pool's reclaim then takes, in this order: the caches, idle slots' CUDA graph sets (SRV-795, \code{QSE_GRAPH_POOL_GIB}), the side conversations already current on the NVMe (trimmed only), the other idle side conversations (each written before its pages go, and read back on its own slot at its next turn, SRV-779), slot 0's idle conversation, the side conversations no save could write, and the park. An older copy of a chat left on a slot by a compaction goes first and is never written (\#170). The admission prices a turn whose conversation is on the NVMe by the rows past the entry (\#167); in the measurement below two such turns were still charged a cold prefill and waited 21 and 16~s (SRV-799, open). The swap does not change how many long chats are resident at once, which is the KV pool's room; it changes what a return costs. \code{--session-spill off} (\code{SESSION_SPILL=off} in serve.env) writes and reads nothing; \code{SESSION_SPILL_IDLE=off} turns off the idle backfill alone.
+
+Table~\ref{tab:spill-0153} is the warm round of a measurement on 0.15.3 (2026-11-09, 07ffd483, \measured): one DGX Spark with Flash-Next 3.05 and 8 slots, through the chat app; five chats each filled with a unique paste of about 190k tokens (221k to 225k in use), then one short turn per chat with all five sent at once; room in the KV pool for four such chats; the spill off against on, everything else the same. In the off arm the ladder evicted another resident chat's rows (6.76~GB, \code{why=no_spill}) to make the 15.9~GiB workspace for one re-read, and that chat needed the same re-read at its own turn. Only this round is comparable: the off arm ran out of its 2,700~s budget before round 2, and in the on arm the chat app compacted four chats in round 2 because 221k tokens in use plus two turns crossed its 80~\% line. Nine agent turns of the chat app ran during each arm (37.5~min of engine time in the off arm, 3.5~min in the on arm).
+
+\begin{table}[htbp]
+\centering\small
+\caption{The session spill off against on, warm round 1: five chats of 221k to 225k tokens take one short turn at once, with room for four (0.15.3, one DGX Spark, Flash-Next 3.05).}\label{tab:spill-0153}
+\begin{tabularx}{\linewidth}{@{}L{.3\linewidth}YY@{}}
+\toprule
+\hd{warm round 1} & \hd{spill off} & \hd{spill on} \\
+\midrule
+turn s, p50 / max & 764.8 / 894.2 & 64.9 / 68.3 \\
+time to first token s, p50 / max & 659.1 / 879.9 & 49.0 / 61.4 \\
+chats that waited for memory / longest wait s & 4 of 5 / 665.5 & 4 of 5 / 23.5 \\
+what the engine did & 4 of 5 read 217k to 220k tokens again, one at a time & 3 resident; 2 restored, 4.63 and 4.66~GB in 1.83 and 2.07~s, then 1,686 and 3,973 tokens forwarded \\
+\code{memory_full} / unfinished turns & 0 / 0 & 0 / 0 \\
+\midrule
+KV pool committed, max GiB & 26.4 & 28.5 \\
+MemAvailable GiB, min / median & 9.7 / 20.2 & 7.8 / 17.2 \\
+spill saves n / GB; restores n / GB & 0; 0 & 27 / 32.3; 13 / 23.7 \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \section{Compaction as a continuation}\label{sec:compaction}\index{compaction}
 
