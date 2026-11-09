@@ -2881,11 +2881,24 @@ class FlashNextEngine(FlashNextRef):
         chunk = chunk or (PREFILL_CHUNK if path == "kernels" else 2048)
         out = None
         stacks = []
-        for i in range(0, ids.numel(), chunk):
-            last = i + chunk >= ids.numel()
-            out = fwd(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
-            if keep_stack:
-                stacks.append(self.stack)
+        from engine.models.flashnext import layer_major as LM
+        starts = list(range(0, ids.numel(), chunk))
+        wins = ([[i] for i in range(len(starts))] if not (LM.ROWS > chunk and len(starts) > 1 and LM.ok(self, st))
+                else LM.groups([min(chunk, ids.numel() - a) for a in starts], LM.ROWS))
+        for win in wins:
+            last = win[-1] == len(starts) - 1
+            if len(win) > 1:
+                # SPD-249 P1 (QWEN38_FN_PF_WINDOW): the window's chunks layer-major, each chunk's own bits
+                out, hs = LM.window(self, [ids[starts[j]:starts[j] + chunk].to(self.device) for j in win], st,
+                                   head=last)
+                if keep_stack:
+                    stacks += hs
+                del hs
+            else:
+                i = starts[win[0]]
+                out = fwd(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
+                if keep_stack:
+                    stacks.append(self.stack)
             if st.length > 4096:
                 # the reference attention's score blocks grow with the context; cached blocks of one
                 # chunk fit no request of the next (a 32k prompt held tens of GB, 2026-10-11)

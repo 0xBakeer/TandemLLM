@@ -68,6 +68,10 @@ KNOBS: dict[str, tuple] = {
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone
     'FN_JOINT_PREFILL': ('0', 'engine/models/flashnext/joint_prefill.py'),
+    # SPD-249 P1: a prompt's prefill chunks go LAYER-major in windows of up to this many rows: each layer's experts
+    # once over the window's rows, the rest a chunk at a time at its own rows (every chunk's bits its chunk-major
+    # forward's); 0: chunk-major
+    'FN_PF_WINDOW': ('0', 'engine/models/flashnext/layer_major.py'),
     # SPD-249: the MTP lanes' lookup backs off where other lanes share the round (its host time comes after their
     # drafts are done): after a round the lookup gave the walk nothing, up to N rounds skip it (1, 2, 4 .. N), a round
     # that took a row the lookup shaped (its own, or a spine row it agreed with) starts over, a lone round always looks

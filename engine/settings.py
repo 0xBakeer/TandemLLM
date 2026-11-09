@@ -448,6 +448,9 @@ KNOBS: dict[str, tuple] = {
     'FN_PREFILL': ('kernels', 'engine/models/flashnext/engine.py'),
     # rows an item of the prefill kernels' MoE group GEMM takes: 64 or 32 (any other value refuses)
     'FN_GROUP_ROWS': ('64', 'tools/fn_prefill_kernels.py'),
+    # SPD-249 P1: the prefill's pair rotation takes the pairs in their rows' order (a row read once), each pair's
+    # arithmetic and place the same; 0: in the grouped order
+    'FN_PF_ROT_ROWS': ('0', 'tools/fn_prefill_kernels.py'),
     # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
     'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =

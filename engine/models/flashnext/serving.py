@@ -287,6 +287,12 @@ WS_ADD_N = 1 << 30                     # more than a chunk: the margin (the stre
 WS_MARGIN = 1.15
 
 
+def cache_mod():
+    """engine/cache.py, imported when a window first needs it (it imports this family's neighbours)."""
+    from engine import cache
+    return cache
+
+
 class FlashNextServing:
     """`FlashNextEngine` with one state and its graphs, in the server's engine interface."""
 
@@ -629,7 +635,83 @@ class FlashNextServing:
         return True
 
     def window_ok(self, i: int) -> bool:
-        return False                        # no layer-major prefill window (engine/cache.py)
+        """SPD-249 P1 (QWEN38_FN_PF_WINDOW): whether engine/cache.py's chunk loop may hand this slot a layer-major
+        window from row `i` (`prefill_window`): the knob on past one chunk, text only, never for a family built on
+        this adapter (Ornith's Qwen35MoeServing runs its own trunk). Off: chunk-major, one `forward` a chunk."""
+        if type(self) is not FlashNextServing:
+            return False
+        from engine.models.flashnext import layer_major as LM
+        return LM.ROWS > PREFILL_CHUNK and LM.ok(self.fn, self.st)
+
+    @torch.no_grad()
+    def prefill_window(self, toks: list, starts: list, bufs: list | None = None) -> tuple:
+        """SPD-249 P1: engine/cache.py's layer-major window: `toks` the prompt's chunks at `starts` (consecutive, from
+        the state's length), in windows of at most QWEN38_FN_PF_WINDOW rows (`layer_major.window`; a window of one
+        chunk runs as its `forward`), every chunk's rows its own forward's bits. `bufs[c]` (every chunk but the last,
+        buffers of `state_empty`'s shapes): the sections a chunk-major prefill holds at the end of chunk c (the GDN
+        and conv states and the PLE conv and context as each layer leaves them for that chunk, the chunk's last
+        streams as mtp.h_last). Returns (the last row's logits [1, 1, vocab], each chunk's streams [1, T, hc H], each
+        chunk's tap: its PLE context on the host and its streams, which `replay_taps` puts back at its line)."""
+        from engine.models.flashnext import layer_major as LM
+        fn, st = self.fn, self.st
+        self.graph_set.used()
+        self._settle_chain()
+        self._at(int(starts[0]))
+        C = len(toks)
+        self._ensure(int(starts[-1]) + int(toks[-1].numel()))
+        idx = {k: i for i, k in enumerate(self.state.buffers())}
+        hs: list = [None] * C
+        ctxs: list = [None] * C
+
+        def snap_of(c0: int):
+            def snap(ci: int, li: int) -> None:
+                c = c0 + ci
+                if li in self._ctx:
+                    ctxs[c] = ctxs[c] if ctxs[c] is not None else {}
+                    ctxs[c][li] = st.ple_ctx[li].clone()
+                if bufs is None:
+                    return
+                b = bufs[c]
+                if li in st.S:
+                    b[idx[f"gdn.S.{li}"]].copy_(st.S[li])
+                    b[idx[f"gdn.conv.{li}"]].copy_(st.conv[li])
+                if li in st.ple_conv:
+                    b[idx[f"ple.conv.{li}"]].copy_(st.ple_conv[li])
+                if li in self._ctx:
+                    b[idx[f"ple.ctx.{li}"]].copy_(st.ple_ctx[li].view(1, -1))
+            return snap
+        lg = None
+        for g in LM.groups([int(t.numel()) for t in toks], max(LM.ROWS, 1)):
+            if len(g) == 1:
+                lg = fn.prefill(toks[g[0]].view(-1), st, keep_stack=True)
+                hs[g[0]] = fn.prompt_stack
+            else:
+                lg, got = LM.window(fn, [toks[c] for c in g], st, head=g[-1] == C - 1, snap=snap_of(g[0]))
+                for c, h in zip(g, got):
+                    hs[c] = h
+            c = g[-1]
+            ctxs[c] = {li: v.clone() for li, v in st.ple_ctx.items() if li in self._ctx}
+            if bufs is not None and c < C - 1:
+                cache_mod().state_save(bufs[c], self)         # the state at this group's end: every section
+        if bufs is not None:
+            for c in range(C - 1):
+                bufs[c][idx["mtp.h_last"]].copy_(hs[c][-1:])
+        T = sum(int(t.numel()) for t in toks)
+        self._hidden = hs[-1].unsqueeze(0)
+        self._h_last.copy_(hs[-1][-1:])
+        self.stats["prefill_rows"] += T
+        return lg.view(1, 1, -1), [h.unsqueeze(0) for h in hs], [{"ctx": x, "hidden": h} for x, h in zip(ctxs, hs)]
+
+    def replay_taps(self, kept) -> None:
+        """SPD-249 P1: engine/cache.py replays a window's line (after it loaded the line's sections and set the
+        length): the PLE context as the chunk left it (the engine reads it on the host; the section buffer is its
+        copy) and the chunk's streams as the slot's `hidden_post_norm`."""
+        if not kept:
+            return
+        for li, v in (kept.get("ctx") or {}).items():
+            self.st.ple_ctx[li] = v.clone()
+        if kept.get("hidden") is not None:
+            self._hidden = kept["hidden"].unsqueeze(0)
 
     def reset(self) -> None:
         """A new sequence (`restart`), as the 27B's reset: its KV rows stay."""

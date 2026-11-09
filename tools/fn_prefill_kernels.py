@@ -71,6 +71,11 @@ def _module():
 GROUP_ROWS = int(_S.get("FN_GROUP_ROWS") or 64)
 if GROUP_ROWS not in (32, 64):
     raise ValueError(f"QWEN38_FN_GROUP_ROWS={GROUP_ROWS}: the group GEMM's items take 32 or 64 rows")
+# SPD-249 P1: `pair_rot` takes the pairs in their rows' order (a row's slots one after another, the row read once
+# from memory) and writes each to its place in the grouped layout; 0: in the grouped (expert) order, where each pair
+# reads its row again (past ~4k rows a chunk the rows leave L2: 30.96 ms at 32,768 rows against 8 x 3.0 at 4,096,
+# 2026-11-09 on layer 2's real routing). The same arithmetic and the same writes either way
+ROT_ROWS = _S.get("FN_PF_ROT_ROWS") == "1"
 
 
 def group_plan(ids_flat: torch.Tensor, groups: int, rows: int = GROUP_ROWS) -> dict:
@@ -119,7 +124,15 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     row = torch.div(g["order"], S, rounding_mode="floor").to(torch.int32)
     kbmax = bank.ks[-1]
     xh = torch.empty(2, R, bank.H, dtype=torch.float16, device=x.device)
-    mod.pre_pair_rot(x, row, g["eid"], prow, bank.tr, bank.kb, bank.su, bank.sv, 0, xh)
+    if ROT_ROWS:
+        # pair p = row p // S, slot p % S: its expert is ids' own, its padded row the grouped layout's
+        prow_o = torch.empty_like(prow)
+        prow_o.index_copy_(0, g["order"], prow)
+        row_o = torch.arange(M, dtype=torch.int32, device=x.device).repeat_interleave(S)
+        mod.pre_pair_rot(x, row_o, ids.reshape(-1).to(torch.int32).contiguous(), prow_o, bank.tr, bank.kb, bank.su,
+                         bank.sv, 0, xh)
+    else:
+        mod.pre_pair_rot(x, row, g["eid"], prow, bank.tr, bank.kb, bank.su, bank.sv, 0, xh)
     ygu = torch.empty(R, 2 * bank.I, dtype=torch.bfloat16, device=x.device)
     mod.pre_group_gemm(xh, g["cnt"], g["pstart"], g["iend"], bank.tr, bank.kb, bank.su, bank.sv, 0, bank.I, ygu, None,
                        g["items"], rows // 16, kbmax)
