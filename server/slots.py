@@ -107,16 +107,29 @@ class GuardedPool(kvpool.KVPool):
     engine/kvpool.py: that file counts in the spill's and the disk tier's fingerprints, and new bytes there would
     leave every entry on the NVMe unreadable."""
     guard = None
+    #: SRV-797: (rows) -> bytes or None, the guard while a prefill of `rows` runs beside the admitted ones
+    guard_at = None
+
+    def _capped(self, fn, *args) -> int:
+        try:
+            g = fn(*args)
+        except Exception:                                          # noqa: BLE001
+            g = None
+        return self.hard_floor_cfg if g is None else min(self.hard_floor_cfg, max(0, int(g)))
 
     @property
     def hard_floor(self) -> int:
         if self.guard is None or self.hard_floor_cfg <= 0:
             return self.hard_floor_cfg
-        try:
-            g = self.guard()
-        except Exception:                                          # noqa: BLE001
-            g = None
-        return self.hard_floor_cfg if g is None else min(self.hard_floor_cfg, max(0, int(g)))
+        return self._capped(self.guard)
+
+    def floor_at(self, rows: int = 0) -> int:
+        """SRV-797: the hard floor the gate holds while a prefill of `rows` runs (the guard at the class of it or of
+        the longest admitted prefill, at most the configured value): what the admission checks a request's pages
+        against, so it never admits one whose pages the gate then refuses. `hard_floor` without `guard_at` or rows."""
+        if self.guard_at is None or self.hard_floor_cfg <= 0 or int(rows) <= 0:
+            return self.hard_floor
+        return self._capped(self.guard_at, int(rows))
 
     @hard_floor.setter
     def hard_floor(self, value: int) -> None:
@@ -144,10 +157,11 @@ class Admission:
     workspace leaves the reservation when it has run (`prefilled`), its KV part stays until the
     release. Without /proc/meminfo (a Mac, a test without `meminfo`) every
     request is admitted and says so. SRV-785: the floor is the live guard (`guard`, `floor_at`), never above the
-    configured one (`cap`)."""
+    configured one (`cap`). SRV-797: a request with KV pages is checked as the KV pool's gate will see its prefill's
+    pages too (`pool_floor`, `check`)."""
 
     def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None,
-                 spare=None, committed=None, guard=None):
+                 spare=None, committed=None, guard=None, pool_floor=None, relieve=None, unrelieve=None):
         self.cap = int(floor_bytes)
         # SRV-785: (rows) -> (bytes, inputs) or None, the floor from the live state (`guard`) at the class of the
         # longest prefill in flight or this one (`rows`); never above `cap`. None, or no answer: `cap`, as before
@@ -174,6 +188,13 @@ class Admission:
         # is the pages it may still commit; what its slot committed since it was admitted has
         # already left MemAvailable and is credited, so it is never counted twice
         self.committed = committed
+        # SRV-797: (rows) -> bytes, the KV pool's hard floor while a prefill of `rows` runs (`GuardedPool.floor_at`);
+        # None: no pool
+        self.pool_floor = pool_floor
+        # SRV-797: (key, bytes) -> bytes, the caches' growth room the request is let in on instead of waiting for it
+        # (server/app.py `_par_relieve`), and (key) -> None that gives it back, once its prefill has run or it ends
+        self.relieve, self.unrelieve = relieve, unrelieve
+        self.relieved: dict = {}           # key -> held for its whole life (True) or until its prefill has run
         self.lock = threading.Lock()
         self._admit = threading.Lock()
         self.held: dict = {}
@@ -181,6 +202,7 @@ class Admission:
         self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
         self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
+        self.holds: dict = {}              # SRV-797: key -> until when (monotonic) a lane backs off, out of the line
         self.last_refused: dict | None = None   # 0.8.2: the last check that said no (`check`'s d)
         self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
                       "timeouts": 0, "alone": 0, "lone_checked": 0, "peak_waits": 0}
@@ -238,12 +260,22 @@ class Admission:
         return self.floor_at()[0]
 
     def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False,
-              rows: int = 0) -> tuple[bool, dict]:
+              rows: int = 0, kv_prompt: int | None = None) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
         it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
         the allocator's free default-pool blocks it takes before any new memory (`spare`), against the room's
         charge, the larger of the two (SRV-787). `rows`: its prompt's rows, the class of the guard's chunk
-        (SRV-785, `floor_at`)."""
+        (SRV-785, `floor_at`).
+
+        SRV-797: with the KV pool (`pool_floor`), also what its gate sees at the prefill's pages: `kv_prompt` (of
+        `kv`; all of it when None) commits while the prefill runs, under the pool's floor at its class, and this
+        request's workspace is not out of MemAvailable at those commits: a family maps the prompt's rows before its
+        prefill (`kv.ensure`), or each chunk's rows before that chunk and gives the allocator's blocks back after every
+        chunk once the state holds more than 4,096 rows (its engine's `prefill`), so one chunk's workspace is all a
+        commit can see, and the pool's floor holds that chunk already (the guard's step). The rest of `kv`
+        commits once the prefill has run, under the admission's floor as before. (The one overlap: a cold prompt's
+        first 4,096 rows' workspace at its second chunk's commit; a refusal there gives way once, and the
+        continuation resumes past 4,096 rows.)"""
         floor, gin = self.floor_at(rows)
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
@@ -263,6 +295,16 @@ class Admission:
                 gin = dict(gin, step=int(gin["step"]) - own, own=own)
                 gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
                 floor = min(self.cap, gin["guard"])
+        # SRV-797: the prompt's pages commit through the KV pool, whose gate refuses one that would take MemAvailable
+        # under its hard floor while this prefill runs (its whole chunk counted, `GuardedPool.floor_at`). Checked
+        # against the admission's floor alone, a request whose first pages the gate refused was admitted, gave way and
+        # was admitted again (2026-11-08: 16 times at 6.9 >= 5.4 while the pool held 8.4 GiB, then `memory_full`)
+        pf = None
+        if self.pool_floor is not None and int(kv) > 0:
+            try:
+                pf = int(self.pool_floor(int(rows)))
+            except Exception:                                      # noqa: BLE001
+                pf = None
         spare = 0
         if over_peak and self.spare is not None:
             try:
@@ -291,18 +333,26 @@ class Admission:
         # flight, nor once the reserve is at the peak (`Budget.admit`: reserve + bytes + `ws_now` <= peak), so the
         # room and the over-peak workspace never leave MemAvailable together (2026-11-05: a lone 128k turn found
         # 25.0 - 8.5 - 8.0 - 0.8 = 7.7 < 10 and waited 900 s with the engine idle). Without a policy, the sum
-        under = grow + held_ws + (0 if over_peak else need_ws)
-        if room is None:
-            take = under + (new_ws if over_peak else 0)
-        elif over_peak:
-            take = max(min(room, under), held_ws + new_ws)
-        else:
-            take = min(room, under)
+        def taken(own: bool) -> tuple[int, int]:
+            """(the workspaces' charge, `under`), with this request's workspace or without it."""
+            under_ = grow + held_ws + (need_ws if own and not over_peak else 0)
+            mine = new_ws if own else 0
+            if room is None:
+                return under_ + (mine if over_peak else 0), under_
+            if over_peak:
+                return max(min(room, under_), held_ws + mine), under_
+            return min(room, under_), under_
+        take, under = taken(True)
         # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
         # its room, always counted
         take += held_kv + int(kv)
         after = avail - take
         d.update(avail=avail, after=after, ok=after >= floor, room=room, under=under)
+        if pf is not None:
+            kp = int(kv) if kv_prompt is None else max(0, min(int(kv), int(kv_prompt)))
+            after_p = avail - taken(False)[0] - held_kv - kp
+            d["prefill"] = {"after": after_p, "floor": pf, "kv": kp, "ok": after_p >= pf}
+            d["ok"] = d["ok"] and after_p >= pf
         if not d["ok"]:
             self.last_refused = d
         if count:
@@ -312,7 +362,7 @@ class Admission:
         return d["ok"], d
 
     def reserve(self, key, need: int, kv: int = 0, owner=None, over_peak: bool = False,
-                rows: int = 0) -> tuple[bool, dict]:
+                rows: int = 0, kv_prompt: int | None = None) -> tuple[bool, dict]:
         """Check and record in one step, so two requests cannot both take the last bytes. SRV-775: a
         request with nothing else in flight is checked as well (`alone` and `lone_checked` count it):
         the engine's memory policy keeps it under the declared peak, not the box above its floor
@@ -333,7 +383,25 @@ class Admission:
                     base = int(self.committed(owner))
                 except Exception:                                  # noqa: BLE001
                     base = 0
-            ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows)
+            ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows, kv_prompt=kv_prompt)
+            if not ok and self.relieve is not None and d.get("after") is not None:
+                # the whole request's check short too: the answer's pages need the room after its prefill as well
+                life = d["after"] < d["floor"]
+                # SRV-797: short by the caches' room alone (what they MAY still take): let in on it, not held back
+                after_, floor_ = self.binding(d)
+                try:
+                    cut = int(self.relieve(key, int(floor_) - int(after_)) or 0)
+                except Exception:                                  # noqa: BLE001
+                    cut = 0
+                if cut:
+                    ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows, kv_prompt=kv_prompt,
+                                       count=False)
+                    if ok:
+                        d["relieved"], d["relieved_life"] = cut, life
+                        self.relieved[key] = life
+                        self.stats["relieved"] = self.stats.get("relieved", 0) + 1
+                    else:
+                        self._unrelieve(key)
             if alone:
                 self.stats["alone"] += 1
                 self.stats["lone_checked"] += 1
@@ -346,12 +414,24 @@ class Admission:
                         self.rows[key] = int(rows)
                     self.waiting.pop(key, None)
                     self.prio.pop(key, None)
+                    self.holds.pop(key, None)
                 self.stats["admitted"] += 1
         return ok, d
 
+    def _unrelieve(self, key) -> None:
+        self.relieved.pop(key, None)
+        if self.unrelieve is not None:
+            try:
+                self.unrelieve(key)
+            except Exception:                                      # noqa: BLE001
+                pass
+
     def prefilled(self, key) -> None:
         """SRV-775: `key`'s prefill has run: its workspace leaves the reservation, its KV part stays until
-        `release`."""
+        `release`. SRV-797: the caches' room it was let in on for its prefill alone is theirs again; room its answer's
+        pages were counted on stays held until `release`."""
+        if key in self.relieved and not self.relieved[key]:
+            self._unrelieve(key)
         with self.lock:
             self.rows.pop(key, None)
             if key in self.held:
@@ -367,7 +447,17 @@ class Admission:
                 self.waiting[key] = now
                 self.prio[key] = max(0, min(2, int(prio)))
             mine = self._rank(key, now)
-            return 1 + sum(1 for k in self.waiting if k != key and self._rank(k, now) < mine)
+            return 1 + sum(1 for k in self.waiting if k != key and self._in_line(k, now) and self._rank(k, now) < mine)
+
+    def _in_line(self, key, now: float) -> bool:
+        """SRV-797: a lane that backs off after giving way (`hold`) keeps its place but holds no one back until its
+        backoff ends; under the lock."""
+        return self.holds.get(key, 0.0) <= now
+
+    def hold(self, key, until: float) -> None:
+        """SRV-797: `key` backs off until `until` (monotonic): requests that fit go meanwhile."""
+        with self.lock:
+            self.holds[key] = float(until)
 
     def _rank(self, key, now: float) -> tuple:
         """Where `key` stands in the line (smaller first); under the lock. A lane `first` put at the head (a
@@ -382,7 +472,7 @@ class Admission:
         line instead of taking the bytes the waiter is held for."""
         with self.lock:
             now = time.monotonic()
-            return any(self._rank(k, now)[0] < -int(prio) for k in self.waiting)
+            return any(self._in_line(k, now) and self._rank(k, now)[0] < -int(prio) for k in self.waiting)
 
     def ahead_higher(self, key) -> int:
         """The waiters ahead of `key` because their chat's priority is higher (not because they came first)."""
@@ -391,27 +481,42 @@ class Admission:
                 return 0
             now = time.monotonic()
             mine = self._rank(key, now)
-            return sum(1 for k in self.waiting if k != key and self._rank(k, now)[0] < mine[0])
+            return sum(1 for k in self.waiting
+                       if k != key and self._in_line(k, now) and self._rank(k, now)[0] < mine[0])
 
-    def first(self, key) -> None:
+    def first(self, key, at: float | None = None) -> None:
         """SRV-709: `key` goes to the head of the line for memory (a lane that gave its memory back
         mid-answer resumes before any request that has not started); among such lanes, the one
-        that gave way first."""
+        that gave way first. SRV-797: by when it first gave way (`at`, monotonic; now when None): the newest
+        was put first, so a lane that kept giving way could be passed for ever."""
         with self.lock:
-            self.waiting[key] = min([0.0] + list(self.waiting.values())) - 1.0
+            self.waiting[key] = (time.monotonic() if at is None else float(at)) - 1e9
 
     def unwait(self, key) -> None:
         with self.lock:
             self.waiting.pop(key, None)
             self.prio.pop(key, None)
+            self.holds.pop(key, None)
 
     def release(self, key) -> None:
+        if key in self.relieved:
+            self._unrelieve(key)
         with self.lock:
             self.held.pop(key, None)
             self.kv.pop(key, None)
             self.rows.pop(key, None)
             self.waiting.pop(key, None)
             self.prio.pop(key, None)
+            self.holds.pop(key, None)
+
+    @staticmethod
+    def binding(d: dict) -> tuple:
+        """SRV-797: (after, floor) of the check that is shorter: the prefill's pages under the KV pool's floor
+        (`check`'s "prefill"), else the whole request under the admission's floor."""
+        p = d.get("prefill")
+        if p is not None and d.get("after") is not None and p["floor"] - p["after"] > d["floor"] - d["after"]:
+            return p["after"], p["floor"]
+        return d.get("after"), d.get("floor")
 
     @staticmethod
     def describe(d: dict) -> str:
@@ -446,9 +551,18 @@ class Admission:
         else:
             mid = (f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - this request "
                    f"{g(d['need'] - spare)}" + (" new" + free if over and spare else ""))
+        p = d.get("prefill")
+        ok_all = d["after"] >= d["floor"]
+        # SRV-797: the prefill's pages against the KV pool's floor, when that is what holds it back
+        pre = ("" if p is None or p["ok"] else
+               f"; its prefill's pages: MemAvailable {g(d['avail'])} - "
+               + "the other workspaces" + f" - KV pages {g(p['kv'])} = "
+               f"{g(p['after'])} GiB (< the KV pool's floor {g(p['floor'])} while its prefill runs)")
         return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
-                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])}"
-                + Admission.guard_words(d.get("guard")) + ")"
+                + f" = {g(d['after'])} GiB ({'>=' if ok_all else '<'} floor {g(d['floor'])}"
+                + Admission.guard_words(d.get("guard")) + ")" + pre
+                + (f"; let in on {g(d['relieved'])} GiB of the caches' room (held from them until "
+                   + ("it ends)" if d.get("relieved_life") else "its prefill has run)") if d.get("relieved") else "")
                 + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"
                    if d.get("kv") or d.get("kv_reserved") else ""))
 

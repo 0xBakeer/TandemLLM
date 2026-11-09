@@ -16,10 +16,12 @@ It refuses the production ledger (it is a test run).
 Words in the last user message steer it, for the e2e's error and edge states:
 
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
-    FAKE_POOL_FULL  the KV pool's gate refuses after five tokens (engine/kvpool.py `PoolFull`,
-                  SRV-709): the answer ends with the `memory_full` error
+    FAKE_POOL_FULL  the KV pool's gate refuses the block that would write the sixth token, before that block
+                  runs, as the engine's `_ensure` does (engine/kvpool.py `PoolFull`, SRV-709)
     FAKE_POOL_FULL_ONCE  the same, the first time per message only (SRV-709: with another lane
                   running, the lane gives way and goes on)
+    FAKE_PREFILL_POOL_FULL_ONCE  the gate refuses in the prefill, before any token, the first time per
+                  message only (SRV-797: alone, the request gives way, waits and goes on)
     FAKE_CALL_NOTOOLS  the answer calls a tool named `tool`, offered or not (SRV-247)
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
@@ -410,6 +412,10 @@ def load(app, a) -> None:
         if think is not None:
             think.start(ctx)
         t0 = time.perf_counter()
+        # SRV-797: a test's paged KV (`kv.ensure`): the prompt's rows are committed before the prefill, as the 27B's
+        ens = getattr(getattr(app.STATE.get("engine"), "kv", None), "ensure", None)
+        if ens is not None:
+            ens(len(ctx))
         info = getattr(on_prefill, "info", None)
         warm = "FAKE_WARM_PREFILL" in user
         chunked = warm or "FAKE_SLOW_PREFILL" in user
@@ -430,9 +436,16 @@ def load(app, a) -> None:
                     _lane("prefill")
         else:
             app._par_sleep(min(2.0, 0.02 + 0.0001 * (len(ctx) - reused)))
+        if "FAKE_PREFILL_POOL_FULL_ONCE" in user and ("prefill", user) not in _POOL_FULL_SEEN:
+            _POOL_FULL_SEEN.add(("prefill", user))
+            from engine import kvpool
+            raise kvpool.PoolFull("KV pool: committing 4 MiB for slot1 would leave 8.4 GiB available, under the "
+                                  "hard floor 8.4 GiB (FAKE_PREFILL_POOL_FULL_ONCE)")
         app.STATE["last_prefill"] = {"reused": reused, "forwarded": len(ctx) - reused,
                                      "ms": (time.perf_counter() - t0) * 1e3,
                                      "kind": "prefix" if reused else None}
+        rec_ = getattr(on_prefill, "rec", None)
+        app._par_prefilled(getattr(rec_, "request_id", None))     # SRV-775: as the real prefill, its workspace free
         seen.append(ctx)
         reasoning, answer = _reply(user, tools, opened)
         close = [THINK_CLOSE] + tok.encode_text("\n\n") if opened else []
@@ -466,6 +479,10 @@ def load(app, a) -> None:
         app.STATE["last_ctx"] = ctx
         start = len(ctx)
         n, i = 0, 0
+        if "POOL_FULL" in user:
+            # a lane that gave way reads its prompt and its text again (SRV-709): the answer goes on after that text,
+            # as the real engine's does, not from its start
+            i = next((k for k in range(min(len(ids), len(ctx)), 0, -1) if ctx[-k:] == ids[:k]), 0)
         while i < len(ids):
             block = ids[i:i + 4]
             i += len(block)
@@ -494,20 +511,24 @@ def load(app, a) -> None:
             if n:
                 app._par_sleep(len(block) / rate)
                 bs.block(15, len(block) - 1)
+            # the gate refuses before the block runs (the engine's `_ensure`): nothing of it observed or yielded
+            if n <= 5 < n + len(block):
+                if "FAKE_POOL_FULL_ONCE" in user and user not in _POOL_FULL_SEEN:
+                    _POOL_FULL_SEEN.add(user)
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot1 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL_ONCE)")
+                if "FAKE_POOL_FULL" in user and "FAKE_POOL_FULL_ONCE" not in user:
+                    from engine import kvpool
+                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot0 would leave 9.9 GiB "
+                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL)")
+            if ens is not None:
+                ens(len(ctx) + len(block))
             if think is not None:
                 think.observe(block)          # as the real loop: the block, before it is yielded
             for t in block:
                 if "FAKE_ERROR" in user and n == 5:
                     raise RuntimeError("the fake engine failed on purpose (FAKE_ERROR)")
-                if "FAKE_POOL_FULL_ONCE" in user and n == 5 and user not in _POOL_FULL_SEEN:
-                    _POOL_FULL_SEEN.add(user)
-                    from engine import kvpool
-                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot1 would leave 9.9 GiB "
-                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL_ONCE)")
-                if "FAKE_POOL_FULL" in user and "FAKE_POOL_FULL_ONCE" not in user and n == 5:
-                    from engine import kvpool
-                    raise kvpool.PoolFull("KV pool: committing 64 MiB for slot0 would leave 9.9 GiB "
-                                          "available, under the hard floor 10.0 GiB (FAKE_POOL_FULL)")
                 if n == 0:
                     bs.first()
                 if lpr is not None:
