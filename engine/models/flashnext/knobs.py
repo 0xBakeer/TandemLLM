@@ -64,6 +64,14 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the round runner hands a lane's tree over when its tokens are known (before its cuts and staging): its PLE
     # rows are read into the table's row cache on the reader thread, the verify's own read finds them there; 0: off
     'FN_PLE_PREFETCH': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P2: a prompt chunk's mixers feed the same library fp32 GEMMs the same inputs with fewer passes: n's fp32
+    # form from the inject's launch (with FN_PF_INJ_FUSED), a's from one launch (tools/fn_pf_hc.py `mix`; the bits of
+    # `mm_rows`, the torch silu, `mm_rows`, `mix_tail`); 0: those
+    'FN_PF_HC_FUSED': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P2: a prompt chunk's injects (the layer output into the streams and the next site's norm) in a CTA a row
+    # with 16-byte loads (tools/fn_pf_hc.py `inject_norm`: fn_kernels.inject_norm's bits, the norm's sum in its order);
+    # 0: fn_kernels.inject_norm
+    'FN_PF_INJ_FUSED': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: a prefill burst's prompts in one forward (`FlashNextServing.prefill_joint`, joint_prefill.py): each
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone

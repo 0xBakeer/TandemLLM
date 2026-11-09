@@ -26,7 +26,7 @@ import re
 
 #: the inline CUDA extensions, by the name their module asks `arch_flags` with
 INLINE = ("exl3_linear", "exl3_tall", "exl3_relu2", "exl3_frag", "fn_kernels", "fn_prefill_kernels",
-          "fn_seq_kernels", "nvfp4_skinny", "l2_prefetch")
+          "fn_seq_kernels", "nvfp4_skinny", "l2_prefetch", "fn_pf_hc")
 
 
 class NoInlineBuild(RuntimeError):
