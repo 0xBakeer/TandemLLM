@@ -91,10 +91,60 @@ def instrument(eng: FlashNextEngine) -> PartTimer:
                       ("qsa_pool", "qsa pool"), ("gdn_pre", "gdn conv + gates")):
         T.wrap(SK, name, lab)
     from tools import fn_prefill_kernels as PK
-    for name, lab in (("moe_grouped", "moe experts"), ("mm_rows", "library GEMM rows (mixers, router, a/b, ple)"),
-                      ("mix_tail", "mixer up")):
+    from tools import gdn_prefill_kernels as GK
+    fam = weight_families(eng)
+
+    def mm_label(x, w):
+        return "library GEMM rows: " + fam.get(id(w), "other")
+    T.wrap(PK, "mm_rows", mm_label)
+    for name, lab in (("moe_grouped", "moe experts"), ("mix_tail", "mixer up"), ("qsa_scores_rows", "attention qsa")):
         T.wrap(PK, name, lab)
+    T.wrap(GK, "fused_chunk_prefill", "gdn delta rule")
     return T
+
+
+def weight_families(eng: FlashNextEngine) -> dict:
+    """SPD-249 P0: id(weight) -> the family `mm_rows` serves it to (mixers, router, GDN a|b, PLE)."""
+    out = {}
+    for k, w in eng.W.items():
+        if k.endswith((".down_inject", ".input_mix_weight_up.weight")):
+            out[id(w)] = "mixers"
+        elif k.endswith("mlp.router"):
+            out[id(w)] = "router"
+        elif k.endswith("linear_attn.ab"):
+            out[id(w)] = "gdn a|b"
+        elif ".ple." in k:
+            out[id(w)] = "ple"
+    return out
+
+
+#: SPD-249 P0: a kernel's stage by its name (first match), for the stage table of a prefill profile
+STAGES = (
+    ("expert grouped GEMMs", ("group_gemm_kernel",)),
+    ("expert rotations + combine + routing", ("pair_rot_kernel", "pair_silu_rot_kernel", "moe_combine_kernel",
+                                              "router_kernel", "RadixSort", "radixSort", "DeviceScan",
+                                              "kernelHistogram", "histogram")),
+    ("hyper-connection norms + mix tails", ("inject_norm_kernel", "hc_norm_kernel", "mix_tail_kernel",
+                                           "mix_up", "combine_inject")),
+    ("EXL3 projections: rotations", ("rot_in_kernel", "rot_out_kernel")),
+    ("EXL3 projections: slab decode", ("recon_kernel",)),
+    ("library fp32 GEMM (mm_rows)", ("magma_sgemm", "sgemm", "gemmSN", "gemv2T", "gemvx")),
+    ("library fp16 GEMM (EXL3 slabs)", ("s16816gemm", "s1688gemm", "nvjet", "cutlass_80_tensorop", "xmma")),
+    ("DeltaNet kernels", ("_scan", "_intra", "gdn_pre_kernel", "gated_norm_kernel", "fused_chunk", "_prep",
+                          "chunk_", "_ut", "_wy")),
+    ("attention core + QSA", ("_attn_rows", "attn_prep_kernel", "qsa_", "gate_mul_kernel")),
+    ("PLE kernels", ("ple_", "decode_rows", "_decode")),
+    ("copies and elementwise", ("direct_copy", "copy_kernel", "Memcpy", "Memset", "elementwise_kernel",
+                                "FillFunctor", "reduce_kernel", "index_elementwise", "index_copy", "index_select",
+                                "indexSelect", "cat_", "CatArray", "fill_", "scatter", "gather")),
+)
+
+
+def stage_of(name: str) -> str:
+    for stage, keys in STAGES:
+        if any(k in name for k in keys):
+            return stage
+    return "other kernels"
 
 
 def run(eng: FlashNextEngine, ids: list[int], path: str, chunk: int) -> float:
@@ -154,7 +204,15 @@ def main() -> None:
                 if us:
                     per[e.key] = (per.get(e.key, (0.0, 0))[0] + us / 1e6, e.count)
             row["gpu_s"] = round(sum(v[0] for v in per.values()), 2)
-            row["kernels"] = [(k[:80], round(v[0], 3), v[1]) for k, v in sorted(per.items(), key=lambda kv: -kv[1][0])[:a.kernels]]
+            row["kernels"] = [(k[:160], round(v[0], 3), v[1]) for k, v in sorted(per.items(), key=lambda kv: -kv[1][0])[:a.kernels]]
+            stages: dict = defaultdict(lambda: [0.0, 0, 0])
+            for k, (s_, n_) in per.items():
+                g = stages[stage_of(k)]
+                g[0] += s_
+                g[1] += n_
+                g[2] += 1
+            row["stages_s"] = {k: (round(v[0], 3), v[1], v[2]) for k, v in sorted(stages.items(), key=lambda kv: -kv[1][0])}
+            row["kernel_kinds"] = len(per)
         row["mem_gib"] = mem_available_gib()
         res["rows"].append(row)
         print(f"[prefill-profile] {json.dumps(row)}", flush=True)
