@@ -72,6 +72,8 @@ class _Eng:
     forward_pre = E.FlashNextEngine.forward_pre
     trunk = E.FlashNextEngine.trunk
     _mix_pre = E.FlashNextEngine._mix_pre
+    _inject_pre = E.FlashNextEngine._inject_pre
+    _n32_clear = E.FlashNextEngine._n32_clear
     _moe_pre = E.FlashNextEngine._moe_pre
     moe_group_rows = None                # the grouped GEMM's default item rows, as FlashNextEngine
     prefill_path = "kernels"

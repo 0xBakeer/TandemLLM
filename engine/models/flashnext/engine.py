@@ -63,6 +63,15 @@ PLE_LATE = _S.get("FN_PLE_LATE") == "1"
 GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
 #: SPD-249: the mixers' down GEMV writes the mix_up's A in its own launch (`fn_kernels.gemv_mix`); 0: mix_a apart
 MIX_FUSED = _S.get("FN_MIX_FUSED") == "1"
+#: SPD-249 P2: a prompt chunk's mixers in two launches a site (`_mix_pre`, tools/fn_pf_hc.py), the same bits; 0: the
+#: library GEMMs with silu and mix_tail apart
+PF_HC_FUSED = _S.get("FN_PF_HC_FUSED") == "1"
+#: SPD-249 P2: a prompt chunk's injects in a CTA a row (`_inject_pre`, tools/fn_pf_hc.py), the same bits; 0: the
+#: decode path's inject_norm
+PF_INJ_FUSED = _S.get("FN_PF_INJ_FUSED") == "1"
+#: SPD-249 P6: the pipeline stages of a prompt chunk's attention split launch (`_attn_pre`), the same bits; 2: the
+#: decode path's launch
+PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 2)
 #: SPD-249: a joint pass's GDN conv and gates of every state in one launch a layer (`gdn_pre_multi`); 0: a launch a state
 GDN_PRE_MULTI = _S.get("FN_GDN_PRE_MULTI") == "1"
 #: SPD-249: a joint pass leaves up to N parked GDN rows parked (no state write-back that round; the next call walks
@@ -443,13 +452,13 @@ class FlashNextEngine(FlashNextRef):
             else:
                 out = self._attn1(x, li, st) if step else (self._attn_pre(x, li, st) if pre else
                                                            self.attention(x, li, st, positions))
-            h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
-                                 self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+            h, n = (self._inject_pre if pre else K.inject_norm)(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                                                                self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
             x, di = mix(n, p + "mlp_hyper_connection")
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
             if pre:
-                h, n = K.inject_norm(h, self._moe_pre(x, li), di, R, nxt, hc, eps)
+                h, n = self._inject_pre(h, self._moe_pre(x, li), di, R, nxt, hc, eps)
             elif x.shape[0] <= self.MOE_ROWS:
                 yd, ids, wts = self.moe_parts(x, li)
                 if step and not self._write:
@@ -501,6 +510,7 @@ class FlashNextEngine(FlashNextRef):
             e = self._image_rows(e, st, st.length)
         h = e.repeat(1, self.cfg.hc_count)
         n = self.trunk(h, tokens, st, None, pre=True)
+        self._n32_clear()
         st.length += T
         self._pre = None
         if head == "none":
@@ -545,13 +555,46 @@ class FlashNextEngine(FlashNextRef):
 
     def _mix_pre(self, n, p):
         """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
-        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings."""
+        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings. SPD-249 P2
+        (QWEN38_FN_PF_HC_FUSED): the same GEMMs of the `mm_rows` mode that runs on the same values, a from one launch
+        and, where the GEMM reads fp32, n's fp32 form from the inject's launch when it wrote one (`_inject_pre`;
+        tools/fn_pf_hc.py `mix`)."""
         from tools import fn_prefill_kernels as PK
         c = self.cfg
-        di = PK.mm_rows(n, self.W[p + ".down_inject"])
+        wd, wu = self.W[p + ".down_inject"], self.W[p + ".input_mix_weight_up.weight"]
         R = self.W[p + ".rank"]
+        st = getattr(self, "_n32", None)
+        ent = st.pop(id(n), None) if st else None
+        if PF_HC_FUSED:
+            from tools import fn_pf_hc as HC
+            if HC.mix_ok(n, c.hc_count):
+                return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count)
+        di = PK.mm_rows(n, wd)
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_tail(PK.mm_rows(a, self.W[p + ".input_mix_weight_up.weight"]), n, c.hc_count), di
+        return PK.mix_tail(PK.mm_rows(a, wu), n, c.hc_count), di
+
+    def _inject_pre(self, h, out, di, R, w, hc, eps):
+        """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits
+        in a CTA a row (tools/fn_pf_hc.py); with QWEN38_FN_PF_HC_FUSED too and a mixer GEMM that reads fp32, the same
+        launch writes n's fp32 form for the next `_mix_pre` (kept by n's identity until that call takes it, or
+        `_n32_clear`)."""
+        from tools import fn_kernels as K
+        if PF_INJ_FUSED:
+            from tools import fn_pf_hc as HC
+            if HC.inject_ok(h, out, hc):
+                want = w is not None and PF_HC_FUSED and HC.wants_n32()
+                hn, nn, n32 = HC.inject_norm(h, out, di, R, w, hc, eps, n32=want)
+                if n32 is not None:
+                    if getattr(self, "_n32", None) is None:
+                        self._n32 = {}
+                    self._n32[id(nn)] = (nn, n32)
+                return hn, nn
+        return K.inject_norm(h, out, di, R, w, hc, eps)
+
+    def _n32_clear(self) -> None:
+        """Drop the fp32 forms no mixer took (the last layer's, which feeds the final mixer's own kernels)."""
+        if getattr(self, "_n32", None):
+            self._n32.clear()
 
     def _moe_pre(self, x, li):
         """The MoE of a chunk: the router (library GEMM, the router kernel), every pair's expert output
@@ -604,7 +647,7 @@ class FlashNextEngine(FlashNextRef):
                 sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls)
                 SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
                 del sc
-        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
+        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES)
         y = K.gate_mul(o, qkv, c.head_dim)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
@@ -2950,10 +2993,11 @@ class FlashNextEngine(FlashNextRef):
         n = K.hc_norm(h, self.W[p + "attn_hyper_connection.hc_norm.weight"], H, eps)
         x, di = self._mix_pre(n, p + "attn_hyper_connection")
         out = self._attn_pre(x, MTP, st_m)
-        h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
-                             self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+        h, n = self._inject_pre(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                                self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
         x, di = self._mix_pre(n, p + "mlp_hyper_connection")
-        h, _ = K.inject_norm(h, self._moe_pre(x, MTP), di, self.W[p + "mlp_hyper_connection.rank"], None, hc, eps)
+        h, _ = self._inject_pre(h, self._moe_pre(x, MTP), di, self.W[p + "mlp_hyper_connection.rank"], None, hc, eps)
+        self._n32_clear()
         st_m.length += T
         self._pre = None
         return h
