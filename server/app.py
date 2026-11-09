@@ -756,9 +756,22 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
 #: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
 KV_RECOMPUTE_MAX = 16
-#: SRV-E6: the KV pool's ladder drops idle slots' captured graphs after slot 0's conversation (`on`; off by default:
-#: the re-capture per slot is unmeasured, and only a family with `drop_idle_graphs` gives anything back)
-RECLAIM_GRAPHS = (os.environ.get("QSE_RECLAIM_GRAPHS", "off") or "off") == "on"
+#: SRV-E6, SRV-795: the KV pool's ladder drops idle slots' graph sets, the least recently used first, after the
+#: caches and the small models and before any conversation's rows, and an idle window over the cap drops them too
+#: (`off`, `0`, `false`: never). Only a family whose engine keeps a graph set (`graph_set`, `drop_graphs`:
+#: engine/models/graph_set.py) gives anything back
+RECLAIM_GRAPHS = (os.environ.get("QSE_RECLAIM_GRAPHS") or "on").strip().lower() not in ("off", "0", "false", "no")
+#: SRV-795: the growth of the graphs' pools over what they held after the load that an idle window brings back
+#: down to GRAPH_LOW_WATER of it (dropping idle slots' graph sets, the least recently used first) and captures no
+#: graph past (GiB; 0: no cap; no cap either without the memory policy's pools probe). 8: the memory policy leaves up
+#: to peak - ceiling - the smallest prefill's workspace of the graphs' scratch out of its ceiling (8.25 GiB live), so
+#: under the cap the scratch stays inside what the policy budgets for it. Live on 2026-11-08 the pools held 1.41 GiB
+#: after the load and 33.0 GB after 29 h
+GRAPH_POOL_GIB = float(os.environ.get("QSE_GRAPH_POOL_GIB", "8") or 0)
+GRAPH_LOW_WATER = 0.75
+#: SRV-795: the cap never drops the set of a slot that served this recently (s): its conversation's next turn
+#: would pay the captures (0.35 s a class measured, 3.4-5.1 s for a class's full set); the reclaim may
+GRAPH_SET_MIN_IDLE_S = float(os.environ.get("QSE_GRAPH_SET_MIN_IDLE_S", "300") or 0)
 #: SRV-775: a request the memory gate refuses waits for the prefills in flight; alone, it runs over the
 #: engine's declared peak and is counted (`_par_admit`). 1: a lone one waits too, and the gate counts the
 #: workspaces of the prefills in flight on the reserve, as the admission holds them: by their rows (in no profile)
@@ -5311,6 +5324,9 @@ def graphs_once() -> str:
             return "busy"
     if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
         return "recent"
+    # SRV-795: over the cap, idle slots' graph sets go, the least recently used first
+    if _graphs_over_cap() > 0:
+        _graphs_cap()
     # a length where the drafter takes the plain step anyway (260,800 tokens) captures nothing
     engines = [(i, e, d) for i, e, d in engines
                if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
@@ -5319,6 +5335,8 @@ def graphs_once() -> str:
     mem = STATE.get("mem")
     if _graphs_at_peak(mem):
         return "peak"
+    if _graphs_capped():
+        return "cap"
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         return "busy"
@@ -5340,6 +5358,9 @@ def graphs_once() -> str:
                     # to 74.2 GiB (2026-11-03), so a window that starts under the bound can end over the peak
                     if _graphs_at_peak(mem):
                         why = "peak"
+                        return why
+                    if _graphs_capped():         # SRV-795: an idle window never captures past the cap
+                        why = "cap"
                         return why
             except Exception as exc:                               # noqa: BLE001
                 # SPD-271: one engine's failed capture leaves the others their idle window; the engine records
@@ -6088,18 +6109,19 @@ def _kv_reclaim_kept_park(want: int, owner) -> int:
 
 def _add_kv_reclaimers(pool) -> None:
     """The KV pool's reclaim order, cheapest first (the full-pool order approved 2026-10-24): the
-    caches and the allocator's free blocks, the small models, the idle side conversations already
-    current on the NVMe (SRV-E6: the idle backfill wrote them; trimmed only), the ones not written
-    yet (saved, then trimmed), slot 0's idle conversation, the idle slots' graphs (`RECLAIM_GRAPHS`,
-    off), the side conversations no save could write (SRV-779) after every other conversation,
-    ENG-371's kept park last."""
+    caches and the allocator's free blocks, the small models, the idle slots' graph sets (SRV-795,
+    `RECLAIM_GRAPHS`: before any conversation's rows are written or dropped), the idle side
+    conversations already current on the NVMe (SRV-E6: the idle backfill wrote them; trimmed only),
+    the ones not written yet (saved, then trimmed), slot 0's idle conversation, the side
+    conversations no save could write (SRV-779) after every other conversation, ENG-371's kept
+    park last."""
     pool.add_reclaimer("caches", _kv_reclaim_caches)
     pool.add_reclaimer("roles", _kv_reclaim_roles)
+    if RECLAIM_GRAPHS:
+        pool.add_reclaimer("graphs", _kv_reclaim_graphs)
     pool.add_reclaimer("written_side", _kv_reclaim_written)
     pool.add_reclaimer("idle_side", _kv_reclaim_side)
     pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
-    if RECLAIM_GRAPHS:
-        pool.add_reclaimer("graphs", _kv_reclaim_graphs)
     pool.add_reclaimer("unwritten_side", _kv_reclaim_unwritten)
     pool.add_reclaimer("kept_park", _kv_reclaim_kept_park)
 
@@ -6334,35 +6356,221 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
 
 
 def _kv_reclaim_graphs(want: int, owner) -> int:
-    """SRV-E6 (`QSE_RECLAIM_GRAPHS=on`, off by default): the captured graphs of idle slots' engines
-    (their private pools, 6.96 GiB of free scratch on 2026-11-05), through the model family's own
-    `drop_idle_graphs()` (bytes given back), then the allocator's free blocks. A slot pays the
-    re-capture at its next turn in a class (unmeasured per slot); a family without the method
-    gives nothing back here. Each engine only while its slot is idle and no capture runs."""
+    """SRV-E6, SRV-795 (`QSE_RECLAIM_GRAPHS`, on): the graph sets of idle slots' engines, the least recently
+    used slot first, until `want` is back (`_drop_graphs_lru`: each set's private pools to the driver, counted by
+    those pools' own segments). The slot's next turn captures what it needs again; a family without a graph set
+    gives nothing back here. Never the asking slot's (`owner`), one in use or one a capture uses."""
+    return _drop_graphs_lru(want, owner, "reclaim")
+
+
+#: SRV-795: the graph sets dropped so far (`_drop_slot_graphs`), for /health's memory.graphs
+GRAPH_DROPS: dict = {"drops": 0, "graphs": 0, "bytes": 0, "by_why": {}, "last": None}
+
+
+def _graph_holders(owner=None) -> list:
+    """SRV-795: [(slot index, its pool `Slot` or None, the slot's lock, its engine)] of every slot whose engine keeps
+    a graph set (`graph_set`, `drop_graphs`), but `owner`'s ("slotN"); slot 0's lock is the engine lock's own."""
     pool = dict.get(STATE, "pool")
-    held = [(LOCK._lk, dict.get(STATE, "engine"))] + [
-        (s.lock, (s.values or {}).get("engine")) for s in (pool.side() if pool is not None else ())
-        if f"slot{s.index}" != owner]
-    got = 0
-    for lk, eng in held:
-        drop = getattr(eng, "drop_idle_graphs", None)
-        if got >= want or drop is None or not lk.acquire(blocking=False):
-            continue
+    out = []
+    if owner != "slot0":
+        out.append((0, pool.slots[0] if pool is not None else None, LOCK._lk, dict.get(STATE, "engine")))
+    for s in pool.side() if pool is not None else ():
+        if f"slot{s.index}" != owner:
+            out.append((s.index, s, s.lock, (s.values or {}).get("engine")))
+    return [h for h in out
+            if getattr(h[3], "graph_set", None) is not None and callable(getattr(h[3], "drop_graphs", None))]
+
+
+def _graphs_lru(owner=None) -> list:
+    """SRV-795: `_graph_holders` that hold graphs, the slot whose last round is oldest first."""
+    from engine.models.graph_set import lru
+    return [h for h, _ in lru([(h, h[3].graph_set) for h in _graph_holders(owner)])]
+
+
+def _slot_in_use(slot, eng) -> bool:
+    """SRV-795: a request still works on the slot past its lock: it is in a phase (prefill, decode, the round
+    runner's), or the round runner holds a task over its engine (`_runner_decode`'s request may give the slot back
+    before the runner sees its task cancelled)."""
+    if slot is not None and slot.phase:
+        return True
+    rr = _round_runner.RUNNER
+    return rr is not None and any(t.eng is eng and not t.done for t in list(rr.tasks))
+
+
+def _pools_bytes(pids: set) -> int:
+    """SRV-795: what the allocator's segments of these private pools reserve (a walk of every segment)."""
+    if not pids or not torch.cuda.is_available():
+        return 0
+    return sum(int(seg.get("total_size") or 0) for seg in cache.allocator_segments()
+               if tuple(seg.get("segment_pool_id") or (0, 0)) in pids)
+
+
+def _drop_slot_graphs(idx: int, slot, lk, eng, why: str) -> int | None:
+    """SRV-795: slot `idx`'s graph set dropped (`eng.drop_graphs`) and its pools given back, without waiting for
+    anything: only while its slot is idle (`lk`; slot 0 also the GPU turn) and no request still works on it
+    (`_slot_in_use`), no idle capture step holds its set and no capture runs (`capture_lock.GUARD`). The reset is
+    counted after the allocator's `empty` (`capture_lock.graphs_reset`), so the policy's next walk sees the pools
+    gone. Returns the bytes the set's own pools gave back, None when skipped; one log line."""
+    if _slot_in_use(slot, eng) or (lk is not None and not lk.acquire(blocking=False)):
+        return None
+    turn = LOCK.turn if idx == 0 else None
+    took = False
+    try:
+        if turn is not None:
+            took = turn.try_acquire(0)
+            if not took:
+                return None
+        gs = eng.graph_set
+        if _slot_in_use(slot, eng) or not gs.lock.acquire(blocking=False):
+            return None
         try:
-            if capture_lock.GUARD.acquire(blocking=False):
-                try:
-                    got += int(drop() or 0)
-                finally:
-                    capture_lock.GUARD.release()
+            if not capture_lock.GUARD.acquire(blocking=False):
+                return None
+            try:
+                pids = eng.graph_pools()
+                before = _pools_bytes(pids)
+                n = int(eng.drop_graphs() or 0)
+                mem = dict.get(STATE, "mem")
+                if mem is not None:
+                    mem.empty("graphs")
+                elif torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                capture_lock.graphs_reset()
+                got = max(0, before - _pools_bytes(pids))
+            finally:
+                capture_lock.GUARD.release()
         finally:
+            gs.lock.release()
+    finally:
+        if took:
+            turn.release(0)
+        if lk is not None:
             lk.release()
-    mem = dict.get(STATE, "mem")
-    if got and mem is not None and capture_lock.GUARD.acquire(blocking=False):
-        try:
-            got += int(mem.empty("graphs") or 0)
-        finally:
-            capture_lock.GUARD.release()
+    GRAPH_DROPS["drops"] += 1
+    GRAPH_DROPS["graphs"] += n
+    GRAPH_DROPS["bytes"] += got
+    GRAPH_DROPS["by_why"][why] = GRAPH_DROPS["by_why"].get(why, 0) + 1
+    GRAPH_DROPS["last"] = {"slot": idx, "graphs": n, "bytes": got, "why": why, "ts": round(time.time(), 3)}
+    print(f"[graphs] dropped slot{idx}: {n} graphs, {_gib(got)} GiB back (why={why})", flush=True)
     return got
+
+
+#: SRV-795: a drop that gives back less is a set with nothing left to give
+GRAPH_DROP_MIN = 1 << 20
+
+
+def _drop_graphs_lru(want: int, owner, why: str) -> int:
+    """SRV-795: idle slots' graph sets, the least recently used first, until `want` bytes are back: by the sets'
+    own pools, or by the KV pool's own reading (MemAvailable up by `want` since the first drop: what the gate tests);
+    after two drops that gave nothing, no more."""
+    pool = kvpool.POOL
+    avail = pool.meminfo if pool is not None else None
+    a0 = avail() if avail is not None else None
+    got, empty = 0, 0
+    for h in _graphs_lru(owner):
+        if got >= want or (a0 is not None and (avail() or a0) - a0 >= want):
+            break
+        n = _drop_slot_graphs(*h, why)
+        if n is None:
+            continue
+        got += n
+        if n < GRAPH_DROP_MIN:
+            empty += 1
+            if empty >= 2:
+                break
+    return got
+
+
+def _graphs_base() -> int:
+    """SRV-795: what the graphs' pools reserved once the load was done (`_mem_load_mark`'s walk), 0 without it."""
+    return int((((dict.get(STATE, "mem_load") or {}).get("pools") or {}).get("graphs") or {}).get("reserved") or 0)
+
+
+def _graphs_growth() -> tuple | None:
+    """SRV-795: (bytes the graphs' pools reserve over what they held after the load, `_graphs_base`; one graph's
+    pool on average) from the memory policy's walk (`Budget.pools`, which walks the allocator again only after a
+    capture or a reset); None without a cap or a reading (no pools probe: the policy off, or no expandable
+    segments). The growth leaves out what the load captured and what no drop gives back since (the joint graphs,
+    a family's own heads)."""
+    if GRAPH_POOL_GIB <= 0:
+        return None
+    mem = dict.get(STATE, "mem")
+    p = mem.pools() if mem is not None and getattr(mem, "on", False) else None
+    if p is None:
+        return None
+    res = int(p.get("graphs_reserved") or 0)
+    return res - _graphs_base(), res // max(1, int(p.get("graphs_pools") or 0))
+
+
+def _graphs_over_cap(ahead: bool = False) -> int:
+    """SRV-795: bytes the graphs' pools' growth is over `GRAPH_POOL_GIB`, with `ahead` one more graph's (the next
+    capture's); 0 or less: under it, no cap or no reading."""
+    g = _graphs_growth()
+    if g is None:
+        return 0
+    return g[0] + (g[1] if ahead else 0) - int(GRAPH_POOL_GIB * (1 << 30))
+
+
+def _graphs_cap() -> int:
+    """SRV-795, in an idle window over the cap: idle slots' graph sets dropped, the least recently used first, down
+    to `GRAPH_LOW_WATER` of the cap, never a set whose slot served in the last `GRAPH_SET_MIN_IDLE_S` (the reclaim
+    under pressure still may), and no more once a drop gave nothing back. Nothing with `QSE_RECLAIM_GRAPHS=off`.
+    Returns the bytes back."""
+    if not RECLAIM_GRAPHS:
+        return 0
+    low = int(GRAPH_LOW_WATER * GRAPH_POOL_GIB * (1 << 30))
+    now, got = time.monotonic(), 0
+    for h in _graphs_lru():
+        g = _graphs_growth()
+        if g is None or g[0] <= low:
+            break
+        gs = h[3].graph_set
+        if gs.t_used and now - gs.t_used < GRAPH_SET_MIN_IDLE_S:
+            break                           # the LRU order: every set after it served later
+        n = _drop_slot_graphs(*h, "cap")
+        if n is None:
+            continue
+        got += n
+        if n < GRAPH_DROP_MIN:
+            break
+    return got
+
+
+def _graphs_capped() -> bool:
+    """SRV-795: would the next capture take the graphs' pools over the cap? An idle window captures nothing past
+    it; "[graphs] idle captures paused" is said once until they are back under."""
+    over = _graphs_over_cap(ahead=True)
+    if over <= 0:
+        STATE["graphs_cap_said"] = False
+        return False
+    if not STATE.get("graphs_cap_said"):
+        STATE["graphs_cap_said"] = True
+        print(f"[graphs] idle captures paused: the graphs' pools' growth since the load and one more graph are "
+              f"{_gib(over)} GiB over the cap {GRAPH_POOL_GIB:g} GiB (QSE_GRAPH_POOL_GIB)", flush=True)
+    return True
+
+
+def _graphs_report() -> dict:
+    """SRV-795: /health's memory.graphs: the cap, the drops so far, the graphs' pools as the memory policy's last
+    walk read them (no walk here), the capture streams leased, and each slot's graphs (no CUDA call)."""
+    mem = dict.get(STATE, "mem")
+    p = getattr(getattr(mem, "pools_probe", None), "last", None) or {}
+    now = time.monotonic()
+    slots = []
+    for idx, _, _, eng in _graph_holders():
+        gs = eng.graph_set
+        count = getattr(eng, "graph_count", None)
+        slots.append({"slot": idx, "graphs": count() if callable(count) else None, "holding": gs.holding,
+                      "dropped": gs.dropped, "drops": gs.stats["drops"],
+                      "idle_s": round(now - gs.t_used, 1) if gs.t_used else None})
+    g = (lambda k: round(int(p[k]) / 2**30, 3) if p.get(k) is not None else None)
+    base = _graphs_base()
+    return {"cap_gib": GRAPH_POOL_GIB or None, "reclaim": RECLAIM_GRAPHS, "pools": p.get("graphs_pools"),
+            "reserved_gib": g("graphs_reserved"), "free_gib": g("graphs_free"),
+            "base_gib": round(base / 2**30, 3),
+            "streams": dict(capture_lock.LEASES), "drops": GRAPH_DROPS["drops"],
+            "graphs_dropped": GRAPH_DROPS["graphs"], "bytes_back_gib": round(GRAPH_DROPS["bytes"] / 2**30, 3),
+            "by_why": dict(GRAPH_DROPS["by_why"]), "last": GRAPH_DROPS["last"], "slots": slots}
 
 
 #: SRV-E6: the host heap is trimmed after a reclaim at most this often (s): `malloc_trim` holds the heap's
@@ -11712,6 +11920,10 @@ def _memory() -> dict:
     a = capture_lock.ALLOC
     out["capture_plain_segments"] = {"on": a.get("on"), "toggles": a.get("toggles"), "errors": a.get("errors"),
                                      "error": a.get("error")}
+    try:
+        out["graphs"] = _graphs_report()                         # SRV-795: the slots' graph sets and their drops
+    except Exception as exc:                                       # noqa: BLE001
+        out["graphs"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     # The interpreter singletons' reference counts now (server/refwatch.py); a count
     # that falls from one look to the next is a C extension dropping references (bool_dealloc)
     out["python_refs"] = {name: sys.getrefcount(obj) for name, obj in refwatch_mod.WATCH}

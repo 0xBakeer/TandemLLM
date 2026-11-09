@@ -957,7 +957,7 @@ def test_spd271_a_failed_idle_capture_is_recorded_once_and_retried_after_the_sta
                 raise E.ClassError("verify: class 1024 below 32768, the class of position 85010")
             super().capture()
     stubs = (S, BadVG, CG)
-    after, S._after_failed_capture = S._after_failed_capture, lambda: None   # no CUDA stream on the host
+    after, S._after_failed_capture = S._after_failed_capture, lambda gs=None: None   # no CUDA stream on the host
     try:
         assert s.capture_cost(2100) > 0 and s._owed.get(1024) == 2100, s._owed
         try:
@@ -1124,7 +1124,7 @@ def test_an_mtp_capture_between_a_verify_and_its_commit_keeps_the_verify_records
 
     stream = lambda: types.SimpleNamespace(wait_stream=lambda s: None)    # noqa: E731
     cuda = {"Stream": stream, "stream": lambda s: contextlib.nullcontext(), "current_stream": stream, "CUDAGraph": _Graph,
-            "graph": lambda g: contextlib.nullcontext(), "synchronize": lambda: None}
+            "graph": lambda g, **kw: contextlib.nullcontext(), "synchronize": lambda: None}
     real = {k: getattr(torch.cuda, k) for k in cuda}
     real_cg = E.CommitGraph
     st, st_m = FNState(cap=16), FNState(cap=16)

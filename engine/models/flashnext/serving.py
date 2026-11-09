@@ -44,6 +44,7 @@ from engine.models.flashnext import coupled as CP
 from engine.models.flashnext.engine import (CAPTURE_ROWS, PREFILL_CHUNK, QSA_TILE, CommitGraph, DecodeGraph, FlashNextEngine,
                                             VerifyGraph, _state_restore, _state_saved)
 from engine.models.flashnext.mtp import FlashNextMTPHead
+from engine.models.graph_set import GraphSet
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
 
@@ -72,20 +73,23 @@ class _DraftReadWait:
         torch.cuda.current_stream().synchronize()
 
 
-def _leave_capture_stream() -> None:
+def _leave_capture_stream(gs: GraphSet | None = None) -> None:
     """SPD-261: after a capture that raised, the engine thread on its own stream again. `torch.cuda.graph` ends the
     capture before it leaves the capture stream (torch 2.13), so a capture whose end raised (an invalidated one) left
-    the thread on torch's capture stream, where every later launch of the thread would queue. The verify, commit and
-    draft graphs are captured on that stream; the engine's threads run on the default stream."""
+    the thread on the capture stream, where every later launch of the thread would queue. A slot's graphs are captured
+    on its own stream (SRV-795, `gs`), a state without one's on torch's; the engine's threads run on the default
+    stream."""
+    cur = torch.cuda.current_stream()
     cap = getattr(torch.cuda.graph, "default_capture_stream", None)
-    if cap is not None and torch.cuda.current_stream() == cap:
+    own = gs._stream if gs is not None else None
+    if (cap is not None and cur == cap) or (own is not None and cur == own):
         torch.cuda.set_stream(torch.cuda.default_stream())
 
 
-def _after_failed_capture() -> None:
+def _after_failed_capture(gs: GraphSet | None = None) -> None:
     """SPD-261: before a call runs again eagerly after its capture raised: the thread's own stream, and every launch of
     the capture's warm-ups landed (they were queued on a stream of their own)."""
-    _leave_capture_stream()
+    _leave_capture_stream(gs)
     torch.cuda.synchronize()
 
 
@@ -108,7 +112,7 @@ class _MTPHead(FlashNextMTPHead):
     warm-ups wrote only cache rows past the length and pool blocks the feed writes again). The round completes, and
     the next draft of that key captures it again. A draft only proposes tokens: the verify decides what is written.
     `capture_all` and `capture_class` raise as before. A dropped graph goes to `dead` (the adapter's `dead_graphs`):
-    kept, never reset."""
+    kept, reset only with every other graph of its slot (`FlashNextServing.drop_graphs`)."""
 
     def __init__(self, *a, dead: list | None = None, **kw):
         self.dead = dead if dead is not None else []
@@ -127,7 +131,7 @@ class _MTPHead(FlashNextMTPHead):
             super().capture_all()
         except Exception:
             self._drop(n0)
-            _leave_capture_stream()
+            _leave_capture_stream(getattr(self.st, "graphs", None))
             raise
 
     def capture_class(self, n: int, cls: int) -> None:
@@ -136,7 +140,7 @@ class _MTPHead(FlashNextMTPHead):
             super().capture_class(n, cls)
         except Exception:
             self._drop(n0)
-            _leave_capture_stream()
+            _leave_capture_stream(getattr(self.st, "graphs", None))
             raise
 
     def launch(self, rows: torch.Tensor, nexts: list[int]) -> None:
@@ -148,7 +152,7 @@ class _MTPHead(FlashNextMTPHead):
             made = self._drop(n0)
             if not made:
                 raise
-            _after_failed_capture()
+            _after_failed_capture(getattr(self.st, "graphs", None))
             print(f"[fn-graphs] MTP chain capture {made[0]} failed ({type(exc).__name__}: {exc}): the draft runs "
                   f"eagerly", flush=True)
         fn, n = self.fn, len(nexts)
@@ -312,10 +316,14 @@ class FlashNextServing:
         self.dg = None                      # the decode step's graphs, made on the first decode token
         self.vgraphs: dict = {}
         self.cgraphs: dict = {}
+        # SRV-795: every graph of this slot (its head's too) is captured on the set's stream and reset with all the
+        # others (`drop_graphs`)
+        self.graph_set = GraphSet()
+        self.st.graphs = self.graph_set
         self._eager_block = False           # SPD-261: the last block verified eagerly, so its commit runs eagerly too
-        # SPD-261: every verify, commit or draft graph a failed capture dropped, kept for the adapter's life and never
-        # reset or cleared: a reset gives back torch's cuBLAS workspace of the graph's capture stream
-        # (engine/capture_lock.py, SPD-223), which a kept graph captured on the same stream may read
+        # SPD-261: every verify, commit or draft graph a failed capture dropped, kept and never reset alone: a reset
+        # gives back torch's cuBLAS workspace of the graph's capture stream (engine/capture_lock.py, SPD-223), which a
+        # kept graph captured on the same stream may read; `drop_graphs` resets them with the rest
         self.dead_graphs: list = []
         # verify width M / commit key (M, n, moved) -> rounds that used it, from a prior of one round
         # each for chains of 2-6 rows (a class's idle captures need shapes before the first rounds)
@@ -531,6 +539,7 @@ class FlashNextServing:
     def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
         self.heads["mtp"] = _MTPHead(self.fn, depth, self.max_len, pages=self.st.pages,     # SPD-261
                                      dead=self.dead_graphs)
+        self.heads["mtp"].st.graphs = self.graph_set              # SRV-795: its chains on the slot's stream
         # the head's graphs are captured now (`capture_all`): with the KV pool its first rows must be
         # mapped -- a Triton launch refuses a buffer whose first page is not ("cannot be accessed from
         # Triton", 2026-10-12)
@@ -644,6 +653,61 @@ class FlashNextServing:
             h.reset()
         self._capture_failed.clear()
 
+    # --- SRV-795: the slot's graphs, dropped all at once -------------------------------------
+    def _graph_objects(self) -> list:
+        """Every CUDAGraph this slot holds: the decode step's by class (and its failed captures), the verify and
+        commit graphs, each head's chains, and the graphs failed captures dropped (`dead_graphs`)."""
+        out = []
+        if self.dg is not None:
+            out += list(self.dg.graphs.values()) + list(self.dg.dead)
+        out += [g.graph for g in self.vgraphs.values()] + [g.graph for g in self.cgraphs.values()]
+        for h in self.heads.values():
+            out += [g.graph for g in h.graphs.values()]
+        out += [getattr(g, "graph", None) for g in self.dead_graphs]
+        return out
+
+    def graph_count(self) -> int:
+        """The graphs the slot keeps (its failed captures' too), for /health; no CUDA call. A drop on another thread
+        may clear them meanwhile: each part is read once."""
+        dg = self.dg
+        n = len(dg.graphs) + len(dg.dead) if dg is not None else 0
+        return (n + len(self.vgraphs) + len(self.cgraphs) + sum(len(h.graphs) for h in list(self.heads.values()))
+                + len(self.dead_graphs))
+
+    def graph_pools(self) -> set:
+        """SRV-795: the private pools of the slot's captured graphs (`CUDAGraph.pool()`, the allocator's
+        `segment_pool_id`): a drop's bytes are what those pools give back. A graph whose capture never ended has
+        none."""
+        out = set()
+        for g in self._graph_objects():
+            try:
+                out.add(tuple(g.pool()))
+            except (RuntimeError, AttributeError):
+                pass
+        return out
+
+    def drop_graphs(self) -> int:
+        """SRV-795: every graph of this slot reset at once (`GraphSet.drop`: its decode, verify, commit and draft
+        graphs and the ones failed captures kept, all captured on the slot's own stream, which goes back), so their
+        private pools go back to the driver with the caller's `empty`. The rounds and the idle windows capture them
+        again as they need them; the idle windows wait for the slot's next round (`GraphSet.dropped`). A pending
+        chain is committed first: its commit graph reads its verify graph's intermediates. Only for a slot no round
+        and no capture uses: the caller holds the slot, `graph_set.lock` and `capture_lock.GUARD`. Returns the graphs
+        reset."""
+        self._settle_chain()
+        n = self.graph_set.drop(self._graph_objects())
+        self.dg = None
+        self.vgraphs.clear()
+        self.cgraphs.clear()
+        self.dead_graphs.clear()            # in place: the heads hold the same list
+        self._fresh.clear()
+        self._capture_failed.clear()
+        self._eager_block = False
+        for h in self.heads.values():
+            h.graphs.clear()
+            h.fresh.clear()
+        return n
+
     # --- a context class's graphs, captured while the server is idle -----------------------------
     #: the shapes a class captures ahead: the verify widths and commit shapes that make up this share
     #: of the rounds so far, at most this many of each
@@ -750,6 +814,8 @@ class FlashNextServing:
         commit graphs of the lanes' own class).
         A commit captures its own shape at first use (`commit`); the warm-up's call (`precapture`, without
         `ahead`) still takes class 0's."""
+        if self.graph_set.dropped:
+            return None                     # SRV-795: dropped since its last round; its next turn captures them
         todo, seen = [], set()
         # SPD-249: never a class below the state's own (its rows' positions from the length on): an owed turn
         # that started under it and grew past it keeps its entry for a shorter state (`class_check`).
@@ -796,39 +862,53 @@ class FlashNextServing:
 
     @torch.no_grad()
     def _capture_steps(self, cls: int, miss: list):
-        self._settle_chain()
         fn, st = self.fn, self.st
-        self._ensure(st.length + CAPTURE_ROWS)
+        # SRV-795: each step holds the set's lock, never across a yield; a drop between two steps ends the window
+        # for this slot (its graphs wait for its next round)
+        with self.graph_set.lock:
+            if self.graph_set.dropped:
+                return
+            self._settle_chain()
+            self._ensure(st.length + CAPTURE_ROWS)
         for kind, key in sorted(miss, key=lambda m: "vcm".index(m[0])):     # widths before their commits
             t0 = time.perf_counter()
-            if kind == "v":
-                g = VerifyGraph(fn, st, key, cls)
-                self._capture_undone(g)
-                self.vgraphs[(key, cls)] = g
-                self._fresh.add((key, cls))
-            elif kind == "c":
-                M, n, moved = key
-                vg = self.vgraphs.get((M, cls))
-                if vg is None:
+            with self.graph_set.lock:
+                if self.graph_set.dropped:
+                    return
+                if not self._capture_step(cls, kind, key):
                     continue
-                parents, path = list(range(-1, M - 1)), list(range(n))
-                if moved:
-                    # the path leaves the chain at its last row: row M - 1, a second child of row n - 2
-                    parents[M - 1], path[-1] = n - 2, M - 1
-                fn.stage_rows([0] * M, parents, st)
-                fn._vcls = cls
-                vg.replay()
-                fn.stage_commit(st, path)
-                g = CommitGraph(fn, st, (M, n, moved, cls))
-                self._capture_undone(g)
-                self.cgraphs[(M, n, moved, cls)] = g
-                self._fresh.add((M, n, moved, cls))
-            else:
-                for head in self.heads.values():
-                    head.capture_class(key, cls)
-            torch.cuda.synchronize()
+                torch.cuda.synchronize()
             self._capture_took(t0)
             yield
+
+    def _capture_step(self, cls: int, kind: str, key) -> bool:
+        fn, st = self.fn, self.st
+        if kind == "v":
+            g = VerifyGraph(fn, st, key, cls)
+            self._capture_undone(g)
+            self.vgraphs[(key, cls)] = g
+            self._fresh.add((key, cls))
+        elif kind == "c":
+            M, n, moved = key
+            vg = self.vgraphs.get((M, cls))
+            if vg is None:
+                return False
+            parents, path = list(range(-1, M - 1)), list(range(n))
+            if moved:
+                # the path leaves the chain at its last row: row M - 1, a second child of row n - 2
+                parents[M - 1], path[-1] = n - 2, M - 1
+            fn.stage_rows([0] * M, parents, st)
+            fn._vcls = cls
+            vg.replay()
+            fn.stage_commit(st, path)
+            g = CommitGraph(fn, st, (M, n, moved, cls))
+            self._capture_undone(g)
+            self.cgraphs[(M, n, moved, cls)] = g
+            self._fresh.add((M, n, moved, cls))
+        else:
+            for head in self.heads.values():
+                head.capture_class(key, cls)
+        return True
 
     def _state_undo(self):
         """SPD-261: before a capture, what its warm-ups may write (`_state_saved`: a verify's warm-up folds the parked
@@ -851,7 +931,7 @@ class FlashNextServing:
             g.capture()
         except Exception:
             self.dead_graphs.append(g)
-            _after_failed_capture()
+            _after_failed_capture(self.graph_set)
             undo()
             raise
 
@@ -859,6 +939,7 @@ class FlashNextServing:
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
         """Rows `ids` at positions start..: one token through the decode step, more through the prefill
         kernels. Logits [1, 1, vocab] of the last row (fp32)."""
+        self.graph_set.used()
         self._settle_chain()
         ids = ids.view(-1)
         self._at(start)
@@ -900,6 +981,7 @@ class FlashNextServing:
         its own `forward` would, and it stays out of the joint forward; the leader's thread runs only the forward.
         Again on a prepared slot (`prefill_joint` runs it for a caller that did not): no work (no open chain, one compare
         each)."""
+        self.graph_set.used()
         self._settle_chain()
         self._at(start)
         self._ensure(int(start) + int(T))
@@ -935,6 +1017,7 @@ class FlashNextServing:
         """A draft block in DFS pre-order (row 0 the anchor at `start`): every row's logits [M, vocab]
         fp32 (a static buffer), its greedy pick in `picks`, its streams in `hidden_post_norm`. Nothing
         but the block's own KV rows is written until `commit_tree`."""
+        self.graph_set.used()
         self._settle_chain()
         self._at(start)
         toks = [int(t) for t in block.view(-1).tolist()]
@@ -1000,7 +1083,7 @@ class FlashNextServing:
         (`graph` None). Here the graphs a failed call keyed are dropped. With `capture` (the call's key is missing)
         the state its warm-ups may write is saved first (`_state_undo`); a failed call then puts it back and runs
         eagerly (`call(None)`), so the round completes and the next one captures the key again. A dropped graph goes
-        to `dead_graphs` and is never reset: a reset gives back torch's cuBLAS workspace of its capture stream
+        to `dead_graphs` and is never reset alone: a reset gives back torch's cuBLAS workspace of its capture stream
         (engine/capture_lock.py, SPD-223), which a kept graph captured on the same stream may read."""
         n0 = len(graphs)
         undo = self._state_undo() if capture else None
@@ -1012,7 +1095,7 @@ class FlashNextServing:
                 self.dead_graphs.append(graphs.pop(k))
             if not made or undo is None:
                 raise
-            _after_failed_capture()
+            _after_failed_capture(self.graph_set)
             undo()
             print(f"[fn-graphs] {what} capture {made[0]} failed ({type(exc).__name__}: {exc}): eager instead",
                   flush=True)
@@ -1047,6 +1130,7 @@ class FlashNextServing:
         jobs = []
         t0 = time.perf_counter()
         for s, block, parents, start in items:
+            s.graph_set.used()
             s._settle_chain()
             s._at(start)
             s._ensure(start + block.numel())

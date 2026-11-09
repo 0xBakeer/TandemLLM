@@ -89,6 +89,9 @@ def test_spd273_idle_captures_pause_while_the_reserve_is_at_the_peak():
         def memory(self):
             return 60 * GiB, int(self.res * GiB)
 
+        def pools(self):
+            return None                             # no pools probe: no graphs' cap (SRV-795)
+
     eng = _Eng(3)
     _with(eng)
     mem = _Mem(74.0)
@@ -141,6 +144,9 @@ def test_spd273_a_window_stops_before_the_capture_after_the_reserve_crosses_the_
             res = self.start + self.per * len(self.eng.locked)      # one entry a capture taken
             self.reads.append(round(res, 2))
             return 60 * GiB, int(res * GiB)
+
+        def pools(self):
+            return None
 
     eng = _Eng(5)
     _with(eng)

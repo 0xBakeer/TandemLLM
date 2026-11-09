@@ -1379,9 +1379,9 @@ def test_srv779_a_lane_that_gives_way_on_a_side_slot_is_written_first():
 
 def test_srv_e6_the_ladder_runs_its_levels_in_order_and_stops_at_what_is_short():
     """SRV-E6 (plan row 5): `_kv_reclaim_idle` over the server's own order (`_add_kv_reclaimers`), each level a fake
-    that records its turn: caches, roles, the side chats already on the NVMe, the others, slot 0, (the graphs, a
-    knob), the unwritten ones, the kept park; it stops once it has what the admission is short, runs nothing when
-    the admission passes, and logs each level that gave something with its bytes and ms."""
+    that records its turn: caches, roles, (the graphs, a knob, SRV-795), the side chats already on the NVMe, the
+    others, slot 0, the unwritten ones, the kept park; it stops once it has what the admission is short, runs nothing
+    when the admission passes, and logs each level that gave something with its bytes and ms."""
     import contextlib
     import io
     from engine import kvpool
@@ -1414,7 +1414,8 @@ def test_srv_e6_the_ladder_runs_its_levels_in_order_and_stops_at_what_is_short()
         for ln in lines:
             assert f" bytes={GiB} ms=" in ln and ln.endswith(" owner=slot4"), ln
         got, order, _ = run({"floor": 15 * GiB, "after": 0}, graphs=True)
-        assert order == ["caches", "roles", "written", "side", "slot0", "graphs", "unwritten", "kept_park"], order
+        # SRV-795: the idle slots' graph sets before any conversation's rows
+        assert order == ["caches", "roles", "graphs", "written", "side", "slot0", "unwritten", "kept_park"], order
         got, order, lines = run({"floor": 15 * GiB, "after": 12 * GiB})
         assert order == ["caches", "roles", "written"] and got == 3 * GiB, (order, got)
         gives["caches"] = 4 * GiB
@@ -1427,7 +1428,7 @@ def test_srv_e6_the_ladder_runs_its_levels_in_order_and_stops_at_what_is_short()
         for n, fn in saved.items():
             setattr(app, f"_kv_reclaim_{n}", fn)
         kvpool.POOL, app.RECLAIM_GRAPHS = old_pool, old_graphs
-    return "caches, roles, written_side, idle_side, idle_slot0, [graphs], unwritten_side, kept_park; stops at want"
+    return "caches, roles, [graphs], written_side, idle_side, idle_slot0, unwritten_side, kept_park; stops at want"
 
 
 def test_srv_e6_a_side_chat_current_on_the_nvme_goes_first_and_is_not_written_again():

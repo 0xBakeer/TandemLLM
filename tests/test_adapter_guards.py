@@ -159,17 +159,20 @@ GOLDEN_FP4 = {
     # the same; tools/fn_seq_kernels, tools/fn_prefill_kernels.py, knobs): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe, flint
     "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
     # the prefill's indexer scores and PLE decode in row tiles (engine/models/flashnext/engine.py): qwen4_exp, qwen3_5_moe
-    "qwen4_exp": "da2dc2e94d53206157e8df9d7273e85d3c54f96b03be1ecf4b33f0b6f3a83319",
+    # SRV-795: each graph captured on its slot's own stream (engine/models/flashnext/engine.py; the same rows, its
+    # SAME_ROWS entry): qwen4_exp, qwen3_5_moe
+    "qwen4_exp": "a8dc17f3ef2b9422e4f315358fddfc2ad8b4a7cf0061a1ce62c28bfb6e527992",
     "nemotron_h": "7e42cc390f3fff2b373e47d1dc7e46bc3b26d7948a13ea3dc53adc1dca718c6b",
     "lfm2_moe": "73d224baccec5ff53847027176a38c9a72aeee3665e82178a426f6a341688904",
-    "qwen3_5_moe": "e1981dacb1357c60d011bf3ecb5798625527adf4043bf14e0da571a40c6993a3",
+    "qwen3_5_moe": "62919c616be83191cd83c95c89326f75f9a1bffd53e526b932920e009be442ee",
     "flint": "b3d2ef12774d32e91fdf1ec5a43743d6bc12a312853f2dd9e8a4615c3e85d224",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
 MAY_MOVE = {"flint"}
-#: sha256 of SAME_ROWS' entries at v0.14.0 (sorted [path, now, replaced] triples, JSON)
-SAME_ROWS_SHA256 = "8f5071c81945e487ddfe54f9a2891df42f9eda89b7f9499937be113a946177b0"   # 30 entries
+#: sha256 of SAME_ROWS' entries at v0.14.0 (sorted [path, now, replaced] triples, JSON); SRV-795 adds Flash-Next's
+#: engine.py on purpose (its reason in engine/methods/manifest.py)
+SAME_ROWS_SHA256 = "4d7ac63adfdf6dc4dbc2cb026fe6752505d68dfefb96a1300fd274edff18fd5b"   # 31 entries
 
 
 def _manifest(name: str):
@@ -341,8 +344,8 @@ BASELINE = {
     # SAME_ROWS names files by path; the legacy FN_*/Q35M_* knob owners (frozen, nothing new). The FN_* knobs of the
     # shared kernel libraries (tools/fn_kernels.py, tools/fn_prefill_kernels.py: FN_MOE_*, FN_GEMV_*, FN_PDL, ...)
     # live in this table by their library, which Flash-Next and Ornith both read; their owner is that library, never a
-    # model package (test_family_knobs_live_in_their_package holds both)
-    "engine/methods/manifest.py": 13, "engine/settings.py": 16,
+    # model package (test_family_knobs_live_in_their_package holds both). SRV-795's SAME_ROWS entry names one more
+    "engine/methods/manifest.py": 14, "engine/settings.py": 16,
     # the default --served-model name, the API's own since 0.1 (clients address it)
     "server/app.py": 1,
     # the fake engine emulates each format's output for the tests

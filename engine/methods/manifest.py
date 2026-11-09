@@ -156,7 +156,14 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              ("engine/models/qwen3_5_moe/kernels.py", "2ecc9dcb27f12c9a9e4738e3ff9c58016e82039854680304adb22193321167cc"):
              "2bc18f6e41b6f483360c5e0215e5df6f30da5ea254bfed026d212164dfc66331",
              ("engine/models/lfm2_moe/engine.py", "ab1a6b3f3d1f73cf8b2ad336c5c486582a0683d94f35d456e9538f61bcc14eac"):
-             "76bfb598fee3b1d731a51bd4f4ceb4afc8bb30ee8388ed4ca9551de82d7d388b"}
+             "76bfb598fee3b1d731a51bd4f4ceb4afc8bb30ee8388ed4ca9551de82d7d388b",
+             # SRV-795: Flash-Next's graphs are captured on their slot's own stream (`capture_stream`); a decode
+             # capture that raised is kept for its slot's reset, and puts the state its warm-ups wrote back (as a
+             # capture that returns does); the same launches. On the Spark greedy prompts of 357, 7,240, 30,492 and
+             # 70,623 tokens (logprobs) gave the bytes before's tokens and logprobs bit for bit, and again after every
+             # slot's graphs were dropped and captured anew. Ornith reads this file too: not run on Ornith
+             ("engine/models/flashnext/engine.py", "5b0e3dfaee411ad9429d287b40aa58c28278939962dc0a711c19704946acfc44"):
+             "0a86e64e5cdb7a9fb54f2e2c81784e373b68beba004c4b6e853a982760531384"}
 
 
 def adoption() -> str:
