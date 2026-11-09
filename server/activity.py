@@ -764,14 +764,18 @@ def memory_lines(m: dict, waited: float, left: float, way: dict | None = None) -
     return [why, now, end]
 
 
-def refusal_words(m: dict) -> str:
+def refusal_words(m: dict, long: bool = True) -> str:
     """A refusal after the wait's bound, from `_mem_wait_of`'s bytes: what it needed and what was free above the
-    guard (the peak's excess for a wait at the engine's peak)."""
+    guard (the peak's excess for a wait at the engine's peak). SRV-797: `long` False, a request not streamed that
+    waited `--queue-timeout` only: it is told that it may be sent again, or streamed to wait longer."""
     if m.get("peak_wait"):
         what = f"needed {_gb(m['need'])} GiB, {_gb(m.get('short') or 0)} over the engine's peak"
     else:
         what = (f"needed {_gb(m['need'])} GiB, "
                 f"{_gb(max(0, (m.get('free') or 0) - (m.get('guard') or 0)))} free above the guard")
+    if not long:
+        return (f"Memory stayed full for {_span(m.get('bound_s') or 0)} ({what}): this turn did not start; send it "
+                f"again, or stream it (or send `wait_for_memory: true`) to wait longer.")
     return (f"Memory stayed full for {_span(m.get('bound_s') or 0)}, so this turn did not start ({what}). "
             f"Continue tries again; a shorter conversation or fewer chats at once needs less.")
 

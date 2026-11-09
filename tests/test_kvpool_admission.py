@@ -274,9 +274,11 @@ def test_a_non_streamed_wait_ends_in_a_readable_503():
     assert code == 503 and body["error"]["code"] == "memory_wait_timeout", body
     # SRV-787: the reason in words (it said "memory is almost full; 1 request(s) are running")
     assert body["error"]["message"].startswith("Memory stayed full for "), body
-    assert " so this turn did not start (needed " in body["error"]["message"], body
-    assert body["error"]["message"].endswith(" free above the guard). Continue tries again; a shorter conversation "
-                                             "or fewer chats at once needs less.") and hdr.get("Retry-After") == "30"
+    # SRV-797: not streamed, it is told it may be sent again or streamed (or `wait_for_memory`) to wait longer
+    assert " (needed " in body["error"]["message"], body
+    assert body["error"]["message"].endswith(" free above the guard): this turn did not start; send it again, or "
+                                             "stream it (or send `wait_for_memory: true`) to wait longer.") \
+        and hdr.get("Retry-After") == "30", body
     assert rec.wait_reason == "memory" and rec.waiting_memory is False
     assert said and said[0][1] == 1, said              # the line, with its place in line
     assert adm.stats["timeouts"] == 1 and adm.report()["waiting_memory"] == 0
@@ -1195,10 +1197,12 @@ def test_srv787_the_handler_passes_the_home_share_to_the_admission():
     src = inspect.getsource(app._par_side_need)
     assert "why.update(home=home[0], home_share=home[1])" in src
     handler = inspect.getsource(app.Handler)
-    call = handler[handler.index("not self._par_admit(\n"):]
+    # SRV-797: the first admission and a give-way's re-admission take it from one place (`admit_kw`)
+    call = handler[handler.index("admit_kw = {"):]
     call = call[:call.index("return")]
-    assert 'home=(int(par_why.get("home_share") or 0)' in call, call
-    assert 'if side is not None and par_why.get("home") == side.index else 0)' in call, call
+    assert '"home": (int(par_why.get("home_share") or 0)' in call, call
+    assert 'if par is not None and side is not None and par_why.get("home") == side.index' in call, call
+    assert 'home=admit_kw["home"]' in call and "admit=admit_kw" in handler, call
 
 
 class _Spill:

@@ -77,8 +77,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: #159: the QWEN38_MTP_BACKLOG_CAP default in engine/settings.py (v2 counts its knobs; the drafts only, no text)
 #: SRV-E6: the spill's idle backfill, its device steps under the capture guard and the resident prefix's row
 #: generation (engine/spill.py, engine/cache.py, engine/disk_cache.py's write guard): v2's second value again
+#: SRV-797 (2026-11-08): the policy holds the caches' room a turn was let in on (`Budget.hold_growth`,
+#: engine/cache.py): v2's second value again
 GOLDEN_V2 = ("3ae282292ea19b56921784a1ce75814dda978e50c5d9e51afe2814aa3bf9e9b9",
-             "1766753c4d02b07b6091c1c78f56b8c848734ee9080fcd111eb122b7c15dd59f")
+             "d8fad801bcefe7d7e13b7fcc753365eb5516818d8ab27d674635142417ff3f03")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);

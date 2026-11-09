@@ -167,12 +167,15 @@ def test_the_parallel_view_shows_the_slots():
 def test_admission_holds_a_request_until_the_bytes_are_there():
     # 15 GiB floor, MemAvailable 16.65 GiB: one request's worst case (the 1.15 GiB workspace floor)
     # fits, a lone request checked too (SRV-775); a second one's cannot fit beside the first one's
-    # reservation, so it waits for it
+    # reservation, so it waits for it: for its prefill, as the fake now leaves the reservation's workspace once
+    # prefilled (`_par_prefilled`), as the engine does (SRV-797); then both decode
     port, proc = _server(("--parallel", "2", "--side-max-len", "8192"),
                          env={"FAKE_MEMAVAILABLE_GIB": str(15 + 1.65)})
     try:
-        spans, _ = _together(port, TEXTS[:2])
-        assert _overlap(spans) == 1, "the second request waited for the first one's bytes"
+        # a prefill of seconds (the fake's slow prefill: 8,192 rows at 2,000 a second) to wait for
+        spans, _ = _together(port, ["FAKE_SLOW_PREFILL " + t for t in TEXTS[:2]])
+        first, second = sorted(spans, key=lambda x: x[1])
+        assert second[1] > first[1], "the second request waited for the first one's bytes"
         h = _get(port, "/health")["parallel"]
         assert h["admission"]["waits"] >= 1 and h["admission"]["refused"] == 0, h["admission"]
         assert h["admission"]["in_flight"] == 0, "every reservation released"
@@ -282,8 +285,11 @@ def test_side_slots_on_the_fake_engine_take_the_full_window():
 def test_a_full_pool_stops_the_answer_with_memory_full():
     """SRV-709: a commit the KV pool refuses after every reclaim (`PoolFull`) is the box at its
     floor, not a failure: a streamed answer keeps its text and ends with finish_reason "error"
-    beside the `memory_full` error; one not streamed yet gets a 503 with Retry-After."""
-    port, proc = _server(("--parallel", "2"))
+    beside the `memory_full` error; one not streamed yet gets a 503 with Retry-After. SRV-797: a streamed one
+    alone gives way and waits first, and goes on after the text it wrote each time (the exact answer's head, never
+    from its start again); once its waits reach `QSE_MEM_WAIT_S` (3 s here) the wait's refusal ends it
+    (`memory_wait_timeout`). One not streamed, alone, keeps SRV-709's `memory_full`."""
+    port, proc = _server(("--parallel", "2"), env={"QSE_MEM_WAIT_S": "3"})
     try:
         body = {"messages": [{"role": "user", "content": "FAKE_POOL_FULL go"}], "max_tokens": 64,
                 "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
@@ -304,9 +310,13 @@ def test_a_full_pool_stops_the_answer_with_memory_full():
                         last = d
         assert last is not None and last["choices"][0]["finish_reason"] == "error", last
         err = last["error"]
-        assert err["code"] == "memory_full" and err["type"] == "server_busy", err
-        assert "memory is full" in err["message"] and err["retry_after"] == 30, err
-        assert text, "the text before the stop is kept"
+        assert err["code"] == "memory_wait_timeout" and err["type"] == "server_busy", err
+        assert err["message"].startswith("Memory stayed full for ") and err["retry_after"] == 30, err
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from server import fake_engine
+        reasoning, answer = fake_engine._reply("FAKE_POOL_FULL go", [], False)
+        got = "".join(text)
+        assert len(got) >= 10 and (reasoning + answer).startswith(got), (got, reasoning + answer)
         req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
                                      data=json.dumps(dict(body, stream=False)).encode(),
                                      headers={"Content-Type": "application/json"})
@@ -359,12 +369,47 @@ def test_a_lane_the_pool_refuses_gives_way_and_goes_on():
         text, fin, _ = out["lane"]
         assert fin is not None and fin["choices"][0]["finish_reason"] != "error", fin
         assert "error" not in fin, fin
-        assert text, "the lane's text came through"
+        ask("FAKE_POOL_FULL_ONCE go", out, "again")         # met the full pool already: not refused
+        assert text and text == out["again"][0], (text, out["again"][0])
         ofin = out["other"][1]
         assert ofin is not None and ofin["choices"][0]["finish_reason"] != "error", ofin
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as r:
             rc = json.loads(r.read())["parallel"]["recompute"]
         assert rc["on"] and rc["gave_way"] == 1 and rc["resumed"] == 1 and rc["gave_up"] == 0, rc
+    finally:
+        _stop(proc)
+
+
+def test_srv_floor_a_lone_prefill_the_pool_refuses_waits_and_goes_on():
+    """SRV-797 (2026-11-08, chatcmpl-c584...): a lone request whose prefill the KV pool refuses (no other lane runs)
+    gives way, waits for memory and goes on by itself in the same stream: no `memory_full`, the answer finishes, the
+    client read a `: paused` comment meanwhile, /health counts one give-way and one resume."""
+    port, proc = _server(("--parallel", "2"))
+    try:
+        body = {"messages": [{"role": "user", "content": "FAKE_PREFILL_POOL_FULL_ONCE go"}], "max_tokens": 32,
+                "stream": True, "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        text, fin, comments = [], None, []
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for raw in r:
+                line = raw.decode().strip()
+                if line.startswith(":"):
+                    comments.append(line)
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                d = json.loads(line[6:])
+                for c in d.get("choices") or []:
+                    if (c.get("delta") or {}).get("content"):
+                        text.append(c["delta"]["content"])
+                    if c.get("finish_reason"):
+                        fin = d
+        assert fin is not None and fin["choices"][0]["finish_reason"] != "error" and "error" not in fin, fin
+        assert text and any(c.startswith(": paused: waiting for memory") for c in comments), comments
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as r:
+            rc = json.loads(r.read())["parallel"]["recompute"]
+        assert rc["gave_way"] == 1 and rc["resumed"] == 1 and rc["gave_up"] == 0, rc
     finally:
         _stop(proc)
 

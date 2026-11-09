@@ -167,6 +167,28 @@ def test_a_probe_of_other_weights_or_rows_does_not_decide():
     assert p.row["source"] == "qwen_context"
 
 
+def test_a_full_kv_pool_in_the_stages_prefill_is_a_stage_error_not_the_clients():
+    """SRV-797 (review item 12): a prefill of the probe stage or of the in-context question that the KV pool refuses
+    (`PoolFull`) ends that stage with its error and the class falls back; nothing reaches the client, and the turn's own
+    prefill then waits for memory as any (`_recomputing`)."""
+    from engine import kvpool
+
+    class FullRows(Rows):
+        def __call__(self, ids):
+            self.calls.append(list(ids))
+            raise kvpool.PoolFull("KV pool: committing 4 MiB for slot0 would leave 8.2 GiB available")
+    cond, fakes = setup(decider=lambda t, o: ("code_edit", 0.93))
+    _with_probe(cond, pick="debug")
+    m2, _, _ = _session(cond, fakes)
+    runner = Runner("plan", fail=kvpool.PoolFull("full"))
+    p, _, _ = _turn(cond, body(m2), runner, FullRows())
+    st = p.row["stages"]
+    assert [(s["stage"], s["error"]) for s in st] == [("probe", "probe_PoolFull"),
+                                                     ("qwen_context", "qwen_context_PoolFull")], st
+    assert p.row["class_id"] is not None and len(runner.calls) == 1
+    return "probe_PoolFull, qwen_context_PoolFull; the session's class"
+
+
 def test_shadow_journals_beside_the_router_and_writes_the_snapshot():
     cond, fakes = setup(decider=lambda t, o: ("code_edit", 0.93))
     root = _with_probe(cond, mode="shadow", pick="debug")

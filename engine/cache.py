@@ -635,6 +635,8 @@ class Budget:
         # SRV-775: thread -> the workspace of its prefill, from its gate until it has run (`ws_now`: the largest)
         self._ws_live: dict = {}
         self._ws_lock = threading.Lock()
+        # SRV-797: key -> bytes of the caches' room an admitted request was let in on (`hold_growth`)
+        self._growth_holds: dict = {}
         self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
                       "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
                       "shed": {lv: 0 for lv in self.LEVELS},
@@ -737,6 +739,29 @@ class Budget:
                 self._ws_live[tid] = int(v)
             else:
                 self._ws_live.pop(tid, None)
+
+    @property
+    def growth_held(self) -> int:
+        """SRV-797: the caches' room the admission let requests in on: no cache grows into it (`admit`)."""
+        with self._ws_lock:
+            return sum(self._growth_holds.values())
+
+    def growth_hold_of(self, key) -> int:
+        with self._ws_lock:
+            return int(self._growth_holds.get(key, 0))
+
+    def hold_growth(self, key, nbytes: int) -> None:
+        """SRV-797: `nbytes` of the caches' room under the ceiling are `key`'s until `release_growth`: a turn
+        short only by what the caches MAY still take is let in on it instead of waiting for it."""
+        with self._ws_lock:
+            if int(nbytes) > 0:
+                self._growth_holds[key] = int(nbytes)
+            else:
+                self._growth_holds.pop(key, None)
+
+    def release_growth(self, key) -> None:
+        with self._ws_lock:
+            self._growth_holds.pop(key, None)
 
     def ws_own(self) -> int:
         """SRV-775: this thread's prefill's workspace in `ws_now` (0: none)."""
@@ -1119,7 +1144,7 @@ class Budget:
             alloc, res = self.memory()
             top = res + nbytes if self.pools_probe is not None else max(res, alloc + nbytes)
             under_peak = top + self.ws_now <= self.peak
-            if alloc + nbytes <= self.ceiling - self.slack and under_peak:
+            if alloc + nbytes <= self.ceiling - self.slack - self.growth_held and under_peak:
                 self.stats["admitted"] += 1
                 return True
             if attempt == 0:
@@ -1226,6 +1251,7 @@ class Budget:
                                  else None),
                 "ws_floor": self.ws_floor, "ws_per_token": self.ws_per_token,
                 "ws_now": self.ws_now,             # SRV-775: the largest prefill admitted and not yet run
+                "growth_held": self.growth_held,   # SRV-797: the caches' room requests were let in on
                 "events": list(self.events)[-20:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
 

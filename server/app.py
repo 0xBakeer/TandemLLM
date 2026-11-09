@@ -293,6 +293,28 @@ QUEUE = threading.Lock()
 HEARTBEAT_EVERY_S = 1.0
 
 
+class EngineRestarting(RuntimeError):
+    """SRV-797: a planned stop (`draining`) ended a lane's wait for memory after it gave way: the restart's
+    retryable error (`memory_full_error`), not `memory_full`."""
+
+
+class MemoryWaitEnded(RuntimeError):
+    """SRV-797: a lane that gave way was not admitted again; `code` and `stop` say why (`memory_full_error`), never
+    `memory_full`."""
+    code, stop = "memory_wait_timeout", "memory_wait_timeout"
+
+
+class MemoryWaitTimeout(MemoryWaitEnded):
+    """It waited for memory to its bound: the wait's refusal, its words what it needed and what was free above the
+    guard."""
+
+
+class PeakRefused(MemoryWaitEnded):
+    """Its continuation (prompt and text) is a prefill no reserve could take, the engine's load and its workspace
+    over the declared peak (`cache.MemoryRefused`), as the first admission refuses one at once."""
+    code, stop = "memory_refused", "memory"
+
+
 class ClientGone(ConnectionResetError):
     """The client closed its connection while its request waited or prefilled.
 
@@ -502,6 +524,11 @@ class Deadline:
         if self.t_end and time.monotonic() > self.t_end:
             self.hit = True
         return self.hit
+
+    def extend(self, seconds: float) -> None:
+        """SRV-797: the cap moves on by `seconds` the request spent waiting for memory."""
+        if self.t_end and not self.hit:
+            self.t_end += max(0.0, float(seconds))
 
 
 class BlockStats:
@@ -754,8 +781,17 @@ KV_RECOMPUTE = (os.environ.get("QSE_KV_RECOMPUTE", "on") or "on") != "off"
 #: SRV-709: the most of a request's max_tokens its admission reserves KV pages for (0: all of it). A
 #: lane that writes past it and finds the pool full gives way and continues later (KV_RECOMPUTE)
 KV_ADMIT_ROWS = int(os.environ.get("QSE_KV_ADMIT_ROWS", "8192") or 0)
-#: SRV-709: a request gives way at most this many times; then it ends with `memory_full`
+#: SRV-709: a request not streamed gives way at most this many times; then it ends with `memory_full`. Its client
+#: reads nothing until the answer is whole, so its continuations are bounded by count too, and (SRV-797) each wait by
+#: `--queue-timeout`, as its first admission's. A streamed one gives way until its waits for memory add up to
+#: `MEM_WAIT_S` (it reads a `: paused` comment meanwhile)
 KV_RECOMPUTE_MAX = 16
+#: SRV-797: a streamed lane that gave way is admitted again no sooner than this (s), doubled at each give-way with
+#: fewer than `KV_GIVE_WAY_PROGRESS` tokens written since the one before, up to the second value: one the pool keeps
+#: refusing does not read its rows back and write them out every few seconds (2026-11-08: a 47,653-row restore and its
+#: save every 3 s, 16 times). Not streamed: the first value each time
+KV_GIVE_WAY_BACKOFF_S = (1.0, 60.0)
+KV_GIVE_WAY_PROGRESS = 256
 #: SRV-E6, SRV-795: the KV pool's ladder drops idle slots' graph sets, the least recently used first, after the
 #: caches and the small models and before any conversation's rows, and an idle window over the cap drops them too
 #: (`off`, `0`, `false`: never). Only a family whose engine keeps a graph set (`graph_set`, `drop_graphs`:
@@ -6307,6 +6343,15 @@ def _kv_give_back_own() -> int:
     return int(pages.trim(0))
 
 
+def _give_way_hold(streak: int, long: bool = True) -> float:
+    """SRV-797: how long a lane backs off after its `streak`-th give-way in a row (`KV_GIVE_WAY_BACKOFF_S`); one not
+    streamed (and not asking to wait long), the first step every time."""
+    lo, hi = KV_GIVE_WAY_BACKOFF_S
+    if not long:
+        return float(lo)
+    return min(float(hi), float(lo) * 2 ** min(max(0, int(streak) - 1), 30))
+
+
 def _keep_think(think) -> None:
     """SRV-709: the thinking budget's count and state survive a lane's continuation: the generation
     that reads prompt + text again arms it with `start`, which would count the thinking from 0 and
@@ -6619,7 +6664,8 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
     pool = kvpool.POOL
     if pool is None or d.get("after") is None:
         return 0
-    want = int(d.get("floor", 0)) - int(d["after"])
+    after, floor = slots_mod.Admission.binding(d)       # SRV-797: the shorter check's
+    want = int(floor or 0) - int(after)
     if want <= 0:
         return 0
     rm = dict.get(STATE, "role_mem")
@@ -6966,9 +7012,16 @@ def memory_full_error(exc, generated: int | None = None) -> dict | None:
     the same request again with the text as a continuation (the Chat tab does) waits for memory at
     the admission and goes on from there. A streamed answer ends with it beside `finish_reason`
     "error"; one not streamed yet gets it as a 503 with Retry-After."""
+    done = f" after {int(generated):,} tokens" if generated else ""
+    if isinstance(exc, MemoryWaitEnded):
+        return {"message": str(exc), "type": "server_busy", "code": exc.code, "retry_after": MEMORY_FULL_RETRY_S}
+    if isinstance(exc, EngineRestarting):
+        # SRV-797: a planned stop during a lane's wait for memory: retryable, as a wait the stop ends
+        return {"message": f"the engine is restarting: this request stopped{done}; send it again to continue in a "
+                           f"moment", "type": "server_busy", "code": "engine_restarting",
+                "retry_after": MEMORY_FULL_RETRY_S, "detail": str(exc)}
     if not isinstance(exc, kvpool.PoolFull):
         return None
-    done = f" after {int(generated):,} tokens" if generated else ""
     return {"message": (f"memory is full: this request stopped{done} to keep the box above its "
                         f"memory floor; send it again to continue once memory is free"),
             "type": "server_busy", "code": "memory_full", "retry_after": MEMORY_FULL_RETRY_S,
@@ -8564,7 +8617,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
                    stream: bool = False, rows: int | None = None, respond: bool = True,
-                   cold: bool = False, home: int = 0, priority: int = 1) -> bool:
+                   cold: bool = False, home: int = 0, priority: int = 1, hold_s: float = 0.0,
+                   limit_s: float | None = None, deadline=None, wait_long: bool = False) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8624,8 +8678,17 @@ class Handler(BaseHTTPRequestHandler):
         charged, not the whole prompt. This gate runs on the client's tokens, which part from the slot's
         rows at the first router note the prefill puts back (`_end_replay`), so where it resumes in place
         said nothing there: 35 side-slot turns of 2026-11-05 were charged the whole prompt (5.2-8.5 GiB)
-        and forwarded 23-5,331 rows."""
+        and forwarded 23-5,331 rows.
+
+        SRV-797: `hold_s`, a lane that gave way backs off that long before it is admitted again (`_recomputing`),
+        out of the line meanwhile (`Admission.hold`: requests that fit go); `limit_s`, what is left of its bound when
+        it waited before. The prompt's pages are checked as the KV pool's gate sees them in the prefill
+        (`Admission.check`'s `kv_prompt`). `deadline` (the request's `Deadline`) is moved on by the time
+        it waited: a wait for memory is not generation time (a 20-minute wait ended the answer at an hour's
+        `--request-timeout`). `wait_long`: a request not streamed whose client asked to wait for memory as long as a
+        streamed one (`_wait_for_memory`): its bound is `MEM_WAIT_S`, not `--queue-timeout`."""
         self._mem_wait = False
+        self._mem_refusal = self._mem_refused = None
         adm = pool.admission
         if adm is None:
             return True
@@ -8692,8 +8755,9 @@ class Handler(BaseHTTPRequestHandler):
                 if rec is not None:
                     rec.stop_detail = "memory"
                 print(f"[memory] {cid} refused: {exc}", flush=True)
+                self._mem_refused = f"{exc}; retry when the engine is idle"      # SRV-797: a lane's continuation
                 if respond:
-                    self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                    self._busy(503, self._mem_refused, retry=30)
                 return False
 
         def gate() -> dict | None:
@@ -8732,7 +8796,7 @@ class Handler(BaseHTTPRequestHandler):
                 full = left == 2
             return None
 
-        kv, owner = 0, None
+        kv, owner, kv_prompt = 0, None, None
         if kvpool.POOL is not None:
             eng = STATE.get("engine")
             pages = getattr(getattr(eng, "kv", None), "pages", None)
@@ -8745,13 +8809,20 @@ class Handler(BaseHTTPRequestHandler):
                 kv_rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
                 kv = pages.need_bytes(kv_rows)
                 owner = pages.owner
+                # SRV-797: the pages its prefill commits (the prompt and the router's notes), under the pool's floor
+                # while it runs; the rest come after it, under the decode floor (`Admission.check`)
+                kv_prompt = pages.need_bytes(min(int(eng.kv.max_len), n + PLAN_MARGIN + SIDE_MARGIN))
 
         def reserve() -> tuple[bool, dict]:
             """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
             workspace past the engine's room, in full less the allocator's free default-pool blocks
             (`Admission.check`)."""
             return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")),
-                               rows=n)
+                               rows=n, kv_prompt=kv_prompt)
+
+        def check_now() -> tuple[bool, dict]:
+            return adm.check(est["ws_r1"] + kv, count=False, kv=kv, over_peak=bool(est.get("over_peak")), rows=n,
+                             kv_prompt=kv_prompt)
         # the chat's priority (`tandem.priority`): the line for memory is by it, and the pool's reclaim takes the
         # idle conversations of lower-priority chats first (`_kv_reclaim_side`)
         slot_now = slots_mod.current()
@@ -8764,9 +8835,21 @@ class Handler(BaseHTTPRequestHandler):
         if gate_again:
             adm.stats["peak_waits"] += 1
         freed = 0                     # SRV-787: what the reclaims gave back for it, for the live view
-        if not gate_again and adm.outranked(priority):
+        # SRV-787: a wait has an end, streamed or not (a streamed one waited `--request-timeout`, an hour live)
+        limit = (MEM_WAIT_S if stream or wait_long else min(MEM_WAIT_S, float(STATE.get("queue_timeout", 120.0))))
+        if limit_s is not None:
+            limit = max(0.0, min(limit, float(limit_s)))
+        until = time.monotonic() + limit
+        # SRV-797: a lane that gave way backs off first, out of the line (`hold`), on the gate's wait too; never
+        # past its bound
+        hold_until = min(until, time.monotonic() + max(0.0, float(hold_s)))
+        if hold_s > 0:
+            adm.hold(cid, hold_until)
+        backoff = False
+        if not gate_again and (hold_s > 0 or adm.outranked(priority)):
             # a chat of a higher priority waits for memory: this request joins the line behind it
-            _, d = adm.check(est["ws_r1"] + kv, count=False, kv=kv, over_peak=bool(est.get("over_peak")), rows=n)
+            ok, d = check_now()
+            backoff = hold_s > 0 and ok
         elif not gate_again:
             ok, d = reserve()
             got = _kv_reclaim_idle(d, owner) if not ok else 0
@@ -8783,21 +8866,39 @@ class Handler(BaseHTTPRequestHandler):
             # it, not after up to the burst's wait (2026-11-02: one member's 12 s wait held the seven others'
             # first tokens to 10.5-13.7 s); admitted, it prefills alone. `_par_end`'s leave is then a no-op
             burst.leave(i)
-        print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
-        adm.stats["waits"] += 1
+        if backoff:
+            # SRV-797: memory is there; the lane that gave way backs off before it reads its rows again
+            print(f"[parallel] {cid} backs off {hold_s:g} s after giving way: {slots_mod.Admission.describe(d)}",
+                  flush=True)
+        else:
+            print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
+            adm.stats["waits"] += 1
         self._mem_wait = True
         if rec is not None:
-            rec.wait_reason = "memory"
-            rec.waiting_memory = True
+            rec.wait_reason = "backoff" if backoff else "memory"
+            rec.waiting_memory = not backoff
         t0 = time.perf_counter()
         st0 = getattr(mem, "stats", None)
         e0 = (int(st0.get("empties") or 0), float(st0.get("empty_ms") or 0.0)) if isinstance(st0, dict) else None
         # SRV-775: the prefills in flight and the time at the gate's last refusal (`PEAK_REGATE_S`)
         seen, t_gate = adm.ws_in_flight(), time.monotonic()
-        # SRV-787: a wait has an end, streamed or not (a streamed one waited `--request-timeout`, an hour live)
-        limit = (MEM_WAIT_S if stream else min(MEM_WAIT_S, float(STATE.get("queue_timeout", 120.0))))
-        until = time.monotonic() + limit
         said = -1e9
+
+        def admitted() -> bool:
+            waited = time.perf_counter() - t0
+            if rec is not None:
+                rec.wait_mem_ms = round(waited * 1e3, 1)
+                if rec.t_lock is not None:
+                    rec.t_lock += waited            # the wait is the queue's, not prefill
+            st = getattr(mem, "stats", None)
+            emp = (f"; empties +{int(st.get('empties') or 0) - e0[0]} "
+                   f"({float(st.get('empty_ms') or 0.0) - e0[1]:.1f} ms)"
+                   if e0 is not None and isinstance(st, dict) else "")
+            print(f"[parallel] {cid} admitted after {waited:.1f} s: "
+                  f"{slots_mod.Admission.describe(d)}{emp}", flush=True)
+            if deadline is not None:
+                deadline.extend(waited)
+            return True
         try:
             while time.monotonic() < until:
                 if STATE.get("draining"):
@@ -8809,7 +8910,13 @@ class Handler(BaseHTTPRequestHandler):
                     if respond:
                         self._busy(503, "The engine is restarting; send the request again in a moment.", retry=30)
                     return False
+                backing = False
+                if time.monotonic() < hold_until and not gate_again:
+                    # SRV-797: while it backs off, its line reads memory as it is now: backing off, or waiting
+                    backing, d = check_now()
                 if rec is not None:
+                    rec.wait_reason = "backoff" if backing else "memory"
+                    rec.waiting_memory = not backing
                     # SRV-787: what the live view says while it waits (server/activity.py `memory_of`)
                     rec.mem_wait = _mem_wait_of(d, est["fwd"], t0, limit, adm.wait(cid, priority), freed)
                     rec.mem_wait["higher"] = adm.ahead_higher(cid)
@@ -8832,13 +8939,17 @@ class Handler(BaseHTTPRequestHandler):
                 line = time.monotonic() - said >= MEM_LINE_EVERY_S
                 if line and said > 0:
                     # SRV-787: the engine log says why every MEM_LINE_EVERY_S, the guard's inputs with it
-                    print(f"[parallel] {cid} still waits for memory ({time.perf_counter() - t0:.0f} s of "
-                          f"{limit:.0f}): {slots_mod.Admission.describe(d)}", flush=True)
+                    print(f"[parallel] {cid} still " + (f"backs off after giving way ({time.perf_counter() - t0:.0f} s "
+                                                        f"of {hold_s:g})" if backing else
+                                                        f"waits for memory ({time.perf_counter() - t0:.0f} s of "
+                                                        f"{limit:.0f})")
+                          + f": {slots_mod.Admission.describe(d)}", flush=True)
                 if line:
                     said = time.monotonic()
                 if line and say is not None:
+                    after_, floor_ = slots_mod.Admission.binding(d)
                     gap = ((d.get("over") or 0) if d.get("peak_wait")       # SRV-775: over the peak
-                           else d.get("floor", 0) - (d.get("after") or 0))
+                           else (floor_ or 0) - (after_ or 0))
                     short = max(0.0, gap / slots_mod.GiB)
                     try:
                         try:
@@ -8851,12 +8962,13 @@ class Handler(BaseHTTPRequestHandler):
                 if held:
                     pool.turn.release(i)
                 try:
-                    time.sleep(1.0)
+                    left_ = hold_until - time.monotonic()
+                    time.sleep(min(1.0, max(0.01, left_)) if left_ > 0 else 1.0)
                 finally:
                     if held:
                         pool.turn.acquire(i)
                 # the first in line only: arrival order among the requests that wait for memory
-                if place > 1:
+                if place > 1 or time.monotonic() < hold_until:
                     continue
                 if price() > est.get("gated", n):
                     gate_again = True           # SRV-773: a shed during the wait moved the resume point down
@@ -8877,18 +8989,13 @@ class Handler(BaseHTTPRequestHandler):
                     freed += got
                     ok, d = reserve()
                 if ok:
-                    waited = time.perf_counter() - t0
-                    if rec is not None:
-                        rec.wait_mem_ms = round(waited * 1e3, 1)
-                        if rec.t_lock is not None:
-                            rec.t_lock += waited            # the wait is the queue's, not prefill
-                    st = getattr(mem, "stats", None)
-                    emp = (f"; empties +{int(st.get('empties') or 0) - e0[0]} "
-                           f"({float(st.get('empty_ms') or 0.0) - e0[1]:.1f} ms)"
-                           if e0 is not None and isinstance(st, dict) else "")
-                    print(f"[parallel] {cid} admitted after {waited:.1f} s: "
-                          f"{slots_mod.Admission.describe(d)}{emp}", flush=True)
-                    return True
+                    return admitted()
+            if not gate_again and not STATE.get("draining"):
+                # SRV-797: at its bound, one check more: a request memory is there for is admitted, not refused
+                # (a lane's backoff, or a turn behind others in the line, can run to the bound with memory free)
+                ok, d = reserve()
+                if ok:
+                    return admitted()
         finally:
             adm.unwait(cid)
             if rec is not None:
@@ -8900,24 +9007,47 @@ class Handler(BaseHTTPRequestHandler):
         if rec is not None:
             rec.stop_detail = "memory_wait_timeout"
             rec.wait_mem_ms = round((time.perf_counter() - t0) * 1e3, 1)
+        # SRV-797: one not streamed is told it can be sent again, or streamed (or `wait_for_memory`) to wait longer
+        self._mem_refusal = activity_mod.refusal_words(_mem_wait_of(d, est["fwd"], t0, limit, 1, freed),
+                                                       long=stream or wait_long)
         if not respond:
             return False
         # SRV-787: the reason in words; a stream opened while it waited ends with it as an error event
         self._send_bytes(503, json.dumps({"error": {
-            "message": activity_mod.refusal_words(_mem_wait_of(d, est["fwd"], t0, limit, 1, freed)),
-            "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
+            "message": self._mem_refusal, "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
             extra_headers=(("Retry-After", "30"),))
         return False
 
-    def _recomputing(self, pool, cid: str, rec, stream: bool, prompt, max_new: int, think, make):
+    def _recomputing(self, pool, cid: str, rec, stream: bool, prompt, max_new: int, think, make,
+                     admit: dict | None = None, deadline=None):
         """SRV-709: the tokens of `make(prompt, max_new)`; when the KV pool refuses this lane's next
         pages and other lanes run, the lane gives its memory back (`_kv_give_back_own`), waits at
         the head of the admission's line (`Admission.first`) and goes on with `make(prompt + its
         text, what is left)`: the same answer, read again from its prompt and text. A streamed
-        client gets an SSE comment while the lane waits (no client reads it as a token). Alone, or
-        after `KV_RECOMPUTE_MAX` times, the refusal stands (`memory_full`)."""
+        client gets an SSE comment while the lane waits (no client reads it as a token).
+
+        SRV-797: a streamed lane gives way alone too, and in its prefill as in its answer (2026-11-08: a lone
+        chat whose prefill the pool refused ended with `memory_full` after 0 tokens): memory comes back with nothing
+        else running (a sandbox that ends, the small models, the idle conversations, a reclaim level). Each give-way
+        backs off longer before it is admitted again (`KV_GIVE_WAY_BACKOFF_S`), from the first step again once it
+        wrote `KV_GIVE_WAY_PROGRESS` tokens since the one before; the refusal stands once its waits for memory (its
+        first admission's too) add up to `MEM_WAIT_S`,
+        and a planned stop during a wait ends it as a restart (`EngineRestarting`), not `memory_full`. One not
+        streamed (and not asking `wait_for_memory`) keeps SRV-709's count: alone, or after `KV_RECOMPUTE_MAX`
+        give-ways, the refusal stands (`memory_full`); unlike before (each wait up to `MEM_WAIT_S`), each of its waits
+        is a non-streamed request's, at most `--queue-timeout` after a 1 s backoff, and ends with the wait's own
+        refusal (`memory_wait_timeout`, a 503 its client can send again). It is
+        admitted again as it was the first time (`admit`: its image rows, `cold`, `home`, its priority), the line
+        by when it first gave way, and its `deadline` moves on by every wait. The thinking budget goes on from
+        where it was only when the lane wrote a token; refused before that, its budget may never have been armed
+        (a family that maps the prompt's rows before `think.start`) and starts as it would have."""
         produced: list[int] = []
+        # SRV-797: its waits for memory, the first admission's too, count toward `MEM_WAIT_S`
         cur, left, gave = prompt, int(max_new), 0
+        waited = float(getattr(rec, "wait_mem_ms", None) or 0.0) / 1e3
+        streak, at, t_first = 0, 0, None      # SRV-797: give-ways with little written between them
+        admit = admit or {}
+        long = stream or bool(admit.get("wait_long"))     # SRV-797: waits as a stream does
         while True:
             gen = make(cur, left)
             try:
@@ -8927,8 +9057,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             except kvpool.PoolFull:
                 adm = pool.admission
-                if adm is None or pool.running() <= 1 or gave >= KV_RECOMPUTE_MAX:
+                if adm is None or (not long and (pool.running() <= 1 or gave >= KV_RECOMPUTE_MAX)):
                     raise
+                if long and waited >= MEM_WAIT_S:
+                    raise MemoryWaitTimeout(self._mem_refusal or "Memory stayed full for the whole wait for it, so "
+                                            "this turn did not go on. Continue tries again.") from None
                 gen.close()
                 gave += 1
                 freed = _kv_give_back_own()
@@ -8938,25 +9071,44 @@ class Handler(BaseHTTPRequestHandler):
                 st["freed_gib"] = round(st["freed_gib"] + freed / (1 << 30), 3)
                 if rec is not None:
                     rec.gave_way = gave
+                streak = 1 if streak == 0 or len(produced) - at >= KV_GIVE_WAY_PROGRESS else streak + 1
+                at = len(produced)
+                hold = _give_way_hold(streak, long)
                 print(f"[kv-pool] {cid} gives way after {len(produced):,} tokens: {_gib(freed)} GiB "
-                      f"back to the pool, {pool.running() - 1} lane(s) go on; it continues when "
-                      f"memory is free", flush=True)
+                      f"back to the pool, {max(0, pool.running() - 1)} lane(s) go on; it continues when "
+                      f"memory is free, in {hold:g} s at the soonest (give-way {gave})", flush=True)
                 adm.release(cid)
-                adm.first(cid)
+                t_first = time.monotonic() if t_first is None else t_first
+                adm.first(cid, t_first)
+                adm.hold(cid, time.monotonic() + hold)     # out of the line from now, not from its admission's start
                 cur = torch.cat([prompt, torch.tensor(produced, dtype=prompt.dtype,
                                                       device=prompt.device)])
                 left = int(max_new) - len(produced)
 
                 def paused(short: float, place: int = 1) -> None:
                     if stream:
-                        self.wfile.write(f": paused: waiting for memory ({short:.1f} GiB short)\n\n"
+                        self.wfile.write((f": paused: waiting for memory ({short:.1f} GiB short)\n\n" if short > 0
+                                          else ": paused: backing off after giving way, memory is there\n\n")
                                          .encode())
                         self.wfile.flush()
-                if not self._par_admit(pool, cid, cur, rec=rec, say=paused, max_new=left,
-                                       stream=True, respond=False):
+                rows_of = admit.get("rows_of")
+                t_w = time.monotonic()
+                ok = self._par_admit(pool, cid, cur, rec=rec, say=paused, max_new=left, stream=stream,
+                                     respond=False, hold_s=hold, limit_s=(MEM_WAIT_S - waited) if long else None,
+                                     deadline=deadline, rows=rows_of(int(cur.numel())) if rows_of else None,
+                                     cold=bool(admit.get("cold")), home=int(admit.get("home") or 0),
+                                     priority=int(admit.get("priority", 1)), wait_long=long)
+                waited += time.monotonic() - t_w
+                if not ok:
                     st["gave_up"] += 1
-                    raise
-                _keep_think(think)
+                    if STATE.get("draining"):
+                        raise EngineRestarting("the engine stopped while this request waited for memory") from None
+                    if self._mem_refused:
+                        raise PeakRefused(self._mem_refused) from None
+                    raise MemoryWaitTimeout(self._mem_refusal or "Memory stayed full, so this turn did not go on.") \
+                        from None
+                if produced:
+                    _keep_think(think)
                 st["resumed"] += 1
                 print(f"[kv-pool] {cid} goes on: reads its {int(cur.numel()):,} tokens again",
                       flush=True)
@@ -10447,12 +10599,17 @@ class Handler(BaseHTTPRequestHandler):
                 # never "a prefill needs at least one token" as a 500
                 return self._json(400, compat.Refusal(
                     "messages" if chat else "prompt", "the prompt is empty").body())
+            # SRV-797: how a give-way's continuation is admitted again (`_recomputing`): as this request was
+            admit_kw = {"rows_of": (lambda n: _mm_rows(n, images)) if images else None, "cold": cold,
+                        "home": (int(par_why.get("home_share") or 0)
+                                 if par is not None and side is not None and par_why.get("home") == side.index
+                                 else 0),
+                        "priority": _priority_of(body), "wait_long": _wait_for_memory(body, self.headers)}
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
-                    rows=_mm_rows(int(prompt.numel()), images) if images else None, cold=cold,
-                    home=(int(par_why.get("home_share") or 0)
-                          if side is not None and par_why.get("home") == side.index else 0),
-                    priority=_priority_of(body)):
+                    rows=admit_kw["rows_of"](int(prompt.numel())) if images else None, cold=cold,
+                    home=admit_kw["home"], priority=admit_kw["priority"], deadline=deadline,
+                    wait_long=admit_kw["wait_long"]):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -10932,7 +11089,8 @@ class Handler(BaseHTTPRequestHandler):
                         par, cid, rec, stream, prompt, max_new, budget_state,
                         lambda p, n: generate_stream(p, n, eos, budget_state, disk_id, deadline,
                                                      pen=pen, pstop=guard, sampler=samp,
-                                                     on_prefill=watch, **kw)))
+                                                     on_prefill=watch, **kw),
+                        admit=admit_kw, deadline=deadline))
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, disk_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -11747,6 +11905,10 @@ class Handler(BaseHTTPRequestHandler):
                 rec.stop_detail = "tool_arg_loop"
             if isinstance(failed, kvpool.PoolFull):
                 rec.stop_detail = "memory_full"            # SRV-709
+            elif isinstance(failed, EngineRestarting):
+                rec.stop_detail = "draining"               # SRV-797
+            elif isinstance(failed, MemoryWaitEnded):
+                rec.stop_detail = failed.stop              # SRV-797
             if sup is not None:
                 _outcome(sup, tbuf.calls if tbuf is not None else [], ids, in_think, finish)
             _log_request(cid, n_prompt, len(ids), finish, t_req, stream=True, exc=failed, pen=pen_spec,
@@ -13449,6 +13611,18 @@ def _guard(rows: int, cap: int) -> tuple[int, dict] | None:
     return slots_mod.guard(cap, step=step, kv=kv, sandbox=sandbox, margin=int(GUARD_MARGIN_GB * (1 << 30)))
 
 
+def _wait_for_memory(body, headers) -> bool:
+    """SRV-797: a request not streamed that asks to wait for memory as long as a streamed one (`MEM_WAIT_S`, not
+    `--queue-timeout`): `wait_for_memory: true` in the body or in its `tandem` object, or the header
+    `X-Tandem-Wait-For-Memory: 1` (an agent app that does not stream)."""
+    t = body.get("tandem") if isinstance(body, dict) else None
+    if isinstance(body, dict) and body.get("wait_for_memory") is True or isinstance(t, dict) and \
+            t.get("wait_for_memory") is True:
+        return True
+    h = (headers.get("X-Tandem-Wait-For-Memory") if headers is not None else None) or ""
+    return str(h).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _priority_of(body) -> int:
     """A chat's priority for memory, from the request's `tandem.priority` ("high", "normal", "low"): 2, 1, 0.
     Anything else, and a request without the field: normal."""
@@ -13465,7 +13639,7 @@ def _mem_wait_of(d: dict, fwd: int, t0: float, limit: float, place: int, freed: 
     if d.get("peak_wait"):
         need, free, floor, short = int(d.get("ws") or 0), None, None, int(d.get("over") or 0)
     else:
-        avail, after, floor = d.get("avail"), d.get("after"), d.get("floor")
+        (after, floor), avail = slots_mod.Admission.binding(d), d.get("avail")    # SRV-797: the shorter check
         need = int(avail - after) if avail is not None and after is not None else int(d.get("need") or 0)
         free = avail
         short = max(0, int(floor) - int(after)) if after is not None and floor is not None else None
@@ -13487,8 +13661,50 @@ def _par_growth() -> int:
     at most what their policy still lets them allocate (`Budget.admit`): `ceiling - slack` less what is allocated, and
     nothing while the reserve and the largest prefill admitted (`ws_now`) are at the peak, as with an over-peak prefill
     in flight (2026-11-05: the budgets counted 13.6 GiB where admit allowed 4.5, and 0 for the turn over the peak). The
-    response cache holds token ids in host memory, outside the policy: its budget counts as it is."""
-    g = 0
+    response cache holds token ids in host memory, outside the policy: its budget counts as it is. SRV-797: less the
+    room requests were let in on (`_par_relieve`), which no cache grows into."""
+    g, rcg = _par_budgets_left()
+    mem = dict.get(STATE, "mem")
+    if mem is not None and getattr(mem, "on", False):
+        alloc, reserved = mem.memory()
+        g = 0 if reserved + mem.ws_now >= mem.peak else min(
+            g, max(0, mem.ceiling - mem.slack - int(getattr(mem, "growth_held", 0) or 0) - alloc))
+    return g + rcg
+
+
+def _par_relieve(key, cut: int) -> int:
+    """SRV-797: a turn the admission finds short by up to `cut` is let in on the caches' room instead of waiting
+    for it: that room is what the state store and the resident prefix MAY still take under the policy's ceiling, not
+    memory anything holds (2026-11-08: a turn waited 0.7 GiB short at 11.5 GB free, on the room alone). The policy
+    keeps that much of it for `key` (`Budget.hold_growth`) until its prefill has run, so no cache grows into it.
+    Returns how much of the growth the admission counted is gone (0: none to give; the response cache's, in host
+    memory, is not the policy's and stays counted)."""
+    mem = dict.get(STATE, "mem")
+    if mem is None or not getattr(mem, "on", False) or not hasattr(mem, "hold_growth") or int(cut) <= 0:
+        return 0
+    g, _ = _par_budgets_left()
+    alloc, reserved = mem.memory()
+    if reserved + mem.ws_now >= mem.peak:
+        return 0                          # no growth is counted at the peak
+    room = max(0, mem.ceiling - mem.slack - (mem.growth_held - mem.growth_hold_of(key)) - alloc)
+    counted = min(g, room)
+    cut = min(int(cut), counted)
+    if cut <= 0:
+        return 0
+    # the growth counted is min(budgets, room): hold enough of the room that it falls by `cut`
+    mem.hold_growth(key, min(room, cut if g >= room else room - g + cut))
+    return cut
+
+
+def _par_unrelieve(key) -> None:
+    mem = dict.get(STATE, "mem")
+    if mem is not None and hasattr(mem, "release_growth"):
+        mem.release_growth(key)
+
+
+def _par_budgets_left() -> tuple[int, int]:
+    """(what the state store and the resident prefix may still take by their budgets, the response cache's)."""
+    g, rcg = 0, 0
     store, res, rc = (dict.get(STATE, "state_store"), dict.get(STATE, "resident"),
                       dict.get(STATE, "response_cache"))
     if store is not None:
@@ -13503,16 +13719,12 @@ def _par_growth() -> int:
             g += max(0, total - int(getattr(res, "bytes", 0) or 0))
         except Exception:                                          # noqa: BLE001
             pass
-    mem = dict.get(STATE, "mem")
-    if mem is not None and getattr(mem, "on", False):
-        alloc, reserved = mem.memory()
-        g = 0 if reserved + mem.ws_now >= mem.peak else min(g, max(0, mem.ceiling - mem.slack - alloc))
     if rc is not None:
         try:
-            g += max(0, int(rc.budget) - int(getattr(rc, "bytes", 0)))
+            rcg = max(0, int(rc.budget) - int(getattr(rc, "bytes", 0)))
         except Exception:                                          # noqa: BLE001
             pass
-    return g
+    return g, rcg
 
 
 def _par_sleep(seconds: float) -> None:
@@ -13750,7 +13962,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     L = side_window(a)
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
     adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
-                              spare=_par_spare,
+                              spare=_par_spare, relieve=_par_relieve, unrelieve=_par_unrelieve,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
@@ -13876,6 +14088,10 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     kp = kvpool.POOL
     if isinstance(kp, slots_mod.GuardedPool):
         kp.guard = lambda: (_guard(adm.ctx_rows(), kp.hard_floor_cfg) or (None,))[0]
+        kp.guard_at = lambda rows: (_guard(max(int(rows), adm.ctx_rows()), kp.hard_floor_cfg) or (None,))[0]
+    if kp is not None:
+        # SRV-797: a request is never admitted under the floor its pages commit under
+        adm.pool_floor = getattr(kp, "floor_at", None) or (lambda rows: kp.hard_floor)
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
