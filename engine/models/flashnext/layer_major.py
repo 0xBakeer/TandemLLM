@@ -33,6 +33,24 @@ from engine.settings import SETTINGS as _S
 
 #: SPD-249 P1: the most rows a layer-major window takes (a multiple of the prefill chunk); 0: chunk-major
 ROWS = int(_S.get("FN_PF_WINDOW") or 0)
+#: a window's bytes a row above one chunk's (the experts' buffers of all its rows, the held streams and mixer inputs)
+ROW_BYTES = 256 * 1024
+#: the device memory a window leaves free (unified memory: the box's own work and the other slots' decode)
+MARGIN = 6 << 30
+
+
+def rows_now(chunk: int, cap: int) -> int:
+    """The most rows a window may take now: `cap` rows, fewer when the device's free memory (the driver's free bytes
+    and the allocator's cached ones) less `MARGIN` holds fewer rows past one chunk at `ROW_BYTES` each; a multiple of
+    `chunk`, at least one chunk (chunk-major). The window's size never changes a bit, only when it runs."""
+    if cap <= chunk:
+        return chunk
+    if not torch.cuda.is_available():
+        return cap
+    free, _ = torch.cuda.mem_get_info()
+    free += torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+    fit = chunk + max(0, free - MARGIN) // ROW_BYTES
+    return max(chunk, min(cap, fit // chunk * chunk))
 
 
 def groups(lens: list, cap: int) -> list:

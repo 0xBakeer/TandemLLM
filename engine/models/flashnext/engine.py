@@ -2884,7 +2884,7 @@ class FlashNextEngine(FlashNextRef):
         from engine.models.flashnext import layer_major as LM
         starts = list(range(0, ids.numel(), chunk))
         wins = ([[i] for i in range(len(starts))] if not (LM.ROWS > chunk and len(starts) > 1 and LM.ok(self, st))
-                else LM.groups([min(chunk, ids.numel() - a) for a in starts], LM.ROWS))
+                else LM.groups([min(chunk, ids.numel() - a) for a in starts], LM.rows_now(chunk, LM.ROWS)))
         for win in wins:
             last = win[-1] == len(starts) - 1
             if len(win) > 1:

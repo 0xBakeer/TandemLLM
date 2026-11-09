@@ -174,6 +174,22 @@ def test_the_cut_and_what_runs_a_window(monkeypatch):
     return "windows of at most the knob's rows; text on the prefill kernels only; off by default"
 
 
+def test_the_window_takes_the_memory_that_is_free(monkeypatch):
+    assert LM.rows_now(4096, 0) == 4096 and LM.rows_now(4096, 4096) == 4096       # off, or one chunk: chunk-major
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    G = 1 << 30
+    for free, cached, want in ((LM.MARGIN + 64 * G, 0, 32768),                     # room for the whole window
+                               (LM.MARGIN + 2 * G, 0, 4096 + (2 * G // LM.ROW_BYTES) // 4096 * 4096),
+                               (LM.MARGIN + 1 * G, 1 * G, 4096 + (2 * G // LM.ROW_BYTES) // 4096 * 4096),
+                               (LM.MARGIN // 2, 0, 4096)):                         # short of the margin: chunk-major
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda f=free: (f, 128 * G))
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda c=cached: 3 * G + c)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 3 * G)
+        got = LM.rows_now(4096, 32768)
+        assert got == min(32768, want) and got % 4096 == 0, (free, cached, got, want)
+    return "free + cached memory past the margin buys rows at ROW_BYTES each, in whole chunks, at most the knob"
+
+
 def _replay(s, toks, starts, monkeypatch):
     """engine/cache.py's window loop around the slot verb, with a state buffer at every line."""
     bufs = [cache.state_empty(s) for _ in toks]

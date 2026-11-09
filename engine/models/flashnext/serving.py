@@ -681,7 +681,11 @@ class FlashNextServing:
                     b[idx[f"ple.ctx.{li}"]].copy_(st.ple_ctx[li].view(1, -1))
             return snap
         lg = None
-        for g in LM.groups([int(t.numel()) for t in toks], max(LM.ROWS, 1)):
+        cap = LM.rows_now(PREFILL_CHUNK, LM.ROWS)
+        wins = LM.groups([int(t.numel()) for t in toks], cap)
+        print(f"[pf-window] rows {int(starts[0])}..{int(starts[-1]) + int(toks[-1].numel())} chunks {C} windows "
+              f"{[len(g) for g in wins]} cap {cap} lines {bufs is not None}", flush=True)
+        for g in wins:
             if len(g) == 1:
                 lg = fn.prefill(toks[g[0]].view(-1), st, keep_stack=True)
                 hs[g[0]] = fn.prompt_stack
