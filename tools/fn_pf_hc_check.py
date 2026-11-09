@@ -13,17 +13,22 @@ fresh state by each arm in turn, `--reps` times round robin (once in the later m
   fused       both
   st1         QWEN38_FN_PF_ATTN_STAGES=1 (SPD-249 P6: the attention split launch's stages), the switches off
   fused_st1   both switches and QWEN38_FN_PF_ATTN_STAGES=1
+  win8k       QWEN38_FN_PF_WINDOW=8192 (SPD-249 P1: layer-major windows), the rest off
+  win32k      QWEN38_FN_PF_WINDOW=32768 and QWEN38_FN_PF_ROT_ROWS, the rest off
+  all8k       both switches, QWEN38_FN_PF_ATTN_STAGES=1 and QWEN38_FN_PF_WINDOW=8192
+  all32k      both switches, QWEN38_FN_PF_ATTN_STAGES=1, QWEN38_FN_PF_WINDOW=32768 and QWEN38_FN_PF_ROT_ROWS
 
-and every run is compared with the first base run (so the base's second run shows that a prefill repeats its bits):
+(the tool sets every one of these itself, whatever the process's environment says) and every run is compared with the first base run (so the base's second run shows that a prefill repeats its bits):
 
   logits      the last row's fp32 logits (`prefill`'s output), bit for bit
   streams     every row's pre-final-mixer streams (`prompt_stack`, keep_stack), bit for bit
   state       every cache and recurrent tensor of the state (KV, indexer keys, pooled keys, GDN state and conv,
               PLE conv and context) by a bit checksum on the device
   times       each run's prefill wall time (device synchronized), an arm's median, its gain on the base's median;
-              a mode's first context runs every arm once untimed first, so each arm's kernels are built and warm
+              a mode's first context runs every arm once untimed first, so each arm's kernels are built and warm;
+              `--warm-each`: every context does (the arms in order, the base first; the dropped times are `warm_s`)
 
-`--sites`: one more pass with the switches on in which every `_mix_pre` and `_inject_pre` call also runs the
+`--sites`: one more pass with the switches on (the window, rotation order and stages of `--sites-arm`) in which every `_mix_pre` and `_inject_pre` call also runs the
 replaced path on the same inputs and compares the results (x and di; h and n) bit for bit: the fused launches
 against the unfused chain on every real layer input of the prompt (every layer's two sites, every chunk), with the
 count of calls the fused path took and of mixers that got n's fp32 form from an inject.
@@ -46,6 +51,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext import engine as E  # noqa: E402
+from engine.models.flashnext import layer_major as LM  # noqa: E402
 from engine.models.flashnext.engine import FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
 from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
@@ -83,24 +89,48 @@ def same_bits(x: torch.Tensor, y: torch.Tensor) -> bool:
     return bool(torch.equal(x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)))
 
 
-#: (PF_HC_FUSED, PF_INJ_FUSED, PF_ATTN_STAGES)
+#: (PF_HC_FUSED, PF_INJ_FUSED, PF_ATTN_STAGES[, layer_major.ROWS, fn_prefill_kernels.ROT_ROWS])
 ARMS = {"base": (False, False, 2), "inj": (False, True, 2), "fused": (True, True, 2), "st1": (False, False, 1),
-        "fused_st1": (True, True, 1)}
+        "fused_st1": (True, True, 1), "win8k": (False, False, 2, 8192, False), "win32k": (False, False, 2, 32768, True),
+        "all8k": (True, True, 1, 8192, False), "all32k": (True, True, 1, 32768, True)}
 
 
-def switch(hc: bool, inj: bool | None = None, stages: int = 2) -> None:
-    E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES = hc, hc if inj is None else inj, stages
+def fuse(hc: bool, inj: bool | None = None) -> None:
+    E.PF_HC_FUSED, E.PF_INJ_FUSED = hc, hc if inj is None else inj
+
+
+def switch(hc: bool, inj: bool | None = None, stages: int = 2, window: int = 0, rot: bool = False) -> None:
+    from tools import fn_prefill_kernels as PK
+    fuse(hc, inj)
+    E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS = stages, window, rot
+
+
+#: the layer-major windows a prefill ran (`layer_major.window` counted)
+WINDOWS = [0]
+
+
+def _count_windows() -> None:
+    f = LM.window
+
+    def window(*a, **kw):
+        WINDOWS[0] += 1
+        return f(*a, **kw)
+    LM.window = window
 
 
 def arm(eng: FlashNextEngine, ids: list[int], name: str) -> dict:
     switch(*ARMS[name])
     st = eng.new_state(eng.max_len)
     torch.cuda.synchronize()
+    WINDOWS[0] = 0
+    held = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     lg = eng.prefill(torch.tensor(ids), st, keep_stack=True)
     torch.cuda.synchronize()
     dt = time.perf_counter() - t0
-    out = {"logits": lg.clone(), "stack": eng.prompt_stack, "state": state_sums(eng, st), "s": dt}
+    out = {"logits": lg.clone(), "stack": eng.prompt_stack, "state": state_sums(eng, st), "s": dt,
+           "peak_gib": (torch.cuda.max_memory_allocated() - held) / (1 << 30), "windows": WINDOWS[0]}
     eng.prompt_stack = None
     del st
     torch.cuda.empty_cache()
@@ -132,20 +162,20 @@ class SiteCheck:
         from tools import fn_pf_hc as HC
         held = getattr(self.eng, "_n32", None)
         self.n32 += int(bool(held) and id(n) in held)
-        switch(True)
+        fuse(True)
         r1 = self.mix0(n, p)                    # first: it takes n's fp32 form when an inject left one
-        switch(False)
+        fuse(False)
         r0 = self.mix0(n, p)
-        switch(True)
+        fuse(True)
         self._cmp("mix", n.shape[0], r0, r1, p)
         self.st["mix"][3] += int(HC.mix_ok(n, self.eng.cfg.hc_count))
         return r1
 
     def inject(self, h, out, di, R, w, hc, eps):
         from tools import fn_pf_hc as HC
-        switch(False)
+        fuse(False)
         r0 = self.inj0(h, out, di, R, w, hc, eps)
-        switch(True)
+        fuse(True)
         r1 = self.inj0(h, out, di, R, w, hc, eps)
         self._cmp("inject", h.shape[0], r0, r1, "w None" if w is None else "w")
         self.st["inject"][3] += int(HC.inject_ok(h, out, hc))
@@ -168,6 +198,8 @@ def main() -> None:
     ap.add_argument("--arms", default="base,inj,fused")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--sites", action="store_true")
+    ap.add_argument("--sites-arm", default="fused", help="the arm whose window, rotation order and stages the pass takes")
+    ap.add_argument("--warm-each", action="store_true", help="every context runs every arm once untimed first")
     ap.add_argument("--joint", type=int, default=0)
     ap.add_argument("--json")
     a = ap.parse_args()
@@ -175,8 +207,8 @@ def main() -> None:
     from tools import fn_prefill_kernels as PK
     ctxs = [int(x) for x in a.ctx.split(",")]
     arms = [x for x in a.arms.split(",") if x]
-    assert arms[0] == "base" and all(x in ARMS for x in arms), arms
-    mode0 = PK.MM
+    assert arms[0] == "base" and all(x in ARMS for x in arms) and a.sites_arm in ARMS, arms
+    mode0, own = PK.MM, (E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS)
     modes = [x for x in a.modes.split(",") if x] or [mode0]
     idx, W, banks, tables, timing = load(a.pack, "cuda")
     eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max(ctxs) + 64)
@@ -184,28 +216,34 @@ def main() -> None:
     res = {"pack": a.pack, "load": timing, "mem_after_load_gib": mem_available_gib(),
            "knobs": {"FN_PREFILL_MM": mode0, "modes": modes, "FN_PREFILL_CHUNK": E.PREFILL_CHUNK,
                      "prefill_path": eng.prefill_path, "group_rows": PK.GROUP_ROWS, "reps": a.reps,
+                     "arms": {k: ARMS[k] for k in arms}, "warm_each": a.warm_each, "sites_arm": a.sites_arm,
+                     "window_margin_gib": LM.MARGIN / (1 << 30), "window_row_bytes": LM.ROW_BYTES,
                      "FN_MIX": os.environ.get("QWEN38_FN_MIX", "int8"), "kv_dtype": str(eng.dtype),
                      "prefix_cache": "off", "max_len": eng.max_len,
                      "env": {k: v for k, v in os.environ.items() if k.startswith(("QWEN38_", "QSE_"))}},
            "rows": [], "joint": [], "ok": True}
     print("[pf-hc] knobs " + json.dumps({k: v for k, v in res["knobs"].items() if k != "env"}), flush=True)
+    _count_windows()
     for name in arms:
         arm(eng, class_prompt(tok, "prose", 256), name)
     for mode in modes:
         PK.MM = mode
         for n in ctxs:
             ids = class_prompt(tok, "prose", n)
-            if n == ctxs[0]:
+            warm = {}
+            if n == ctxs[0] or a.warm_each:
                 for name in arms:
-                    arm(eng, ids, name)
+                    warm[name] = round(arm(eng, ids, name)["s"], 3)
             ref = None
             times = {k: [] for k in arms}
+            peak, wins = {k: 0.0 for k in arms}, {}
             eq = {k: {"logits": True, "streams": True, "state": True} for k in arms}
             diff = {}
             for _ in range(a.reps if mode == modes[0] else 1):
                 for name in arms:
                     got = arm(eng, ids, name)
                     times[name].append(got["s"])
+                    peak[name], wins[name] = max(peak[name], got["peak_gib"]), got["windows"]
                     if ref is None:
                         ref = got
                         continue
@@ -221,13 +259,15 @@ def main() -> None:
             del ref
             torch.cuda.empty_cache()
             m = {k: med(v) for k, v in times.items()}
-            row = {"mode": mode, "ctx": len(ids), "equal": eq, "diff": diff,
+            row = {"mode": mode, "ctx": len(ids), "equal": eq, "diff": diff, "warm_s": warm,
                    "s": {k: [round(x, 3) for x in v] for k, v in times.items()},
                    "median_s": {k: round(v, 3) for k, v in m.items()},
                    "gain_s": {k: round(m["base"] - v, 3) for k, v in m.items() if k != "base"},
-                   "tok_s": {k: round(len(ids) / v, 1) for k, v in m.items()}}
+                   "tok_s": {k: round(len(ids) / v, 1) for k, v in m.items()},
+                   "peak_gib": {k: round(v, 3) for k, v in peak.items()}, "windows": wins}
             row["ok"] = all(all(v.values()) for v in eq.values())
             if a.sites:
+                switch(True, True, *ARMS[a.sites_arm][2:])
                 sc = SiteCheck(eng)
                 try:
                     st = eng.new_state(eng.max_len)
@@ -265,7 +305,7 @@ def main() -> None:
             torch.cuda.empty_cache()
             print("[pf-hc] joint " + json.dumps(jr), flush=True)
     PK.MM = mode0
-    switch(False)
+    E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS = own
     print(f"[pf-hc] {'ALL EQUAL' if res['ok'] else 'DIFFERENT'}", flush=True)
     if a.json:
         with open(a.json, "w") as f:

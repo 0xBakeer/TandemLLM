@@ -9,6 +9,13 @@ prefill untimed for the honest wall time and tok/s. Parts: the PLE branch, the h
 mixers (down GEMV, mix_up) and injects, EXL3 projections, other projections, the GDN conv and gates, the
 delta rule, attention (the core, the QSA indexer), the router, the experts, the final mixer and head.
 `--path kernel` profiles `FlashNextEngine.prefill_kernels` (ENG-225); `ref` the reference forward.
+
+`--kernels N`: one more run under torch.profiler (device activity only): the top N kernels and every kernel's time by
+stage (`STAGES`). `--sites N` (SPD-249 P4): one more run under torch.profiler with the host's ops and their Python
+stacks, and the launches of the "copies and elementwise" stage by the line that issued them: a kernel belongs to the
+op that launched it (the profiler's correlation), the op to the innermost frame of this repo on its stack. Launches,
+device seconds, the op and the kernel's kind a line, the top N. The stacks slow the host, not the kernels: the
+seconds are device time, to lay beside the stage table, and the run's wall time is not a prefill's.
 """
 
 from __future__ import annotations
@@ -125,7 +132,7 @@ STAGES = (
                                               "router_kernel", "RadixSort", "radixSort", "DeviceScan",
                                               "kernelHistogram", "histogram")),
     ("hyper-connection norms + mix tails", ("inject_norm_kernel", "hc_norm_kernel", "mix_tail_kernel",
-                                           "mix_up", "combine_inject")),
+                                           "mix_up", "combine_inject", "pf_mix_a_kernel")),
     ("EXL3 projections: rotations", ("rot_in_kernel", "rot_out_kernel")),
     ("EXL3 projections: slab decode", ("recon_kernel",)),
     ("library fp32 GEMM (mm_rows)", ("magma_sgemm", "sgemm", "gemmSN", "gemv2T", "gemvx")),
@@ -145,6 +152,52 @@ def stage_of(name: str) -> str:
         if any(k in name for k in keys):
             return stage
     return "other kernels"
+
+
+COPIES = "copies and elementwise"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def site_of(stack: list) -> str:
+    """The innermost frame of this repo on a profiler stack ("file(line): function"), the repo's path dropped."""
+    for fr in stack:
+        if fr.startswith(ROOT + os.sep) and "fn_prefill_profile.py" not in fr:
+            return fr[len(ROOT) + 1:]
+    return "(no repo frame)"
+
+
+def copy_sites(prof, top: int) -> dict:
+    """SPD-249 P4: the launches of the "copies and elementwise" stage by the line that issued them."""
+    from torch.autograd import DeviceType
+    keys = dict(STAGES)[COPIES]
+    by, line, linked = defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0])
+    for fe in prof.events():
+        ks = getattr(fe, "kernels", None)
+        if not ks or fe.device_type != DeviceType.CPU:
+            continue
+        site = outer = None
+        for k in ks:
+            stage = stage_of(k.name)
+            us = getattr(k, "duration", 0)
+            linked[stage][0] += us / 1e6
+            linked[stage][1] += 1
+            if stage != COPIES:
+                continue
+            if site is None:
+                site, outer = site_of(fe.stack or []), fe
+                while outer.cpu_parent is not None and outer.cpu_parent.name.startswith("aten::"):
+                    outer = outer.cpu_parent
+            kind = next(x for x in keys if x in k.name)
+            for d, key in ((by, (site, outer.name, fe.name, kind)), (line, site)):
+                d[key][0] += us / 1e6
+                d[key][1] += 1
+    tot = sum(v[0] for v in by.values())
+    return {"method": "torch.profiler, host ops with Python stacks + device kernels; a kernel's line is the innermost "
+                      "repo frame of the op that launched it; device seconds",
+            "copies_s": round(tot, 3), "copies_launches": sum(v[1] for v in by.values()),
+            "linked_by_stage": {k: (round(v[0], 3), v[1]) for k, v in sorted(linked.items(), key=lambda kv: -kv[1][0])},
+            "lines": [(k, round(v[0], 4), v[1]) for k, v in sorted(line.items(), key=lambda kv: -kv[1][0])[:top]],
+            "sites": [(*k, round(v[0], 4), v[1]) for k, v in sorted(by.items(), key=lambda kv: -kv[1][0])[:top]]}
 
 
 def run(eng: FlashNextEngine, ids: list[int], path: str, chunk: int) -> float:
@@ -169,6 +222,8 @@ def main() -> None:
     ap.add_argument("--wall-max", type=int, default=1 << 30, help="no untimed run past this context")
     ap.add_argument("--kernels", type=int, default=0, help="also the top N kernels of one untimed run (torch.profiler)")
     ap.add_argument("--repeat", type=int, default=1, help="untimed runs (wall_s is the last; wall_runs all of them)")
+    ap.add_argument("--sites", type=int, default=0, help="also the top N lines that launch copies and elementwise kernels")
+    ap.add_argument("--sites-min", type=int, default=0, help="no --sites run below this context")
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -177,7 +232,16 @@ def main() -> None:
     eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max(ctxs) + 64)
     tok = AutoTokenizer.from_pretrained(a.pack)
     res = {"pack": a.pack, "path": a.path, "chunk": a.chunk, "load": timing, "mem_after_load_gib": mem_available_gib(),
-           "knobs": {"kv_dtype": "bf16", "prefix_cache": "off", "head": "last row of the last chunk"}, "rows": []}
+           "knobs": {"kv_dtype": "bf16", "prefix_cache": "off", "head": "last row of the last chunk",
+                     "env": {k: v for k, v in os.environ.items() if k.startswith("QWEN38_FN_P")}}, "rows": []}
+    from engine.models.flashnext import engine as E
+    from engine.models.flashnext import layer_major as LM
+    from tools import fn_prefill_kernels as PK
+    res["knobs"]["effective"] = {
+        "FN_PF_WINDOW": LM.ROWS, "FN_PF_ROT_ROWS": int(PK.ROT_ROWS), "FN_PF_HC_FUSED": int(E.PF_HC_FUSED),
+        "FN_PF_INJ_FUSED": int(E.PF_INJ_FUSED), "FN_PF_ATTN_STAGES": E.PF_ATTN_STAGES, "FN_PREFILL_MM": PK.MM,
+        "FN_PREFILL_CHUNK": E.PREFILL_CHUNK, "FN_GROUP_ROWS": PK.GROUP_ROWS, "prefill_path": eng.prefill_path}
+    print(f"[prefill-profile] knobs {json.dumps(res['knobs']['effective'])}", flush=True)
     run(eng, class_prompt(tok, "prose", 256), a.path, a.chunk)          # build the kernels
     for n in ctxs:
         ids = class_prompt(tok, "prose", n)
@@ -216,6 +280,13 @@ def main() -> None:
                 g[2] += 1
             row["stages_s"] = {k: (round(v[0], 3), v[1], v[2]) for k, v in sorted(stages.items(), key=lambda kv: -kv[1][0])}
             row["kernel_kinds"] = len(per)
+            del prof
+        if a.sites and len(ids) >= a.sites_min:
+            from torch.profiler import ProfilerActivity, profile
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True) as prof:
+                row["sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+            row["copy_sites"] = copy_sites(prof, a.sites)
+            del prof
         row["mem_gib"] = mem_available_gib()
         res["rows"].append(row)
         print(f"[prefill-profile] {json.dumps(row)}", flush=True)

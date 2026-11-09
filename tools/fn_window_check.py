@@ -15,8 +15,13 @@ loop does) against the chunk-major twin's sections, length and streams at every 
 `--rot-rows`: the window arm also takes the pair rotation in row order (QWEN38_FN_PF_ROT_ROWS), the chunk-major arm
 not, so the check holds both changes to the live prefill at once.
 
-`--timing R`: per context and arm of `--timing-arms` ("window:rot", rot 1 = the row-order pair rotation; default the
-chunk-major prefill and each window with it), R + 1 prefills on a fresh state (the first warms), a device sync
+`--fused`, `--attn-stages N`: the window arm also takes the fused hyper-connection inject and mixer inputs
+(QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and N stages of the attention split launch (QWEN38_FN_PF_ATTN_STAGES),
+the chunk-major arm neither: every prefill knob on against every one off. A context of one chunk runs no window, so
+there the check holds the other knobs alone.
+
+`--timing R`: per context and arm of `--timing-arms` ("window:rot[:fused[:stages]]", rot 1 = the row-order pair
+rotation; default the chunk-major prefill and each window with it), R + 1 prefills on a fresh state (the first warms), a device sync
 around each, the median; the allocator's peak above the slot's resident bytes for each.
 """
 
@@ -33,6 +38,14 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.fn_generate import class_prompt  # noqa: E402
 from tools.fn_joint_check import _twin_diff  # noqa: E402
+
+
+def _knobs(window: int, rot: bool, fused: bool, stages: int) -> None:
+    """The prefill knobs of an arm, set in the process."""
+    from engine.models.flashnext import engine as E
+    from engine.models.flashnext import layer_major as LM
+    from tools import fn_prefill_kernels as PK
+    LM.ROWS, PK.ROT_ROWS, E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES = window, rot, fused, fused, stages
 
 
 def _decode_after(s_l, s_j, lg_l, steps: int) -> tuple:
@@ -60,27 +73,26 @@ def _sections(s) -> dict:
 
 
 @torch.no_grad()
-def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False) -> dict:
+def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False, fused: bool = False, stages: int = 2) -> dict:
     """The slot verb with a state buffer at every chunk line, replayed as engine/cache.py's window loop replays it,
     against the chunk-major twin at each line."""
     from engine import cache
     from engine.models.flashnext import engine as E
     from engine.models.flashnext.serving import FlashNextServing
-    from tools import fn_prefill_kernels as PK
     chunk = E.PREFILL_CHUNK
     s_l, s_j = FlashNextServing(fn, L), FlashNextServing(fn, L)
     t = torch.tensor(ids, device="cuda")
     plan = [(a, min(chunk, len(ids) - a)) for a in range(0, len(ids), chunk)]
     plan = plan[: max(2, win // chunk)]
     ref = []
-    PK.ROT_ROWS = False
+    _knobs(0, False, False, 2)
     for a, n in plan:                                          # chunk-major: what each line holds
         lg = s_l.forward(t[a:a + n], a).clone()
         ref.append({"secs": _sections(s_l), "length": s_l.st.length, "hidden": s_l.hidden_post_norm.clone(),
                     "logits": lg})
     assert s_j.window_ok(0), "window_ok refused a text prompt at 0"
     toks = [t[a:a + n] for a, n in plan]
-    PK.ROT_ROWS = rot
+    _knobs(win, rot, fused, stages)
     bufs = [cache.state_empty(s_j) for _ in plan]
     lg, hid, taps = s_j.prefill_window(toks, [a for a, _ in plan], bufs)
     cache.state_save(bufs[-1], s_j)
@@ -114,6 +126,8 @@ def main() -> None:
     ap.add_argument("--timing", type=int, default=0)
     ap.add_argument("--lines", action="store_true")
     ap.add_argument("--rot-rows", action="store_true")
+    ap.add_argument("--fused", action="store_true")
+    ap.add_argument("--attn-stages", type=int, default=0, help="the window arm's stages (0: 2, the chunk-major arm's)")
     ap.add_argument("--timing-arms", default="")
     ap.add_argument("--skip-check", action="store_true", help="timing only")
     ap.add_argument("--json")
@@ -125,6 +139,9 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.pack)
     rot0 = PK.ROT_ROWS
+    own = (LM.ROWS, rot0, E.PF_HC_FUSED, E.PF_ATTN_STAGES)
+    assert E.PF_INJ_FUSED == E.PF_HC_FUSED, "the two hyper-connection switches differ: the tool moves them together"
+    stages = a.attn_stages or 2
     ctxs = [int(x) for x in a.ctx.split(",") if x.strip()]
     wins = [int(x) for x in a.windows.split(",") if x.strip()]
     L = max(ctxs) + a.steps + 64 + 16
@@ -132,21 +149,24 @@ def main() -> None:
     fn = eng.fn
     knob = LM.ROWS
     print(f"[win] chunk {E.PREFILL_CHUNK}, path {fn.prefill_path}, knob FN_PF_WINDOW {knob} FN_PF_ROT_ROWS {int(rot0)} "
-          f"(the tool sets both itself), group rows {PK.GROUP_ROWS}, rot rows in the window arm {a.rot_rows}, "
-          f"max_len {L}", flush=True)
+          f"FN_PF_HC_FUSED|INJ_FUSED {int(own[2])} FN_PF_ATTN_STAGES {own[3]} (the tool sets them itself), group rows "
+          f"{PK.GROUP_ROWS}, the window arm: rot rows {a.rot_rows} fused {a.fused} stages {stages}, mixer GEMMs "
+          f"{PK.MM}, max_len {L}", flush=True)
     rep = {"chunk": E.PREFILL_CHUNK, "knob": knob, "rot_rows_knob": rot0, "group_rows": PK.GROUP_ROWS,
-           "rot_rows_window_arm": a.rot_rows, "windows": wins, "rows": [], "lines": [], "timing": []}
+           "fused_knob": own[2], "attn_stages_knob": own[3], "mm": PK.MM,
+           "rot_rows_window_arm": a.rot_rows, "fused_window_arm": a.fused, "attn_stages_window_arm": stages,
+           "windows": wins, "rows": [], "lines": [], "timing": []}
     ok_all = True
     for k, n in enumerate(ctxs):
         ids = class_prompt(tok, ("prose", "code", "chat")[k % 3], n)[:n]
         t = torch.tensor(ids, device="cuda")
         for w in ([] if a.skip_check else wins):
             s_l, s_j = FlashNextServing(fn, L), FlashNextServing(fn, L)
-            LM.ROWS, PK.ROT_ROWS = 0, False
+            _knobs(0, False, False, 2)
             lg_l = s_l.forward(t, 0).clone()
-            LM.ROWS, PK.ROT_ROWS = w, a.rot_rows
+            _knobs(w, a.rot_rows, a.fused, stages)
             lg_j = s_j.forward(t, 0).clone()
-            LM.ROWS, PK.ROT_ROWS = knob, rot0
+            _knobs(*own)
             r = {"ctx": len(ids), "window": w, "logits_equal": bool(torch.equal(lg_l, lg_j)),
                  "logits_max_diff": float((lg_l - lg_j).abs().max()),
                  "hidden_equal": bool(torch.equal(s_l.hidden_post_norm, s_j.hidden_post_norm)),
@@ -165,9 +185,8 @@ def main() -> None:
             del s_l, s_j
             torch.cuda.empty_cache()
             if a.lines and len(ids) > E.PREFILL_CHUNK:
-                LM.ROWS = w
-                lr = lines_check(fn, tok, L, ids, w, a.rot_rows)
-                LM.ROWS, PK.ROT_ROWS = knob, rot0
+                lr = lines_check(fn, tok, L, ids, w, a.rot_rows, a.fused, stages)
+                _knobs(*own)
                 lr.update(ctx=len(ids), window=w)
                 ok_all = ok_all and lr["all_equal"]
                 rep["lines"].append(lr)
@@ -179,11 +198,12 @@ def main() -> None:
             s = FlashNextServing(fn, L)
             row = {"ctx": len(ids)}
             arms = ([tuple(int(v) for v in x.split(":")) for x in a.timing_arms.split(",") if x.strip()]
-                    or [(0, 0)] + [(w, int(a.rot_rows)) for w in wins])
-            for w, rot in arms:
-                if w and len(ids) <= E.PREFILL_CHUNK:
+                    or [(0, 0)] + [(w, int(a.rot_rows), int(a.fused), stages) for w in wins])
+            for arm in arms:
+                w, rot, fu, sg = arm + (0, 2)[len(arm) - 2:]
+                if w and len(ids) <= E.PREFILL_CHUNK and not fu and sg == 2:
                     continue
-                LM.ROWS, PK.ROT_ROWS = w, bool(rot)
+                _knobs(w, bool(rot), bool(fu), sg)
                 ts, peaks = [], []
                 for i in range(a.timing + 1):
                     s.kv.length = 0
@@ -197,11 +217,15 @@ def main() -> None:
                     if i:
                         ts.append(time.perf_counter() - t0)
                         peaks.append((torch.cuda.max_memory_allocated() - base) / (1 << 30))
-                LM.ROWS, PK.ROT_ROWS = knob, rot0
+                _knobs(*own)
                 med = sorted(ts)[len(ts) // 2]
-                row[f"w{w}r{rot}"] = {"s": [round(x, 3) for x in ts], "median_s": round(med, 3),
-                                      "tok_s": round(len(ids) / med, 1), "peak_gib": round(max(peaks), 3)}
-                print(f"[win] timing ctx {len(ids)} window {w} rot rows {rot}: {row[f'w{w}r{rot}']}", flush=True)
+                key = f"w{w}r{rot}" + (f"f{fu}s{sg}" if fu or sg != 2 else "")
+                while key in row:                                    # an arm given twice: both rows kept
+                    key += "+"
+                row[key] = {"s": [round(x, 3) for x in ts], "median_s": round(med, 3),
+                            "tok_s": round(len(ids) / med, 1), "peak_gib": round(max(peaks), 3)}
+                print(f"[win] timing ctx {len(ids)} window {w} rot rows {rot} fused {fu} stages {sg}: {row[key]}",
+                      flush=True)
             rep["timing"].append(row)
             del s
             torch.cuda.empty_cache()
