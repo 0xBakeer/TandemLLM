@@ -58,7 +58,7 @@ def _module():
         src = "#define EXL3_ST 3\n" + _HELPERS + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_prefill_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
-                       functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail"],
+                       functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail", "pre_mix_gemm", "pre_mix_up_tail"],
                        extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_prefill_kernels")],
                        verbose=False)
     return _MOD
@@ -156,6 +156,8 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
 # "tc" (SPD-227): the int8 weights on the tensor cores with nothing rounded -- x bf16 and q int8 are exact
 # in bf16, their products exact, summed in fp32 over each scale group, the group's sum times its scale,
 # the groups added in order (`mm_i8_tc`); fp16 weights as "fp32".
+# "tcn" (SPD-249): tc's sums in the native kernel (`mm_i8`, prefill.cu `mix_gemm_kernel`): fixed tiles, nothing
+# compiled at request time; a group's sum times its scale joins the total in one fma.
 MM = _S.get("FN_PREFILL_MM")
 
 _TC = None
@@ -167,8 +169,9 @@ def _tc_kernel():
         import triton
         import triton.language as tl
 
-        # one compile a weight shape: a chunk's row count (the last chunk of a prompt any number) is not specialised
-        @triton.jit(do_not_specialize=["M", "N", "K", "NG", "sxm", "sqn", "ssn", "sym"])
+        # one compile a weight shape: only a chunk's row count (the last chunk of a prompt any number) is not
+        # specialised. With the other scalars unspecialised too it ran 2 to 4 times slower (SPD-249).
+        @triton.jit(do_not_specialize=["M"])
         def mm_i8_kernel(X, Q, S, Y, M, N, K, NG, sxm, sqn, ssn, sym,
                          G: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
             pm, pn = tl.program_id(0), tl.program_id(1)
@@ -214,6 +217,26 @@ def mm_i8_tc(x: torch.Tensor, w) -> torch.Tensor:
     return y
 
 
+def mm_i8_fits(x: torch.Tensor, w) -> bool:
+    """`mm_i8` takes this GEMM: bf16 rows as stored, int8 rows with scale groups of a multiple of 64 columns."""
+    q, s = w.q, w.s
+    ng = 1 if s.dim() == 1 else s.shape[1]
+    return (x.dtype == torch.bfloat16 and x.dim() == 2 and x.is_contiguous() and q.is_contiguous()
+            and x.shape[1] % 8 == 0 and q.shape[0] % 4 == 0 and q.shape[1] % (64 * ng) == 0)
+
+
+def mm_i8(x: torch.Tensor, w, tile: int = 0) -> torch.Tensor:
+    """`mm_i8_tc`'s sums in the native kernel: x [M, K] bf16 @ (q s)^T for `pack.Int8Rows` w -> fp32 [M, N]. A
+    scale group's products summed in fp32 on the tensor cores, the sum times the group's scale added to the
+    total in one fma, groups ascending. A row's result is the same in any chunk. `tile` picks the CTA shape
+    (0: by the weight's shape)."""
+    q, s = w.q, w.s
+    N = q.shape[0]
+    y = torch.empty(x.shape[0], N, dtype=torch.float32, device=x.device)
+    _module().pre_mix_gemm(x, q, s if s.dim() == 2 else s.view(N, 1), y, tile)
+    return y
+
+
 # SPD-249: while it is on, `mm_rows`' fp32 weight forms are kept from a weight's first call to `wf_cache_clear`, so
 # the prompts of a joint prefill (engine/models/flashnext/joint_prefill.py) that pass one layer's weights convert each
 # weight once instead of once a prompt. The fp32 form is the same tensor either way and every GEMM keeps its shape:
@@ -251,10 +274,13 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
     group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
     dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores; tc: int8 weights
-    through `mm_i8_tc`, fp16 ones as fp32."""
+    through `mm_i8_tc`, fp16 ones as fp32; tcn: int8 weights through `mm_i8` (a shape it does not take, and fp16
+    weights, as fp32)."""
     if MM == "tc" and hasattr(w, "q") and x.dtype == torch.bfloat16:
         return mm_i8_tc(x.contiguous(), w)
-    if MM in ("fp32", "tc"):
+    if MM == "tcn" and hasattr(w, "q") and mm_i8_fits(x, w):
+        return mm_i8(x, w)
+    if MM in ("fp32", "tc", "tcn"):
         wf = _wf(w)
         return x.float() @ wf.T
     if hasattr(w, "q"):
@@ -346,6 +372,20 @@ def mix_tail(u: torch.Tensor, n: torch.Tensor, hc: int) -> torch.Tensor:
     x = torch.empty(n.shape[0], n.shape[1] // hc, dtype=torch.bfloat16, device=n.device)
     _module().pre_mix_tail(u, n, x, hc)
     return x
+
+
+def mix_up_tail(a: torch.Tensor, w, n: torch.Tensor, hc: int, tile: int = 0) -> torch.Tensor:
+    """`mix_tail` of the up projection's products of a [M, R] bf16 with w: x [M, H] bf16. "tcn": one pass, the
+    native kernel's sums through the tail's arithmetic without leaving the CTA (the bits of
+    `mix_tail(mm_i8(a, w), n, hc)`)."""
+    H = n.shape[1] // hc
+    if (MM == "tcn" and hc == 4 and hasattr(w, "q") and mm_i8_fits(a, w) and w.q.shape[0] == n.shape[1]
+            and H % 64 == 0 and n.dtype == torch.bfloat16 and n.stride(1) == 1):
+        q, s = w.q, w.s
+        x = torch.empty(n.shape[0], H, dtype=torch.bfloat16, device=n.device)
+        _module().pre_mix_up_tail(a, q, s if s.dim() == 2 else s.view(q.shape[0], 1), n, x, hc, tile)
+        return x
+    return mix_tail(mm_rows(a, w), n, hc)
 
 
 def moe_grouped_reference(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:

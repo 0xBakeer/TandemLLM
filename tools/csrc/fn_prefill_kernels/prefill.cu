@@ -235,6 +235,159 @@ __global__ void __launch_bounds__(256) group_gemm_kernel(const __half* __restric
     }
 }
 
+// ----------------------------------------------------------------------------------- mixer GEMM
+// SPD-249: Y[m, n] = sum over the scale groups gi, ascending, of fp32(sum over the group's K of X[m, k] Q[n, k])
+// * S[n, gi] (an fma a group). bf16 X [M, K] times int8 Q [N, K] on the tensor cores: an int8 is exact in bf16
+// and a product exact in the fp32 sum. One CTA takes 16 MT rows times 8 NTW NW columns, warp w owning NTW
+// column tiles of 8. K streams 64 columns a step through ST cp.async stages (the x rows and the q rows as
+// stored), x through ldmatrix, q converted in registers. The sums leave through shared memory, a warp a row.
+// A row's result does not depend on the other rows: rows and columns past the end read the last one and are
+// not stored. TAIL (the up projection, N = 4 H): a CTA takes the same 2 NTW NW columns of each of the four
+// streams and applies mix_tail_kernel's arithmetic to its sums, so the fp32 products never leave the CTA.
+constexpr int MG_ST = 3, MG_BK = 64, MG_XR = 144, MG_WR = 80;
+
+__device__ __forceinline__ void mma_bf(float* c, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                       uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ void ldm4(uint32_t* r, const void* smem) {
+    const uint32_t s = (uint32_t)__cvta_generic_to_shared(smem);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(s));
+}
+
+// the two int8 in v's low bytes as bf16x2
+__device__ __forceinline__ uint32_t i8x2_bf(uint32_t v) {
+    const float f0 = (float)(int)(int8_t)(v & 0xffu), f1 = (float)(int)(int8_t)((v >> 8) & 0xffu);
+    return (__float_as_uint(f0) >> 16) | (__float_as_uint(f1) & 0xffff0000u);
+}
+
+template <int MT, int NTW, int NW, bool TAIL, int ST>
+__global__ void __launch_bounds__(32 * NW) mix_gemm_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const int8_t* __restrict__ Q, int ldq, const float* __restrict__ S, int lds, float* __restrict__ Y, int ldy,
+        int M, int N, int K, int gk, const __nv_bfloat16* __restrict__ Nn, int ldn, __nv_bfloat16* __restrict__ Xo,
+        int ldo, float inv_hc) {
+    extern __shared__ __align__(16) unsigned char mg_smem[];
+    unsigned char* smem = mg_smem;
+    constexpr int BM = 16 * MT, BN = 8 * NTW * NW, NT = 32 * NW;
+    constexpr int XS = BM * MG_XR, SS = XS + BN * MG_WR;          // a stage: the x rows, then the q rows
+    constexpr int RP = BN + 8, BJ = BN / 4;
+    static_assert(BM * RP * 4 <= ST * SS, "the sums fit the stages");
+    static_assert(ST >= 2 && ST <= 4, "stages");
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int g = lane >> 2, t = lane & 3;
+    const int r0 = blockIdx.x * BM, n0 = blockIdx.y * (TAIL ? BJ : BN), H = N / 4;
+    const int KS = K / MG_BK;
+    // the weight row of the tile's column c
+    auto wrow = [&](int c) { return TAIL ? (c / BJ) * H + n0 + c % BJ : min(n0 + c, N - 1); };
+
+    float acc[MT][NTW][4], part[MT][NTW][4];
+#pragma unroll
+    for (int a = 0; a < MT; ++a)
+#pragma unroll
+        for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) { acc[a][j][c] = 0.f; part[a][j][c] = 0.f; }
+
+    auto issue = [&](int ks, int buf) {
+        if (ks < KS) {
+            unsigned char* xs = smem + buf * SS;
+            unsigned char* ws = xs + XS;
+            for (int c = tid; c < BM * 8; c += NT) {
+                const int r = c >> 3, h = c & 7;
+                cp_async16(xs + r * MG_XR + 16 * h, X + (size_t)min(r0 + r, M - 1) * ldx + ks * MG_BK + 8 * h);
+            }
+            for (int c = tid; c < BN * 4; c += NT) {
+                const int r = c >> 2, h = c & 3;
+                cp_async16(ws + r * MG_WR + 16 * h, Q + (size_t)wrow(r) * ldq + ks * MG_BK + 16 * h);
+            }
+        }
+        cp_commit();
+    };
+#pragma unroll
+    for (int s = 0; s < ST - 1; ++s) issue(s, s);
+    for (int ks = 0; ks < KS; ++ks) {
+        cp_wait<ST - 2>();
+        __syncthreads();                       // step ks is in; every warp is done with the stage refilled next
+        issue(ks + ST - 1, (ks + ST - 1) % ST);
+        const unsigned char* xs = smem + (ks % ST) * SS;
+        const unsigned char* ws = xs + XS;
+#pragma unroll
+        for (int kt = 0; kt < MG_BK / 16; ++kt) {
+            uint32_t xa[MT][4];
+#pragma unroll
+            for (int a = 0; a < MT; ++a)
+                ldm4(xa[a], xs + (16 * a + (lane & 15)) * MG_XR + (kt * 16 + (lane >> 4) * 8) * 2);
+#pragma unroll
+            for (int j = 0; j < NTW; ++j) {
+                const unsigned char* wr = ws + ((warp * NTW + j) * 8 + g) * MG_WR + kt * 16 + 2 * t;
+                const uint32_t b0 = i8x2_bf(*reinterpret_cast<const uint16_t*>(wr));
+                const uint32_t b1 = i8x2_bf(*reinterpret_cast<const uint16_t*>(wr + 8));
+#pragma unroll
+                for (int a = 0; a < MT; ++a) mma_bf(part[a][j], xa[a][0], xa[a][1], xa[a][2], xa[a][3], b0, b1);
+            }
+        }
+        if ((ks + 1) % gk == 0) {              // a scale group ends: its sum times its scale, onto the total
+            const int gi = ks / gk;
+#pragma unroll
+            for (int j = 0; j < NTW; ++j) {
+                const int c = (warp * NTW + j) * 8 + 2 * t;
+                const float s0 = S[(size_t)wrow(c) * lds + gi], s1 = S[(size_t)wrow(c + 1) * lds + gi];
+#pragma unroll
+                for (int a = 0; a < MT; ++a) {
+                    acc[a][j][0] = __fmaf_rn(part[a][j][0], s0, acc[a][j][0]);
+                    acc[a][j][1] = __fmaf_rn(part[a][j][1], s1, acc[a][j][1]);
+                    acc[a][j][2] = __fmaf_rn(part[a][j][2], s0, acc[a][j][2]);
+                    acc[a][j][3] = __fmaf_rn(part[a][j][3], s1, acc[a][j][3]);
+                    part[a][j][0] = 0.f; part[a][j][1] = 0.f; part[a][j][2] = 0.f; part[a][j][3] = 0.f;
+                }
+            }
+        }
+    }
+    cp_wait<0>();
+    __syncthreads();
+    float* red = reinterpret_cast<float*>(smem);
+#pragma unroll
+    for (int a = 0; a < MT; ++a)             // c0 c1: row g, columns 2t 2t+1; c2 c3: row g + 8
+#pragma unroll
+        for (int j = 0; j < NTW; ++j) {
+            const int col = (warp * NTW + j) * 8 + 2 * t;
+            float* lo = red + (16 * a + g) * RP + col;
+            float* hi = red + (16 * a + 8 + g) * RP + col;
+            lo[0] = acc[a][j][0]; lo[1] = acc[a][j][1]; hi[0] = acc[a][j][2]; hi[1] = acc[a][j][3];
+        }
+    __syncthreads();
+    const int nr = min(BM, M - r0);
+    if (TAIL) {
+        for (int m = warp; m < nr; m += NW) {
+            const float* rr = red + m * RP;
+            const __nv_bfloat16* nn = Nn + (size_t)(r0 + m) * ldn + n0;
+            for (int jj = lane; jj < BJ; jj += 32) {
+                float sum = 0.f;
+#pragma unroll
+                for (int st = 0; st < 4; ++st) {
+                    const float sg = bfr(1.0f / (1.0f + ::expf(-bfr(rr[st * BJ + jj]))));
+                    sum += bfr(sg * __bfloat162float(nn[(size_t)st * H + jj]));
+                }
+                Xo[(size_t)(r0 + m) * ldo + n0 + jj] = __float2bfloat16_rn(sum * inv_hc);
+            }
+        }
+        return;
+    }
+    const int nc = min(BN, N - n0);
+    for (int m = warp; m < nr; m += NW)
+        for (int c = 4 * lane; c < nc; c += 128) {
+            const float* rr = red + m * RP + c;
+            float* y = Y + (size_t)(r0 + m) * ldy + n0 + c;
+            if (c + 4 <= nc) *reinterpret_cast<float4*>(y) = make_float4(rr[0], rr[1], rr[2], rr[3]);
+            else for (int e = 0; c + e < nc; ++e) y[e] = rr[e];
+        }
+}
+
 // ----------------------------------------------------------------------------------- mixer tail
 // X[m, j] = bf16(sum over streams s in order of bf16(bf16(sigmoid(bf16(U[m, s H + j]))) * Nn[m, s H + j]) / hc)
 // (mix_up_kernel's roundings after its up projection). grid (H / 256, M), 256 threads, hc = 4.
@@ -331,6 +484,90 @@ void pre_group_gemm(torch::Tensor xh, torch::Tensor cnt, torch::Tensor pstart, t
         if (mt == 4) gg_launch<4, false>(xh, P, Kin, N, cnt, pstart, iend, G, a, mat0, nmat, y, dp, items, kbmax, st);
         else gg_launch<2, false>(xh, P, Kin, N, cnt, pstart, iend, G, a, mat0, nmat, y, dp, items, kbmax, st);
     }
+}
+
+template <int MT, int NTW, int NW, bool TAIL, int ST = MG_ST>
+static void mg_launch(const torch::Tensor& x, const torch::Tensor& q, const torch::Tensor& s, float* y, int ldy,
+                      int gk, const __nv_bfloat16* nn, int ldn, __nv_bfloat16* xo, int ldo, float inv_hc, cudaStream_t st) {
+    constexpr int BM = 16 * MT, BN = 8 * NTW * NW;
+    const int M = x.size(0), K = x.size(1), N = q.size(0);
+    const size_t smem = (size_t)ST * (BM * MG_XR + BN * MG_WR);
+    auto kern = mix_gemm_kernel<MT, NTW, NW, TAIL, ST>;
+    TORCH_CHECK(!TAIL || (N / 4) % (BN / 4) == 0, "mixer GEMM: the stream width in tiles of ", BN / 4);
+    TORCH_CHECK(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem) == cudaSuccess,
+                "mixer GEMM: ", smem, " bytes of shared memory");
+    kern<<<dim3((M + BM - 1) / BM, TAIL ? N / BN : (N + BN - 1) / BN), 32 * NW, smem, st>>>(
+        (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const int8_t*)q.data_ptr(), (int)q.stride(0),
+        (const float*)s.data_ptr(), (int)s.stride(0), y, ldy, M, N, K, gk, nn, ldn, xo, ldo, inv_hc);
+}
+
+// x bf16 [M, K], q int8 [N, K], s fp32 [N, K / G] (G a multiple of 64) -> the 64-column steps a scale group
+static int mg_check(const torch::Tensor& x, const torch::Tensor& q, const torch::Tensor& s) {
+    TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 8 == 0
+                && (uintptr_t)x.data_ptr() % 16 == 0, "x bf16 [M, K], rows 16-byte aligned");
+    const int K = x.size(1), N = q.size(0);
+    TORCH_CHECK(q.dtype() == torch::kChar && q.dim() == 2 && q.size(1) == K && q.stride(1) == 1 && q.stride(0) % 16 == 0
+                && (uintptr_t)q.data_ptr() % 16 == 0, "q int8 [N, K], rows 16-byte aligned");
+    TORCH_CHECK(s.dtype() == torch::kFloat && s.dim() == 2 && s.size(0) == N && s.stride(1) == 1, "s fp32 [N, groups]");
+    const int ng = s.size(1);
+    TORCH_CHECK(ng > 0 && K % ng == 0 && (K / ng) % MG_BK == 0, "scale groups of a multiple of 64 columns");
+    return K / ng / MG_BK;
+}
+
+// y fp32 [M, N] = x bf16 [M, K] times the int8 rows q [N, K] with the fp32 scales s [N, K / G] (G a multiple
+// of 64). tile: 0 = by shape (few columns: every column in one CTA, the rows read once); every tile gives the
+// same bits. Measured 2026-11-09 on a GB10 at 4,096 rows, K 10240, N 324: 0.71 to 0.74 ms with tile 1, 0.84 ms
+// with tile 3.
+void pre_mix_gemm(torch::Tensor x, torch::Tensor q, torch::Tensor s, torch::Tensor y, int64_t tile) {
+    const at::cuda::OptionalCUDAGuard guard(x.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int gk = mg_check(x, q, s);
+    const int M = x.size(0), N = q.size(0);
+    TORCH_CHECK(y.dtype() == torch::kFloat && y.dim() == 2 && y.size(0) == M && y.size(1) == N && y.stride(1) == 1
+                && y.stride(0) % 4 == 0 && (uintptr_t)y.data_ptr() % 16 == 0, "y fp32 [M, N], rows 16-byte aligned");
+    if (M == 0 || N == 0) return;
+    float* yp = (float*)y.data_ptr();
+    const int ldy = y.stride(0);
+    if (tile == 0) tile = N <= 336 ? 1 : 2;
+#define MG_PLAIN(MT, NTW, NW) mg_launch<MT, NTW, NW, false>(x, q, s, yp, ldy, gk, nullptr, 0, nullptr, 0, 0.f, st)
+    switch (tile) {
+        case 1: MG_PLAIN(3, 3, 14); break;
+        case 2: MG_PLAIN(4, 4, 8); break;
+        case 3: MG_PLAIN(2, 3, 14); break;
+        case 4: MG_PLAIN(4, 2, 8); break;
+        default: TORCH_CHECK(false, "tile");
+    }
+#undef MG_PLAIN
+}
+
+// xo bf16 [M, H] = pre_mix_tail of (pre_mix_gemm's products of a bf16 [M, K] and q [4 H, K], s) and n bf16
+// [M, 4 H], the same bits, in one pass. Measured 2026-11-09 on a GB10 at 4,096 rows, K 320, H 2560: 1.09 ms with tile 1
+// (two stages), 1.39 ms with tile 2 (three), 2.16 ms with tile 3; the two launches take 2.05 ms.
+void pre_mix_up_tail(torch::Tensor a, torch::Tensor q, torch::Tensor s, torch::Tensor n, torch::Tensor xo, int64_t hc,
+                     int64_t tile) {
+    const at::cuda::OptionalCUDAGuard guard(a.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int gk = mg_check(a, q, s);
+    const int M = a.size(0), N = q.size(0), H = N / 4;
+    TORCH_CHECK(hc == 4 && N == 4 * H, "four streams");
+    TORCH_CHECK(n.dtype() == torch::kBFloat16 && n.dim() == 2 && n.size(0) == M && n.size(1) == N && n.stride(1) == 1,
+                "n bf16 [M, 4 H]");
+    TORCH_CHECK(xo.dtype() == torch::kBFloat16 && xo.dim() == 2 && xo.size(0) == M && xo.size(1) == H && xo.stride(1) == 1,
+                "x bf16 [M, H]");
+    if (M == 0 || H == 0) return;
+    const __nv_bfloat16* np = (const __nv_bfloat16*)n.data_ptr();
+    __nv_bfloat16* xp = (__nv_bfloat16*)xo.data_ptr();
+    const int ldn = n.stride(0), ldo = xo.stride(0);
+    const float inv = 1.0f / (float)hc;
+#define MG_TAIL(MT, NTW, NW, ST) mg_launch<MT, NTW, NW, true, ST>(a, q, s, nullptr, 0, gk, np, ldn, xp, ldo, inv, st)
+    switch (tile) {
+        case 0:
+        case 1: MG_TAIL(2, 2, 8, 2); break;
+        case 2: MG_TAIL(2, 2, 8, 3); break;
+        case 3: MG_TAIL(4, 4, 8, 3); break;
+        default: TORCH_CHECK(false, "tile");
+    }
+#undef MG_TAIL
 }
 
 void pre_mix_tail(torch::Tensor u, torch::Tensor n, torch::Tensor x, int64_t hc) {

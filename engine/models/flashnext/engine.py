@@ -544,14 +544,15 @@ class FlashNextEngine(FlashNextRef):
         return out
 
     def _mix_pre(self, n, p):
-        """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
-        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings."""
+        """The mixer of a chunk: down and inject on `mm_rows` (the library GEMM in fp32 by default), the up
+        projection of a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings
+        (`mix_up_tail`: one launch for both under QWEN38_FN_PREFILL_MM=tcn)."""
         from tools import fn_prefill_kernels as PK
         c = self.cfg
         di = PK.mm_rows(n, self.W[p + ".down_inject"])
         R = self.W[p + ".rank"]
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_tail(PK.mm_rows(a, self.W[p + ".input_mix_weight_up.weight"]), n, c.hc_count), di
+        return PK.mix_up_tail(a, self.W[p + ".input_mix_weight_up.weight"], n, c.hc_count), di
 
     def _moe_pre(self, x, li):
         """The MoE of a chunk: the router (library GEMM, the router kernel), every pair's expert output
