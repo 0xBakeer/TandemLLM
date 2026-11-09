@@ -563,11 +563,12 @@ def attn_rows_multi(q, pt, lane, strides: tuple, HK: int, bufs: dict | None = No
     return out
 
 
-def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None):
+def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None, stages: int = 2):
     """q [M, Hq, D] bf16 (normed, rotated); kc / vc [Hk, cap, D] bf16 (the caches); ctl int32 [M, 4]
     (visible keys, block start L, dense flag, -); anc int32 [M, ANC] (the cache slot of the row's
     ancestor at each depth, 0 the block's first row); sel int32 [M, NSEL] (QSA: the visible
-    positions in ascending order; read only for rows not dense) -> o [M, Hq, D] bf16."""
+    positions in ascending order; read only for rows not dense) -> o [M, Hq, D] bf16. `stages`: the split
+    launch's pipeline stages (a launch setting; tests/gpu/test_fn_attn_stages_gpu.py holds its bits to 2's)."""
     M, HQ, D = q.shape
     HK = kc.shape[0]
     REP = HQ // HK
@@ -588,7 +589,7 @@ def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None):
         q, kc, vc, ctl, anc, sel, pm, pl, pacc,
         kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1),
         SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, BN=32, CHUNK=ATTN_CHUNK,
-        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=2)
+        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=stages)
     _attn_rows_combine[(M, HQ)](pm, pl, pacc, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ATTN_SPLITS,
                                 num_warps=4)
     return out

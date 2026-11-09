@@ -69,6 +69,9 @@ PF_HC_FUSED = _S.get("FN_PF_HC_FUSED") == "1"
 #: SPD-249 P2: a prompt chunk's injects in a CTA a row (`_inject_pre`, tools/fn_pf_hc.py), the same bits; 0: the
 #: decode path's inject_norm
 PF_INJ_FUSED = _S.get("FN_PF_INJ_FUSED") == "1"
+#: SPD-249 P6: the pipeline stages of a prompt chunk's attention split launch (`_attn_pre`), the same bits; 2: the
+#: decode path's launch
+PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 2)
 #: SPD-249: a joint pass's GDN conv and gates of every state in one launch a layer (`gdn_pre_multi`); 0: a launch a state
 GDN_PRE_MULTI = _S.get("FN_GDN_PRE_MULTI") == "1"
 #: SPD-249: a joint pass leaves up to N parked GDN rows parked (no state write-back that round; the next call walks
@@ -644,7 +647,7 @@ class FlashNextEngine(FlashNextRef):
                 sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls)
                 SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
                 del sc
-        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
+        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES)
         y = K.gate_mul(o, qkv, c.head_dim)
         return self.lin(y, self.W[p + "o_proj.weight"])
 

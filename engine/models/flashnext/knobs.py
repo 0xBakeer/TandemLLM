@@ -72,6 +72,10 @@ KNOBS: dict[str, tuple] = {
     # with 16-byte loads (tools/fn_pf_hc.py `inject_norm`: fn_kernels.inject_norm's bits, the norm's sum in its order);
     # 0: fn_kernels.inject_norm
     'FN_PF_INJ_FUSED': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P6: the pipeline stages (Triton num_stages, 1 .. 4) of the attention split launch over a prompt chunk's
+    # rows (`_attn_pre`, tools/fn_seq_kernels.py `attn_rows`): a launch setting, the output's bits are 2's at every
+    # value (tests/gpu/test_fn_attn_stages_gpu.py); 2: the launch of the decode path
+    'FN_PF_ATTN_STAGES': ('2', 'engine/models/flashnext/engine.py'),
     # SPD-249: a prefill burst's prompts in one forward (`FlashNextServing.prefill_joint`, joint_prefill.py): each
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone

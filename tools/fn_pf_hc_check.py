@@ -11,6 +11,8 @@ fresh state by each arm in turn, `--reps` times round robin (once in the later m
   base        both switches off
   inj         QWEN38_FN_PF_INJ_FUSED
   fused       both
+  st1         QWEN38_FN_PF_ATTN_STAGES=1 (SPD-249 P6: the attention split launch's stages), the switches off
+  fused_st1   both switches and QWEN38_FN_PF_ATTN_STAGES=1
 
 and every run is compared with the first base run (so the base's second run shows that a prefill repeats its bits):
 
@@ -81,11 +83,13 @@ def same_bits(x: torch.Tensor, y: torch.Tensor) -> bool:
     return bool(torch.equal(x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)))
 
 
-ARMS = {"base": (False, False), "inj": (False, True), "fused": (True, True)}      # (PF_HC_FUSED, PF_INJ_FUSED)
+#: (PF_HC_FUSED, PF_INJ_FUSED, PF_ATTN_STAGES)
+ARMS = {"base": (False, False, 2), "inj": (False, True, 2), "fused": (True, True, 2), "st1": (False, False, 1),
+        "fused_st1": (True, True, 1)}
 
 
-def switch(hc: bool, inj: bool | None = None) -> None:
-    E.PF_HC_FUSED, E.PF_INJ_FUSED = hc, hc if inj is None else inj
+def switch(hc: bool, inj: bool | None = None, stages: int = 2) -> None:
+    E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES = hc, hc if inj is None else inj, stages
 
 
 def arm(eng: FlashNextEngine, ids: list[int], name: str) -> dict:
