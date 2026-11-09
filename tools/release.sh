@@ -297,7 +297,7 @@ if want preflight; then
         for c in $(g rev-list "$PREV..HEAD"); do
             n=$((n + 1))
             g log -1 --format=%B "$c" > "$WORK/msg"
-            if grep -qiE '^co-authored-by:|generated with|signed-off-by:.*bot|session[_:]' "$WORK/msg"; then
+            if grep -qiE '^co-authored-by:|generated with|signed-off-by:.*bot|^[a-z-]*session[a-z_-]*:' "$WORK/msg"; then
                 fail "${c:0:8} carries a co-author or session line: $(g log -1 --format=%s "$c")"
             fi
             s="$(g log -1 --format=%s "$c")"

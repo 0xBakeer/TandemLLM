@@ -142,6 +142,27 @@ def test_a_trailer_stops_the_preflight():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_knob_name_in_a_body_is_no_session_line():
+    d, work = _repo()
+    try:
+        _release(work, "1.2.4", "--only", "bump")
+        with open(os.path.join(work, "CHANGELOG.md"), "w") as fh:
+            fh.write("# Changelog\n\n## 1.2.4, 2026-10-22\n\nAnother thing.\n")
+        readme = _read(work, "README.md").replace("current release is `v1.2.3`", "current release is `v1.2.4`")
+        with open(os.path.join(work, "README.md"), "w") as fh:
+            fh.write(readme)
+        with open(os.path.join(work, "manual/chapters/changelog.tex"), "a") as fh:
+            fh.write("1.2.4 & 10-22 & x \\\\\n\\section{1.2.4, x}\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "Release 1.2.4\n\nRows for --session-spill-idle-every-s,\nSESSION_SPILL_IDLE and session_id.")
+        r = _release(work, "1.2.4", "--only", "preflight")
+        assert "carries a co-author or session line" not in r.stdout, r.stdout
+        _git(work, "commit", "-q", "--allow-empty", "-m", "One more\n\nAgent-Session: 0123")
+        r = _release(work, "1.2.4", "--only", "preflight")
+        assert r.returncode != 0 and "carries a co-author or session line" in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
 FAKE_GH = """#!/bin/sh
 # a stand-in for gh: the milestone list from $FAKE_GH_LIST, every call logged to $FAKE_GH_LOG
 echo "$*" >> "$FAKE_GH_LOG"
