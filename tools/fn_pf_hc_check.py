@@ -17,6 +17,9 @@ fresh state by each arm in turn, `--reps` times round robin (once in the later m
   win32k      QWEN38_FN_PF_WINDOW=32768 and QWEN38_FN_PF_ROT_ROWS, the rest off
   all8k       both switches, QWEN38_FN_PF_ATTN_STAGES=1 and QWEN38_FN_PF_WINDOW=8192
   all32k      both switches, QWEN38_FN_PF_ATTN_STAGES=1, QWEN38_FN_PF_WINDOW=32768 and QWEN38_FN_PF_ROT_ROWS
+  nc          QWEN38_FN_PF_NOCOPY (SPD-249 P4: a chunk's copies left out), the rest off
+  all8knc     all8k and QWEN38_FN_PF_NOCOPY
+  all32knc    all32k and QWEN38_FN_PF_NOCOPY
 
 (the tool sets every one of these itself, whatever the process's environment says) and every run is compared with the first base run (so the base's second run shows that a prefill repeats its bits):
 
@@ -89,20 +92,23 @@ def same_bits(x: torch.Tensor, y: torch.Tensor) -> bool:
     return bool(torch.equal(x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)))
 
 
-#: (PF_HC_FUSED, PF_INJ_FUSED, PF_ATTN_STAGES[, layer_major.ROWS, fn_prefill_kernels.ROT_ROWS])
+#: (PF_HC_FUSED, PF_INJ_FUSED, PF_ATTN_STAGES[, layer_major.ROWS, fn_prefill_kernels.ROT_ROWS[, PF_NOCOPY]])
 ARMS = {"base": (False, False, 2), "inj": (False, True, 2), "fused": (True, True, 2), "st1": (False, False, 1),
         "fused_st1": (True, True, 1), "win8k": (False, False, 2, 8192, False), "win32k": (False, False, 2, 32768, True),
-        "all8k": (True, True, 1, 8192, False), "all32k": (True, True, 1, 32768, True)}
+        "all8k": (True, True, 1, 8192, False), "all32k": (True, True, 1, 32768, True),
+        "nc": (False, False, 2, 0, False, True), "all8knc": (True, True, 1, 8192, False, True),
+        "all32knc": (True, True, 1, 32768, True, True)}
 
 
 def fuse(hc: bool, inj: bool | None = None) -> None:
     E.PF_HC_FUSED, E.PF_INJ_FUSED = hc, hc if inj is None else inj
 
 
-def switch(hc: bool, inj: bool | None = None, stages: int = 2, window: int = 0, rot: bool = False) -> None:
+def switch(hc: bool, inj: bool | None = None, stages: int = 2, window: int = 0, rot: bool = False,
+           nocopy: bool = False) -> None:
     from tools import fn_prefill_kernels as PK
     fuse(hc, inj)
-    E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS = stages, window, rot
+    E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS, E.PF_NOCOPY = stages, window, rot, nocopy
 
 
 #: the layer-major windows a prefill ran (`layer_major.window` counted)
@@ -208,7 +214,7 @@ def main() -> None:
     ctxs = [int(x) for x in a.ctx.split(",")]
     arms = [x for x in a.arms.split(",") if x]
     assert arms[0] == "base" and all(x in ARMS for x in arms) and a.sites_arm in ARMS, arms
-    mode0, own = PK.MM, (E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS)
+    mode0, own = PK.MM, (E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS, E.PF_NOCOPY)
     modes = [x for x in a.modes.split(",") if x] or [mode0]
     idx, W, banks, tables, timing = load(a.pack, "cuda")
     eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max(ctxs) + 64)
@@ -305,7 +311,7 @@ def main() -> None:
             torch.cuda.empty_cache()
             print("[pf-hc] joint " + json.dumps(jr), flush=True)
     PK.MM = mode0
-    E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS = own
+    E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES, LM.ROWS, PK.ROT_ROWS, E.PF_NOCOPY = own
     print(f"[pf-hc] {'ALL EQUAL' if res['ok'] else 'DIFFERENT'}", flush=True)
     if a.json:
         with open(a.json, "w") as f:

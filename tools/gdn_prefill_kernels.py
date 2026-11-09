@@ -283,7 +283,7 @@ def fused_prefill_refusal(chunk: int, have_triton: bool = HAVE_TRITON) -> str:
 def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: int = CHUNK,
                         bv: int | None = None, prec: str | None = None,
                         series: bool | None = None, prec_scan: str | None = None,
-                        prec_a: str | None = None):
+                        prec_a: str | None = None, view: bool = False):
     """The chunked gated delta rule over a whole sequence, two kernels, no chunk-shaped temporaries.
 
     Signature and shapes are `engine.gdn.chunk_gated_delta_rule`'s: `[B, T, H, D]` in, `[B, T, H,
@@ -316,7 +316,11 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
     from engine import gdn as _gdn
     q = _gdn.l2norm(query, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
     k = _gdn.l2norm(key, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
-    v = value.reshape(T, H, Dv).contiguous()
+    v = value.reshape(T, H, Dv)
+    if not (view and v.stride(2) == 1):
+        # `view` (SPD-249 P4): the kernel reads the values where they lie, at their row and head strides (a
+        # column slice of the conv's rows): the same values, no copy
+        v = v.contiguous()
     gg = g.reshape(T, H).contiguous()
     bb = beta.reshape(T, H).contiguous()
     nc = (T + chunk_size - 1) // chunk_size

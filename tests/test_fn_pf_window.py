@@ -132,6 +132,45 @@ def test_windows_leave_the_prompt_as_the_chunk_major_prefill(monkeypatch):
     return "windows of 8 and 12+ rows: logits, streams, states, length = chunk-major; one expert call a window and layer"
 
 
+def test_nocopy_windows_write_the_experts_input_side_by_side(monkeypatch):
+    """SPD-249 P4 (QWEN38_FN_PF_NOCOPY): a window's MLP mixers write one buffer of the window's rows, which the
+    experts read in every layer; the prompt is the chunk-major prefill's."""
+    _kernels(monkeypatch)
+    monkeypatch.setattr(E, "PREFILL_CHUNK", 4)
+    fn = _WEng()
+    toks = torch.tensor([3, 9, 1, 4, 7, 2, 8, 5, 6, 1, 1])        # chunks of 4, 4, 3
+    lg0, s0, st0, _ = _prefill(fn, toks, 0, monkeypatch=monkeypatch)
+    assert E.PF_NOCOPY is (os.environ.get("QWEN38_FN_PF_NOCOPY") == "1")
+    seen, outs, grouped, tail = [], [], PK.moe_grouped, PK.mix_tail
+
+    def rec(x, ids, bank, rows=32):
+        seen.append((x.data_ptr(), x.shape[0]))
+        return grouped(x, ids, bank, rows=rows)
+
+    def mt(u, n, hc, out=None):
+        outs.append(None if out is None else out.data_ptr())
+        return tail(u, n, hc, out)
+    monkeypatch.setattr(PK, "moe_grouped", rec)
+    monkeypatch.setattr(PK, "mix_tail", mt)
+    for nocopy in (False, True):
+        monkeypatch.setattr(E, "PF_NOCOPY", nocopy)
+        for rows, want, chunks in ((8, [8] * NL + [3] * NL, 2), (12, [11] * NL, 3)):
+            seen.clear()
+            outs.clear()
+            lg, s, st, calls = _prefill(fn, toks, rows, monkeypatch=monkeypatch)
+            assert torch.equal(lg, lg0) and torch.equal(s, s0), (nocopy, rows)
+            _same(st, st0)
+            assert calls == want and [n for _, n in seen] == want, (nocopy, rows, calls)
+            given = [p for p in outs if p is not None]
+            assert len(outs) == 2 * 3 * NL, len(outs)              # two mixers a chunk and layer
+            if not nocopy:
+                assert not given, (rows, len(given))
+                continue
+            assert len(given) == chunks * NL, (rows, len(given))   # the MLP mixers of the window's chunks
+            assert {p for p, n in seen if n > 4} == {min(given)}, rows   # the experts read that buffer, every layer
+    return "the window's MLP mixers write one buffer the experts read; without the knob none; the same prompt"
+
+
 def test_a_resumed_prompt_and_the_route_trace(monkeypatch):
     _kernels(monkeypatch)
     monkeypatch.setattr(E, "PREFILL_CHUNK", 4)

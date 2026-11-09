@@ -19,7 +19,8 @@ own rotation order instead.
 `--fused`, `--attn-stages N`: the window arm also takes the fused hyper-connection inject and mixer inputs
 (QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and N stages of the attention split launch (QWEN38_FN_PF_ATTN_STAGES),
 the chunk-major arm neither: every prefill knob on against every one off. A context of one chunk runs no window, so
-there the check holds the other knobs alone.
+there the check holds the other knobs alone. `--nocopy`: the window arm also leaves a chunk's copies out
+(QWEN38_FN_PF_NOCOPY).
 
 `--timing R`: per context and arm of `--timing-arms` ("window:rot[:fused[:stages]]", rot 1 = the row-order pair
 rotation; default the chunk-major prefill and each window with it), R + 1 prefills on a fresh state (the first warms), a device sync
@@ -41,12 +42,13 @@ from tools.fn_generate import class_prompt  # noqa: E402
 from tools.fn_joint_check import _twin_diff  # noqa: E402
 
 
-def _knobs(window: int, rot: bool, fused: bool, stages: int) -> None:
+def _knobs(window: int, rot: bool, fused: bool, stages: int, nocopy: bool = False) -> None:
     """The prefill knobs of an arm, set in the process."""
     from engine.models.flashnext import engine as E
     from engine.models.flashnext import layer_major as LM
     from tools import fn_prefill_kernels as PK
     LM.ROWS, PK.ROT_ROWS, E.PF_HC_FUSED, E.PF_INJ_FUSED, E.PF_ATTN_STAGES = window, rot, fused, fused, stages
+    E.PF_NOCOPY = nocopy
 
 
 def _decode_after(s_l, s_j, lg_l, steps: int) -> tuple:
@@ -74,7 +76,8 @@ def _sections(s) -> dict:
 
 
 @torch.no_grad()
-def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False, fused: bool = False, stages: int = 2) -> dict:
+def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False, fused: bool = False, stages: int = 2,
+                nocopy: bool = False) -> dict:
     """The slot verb with a state buffer at every chunk line, replayed as engine/cache.py's window loop replays it,
     against the chunk-major twin at each line."""
     from engine import cache
@@ -92,7 +95,7 @@ def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False, fused: bool 
         ref.append({"secs": _sections(s_l), "length": s_l.st.length, "hidden": s_l.hidden_post_norm.clone(),
                     "logits": lg})
     toks = [t[a:a + n] for a, n in plan]
-    _knobs(win, rot, fused, stages)
+    _knobs(win, rot, fused, stages, nocopy)
     assert s_j.window_ok(0), "window_ok refused a text prompt at 0"
     bufs = [cache.state_empty(s_j) for _ in plan]
     lg, hid, taps = s_j.prefill_window(toks, [a for a, _ in plan], bufs)
@@ -129,6 +132,7 @@ def main() -> None:
     ap.add_argument("--rot-rows", action="store_true")
     ap.add_argument("--fused", action="store_true")
     ap.add_argument("--attn-stages", type=int, default=0, help="the window arm's stages (0: 2, the chunk-major arm's)")
+    ap.add_argument("--nocopy", action="store_true")
     ap.add_argument("--timing-arms", default="")
     ap.add_argument("--skip-check", action="store_true", help="timing only")
     ap.add_argument("--json")
@@ -140,7 +144,7 @@ def main() -> None:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.pack)
     rot0 = PK.ROT_ROWS
-    own = (LM.ROWS, rot0, E.PF_HC_FUSED, E.PF_ATTN_STAGES)
+    own = (LM.ROWS, rot0, E.PF_HC_FUSED, E.PF_ATTN_STAGES, E.PF_NOCOPY)
     assert E.PF_INJ_FUSED == E.PF_HC_FUSED, "the two hyper-connection switches differ: the tool moves them together"
     stages = a.attn_stages or 2
     ctxs = [int(x) for x in a.ctx.split(",") if x.strip()]
@@ -153,11 +157,11 @@ def main() -> None:
     knob = LM.ROWS
     print(f"[win] chunk {E.PREFILL_CHUNK}, path {fn.prefill_path}, knob FN_PF_WINDOW {knob} FN_PF_ROT_ROWS {int(rot0)} "
           f"FN_PF_HC_FUSED|INJ_FUSED {int(own[2])} FN_PF_ATTN_STAGES {own[3]} (the tool sets them itself), group rows "
-          f"{PK.GROUP_ROWS}, the window arm: rot rows {wrot} fused {a.fused} stages {stages}, mixer GEMMs "
+          f"{PK.GROUP_ROWS}, the window arm: rot rows {wrot} fused {a.fused} stages {stages} nocopy {a.nocopy}, mixer GEMMs "
           f"{PK.MM}, max_len {L}", flush=True)
     rep = {"chunk": E.PREFILL_CHUNK, "knob": knob, "rot_rows_knob": rot0, "group_rows": PK.GROUP_ROWS,
            "fused_knob": own[2], "attn_stages_knob": own[3], "mm": PK.MM,
-           "rot_rows_window_arm": {str(k): v for k, v in wrot.items()}, "fused_window_arm": a.fused, "attn_stages_window_arm": stages,
+           "rot_rows_window_arm": {str(k): v for k, v in wrot.items()}, "fused_window_arm": a.fused, "attn_stages_window_arm": stages, "nocopy_window_arm": a.nocopy,
            "windows": wins, "rows": [], "lines": [], "timing": []}
     ok_all = True
     for k, n in enumerate(ctxs):
@@ -167,7 +171,7 @@ def main() -> None:
             s_l, s_j = FlashNextServing(fn, L), FlashNextServing(fn, L)
             _knobs(0, False, False, 2)
             lg_l = s_l.forward(t, 0).clone()
-            _knobs(w, wrot[w], a.fused, stages)
+            _knobs(w, wrot[w], a.fused, stages, a.nocopy)
             lg_j = s_j.forward(t, 0).clone()
             _knobs(*own)
             r = {"ctx": len(ids), "window": w, "rot_rows": wrot[w], "logits_equal": bool(torch.equal(lg_l, lg_j)),
@@ -188,7 +192,7 @@ def main() -> None:
             del s_l, s_j
             torch.cuda.empty_cache()
             if a.lines and len(ids) > E.PREFILL_CHUNK:
-                lr = lines_check(fn, tok, L, ids, w, wrot[w], a.fused, stages)
+                lr = lines_check(fn, tok, L, ids, w, wrot[w], a.fused, stages, a.nocopy)
                 _knobs(*own)
                 lr.update(ctx=len(ids), window=w)
                 ok_all = ok_all and lr["all_equal"]

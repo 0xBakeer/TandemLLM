@@ -58,7 +58,7 @@ def _module():
         src = "#define EXL3_ST 3\n" + _HELPERS + _CUDA
         tag = nb.tag(_CPP, src)
         _MOD = nb.load(f"fn_prefill_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
-                       functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail"],
+                       functions=["pre_pair_rot", "pre_pair_silu_rot", "pre_group_gemm", "pre_mix_tail", "pre_gated_norm"],
                        extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_prefill_kernels")],
                        verbose=False)
     return _MOD
@@ -293,17 +293,25 @@ def _qsa_epi_kernel():
     return _QE
 
 
-def qsa_scores_rows(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB: int, block: int = 1024) -> torch.Tensor:
+def qsa_scores_rows(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB: int, block: int = 1024,
+                    lean: bool = False) -> torch.Tensor:
     """`qsa_scores_rows_torch` with its relu, head sum, scale, mask and store in one pass over each block's
     library GEMM products (2.5x at 16k blocks; bit for bit: the same products, the same fp32 steps in the
-    same order). QWEN38_FN_QSA_EPI_TORCH=1 keeps the torch ops."""
+    same order). QWEN38_FN_QSA_EPI_TORCH=1 keeps the torch ops. `lean` (SPD-249 P4): -inf written only past the
+    pooled blocks, where the kernel does not store (it stores every row's columns below them, -inf past the
+    row's own)."""
     if not iq.is_cuda or _S.get("FN_QSA_EPI_TORCH") == "1":
         return qsa_scores_rows_torch(iq, pool, nblk, NB, block)
     import triton
     M, NH, D = iq.shape
     nb = min(NB, pool.shape[0])
     pk = pool[:nb].float().T
-    out = torch.full((M, NB), float("-inf"), dtype=torch.float32, device=iq.device)
+    if lean and nb:
+        out = torch.empty(M, NB, dtype=torch.float32, device=iq.device)
+        if nb < NB:
+            out[:, nb:] = float("-inf")
+    else:
+        out = torch.full((M, NB), float("-inf"), dtype=torch.float32, device=iq.device)
     if nb == 0:
         return out
     nbl = nblk.to(torch.int32).contiguous()
@@ -340,12 +348,28 @@ def qsa_scores_rows_torch(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tens
     return out
 
 
-def mix_tail(u: torch.Tensor, n: torch.Tensor, hc: int) -> torch.Tensor:
+def mix_tail(u: torch.Tensor, n: torch.Tensor, hc: int, out: torch.Tensor | None = None) -> torch.Tensor:
     """The mixer's stream mean from the up projection's products u [M, hc H] fp32 and the normed
-    streams n [M, hc H] bf16 -> x [M, H] bf16."""
-    x = torch.empty(n.shape[0], n.shape[1] // hc, dtype=torch.bfloat16, device=n.device)
+    streams n [M, hc H] bf16 -> x [M, H] bf16 (`out`: written there, e.g. a window's rows)."""
+    x = torch.empty(n.shape[0], n.shape[1] // hc, dtype=torch.bfloat16, device=n.device) if out is None else out
     _module().pre_mix_tail(u, n, x, hc)
     return x
+
+
+def gated_norm_ok(o: torch.Tensor, z: torch.Tensor) -> bool:
+    """Whether `gated_norm_rows` takes the launch: head rows of 128, z's columns adjacent, a CUDA device that
+    builds the extension."""
+    return (o.is_cuda and o.dtype == torch.bfloat16 and z.dtype == torch.bfloat16 and o.dim() == 2 and o.shape[1] == 128
+            and o.is_contiguous() and z.dim() == 2 and z.stride(1) == 1 and z.shape[1] % 128 == 0
+            and z.numel() == o.numel() and _gpu.profile(o.device).inline("fn_prefill_kernels"))
+
+
+def gated_norm_rows(o: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: float, sigmoid: bool) -> torch.Tensor:
+    """SPD-249 P4: `fn_kernels.gated_norm` with z [T, heads 128] read in place at its row stride (a column slice of
+    the qkv|z rows, no copy): o [T heads, 128] -> y likewise, the same arithmetic a head row."""
+    y = torch.empty_like(o)
+    _module().pre_gated_norm(o, z, w.contiguous(), y, eps, sigmoid)
+    return y
 
 
 def moe_grouped_reference(x: torch.Tensor, ids: torch.Tensor, bank) -> torch.Tensor:

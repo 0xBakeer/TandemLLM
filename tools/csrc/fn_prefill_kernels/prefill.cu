@@ -253,6 +253,33 @@ __global__ void __launch_bounds__(256) mix_tail_kernel(const float* __restrict__
     Xo[(size_t)m * ldx + j] = __float2bfloat16_rn(acc * inv_hc);
 }
 
+// ----------------------------------------------------------------------------------- GDN output norm
+// SPD-249 P4: fn_kernels' gated_norm_kernel (one head row of 128 a warp: bf16(bf16(w bf16(o r)) act(z)), w plain)
+// with z read where it lies: Z [T, HV 128] at row stride ldz (a column slice of the qkv|z rows), head row
+// r = t HV + h. The same arithmetic a head row.
+__global__ void __launch_bounds__(256) gated_norm_z_kernel(const __nv_bfloat16* __restrict__ O,
+        const __nv_bfloat16* __restrict__ Z, int ldz, int HV, const __nv_bfloat16* __restrict__ Wn,
+        __nv_bfloat16* __restrict__ Y, int rows, float eps, int sig) {
+    const int lane = threadIdx.x & 31;
+    const int r = blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const __nv_bfloat16* zr = Z + (size_t)(r / HV) * ldz + (size_t)(r % HV) * 128;
+    float v[4], ss = 0.f;
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { v[e] = __bfloat162float(O[(size_t)r * 128 + lane * 4 + e]); ss = fmaf(v[e], v[e], ss); }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    const float rr = rsqrtf(ss / 128.0f + eps);
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+        const int i = lane * 4 + e;
+        const float hn = bfr(__bfloat162float(Wn[i]) * bfr(v[e] * rr));
+        const float z = __bfloat162float(zr[i]);
+        const float a = sig ? 1.0f / (1.0f + ::expf(-z)) : z / (1.0f + ::expf(-z));
+        Y[(size_t)r * 128 + i] = __float2bfloat16_rn(hn * a);
+    }
+}
+
 }  // namespace
 
 static Bank bank_of(const torch::Tensor& tr, const torch::Tensor& kb, const torch::Tensor& su, const torch::Tensor& sv) {
@@ -343,4 +370,19 @@ void pre_mix_tail(torch::Tensor u, torch::Tensor n, torch::Tensor x, int64_t hc)
     if (M == 0) return;
     mix_tail_kernel<<<dim3((H + 255) / 256, M), 256, 0, st>>>((const float*)u.data_ptr(), (const __nv_bfloat16*)n.data_ptr(),
         (int)n.stride(0), (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), H, 1.0f / (float)hc);
+}
+
+void pre_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig) {
+    const at::cuda::OptionalCUDAGuard guard(o.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(o.dtype() == torch::kBFloat16 && z.dtype() == torch::kBFloat16 && w.dtype() == torch::kBFloat16
+                && y.dtype() == torch::kBFloat16, "bf16");
+    TORCH_CHECK(o.is_contiguous() && y.is_contiguous() && w.is_contiguous() && w.numel() == 128 && o.size(-1) == 128
+                && y.numel() == o.numel(), "head rows of 128");
+    TORCH_CHECK(z.dim() == 2 && z.stride(1) == 1 && z.size(1) % 128 == 0 && z.numel() == o.numel(), "z bf16 [T, heads 128]");
+    const int rows = o.numel() / 128, HV = z.size(1) / 128;
+    if (rows == 0) return;
+    gated_norm_z_kernel<<<dim3((rows + 7) / 8), 256, 0, st>>>((const __nv_bfloat16*)o.data_ptr(),
+        (const __nv_bfloat16*)z.data_ptr(), (int)z.stride(0), HV, (const __nv_bfloat16*)w.data_ptr(),
+        (__nv_bfloat16*)y.data_ptr(), rows, (float)eps, sig ? 1 : 0);
 }

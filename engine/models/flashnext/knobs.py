@@ -76,6 +76,12 @@ KNOBS: dict[str, tuple] = {
     # rows (`_attn_pre`, tools/fn_seq_kernels.py `attn_rows`): a launch setting, the output's bits are 2's at every
     # value (tests/gpu/test_fn_attn_stages_gpu.py); 2: the launch of the decode path
     'FN_PF_ATTN_STAGES': ('2', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P4: a prompt chunk's copies a view serves are not launched: the GDN delta rule reads the values and the
+    # output norm reads z in place (tools/gdn_prefill_kernels.py `view`, tools/fn_prefill_kernels.py `gated_norm_rows`),
+    # the PLE states come from the rows' words (ple.py `row_states`), the indexer scores are filled with -inf only
+    # past the pooled blocks, and a layer-major window's MLP mixers write the experts' input side by side (no cat);
+    # every output's bits are the copies' (tools/fn_pf_hc_check.py, tools/fn_window_check.py); 0: the copies
+    'FN_PF_NOCOPY': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: a prefill burst's prompts in one forward (`FlashNextServing.prefill_joint`, joint_prefill.py): each
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone

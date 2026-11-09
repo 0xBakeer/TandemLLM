@@ -68,7 +68,7 @@ class _Stubs:
         self.hc = types.SimpleNamespace(
             mix_ok=lambda n, hc: True,
             wants_n32=lambda: PK.MM == "fp32",
-            mix=lambda n, n32, wd, wu, R, hc: c.append(("mix", n32)) or ("x", "d"),
+            mix=lambda n, n32, wd, wu, R, hc, out=None: c.append(("mix", n32)) or ("x", "d"),
             inject_ok=lambda h, out, hc: True,
             inject_norm=lambda h, out, d, R, w, hc, eps, n32=False: c.append(("inject", n32)) or (
                 h, torch.zeros(1), torch.ones(1) if n32 else None))
@@ -80,7 +80,7 @@ class _Stubs:
         self.tools.fn_pf_hc = self.hc
         c = self.calls
         self.PK.mm_rows = lambda x, w: c.append(("mm_rows", w)) or torch.zeros(2, 324)
-        self.PK.mix_tail = lambda u, n, hc: c.append(("mix_tail",)) or "x0"
+        self.PK.mix_tail = lambda u, n, hc, out=None: c.append(("mix_tail",)) or "x0"
         self.K.inject_norm = lambda h, out, d, R, w, hc, eps: c.append(("K.inject",)) or (h, torch.zeros(1))
         return self
 
@@ -149,7 +149,7 @@ def test_mix_follows_the_mm_rows_mode():
     try:
         PK.mm_rows = lambda x, w: calls.append(("mm_rows", x.dtype)) or torch.zeros(2, 3)
         PK._wf = lambda w: calls.append(("wf",)) or torch.zeros(3, 4)
-        PK.mix_tail = lambda u, n, hc: "x"
+        PK.mix_tail = lambda u, n, hc, out=None: "x"
         HC.mix_a = lambda d, R, hc, fp32=True: calls.append(("mix_a", fp32)) or torch.zeros(
             2, 4, dtype=torch.float32 if fp32 else torch.bfloat16)
         n = torch.zeros(2, 4, dtype=torch.bfloat16)

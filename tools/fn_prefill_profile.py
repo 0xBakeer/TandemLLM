@@ -331,7 +331,8 @@ def main() -> None:
     from tools import fn_prefill_kernels as PK
     res["knobs"]["effective"] = {
         "FN_PF_WINDOW": LM.ROWS, "FN_PF_ROT_ROWS": int(PK.ROT_ROWS), "FN_PF_HC_FUSED": int(E.PF_HC_FUSED),
-        "FN_PF_INJ_FUSED": int(E.PF_INJ_FUSED), "FN_PF_ATTN_STAGES": E.PF_ATTN_STAGES, "FN_PREFILL_MM": PK.MM,
+        "FN_PF_INJ_FUSED": int(E.PF_INJ_FUSED), "FN_PF_ATTN_STAGES": E.PF_ATTN_STAGES,
+        "FN_PF_NOCOPY": int(E.PF_NOCOPY), "FN_PREFILL_MM": PK.MM,
         "FN_PREFILL_CHUNK": E.PREFILL_CHUNK, "FN_GROUP_ROWS": PK.GROUP_ROWS, "prefill_path": eng.prefill_path}
     print(f"[prefill-profile] knobs {json.dumps(res['knobs']['effective'])}", flush=True)
     nwin, window = [0], LM.window

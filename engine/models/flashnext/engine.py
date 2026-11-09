@@ -72,6 +72,10 @@ PF_INJ_FUSED = _S.get("FN_PF_INJ_FUSED") == "1"
 #: SPD-249 P6: the pipeline stages of a prompt chunk's attention split launch (`_attn_pre`), the same bits; 2: the
 #: decode path's launch
 PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 2)
+#: SPD-249 P4: a prompt chunk's copies that a view or the reading kernel's own stride serves are not launched (the GDN
+#: values and z in place, the PLE states from the rows' words, the indexer scores' fill past the pooled blocks only, a
+#: window's mixer outputs written side by side), the same bits; 0: the copies
+PF_NOCOPY = _S.get("FN_PF_NOCOPY") == "1"
 #: SPD-249: a joint pass's GDN conv and gates of every state in one launch a layer (`gdn_pre_multi`); 0: a launch a state
 GDN_PRE_MULTI = _S.get("FN_GDN_PRE_MULTI") == "1"
 #: SPD-249: a joint pass leaves up to N parked GDN rows parked (no state write-back that round; the next call walks
@@ -553,9 +557,10 @@ class FlashNextEngine(FlashNextRef):
                        pool_pos=(b * r + off).contiguous())
         return out
 
-    def _mix_pre(self, n, p):
+    def _mix_pre(self, n, p, out=None):
         """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
-        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings. SPD-249 P2
+        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings (into `out` [M, H] bf16 when
+        given). SPD-249 P2
         (QWEN38_FN_PF_HC_FUSED): the same GEMMs of the `mm_rows` mode that runs on the same values, a from one launch
         and, where the GEMM reads fp32, n's fp32 form from the inject's launch when it wrote one (`_inject_pre`;
         tools/fn_pf_hc.py `mix`)."""
@@ -568,10 +573,10 @@ class FlashNextEngine(FlashNextRef):
         if PF_HC_FUSED:
             from tools import fn_pf_hc as HC
             if HC.mix_ok(n, c.hc_count):
-                return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count)
+                return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count, out)
         di = PK.mm_rows(n, wd)
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_tail(PK.mm_rows(a, wu), n, c.hc_count), di
+        return PK.mix_tail(PK.mm_rows(a, wu), n, c.hc_count, out), di
 
     def _inject_pre(self, h, out, di, R, w, hc, eps):
         """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits
@@ -644,7 +649,7 @@ class FlashNextEngine(FlashNextRef):
             # arithmetic is the whole call's (measured 2026-11-06 at 200k: the chunk's peak 4.2 -> 2.7 GiB)
             for r0 in range(0, x.shape[0], QSA_TILE):
                 r1 = min(x.shape[0], r0 + QSA_TILE)
-                sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls)
+                sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls, lean=PF_NOCOPY)
                 SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
                 del sc
         o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES)
@@ -679,7 +684,7 @@ class FlashNextEngine(FlashNextRef):
         if T > 64 and not fused_prefill_refusal(GDN_CHUNK):
             # the key heads as they are (the kernel maps value heads to them) and value blocks of 16:
             # 10.2 vs 15.4 ms a layer at 4,096 rows (2026-10-11), the output within one bf16 step
-            o, S = fused_chunk_prefill(q, k, v, g, beta, st.S[li], chunk_size=GDN_CHUNK, bv=16)
+            o, S = fused_chunk_prefill(q, k, v, g, beta, st.S[li], chunk_size=GDN_CHUNK, bv=16, view=PF_NOCOPY)
         else:
             if c.num_v_per_k > 1:
                 q = q.repeat_interleave(c.num_v_per_k, dim=2)
@@ -687,8 +692,12 @@ class FlashNextEngine(FlashNextRef):
             o, S = self.delta_rule(q, k, v, g, beta, st.S[li])
         st.S[li].copy_(S)
         z = qkvz[:, C:]
-        hh = K.gated_norm(o.reshape(-1, c.linear_value_head_dim).to(self.dtype), z.reshape(-1, c.linear_value_head_dim),
-                          self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        o = o.reshape(-1, c.linear_value_head_dim).to(self.dtype)
+        if PF_NOCOPY and PK.gated_norm_ok(o, z):
+            hh = PK.gated_norm_rows(o, z, self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        else:
+            hh = K.gated_norm(o, z.reshape(-1, c.linear_value_head_dim),
+                              self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
         return self.lin(hh.view(T, -1), self.W[a + "out_proj.weight"])
 
     def _ple_pre(self, h, tokens, li, st):
@@ -712,7 +721,7 @@ class FlashNextEngine(FlashNextRef):
         # alone (integer ops, one multiply and add an element), so the tiles' rows are the whole call's
         step = max(1, PLE_DECODE_TOKENS * (packed.shape[0] // max(1, T)))
         emb = torch.cat([decode_rows(packed[r0:r0 + step], heads[r0:r0 + step], pd["bias"], tab.K,
-                                     pd["codebook"]).to(self.dtype)
+                                     pd["codebook"], words=PF_NOCOPY).to(self.dtype)
                          for r0 in range(0, packed.shape[0], step)]).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
         val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)

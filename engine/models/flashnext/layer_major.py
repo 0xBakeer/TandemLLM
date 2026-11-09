@@ -24,7 +24,8 @@ mixer inputs), which the memory policy charges (serving.py `_workspace_rows`). `
 The injects and mixers are the engine's (`_inject_pre`, `_mix_pre`: QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and
 the attention is `_attn_pre` (QWEN38_FN_PF_ATTN_STAGES), as in the chunk-major forward. With both hyper-connection
 knobs on and fp32 mixer GEMMs a chunk's norm waits for the next layer in its fp32 form too: 4 hc H bytes a row more
-(41 KB), inside `ROW_BYTES`.
+(41 KB), inside `ROW_BYTES`. With QWEN38_FN_PF_NOCOPY the chunks' MLP mixers write the experts' input side by side
+in one buffer of the window's rows (no `torch.cat`), kept for the window's layers.
 
 tools/fn_window_check.py holds the window's logits, streams, sections, KV, indexer and pooled keys, length and PLE
 context to the chunk-major prefill's, then decode steps on both.
@@ -88,6 +89,7 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
     from tools import exl3_linear as X
     from tools import fn_kernels as K
     from tools import fn_prefill_kernels as PK
+    from engine.models.flashnext import engine as E
     c, W = fn.cfg, fn.W
     H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
     C = len(toks)
@@ -102,8 +104,11 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
         # own; the window's chunks of one row count share one set, as consecutive chunk-major forwards reuse
         # the allocator's blocks (every launch writes what it reads)
         pre["bufs"] = shared.setdefault(T, {})
-        seqs.append({"t": t, "L0": a, "pre": pre, "h": fn.embed(t).repeat(1, hc), "n": None, "trace": []})
+        seqs.append({"t": t, "L0": a, "pre": pre, "h": fn.embed(t).repeat(1, hc), "n": None, "trace": [],
+                     "r": (a - L0, a - L0 + T)})
         a += T
+    # SPD-249 P4: every chunk's MLP mixer output in the experts' input order, written where the experts read it
+    xw = torch.empty(a - L0, H, dtype=fn.dtype, device=fn.device) if E.PF_NOCOPY and C > 1 else None
     rows = fn.moe_group_rows or PK.GROUP_ROWS
     trace = fn.route_trace
     X.slab_cache_on()
@@ -124,7 +129,7 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
                 out = fn._gdn_pre(x, li, st) if c.is_linear(li) else fn._attn_pre(x, li, st)
                 h, n = fn._inject_pre(h, out, di, W[p + "attn_hyper_connection.rank"],
                                       W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
-                x, di = fn._mix_pre(n, p + "mlp_hyper_connection")
+                x, di = fn._mix_pre(n, p + "mlp_hyper_connection", None if xw is None else xw[s["r"][0]:s["r"][1]])
                 s["h"] = h
                 xs.append(x)
                 dis.append(di)
@@ -139,8 +144,8 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
                     s["trace"].append((li, i_[:, :-1].long()))
                 ids.append(i_)
                 wts.append(w_)
-            yd = PK.moe_grouped(torch.cat(xs) if C > 1 else xs[0], torch.cat(ids) if C > 1 else ids[0],
-                                fn.banks[li], rows=rows)
+            yd = PK.moe_grouped(xw if xw is not None else torch.cat(xs) if C > 1 else xs[0],
+                                torch.cat(ids) if C > 1 else ids[0], fn.banks[li], rows=rows)
             del xs
             nxt = None if li + 1 in c.ple_layers else fn._site_norm(li + 1)
             R = W[p + "mlp_hyper_connection.rank"]

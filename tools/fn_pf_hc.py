@@ -77,9 +77,9 @@ def mix_a(d: torch.Tensor, R: int, hc: int, fp32: bool = True) -> torch.Tensor:
     return a
 
 
-def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int):
+def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int, out: torch.Tensor | None = None):
     """A site's mixer, `_mix_pre`'s (x bf16 [M, H], di fp32 [M, R + hc]) bit for bit in the `mm_rows` mode that runs:
-    the same GEMMs on the same values (see `lib32`), then `mix_tail`."""
+    the same GEMMs on the same values (see `lib32`), then `mix_tail` (into `out` when given)."""
     from tools import fn_prefill_kernels as PK
     if lib32(wd):
         di = (n32 if n32 is not None else n.float()) @ PK._wf(wd).T
@@ -89,7 +89,7 @@ def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int):
         u = mix_a(di, R, hc) @ PK._wf(wu).T
     else:
         u = PK.mm_rows(mix_a(di, R, hc, fp32=False), wu)
-    return PK.mix_tail(u, n, hc), di
+    return PK.mix_tail(u, n, hc, out), di
 
 
 def inject_ok(h0: torch.Tensor, out: torch.Tensor, hc: int) -> bool:

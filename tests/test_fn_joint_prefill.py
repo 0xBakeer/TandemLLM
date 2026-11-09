@@ -169,8 +169,9 @@ def _moe_combine(yd, ids, wts, out=None):
     return (yd.view(M, S, -1) * wts[:, :, None]).sum(1)
 
 
-def _mix_tail(u, n, hc):
-    return (torch.sigmoid(u) * n.float()).view(n.shape[0], hc, -1).mean(1)
+def _mix_tail(u, n, hc, out=None):
+    x = (torch.sigmoid(u) * n.float()).view(n.shape[0], hc, -1).mean(1)
+    return x if out is None else out.copy_(x)
 
 
 def _kernels(monkeypatch):
