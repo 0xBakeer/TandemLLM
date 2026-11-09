@@ -219,6 +219,7 @@ HEADERS = [
     ("X-Tandem-Password-Set", "out", "engine", "to chatd: 1 when an admin password is set"),
     ("X-Tandem-Signed-In", "out", "engine", "to chatd: 1 when the request passed the dashboard's rule"),
     ("X-Tandem-Wait", "out", "engine", "memory, on a response that waited for memory before its prefill; its stream says so every 15 s"),
+    ("X-Tandem-Wait-For-Memory", "in", "engine", "1: a request not streamed waits for memory up to QSE_MEM_WAIT_S, as wait_for_memory: true in the body does, instead of a 503 after the queue timeout"),
     ("X-Tandem-Backend", "out", "proxy", "the id of the backend that answered a relayed request"),
     ("X-Tandem-Cost", "in", "proxy", "1 on a streamed relayed request: one SSE comment before data: [DONE] carries the request's cost (: tandem-cost {\"cost_micros\": N, \"backend\": id}); without it the stream is the backend's"),
     ("X-Engine-Stop", "out", "engine", "pattern-stop(<label>) on a response without a stream that a stop pattern ended"),

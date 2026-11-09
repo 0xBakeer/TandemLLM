@@ -34,7 +34,10 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.15.2 charges a prefill admitted over the engine's peak only its new memory,
+# The engine release. v0.15.3 drops Flash-Next's idle CUDA graphs when memory runs short, lets a
+# request short of memory wait at the KV pool's floor and go on, fits long chats side by side (3 h
+# waits, a chat's priority, the NVMe spill before a reclaim) and speeds up Flash-Next's long prefill;
+# v0.15.2 charges a prefill admitted over the engine's peak only its new memory,
 # pauses idle graph captures at the peak, lets chatd's Stop end a request that waits for memory and
 # takes a tandem_memory tool call as the memory block;
 # v0.15.1 cuts the launches of Flash-Next's joint pass (every lane's attention,
@@ -72,7 +75,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.15.2}"
+TANDEM_REF="${TANDEM_REF:-v0.15.3}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace

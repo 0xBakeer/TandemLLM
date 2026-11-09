@@ -2,6 +2,58 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.15.3, 2026-11-09
+
+0.15.3 fixes a server that refused requests with `memory_full` after a day of use, and lets long chats wait for memory and share the box instead of being cancelled. Flash-Next's CUDA graphs no longer hold memory that nothing gives back, and a request short of memory waits at one floor, the KV pool's, and goes on. Long chats fit side by side: a chat waits up to 3 hours for memory, a conversation the pool needs the room of is written to the NVMe before its pages go, and its return reads it back. Flash-Next prefills long prompts faster and drafts past 32k again. Ten pull requests from four contributors are in it.
+
+### Memory
+
+- Flash-Next's CUDA graphs are captured on their slot's own stream and dropped together (SRV-795). Each graph kept a private allocator pool on torch's shared capture stream, and nothing reset one: after 29 hours a server held 3,905 pools and 33.0 GB, 21.2 GB of it free and unreleasable, and refused requests with `memory_full`. A slot now leases one capture stream for its life, and `drop()` resets every graph of the slot at once. The KV pool's reclaim drops idle sets after the caches, before any conversation's rows. `QSE_GRAPH_POOL_GIB` (default 8) caps the pools' growth over the load-time base: the idle window drops the least recently used idle sets to 0.75 of the cap, never one that served in the last 300 s (`QSE_GRAPH_SET_MIN_IDLE_S`). `/health` shows them under `memory.graphs`. Over an 8.4 h run of 758 requests the pools peaked at 9.87 GiB.
+- A request short of memory waits on the KV pool's floor and goes on (SRV-797). The admission checked against its own floor (5.4 GiB) and the pool against another (8.42 GiB), so a 49k turn was admitted, refused at its first page, and gave way 16 times in 78 s before it ended with `memory_full`. The admission now checks the prompt's pages against the pool's floor while the prefill runs, then the workspace and every page against its own. A refused lane gives way when it runs alone and during its prefill too, keeps its place in the line and backs off (1 s, doubling to 60 s). A turn short only by the caches' growth room gets in, and the policy holds that room from the caches until its prefill ran.
+- A streamed chat request that waits for memory opens its stream at once and gets an SSE comment every 15 s (SRV-787). It waits up to `QSE_MEM_WAIT_S` (3 h) and then ends with `memory_wait_timeout` and the reason. A non-streamed request at its bound gets a 503 with `Retry-After` and the needed and free figures; `wait_for_memory: true` in the body or in `tandem`, or the header `X-Tandem-Wait-For-Memory: 1`, gives it the long wait. The live view shows such a request as `waiting_memory` with its reason, and the Chat tab and the dashboard say that the chat waits and continues by itself (#166).
+- A chat has a priority for memory: high, normal (the default) or low (#169). chatd keeps it in the chat's settings and sends it as `tandem.priority`; the composer has the control. Waiting requests stand in line by priority, then by arrival, and a waiter moves one step up for every 30 minutes it has waited. The pool's reclaim takes the idle conversations of lower-priority chats first.
+- An idle side-slot conversation is written to the session spill before its pages go, and reads back on its own slot (SRV-779). Before, the side reclaim dropped it, and the chat's next turn read its whole context again.
+- An idle conversation is written to the NVMe while its rows stay (SRV-E6), at most every `--session-spill-idle-every-s`, never while its slot is busy, changed blocks only. The reclaim ladder then takes the caches, the conversations already written, and the rest in that order, each level with its bytes and ms in the log.
+- After a compaction the chat's older copy goes first in the reclaim and is not written (#170). Two such copies of 217k and 218k rows held 12.3 GiB of KV after three chats compacted.
+- The admission prices a turn by the rows it forwards: a turn at home on a side slot is charged the rows the slot lacks, and a turn whose conversation the pool wrote to the NVMe the rows past the entry (#167, SRV-787). Such turns were charged a cold prefill of 183,849 rows (10.75 GiB) and waited up to ten minutes for 217 rows. A resumed forward of more than a chunk is charged the workspace of its own rows, not the whole context's.
+- Flash-Next's indexer scores and select run in tiles of 1,024 rows and the PLE decode in tiles of 512 tokens (#167): the same kernels on the same rows, a quarter of the transient memory at long context. A 4,400-row tail at 140k peaked at 8.36 GiB, now 2.19.
+- The admission's cache growth counts only what the memory policy admits, an over-peak workspace counts against the room instead of on top of it, and the floor holds at a live guard under the configured one (`QSE_GUARD_MARGIN_GB`).
+
+On one DGX Spark with Flash-Next 3.05, five chats of 221k to 225k tokens and room in the KV pool for four took a turn at once: 32 to 68 s a turn with the session spill on (three resident, two read back from the NVMe in 1.8 and 2.1 s), 659 to 894 s with it off (four read their whole context again, one at a time). No request ended with `memory_full` in either run.
+
+### Chat (beta)
+
+- A compaction's summary is one more turn of the chat's own request (#168): the chat's system block and messages with its tools, then the instruction, with a 256-token reasoning budget. The engine continues the conversation it holds and reads only the instruction. A compaction at 212k took 36 to 38 s, where it read 100k to 194k tokens again before (114 to 261 s).
+- Plan mode runs tools that change nothing: an MCP tool marked `readOnlyHint`, or an Open WebUI tool with no network or process import, counts as a read tool, as in auto mode.
+- chatd's grep reads a file up to 16 MiB at the read instead of skipping it by its size, takes a file as its path, and has a 10 s budget a call (#65).
+
+### Engine
+
+- Flash-Next's long-context prefill selects its top-512 blocks past 8,192 blocks with a radix select instead of two torch sorts, scores them in one fused pass, and runs the scores' GEMM over the rows written so far (#158). The same selection and scores bit for bit. A cold 185k prompt through the server took 198.4 s (933 tok/s), 312.2 s (593 tok/s) on 0.15.2.
+- Flash-Next drafts past 32k again (#159): a drafting turn primes the MTP head with only the last 2,048 unread rows (`QWEN38_MTP_BACKLOG_CAP`). Decode of 512 greedy tokens at 60,907 tokens of context went from 37.6 to 62.8 tok/s, at 122,920 from 34.3 to 49.1, with the same text.
+- Ada (sm_89) Triton kernels behind the `tools/gpu` adapter, with load-time verdicts instead of fallbacks at the call (#144). The GB10's kernels and text are unchanged.
+- NemotronH's GGUF loader reads every ggml quant type a release file carries, with packed row kernels for the hot projection formats and a dequantised load for the rest (#143).
+
+### Server
+
+- `--usage-context engine` (`QSE_USAGE_CONTEXT=engine`) reports the context occupied after replay, end alignment and image expansion in `usage.prompt_tokens`, for clients that compact by it (#140). The default stays `client`.
+- The HTTP server drops a stalled client after `QSE_HANDLER_TIMEOUT_S` (60 s), checks Content-Length before it reads a body (400, or 413 past `QSE_MAX_BODY_MB`), and frames a chunked body strictly: hex size lines and at most 100 trailer lines (#37). The relay keys its login throttle on the TCP peer instead of `X-Real-IP`, and bounds its eviction (#42).
+
+### Dashboard and Setup Guide
+
+- Every weight card states its slot count beside its parallel line, and docs/setup.md gives each card's count and how a shipped profile differs from a setup through the guide (#163).
+- The Dev view clears its grep timer when it detaches (#161).
+- The Now line, the request card and the lanes show a request held for memory with the server's reason and when its wait ends.
+
+### For contributors
+
+- Five tests that failed only on CI under a parallel run hold now (#162).
+
+### Text and fingerprints
+
+- Flash-Next 3.05 writes the same text as 0.15.2: each change to the engine since passed the quality gate on a DGX Spark with every lossless row equal for greedy as for seeded requests, and the greedy texts with speculation off equal those with it on.
+- Every family's fingerprint moves once (#143, #144, #158, #167 and SRV-795), so 0.15.2's prompt-cache files and spilled conversations are rebuilt once.
+
 ## 0.15.2, 2026-11-04
 
 0.15.2 fixes a long chat that waited 15 minutes for memory on a server that had run for an hour, a Stop that could not end that wait, and a memory note that reached the client as a tool call it did not have. The engine reads the allocator's counters without leaving work for the collector after every round, 7-bit EXL3 tensors run on the dense kernels, and the Setup Guide opens in a simple mode. A pull request that touches the engine now carries a quality gate report, every per-GPU choice goes through one adapter a GPU, and each release gets a benchmark report page. Every family's fingerprint moves once, so saved prompt-cache entries and spilled conversations from 0.15.1 are rebuilt once.
