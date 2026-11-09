@@ -16,6 +16,10 @@ stacks, and the launches of the "copies and elementwise" stage by the line that 
 op that launched it (the profiler's correlation), the op to the innermost frame of this repo on its stack. Launches,
 device seconds, the op and the kernel's kind a line, the top N. The stacks slow the host, not the kernels: the
 seconds are device time, to lay beside the stage table, and the run's wall time is not a prefill's.
+`--sync-sites N`: the same question asked another way, one more run with every torch call timed on the host with a
+device sync before and after it (`SyncSites`), by the innermost repo line that made the call: calls and wall seconds
+of each (line, function), the top N. A kernel launched outside torch (the Triton kernels) is not a torch call: its
+time is drained by the sync before the next call and counted nowhere.
 """
 
 from __future__ import annotations
@@ -184,11 +188,18 @@ def copy_sites(prof, top: int) -> dict:
             if stage != COPIES:
                 continue
             if site is None:
-                site, outer = site_of(fe.stack or []), fe
+                # the kernel hangs on the event that launched it: the op itself or a runtime call under it
+                op = fe
+                while not op.name.startswith("aten::") and op.cpu_parent is not None:
+                    op = op.cpu_parent
+                outer, src = op, fe
                 while outer.cpu_parent is not None and outer.cpu_parent.name.startswith("aten::"):
                     outer = outer.cpu_parent
+                while not src.stack and src.cpu_parent is not None:
+                    src = src.cpu_parent
+                site = site_of(src.stack or [])
             kind = next(x for x in keys if x in k.name)
-            for d, key in ((by, (site, outer.name, fe.name, kind)), (line, site)):
+            for d, key in ((by, (site, outer.name, op.name, kind)), (line, site)):
                 d[key][0] += us / 1e6
                 d[key][1] += 1
     tot = sum(v[0] for v in by.values())
@@ -198,6 +209,40 @@ def copy_sites(prof, top: int) -> dict:
             "linked_by_stage": {k: (round(v[0], 3), v[1]) for k, v in sorted(linked.items(), key=lambda kv: -kv[1][0])},
             "lines": [(k, round(v[0], 4), v[1]) for k, v in sorted(line.items(), key=lambda kv: -kv[1][0])[:top]],
             "sites": [(*k, round(v[0], 4), v[1]) for k, v in sorted(by.items(), key=lambda kv: -kv[1][0])[:top]]}
+
+
+class SyncSites(torch.overrides.TorchFunctionMode):
+    """Every torch call under the mode timed alone: a device sync, the call, a sync; by the innermost repo frame."""
+
+    def __init__(self):
+        super().__init__()
+        self.by = defaultdict(lambda: [0.0, 0])
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        name = getattr(func, "__name__", None) or str(func)
+        if name in ("__get__", "__set__", "size", "dim", "numel", "data_ptr", "element_size", "is_contiguous", "stride"):
+            return func(*args, **(kwargs or {}))
+        f = sys._getframe(1)
+        while f is not None and not (f.f_code.co_filename.startswith(ROOT + os.sep)
+                                     and not f.f_code.co_filename.endswith("fn_prefill_profile.py")):
+            f = f.f_back
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        out = func(*args, **(kwargs or {}))
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
+        site = "(no repo frame)" if f is None else f"{f.f_code.co_filename[len(ROOT) + 1:]}({f.f_lineno}): {f.f_code.co_name}"
+        g = self.by[(site, name)]
+        g[0] += dt
+        g[1] += 1
+        return out
+
+    def table(self, top: int) -> dict:
+        rows = sorted(self.by.items(), key=lambda kv: -kv[1][0])
+        return {"method": "TorchFunctionMode: each torch call between two device syncs, host wall seconds, by the "
+                          "innermost repo frame; kernels launched outside torch are not counted",
+                "torch_calls": sum(v[1] for v in self.by.values()), "torch_s": round(sum(v[0] for v in self.by.values()), 3),
+                "sites": [(k[0], k[1], round(v[0], 4), v[1]) for k, v in rows[:top]]}
 
 
 def run(eng: FlashNextEngine, ids: list[int], path: str, chunk: int) -> float:
@@ -223,7 +268,8 @@ def main() -> None:
     ap.add_argument("--kernels", type=int, default=0, help="also the top N kernels of one untimed run (torch.profiler)")
     ap.add_argument("--repeat", type=int, default=1, help="untimed runs (wall_s is the last; wall_runs all of them)")
     ap.add_argument("--sites", type=int, default=0, help="also the top N lines that launch copies and elementwise kernels")
-    ap.add_argument("--sites-min", type=int, default=0, help="no --sites run below this context")
+    ap.add_argument("--sites-min", type=int, default=0, help="no --sites / --sync-sites run below this context")
+    ap.add_argument("--sync-sites", type=int, default=0, help="also the top N (line, torch function) by sync-timed seconds")
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -281,12 +327,22 @@ def main() -> None:
             row["stages_s"] = {k: (round(v[0], 3), v[1], v[2]) for k, v in sorted(stages.items(), key=lambda kv: -kv[1][0])}
             row["kernel_kinds"] = len(per)
             del prof
+        if a.sync_sites and len(ids) >= a.sites_min:
+            m = SyncSites()
+            with m:
+                row["sync_sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+            row["sync_sites"] = m.table(a.sync_sites)
+        if a.json:                                                         # the stacks' run may not fit: keep the rest
+            json.dump({**res, "rows": res["rows"] + [row]}, open(a.json, "w"), indent=1)
         if a.sites and len(ids) >= a.sites_min:
             from torch.profiler import ProfilerActivity, profile
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True) as prof:
-                row["sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
-            row["copy_sites"] = copy_sites(prof, a.sites)
-            del prof
+            try:
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True) as prof:
+                    row["sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+                row["copy_sites"] = copy_sites(prof, a.sites)
+                del prof
+            except Exception as e:  # noqa: BLE001
+                row["copy_sites"] = {"error": f"{type(e).__name__}: {e}"[:400]}
         row["mem_gib"] = mem_available_gib()
         res["rows"].append(row)
         print(f"[prefill-profile] {json.dumps(row)}", flush=True)
