@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -170,8 +171,49 @@ def site_of(stack: list) -> str:
     return "(no repo frame)"
 
 
+_FRAME = re.compile(r"^(.*\.py)\((\d+)\): (.+)$")
+
+
+def frame_of(name: str):
+    """A profiler Python-function event's name as a repo frame ("file(the function's first line): function"), else
+    None. The tracer names a frame by its file with a `sys.path` prefix dropped."""
+    m = _FRAME.match(name)
+    if not m:
+        return None
+    f = m.group(1)
+    if os.path.isabs(f):
+        if not f.startswith(ROOT + os.sep):
+            return None
+        f = f[len(ROOT) + 1:]
+    else:                                                    # the longest tail of the path that is a repo file
+        parts = f.split("/")
+        tails = ["/".join(parts[i:]) for i in range(len(parts))] + ["tools/" + parts[-1]]
+        f = next((t for t in tails if os.path.isfile(os.path.join(ROOT, t))), None)
+        if f is None:
+            return None
+    if f.endswith("fn_prefill_profile.py"):
+        return None
+    return f"{f}({m.group(2)}): {m.group(3)}"
+
+
+def frames_of(ev) -> tuple:
+    """(the innermost repo function above a profiler event, the repo function that called it): from the Python
+    frames among the event's parents, or where the build gives events a stack, from the stack."""
+    got, e = [], ev
+    while e is not None and len(got) < 2:
+        fr = frame_of(e.name)
+        if fr:
+            got.append(fr)
+        elif not got and getattr(e, "stack", None):
+            fr = site_of(e.stack)
+            if fr != "(no repo frame)":
+                return fr, ""
+        e = e.cpu_parent
+    return (got + ["(no repo frame)", ""])[0], (got + ["", ""])[1]
+
+
 def copy_sites(prof, top: int) -> dict:
-    """SPD-249 P4: the launches of the "copies and elementwise" stage by the line that issued them."""
+    """SPD-249 P4: the launches of the "copies and elementwise" stage by the function that issued them."""
     from torch.autograd import DeviceType
     keys = dict(STAGES)[COPIES]
     by, line, linked = defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0])
@@ -192,19 +234,18 @@ def copy_sites(prof, top: int) -> dict:
                 op = fe
                 while not op.name.startswith("aten::") and op.cpu_parent is not None:
                     op = op.cpu_parent
-                outer, src = op, fe
+                outer = op
                 while outer.cpu_parent is not None and outer.cpu_parent.name.startswith("aten::"):
                     outer = outer.cpu_parent
-                while not src.stack and src.cpu_parent is not None:
-                    src = src.cpu_parent
-                site = site_of(src.stack or [])
+                site, via = frames_of(fe)
             kind = next(x for x in keys if x in k.name)
-            for d, key in ((by, (site, outer.name, op.name, kind)), (line, site)):
+            for d, key in ((by, (site, via, outer.name, op.name, kind)), (line, site)):
                 d[key][0] += us / 1e6
                 d[key][1] += 1
     tot = sum(v[0] for v in by.values())
-    return {"method": "torch.profiler, host ops with Python stacks + device kernels; a kernel's line is the innermost "
-                      "repo frame of the op that launched it; device seconds",
+    return {"method": "torch.profiler, host ops with Python frames + device kernels; a kernel's site is the innermost "
+                      "repo function above the op that launched it (file, the function's first line) and that "
+                      "function's repo caller; device seconds",
             "copies_s": round(tot, 3), "copies_launches": sum(v[1] for v in by.values()),
             "linked_by_stage": {k: (round(v[0], 3), v[1]) for k, v in sorted(linked.items(), key=lambda kv: -kv[1][0])},
             "lines": [(k, round(v[0], 4), v[1]) for k, v in sorted(line.items(), key=lambda kv: -kv[1][0])[:top]],
@@ -222,17 +263,21 @@ class SyncSites(torch.overrides.TorchFunctionMode):
         name = getattr(func, "__name__", None) or str(func)
         if name in ("__get__", "__set__", "size", "dim", "numel", "data_ptr", "element_size", "is_contiguous", "stride"):
             return func(*args, **(kwargs or {}))
-        f = sys._getframe(1)
-        while f is not None and not (f.f_code.co_filename.startswith(ROOT + os.sep)
-                                     and not f.f_code.co_filename.endswith("fn_prefill_profile.py")):
-            f = f.f_back
+        def repo(f):
+            while f is not None and not (f.f_code.co_filename.startswith(ROOT + os.sep)
+                                         and not f.f_code.co_filename.endswith("fn_prefill_profile.py")):
+                f = f.f_back
+            return f
+        f = repo(sys._getframe(1))
+        up = repo(f.f_back) if f is not None else None
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         out = func(*args, **(kwargs or {}))
         torch.cuda.synchronize()
         dt = time.perf_counter() - t0
         site = "(no repo frame)" if f is None else f"{f.f_code.co_filename[len(ROOT) + 1:]}({f.f_lineno}): {f.f_code.co_name}"
-        g = self.by[(site, name)]
+        via = "" if up is None else f"{up.f_code.co_filename[len(ROOT) + 1:]}({up.f_lineno}): {up.f_code.co_name}"
+        g = self.by[(site, via, name)]
         g[0] += dt
         g[1] += 1
         return out
@@ -240,9 +285,10 @@ class SyncSites(torch.overrides.TorchFunctionMode):
     def table(self, top: int) -> dict:
         rows = sorted(self.by.items(), key=lambda kv: -kv[1][0])
         return {"method": "TorchFunctionMode: each torch call between two device syncs, host wall seconds, by the "
-                          "innermost repo frame; kernels launched outside torch are not counted",
+                          "innermost repo line and the repo line that called its function; kernels launched "
+                          "outside torch are not counted",
                 "torch_calls": sum(v[1] for v in self.by.values()), "torch_s": round(sum(v[0] for v in self.by.values()), 3),
-                "sites": [(k[0], k[1], round(v[0], 4), v[1]) for k, v in rows[:top]]}
+                "sites": [(*k, round(v[0], 4), v[1]) for k, v in rows[:top]]}
 
 
 def run(eng: FlashNextEngine, ids: list[int], path: str, chunk: int) -> float:
