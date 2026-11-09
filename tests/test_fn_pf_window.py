@@ -154,6 +154,27 @@ def test_a_resumed_prompt_and_the_route_trace(monkeypatch):
     return "a prompt resumed at 3: the chunk-major bits; the route trace in chunk-major order"
 
 
+def test_a_window_takes_the_engine_inject(monkeypatch):
+    """The injects of a window are `_inject_pre`'s (QWEN38_FN_PF_INJ_FUSED reaches them), two a chunk and layer, and
+    the fp32 forms no mixer took are dropped at the window's end."""
+    _kernels(monkeypatch)
+    monkeypatch.setattr(E, "PREFILL_CHUNK", 4)
+    fn = _WEng()
+    seen, cleared = [], []
+    real = E.FlashNextEngine._inject_pre
+
+    def inj(h, out, di, R, w, hc, eps):
+        seen.append(h.shape[0])
+        return real(fn, h, out, di, R, w, hc, eps)
+    monkeypatch.setattr(fn, "_inject_pre", inj, raising=False)
+    monkeypatch.setattr(fn, "_n32_clear", lambda: cleared.append(1), raising=False)
+    toks = torch.tensor([3, 9, 1, 4, 7, 2, 8, 5, 6, 1, 1])        # chunks of 4, 4, 3
+    _prefill(fn, toks, 12, monkeypatch=monkeypatch)
+    assert sorted(seen) == sorted([4, 4, 3] * 2 * NL), seen
+    assert cleared == [1]
+    return "a window of 3 chunks: 2 engine injects a chunk and layer, one clear"
+
+
 def test_the_cut_and_what_runs_a_window(monkeypatch):
     assert LM.groups([4, 4, 3], 8) == [[0, 1], [2]]
     assert LM.groups([4, 4, 4, 4], 8) == [[0, 1], [2, 3]]

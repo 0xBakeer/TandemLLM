@@ -21,6 +21,11 @@ The window holds every chunk's streams between layers and the experts' buffers o
 mixer inputs), which the memory policy charges (serving.py `_workspace_rows`). `ROWS` caps a window
 (QWEN38_FN_PF_WINDOW; 0: chunk-major as before).
 
+The injects and mixers are the engine's (`_inject_pre`, `_mix_pre`: QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and
+the attention is `_attn_pre` (QWEN38_FN_PF_ATTN_STAGES), as in the chunk-major forward. With both hyper-connection
+knobs on and fp32 mixer GEMMs a chunk's norm waits for the next layer in its fp32 form too: 4 hc H bytes a row more
+(41 KB), inside `ROW_BYTES`.
+
 tools/fn_window_check.py holds the window's logits, streams, sections, KV, indexer and pooled keys, length and PLE
 context to the chunk-major prefill's, then decode steps on both.
 """
@@ -117,8 +122,8 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
                 n = s["n"] if s["n"] is not None else K.hc_norm(h, fn._site_norm(li), H, eps)
                 x, di = fn._mix_pre(n, p + "attn_hyper_connection")
                 out = fn._gdn_pre(x, li, st) if c.is_linear(li) else fn._attn_pre(x, li, st)
-                h, n = K.inject_norm(h, out, di, W[p + "attn_hyper_connection.rank"],
-                                     W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+                h, n = fn._inject_pre(h, out, di, W[p + "attn_hyper_connection.rank"],
+                                      W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
                 x, di = fn._mix_pre(n, p + "mlp_hyper_connection")
                 s["h"] = h
                 xs.append(x)
@@ -142,7 +147,7 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
             r0 = 0
             for s, i_, w_, di in zip(seqs, ids, wts, dis):
                 r1 = r0 + i_.numel()
-                s["h"], s["n"] = K.inject_norm(s["h"], K.moe_combine(yd[r0:r1], i_, w_), di, R, nxt, hc, eps)
+                s["h"], s["n"] = fn._inject_pre(s["h"], K.moe_combine(yd[r0:r1], i_, w_), di, R, nxt, hc, eps)
                 r0 = r1
             del yd, ids, wts, dis
             X.slab_cache_clear()
@@ -150,6 +155,7 @@ def window(fn, toks: list, st, head: bool = True, snap=None) -> tuple:
     finally:
         X.slab_cache_off()
         PK.wf_cache_off()
+        fn._n32_clear()
         fn._pre = None
         st.length = L0
     st.length = a
