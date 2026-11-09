@@ -2969,6 +2969,7 @@ class DecodeGraph:
         self.stacks: dict = {}                 # class -> the graph's streams output [1, hc H]
         self.graph = None
         self.captures = 0                      # classes captured lazily by a step
+        self.dead: list = []                   # SRV-795: graphs whose capture raised
 
     def capture(self, cls: int | None = None) -> None:
         eng, st = self.eng, self.st
@@ -2978,23 +2979,34 @@ class DecodeGraph:
         saved_n = eng._pend_of(st)[1].clone()
         pctx = dict(st.ple_ctx)
         length = st.length
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(2):
-                eng.stage(0, st)
-                eng.step(st, cls)
-        torch.cuda.current_stream().wait_stream(s)
         g = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(g):
-            eng.step(st, cls)
-        self.stacks[cls] = eng.stack
-        torch.cuda.synchronize()
-        _state_restore(saved)                           # the warm-up steps wrote the state: undo
-        eng._pend_of(st)[1].copy_(saved_n)
-        st.ple_ctx.clear()
-        st.ple_ctx.update(pctx)
-        st.length = length
+        cap = capture_stream(st)
+        try:
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(2):
+                    eng.stage(0, st)
+                    eng.step(st, cls)
+            torch.cuda.current_stream().wait_stream(s)
+            with capture_lock.LOCK, torch.cuda.graph(g, stream=cap):
+                eng.step(st, cls)
+            self.stacks[cls] = eng.stack
+        except BaseException:
+            # SRV-795: kept to be reset with its owner's graphs, never alone (SPD-223); a capture whose end raised
+            # left the thread on the capture stream, which it leaves here (the state is put back below either way)
+            self.dead.append(g)
+            cap = cap if cap is not None else getattr(torch.cuda.graph, "default_capture_stream", None)
+            if cap is not None and torch.cuda.current_stream() == cap:
+                torch.cuda.set_stream(torch.cuda.default_stream())
+            raise
+        finally:
+            torch.cuda.synchronize()
+            _state_restore(saved)                       # the warm-up steps wrote the state: undo
+            eng._pend_of(st)[1].copy_(saved_n)
+            st.ple_ctx.clear()
+            st.ple_ctx.update(pctx)
+            st.length = length
         self.graphs[cls] = self.graph = g
 
     def _ready(self) -> None:
@@ -3099,7 +3111,7 @@ class VerifyGraph:
                 eng.rows_step(st, M, cls=self.cls)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+        with capture_lock.LOCK, torch.cuda.graph(self.graph, stream=capture_stream(st)):
             eng.rows_step(st, M, cls=self.cls)
         torch.cuda.synchronize()
         self.rec = eng.rec
@@ -3130,7 +3142,7 @@ class CommitGraph:
             eng.commit_dev(st, self.key)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+        with capture_lock.LOCK, torch.cuda.graph(self.graph, stream=capture_stream(st)):
             eng.commit_dev(st, self.key)
         torch.cuda.synchronize()
         _state_restore(saved)
@@ -3162,7 +3174,7 @@ class MTPChainGraph:
                 eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls, **kw)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+        with capture_lock.LOCK, torch.cuda.graph(self.graph, stream=capture_stream(st_m)):
             eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls, **kw)
         torch.cuda.synchronize()
         for k, v in st_m.pool.items():
@@ -3171,6 +3183,13 @@ class MTPChainGraph:
 
 #: the rows past the length a captured step, verify block or commit may write (a block is at most 33 rows)
 CAPTURE_ROWS = 64
+
+
+def capture_stream(st: FNState):
+    """SRV-795: the stream a graph of state `st` is captured on: its owner's own (`st.graphs`, a slot adapter's
+    engine/models/graph_set.py `GraphSet`), else torch's shared capture stream (None)."""
+    gs = getattr(st, "graphs", None)
+    return gs.stream() if gs is not None else None
 
 
 def _state_saved(eng: FlashNextEngine, st: FNState) -> list:

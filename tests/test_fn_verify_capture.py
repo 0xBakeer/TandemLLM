@@ -72,6 +72,7 @@ class _Cuda:
         self.fail = self.fail_end = None
         self.replays: list = []
         self.resets: list = []
+        self.streams: list = []                 # the stream each capture ran on, by name
         self.default, self.capture = _Stream("default"), _Stream("capture")
         self.cur = self.default
         cuda = self
@@ -94,7 +95,9 @@ class _Cuda:
             if cuda.fail is not None:
                 exc, cuda.fail = cuda.fail, None
                 raise exc
-            prev, cuda.cur, cuda.where = cuda.cur, cuda.capture, "graph"
+            # SRV-795: on the stream the capture names (a slot's own), else torch's capture stream
+            prev, cuda.cur, cuda.where = cuda.cur, kw.get("stream") or cuda.capture, "graph"
+            cuda.streams.append(cuda.cur.name)
             try:
                 yield
             except BaseException:
@@ -123,14 +126,21 @@ class _Cuda:
 
     @contextlib.contextmanager
     def on(self):
+        from engine import capture_lock
         real = {k: getattr(torch.cuda, k) for k in self.calls}
+        real_new = capture_lock._new_stream
+        free, leases = list(capture_lock._FREE), dict(capture_lock.LEASES)
         try:
             for k, v in self.calls.items():
                 setattr(torch.cuda, k, v)
+            capture_lock._new_stream = lambda: _Stream("leased")     # SRV-795: a slot's own capture stream
             yield self
         finally:
             for k, v in real.items():
                 setattr(torch.cuda, k, v)
+            capture_lock._new_stream = real_new
+            capture_lock._FREE[:] = free                              # no fake stream left for a later lease
+            capture_lock.LEASES.update(leases)
 
 
 class _Eng:
