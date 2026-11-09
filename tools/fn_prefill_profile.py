@@ -288,6 +288,12 @@ def main() -> None:
         "FN_PF_INJ_FUSED": int(E.PF_INJ_FUSED), "FN_PF_ATTN_STAGES": E.PF_ATTN_STAGES, "FN_PREFILL_MM": PK.MM,
         "FN_PREFILL_CHUNK": E.PREFILL_CHUNK, "FN_GROUP_ROWS": PK.GROUP_ROWS, "prefill_path": eng.prefill_path}
     print(f"[prefill-profile] knobs {json.dumps(res['knobs']['effective'])}", flush=True)
+    nwin, window = [0], LM.window
+
+    def counted(*args, **kw):
+        nwin[0] += 1
+        return window(*args, **kw)
+    LM.window = counted
     run(eng, class_prompt(tok, "prose", 256), a.path, a.chunk)          # build the kernels
     for n in ctxs:
         ids = class_prompt(tok, "prose", n)
@@ -344,6 +350,7 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 row["copy_sites"] = {"error": f"{type(e).__name__}: {e}"[:400]}
         row["mem_gib"] = mem_available_gib()
+        row["windows"], nwin[0] = nwin[0], 0                              # layer-major windows over the row's runs
         res["rows"].append(row)
         print(f"[prefill-profile] {json.dumps(row)}", flush=True)
     if a.json:
