@@ -91,9 +91,9 @@ def lines_check(fn, tok, L, ids: list, win: int, rot: bool = False, fused: bool 
         lg = s_l.forward(t[a:a + n], a).clone()
         ref.append({"secs": _sections(s_l), "length": s_l.st.length, "hidden": s_l.hidden_post_norm.clone(),
                     "logits": lg})
-    assert s_j.window_ok(0), "window_ok refused a text prompt at 0"
     toks = [t[a:a + n] for a, n in plan]
     _knobs(win, rot, fused, stages)
+    assert s_j.window_ok(0), "window_ok refused a text prompt at 0"
     bufs = [cache.state_empty(s_j) for _ in plan]
     lg, hid, taps = s_j.prefill_window(toks, [a for a, _ in plan], bufs)
     cache.state_save(bufs[-1], s_j)
