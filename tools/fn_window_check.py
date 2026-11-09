@@ -13,7 +13,8 @@ cache loop calls (`FlashNextServing.prefill_window` with a state buffer a chunk 
 loop does) against the chunk-major twin's sections, length and streams at every line.
 
 `--rot-rows`: the window arm also takes the pair rotation in row order (QWEN38_FN_PF_ROT_ROWS), the chunk-major arm
-not, so the check holds both changes to the live prefill at once.
+not, so the check holds both changes to the live prefill at once. A window given as "rows:0" or "rows:1" takes its
+own rotation order instead.
 
 `--fused`, `--attn-stages N`: the window arm also takes the fused hyper-connection inject and mixer inputs
 (QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and N stages of the attention split launch (QWEN38_FN_PF_ATTN_STAGES),
@@ -143,18 +144,20 @@ def main() -> None:
     assert E.PF_INJ_FUSED == E.PF_HC_FUSED, "the two hyper-connection switches differ: the tool moves them together"
     stages = a.attn_stages or 2
     ctxs = [int(x) for x in a.ctx.split(",") if x.strip()]
-    wins = [int(x) for x in a.windows.split(",") if x.strip()]
+    wrot = {int(x.split(":")[0]): (bool(int(x.split(":")[1])) if ":" in x else a.rot_rows)
+            for x in a.windows.split(",") if x.strip()}
+    wins = list(wrot)
     L = max(ctxs) + a.steps + 64 + 16
     eng, _, _ = build(a.pack, L, tok, spec=False, log=lambda s: print(s, flush=True))
     fn = eng.fn
     knob = LM.ROWS
     print(f"[win] chunk {E.PREFILL_CHUNK}, path {fn.prefill_path}, knob FN_PF_WINDOW {knob} FN_PF_ROT_ROWS {int(rot0)} "
           f"FN_PF_HC_FUSED|INJ_FUSED {int(own[2])} FN_PF_ATTN_STAGES {own[3]} (the tool sets them itself), group rows "
-          f"{PK.GROUP_ROWS}, the window arm: rot rows {a.rot_rows} fused {a.fused} stages {stages}, mixer GEMMs "
+          f"{PK.GROUP_ROWS}, the window arm: rot rows {wrot} fused {a.fused} stages {stages}, mixer GEMMs "
           f"{PK.MM}, max_len {L}", flush=True)
     rep = {"chunk": E.PREFILL_CHUNK, "knob": knob, "rot_rows_knob": rot0, "group_rows": PK.GROUP_ROWS,
            "fused_knob": own[2], "attn_stages_knob": own[3], "mm": PK.MM,
-           "rot_rows_window_arm": a.rot_rows, "fused_window_arm": a.fused, "attn_stages_window_arm": stages,
+           "rot_rows_window_arm": {str(k): v for k, v in wrot.items()}, "fused_window_arm": a.fused, "attn_stages_window_arm": stages,
            "windows": wins, "rows": [], "lines": [], "timing": []}
     ok_all = True
     for k, n in enumerate(ctxs):
@@ -164,10 +167,10 @@ def main() -> None:
             s_l, s_j = FlashNextServing(fn, L), FlashNextServing(fn, L)
             _knobs(0, False, False, 2)
             lg_l = s_l.forward(t, 0).clone()
-            _knobs(w, a.rot_rows, a.fused, stages)
+            _knobs(w, wrot[w], a.fused, stages)
             lg_j = s_j.forward(t, 0).clone()
             _knobs(*own)
-            r = {"ctx": len(ids), "window": w, "logits_equal": bool(torch.equal(lg_l, lg_j)),
+            r = {"ctx": len(ids), "window": w, "rot_rows": wrot[w], "logits_equal": bool(torch.equal(lg_l, lg_j)),
                  "logits_max_diff": float((lg_l - lg_j).abs().max()),
                  "hidden_equal": bool(torch.equal(s_l.hidden_post_norm, s_j.hidden_post_norm)),
                  "argmax": [int(lg_l.view(-1).argmax()), int(lg_j.view(-1).argmax())]}
@@ -185,7 +188,7 @@ def main() -> None:
             del s_l, s_j
             torch.cuda.empty_cache()
             if a.lines and len(ids) > E.PREFILL_CHUNK:
-                lr = lines_check(fn, tok, L, ids, w, a.rot_rows, a.fused, stages)
+                lr = lines_check(fn, tok, L, ids, w, wrot[w], a.fused, stages)
                 _knobs(*own)
                 lr.update(ctx=len(ids), window=w)
                 ok_all = ok_all and lr["all_equal"]
@@ -198,7 +201,7 @@ def main() -> None:
             s = FlashNextServing(fn, L)
             row = {"ctx": len(ids)}
             arms = ([tuple(int(v) for v in x.split(":")) for x in a.timing_arms.split(",") if x.strip()]
-                    or [(0, 0)] + [(w, int(a.rot_rows), int(a.fused), stages) for w in wins])
+                    or [(0, 0)] + [(w, int(wrot[w]), int(a.fused), stages) for w in wins])
             for arm in arms:
                 w, rot, fu, sg = arm + (0, 2)[len(arm) - 2:]
                 if w and len(ids) <= E.PREFILL_CHUNK and not fu and sg == 2:
