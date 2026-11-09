@@ -432,7 +432,8 @@ if HAVE_TRITON:
         base = ((t * HK + kvh) * NS + sp) * BM + rows
         tl.store(PM + base, m_i)
         tl.store(PL + base, l_i)
-        tl.store(PACC + base[:, None] * D + od[None, :], acc)
+        # a 64-bit offset: M rows hold M * HK * NS * BM * D elements, past 2^31 from 29,128 rows (HK 2, D 256)
+        tl.store(PACC + base.to(tl.int64)[:, None] * D + od[None, :], acc)
 
     @triton.jit
     def _attn_rows_combine(PM, PL, PACC, OUT, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr,
@@ -452,7 +453,7 @@ if HAVE_TRITON:
         # in chunk order: the chunks past a row's last key add exact zeros
         for s in tl.static_range(0, NS):
             w = tl.exp(tl.load(PM + b0 + s * BM) - mx)
-            num = num + tl.load(PACC + (b0 + s * BM) * D + od) * w
+            num = num + tl.load(PACC + (b0 + s * BM).to(tl.int64) * D + od) * w     # as the split's store
             den = den + tl.load(PL + b0 + s * BM) * w
         o = num / tl.where(den == 0.0, 1.0, den)
         tl.store(OUT + (t * HQ + qh) * D + od, o.to(tl.bfloat16))
@@ -516,7 +517,8 @@ if HAVE_TRITON:
         base = ((t * HK + kvh) * NS + sp) * BM + rows
         tl.store(PM + base, m_i)
         tl.store(PL + base, l_i)
-        tl.store(PACC + base[:, None] * D + od[None, :], acc)
+        # a 64-bit offset: M rows hold M * HK * NS * BM * D elements, past 2^31 from 29,128 rows (HK 2, D 256)
+        tl.store(PACC + base.to(tl.int64)[:, None] * D + od[None, :], acc)
 
 
 #: SPD-249: the int64 fields of an `attn_rows_multi` lane entry (row0, K, V, CTL, ANC, SEL, -, -)
