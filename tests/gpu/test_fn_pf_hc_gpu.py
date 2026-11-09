@@ -1,9 +1,10 @@
 """On the board (SPD-249 P2): tools/fn_pf_hc.py equals the prefill mixer and inject it replaces, bit for bit.
 
-  * mix: (x, di) equal `_mix_pre`'s replaced path (fn_prefill_kernels `mm_rows` at QWEN38_FN_PREFILL_MM=fp32, the torch
-    silu, `mm_rows`, `mix_tail`) at the mixer shapes for every row count in ROWS (`--all-rows`: 1 .. 4,096 each), with
-    n's fp32 form given (as the inject's launch makes it) and without it;
-  * mix_a over every bf16 value of bf16(di) (a NaN aside: both NaN);
+  * mix: (x, di) equal `_mix_pre`'s replaced path (fn_prefill_kernels `mm_rows`, the torch silu, `mm_rows`,
+    `mix_tail`) in each `mm_rows` mode (QWEN38_FN_PREFILL_MM fp32, tc, fp16) at the mixer shapes for every row count
+    in ROWS (`--all-rows`: 1 .. 4,096 each for fp32 and tc), with n's fp32 form given (as the inject's launch makes
+    it) and without it;
+  * mix_a, fp32 and bf16 output, over every bf16 value of bf16(di) (a NaN aside: both NaN);
   * inject_norm: (h, n) equal tools/fn_kernels.inject_norm's at stream widths 2,560 (the model's), 512, 1,024,
     2,048, 3,000 and 4,096, norm weights fp16, bf16 and none, every row count in ROWS; its n32 is n.float();
   * the times of both paths at 4,096 rows (printed, not asserted).
@@ -24,6 +25,7 @@ sys.path.insert(0, ROOT)
 from engine.models.flashnext.pack import Int8Rows  # noqa: E402
 from tools import fn_kernels as K  # noqa: E402
 from tools import fn_pf_hc as HC  # noqa: E402
+from tools import fn_prefill_kernels as PK  # noqa: E402
 
 DEV = "cuda"
 H, HCN, R = 2560, 4, 320
@@ -55,19 +57,36 @@ def _inj_inputs(M, G, seed):
     return h0, out, d
 
 
-def test_mix_equals_the_replaced_path(rows=None):
+def _mix_mode(mode, rows):
     wd, wu = _w(R + HCN, HCN * H, 128, 31), _w(HCN * H, R, 64, 32)
     assert HC.mix_ok(_n(4, 0), HCN)
     bad = []
-    for M in rows or ROWS:
-        n = _n(M, 700 + M)
-        x, di = HC.mix_reference(n, wd, wu, R, HCN)
-        for n32 in (None, n.float()):
-            x2, di2 = HC.mix(n, n32, wd, wu, R, HCN)
-            if not (_same(x, x2) and _same(di, di2)):
-                bad.append((M, n32 is not None, int((x != x2).sum()), int((di != di2).sum())))
-    assert not bad, f"mix differs at (rows, n32, x diffs, di diffs) {bad[:12]}"
-    return f"{len(rows or ROWS)} row counts"
+    saved = PK.MM
+    PK.MM = mode
+    try:
+        for M in rows:
+            n = _n(M, 700 + M)
+            x, di = HC.mix_reference(n, wd, wu, R, HCN)
+            for n32 in (None, n.float()) if HC.wants_n32() else (None,):
+                x2, di2 = HC.mix(n, n32, wd, wu, R, HCN)
+                if not (_same(x, x2) and _same(di, di2)):
+                    bad.append((M, n32 is not None, int((x != x2).sum()), int((di != di2).sum())))
+    finally:
+        PK.MM = saved
+    assert not bad, f"mix ({mode}) differs at (rows, n32, x diffs, di diffs) {bad[:12]}"
+    return f"{len(rows)} row counts"
+
+
+def test_mix_equals_the_replaced_path(rows=None):
+    return _mix_mode("fp32", rows or ROWS)
+
+
+def test_mix_equals_the_replaced_path_tc(rows=None):
+    return _mix_mode("tc", rows or ROWS)
+
+
+def test_mix_equals_the_replaced_path_fp16():
+    return _mix_mode("fp16", ROWS)
 
 
 def test_mix_a_every_bf16():
@@ -75,11 +94,15 @@ def test_mix_a_every_bf16():
     v = bits.view(torch.bfloat16)
     d = torch.zeros(v.numel(), 8, device=DEV)
     d[:, 3] = v.float()
-    ref = torch.nn.functional.silu(d[:, :4].to(torch.bfloat16).float() / HCN).to(torch.bfloat16).float()
-    got = HC.mix_a(d, 4, HCN)
-    ok = (ref.view(torch.int32) == got.view(torch.int32)) | (torch.isnan(ref) & torch.isnan(got))
-    assert bool(ok.all()), f"mix_a differs at {int((~ok).sum())} values"
-    return f"{v.numel()} bf16 values"
+    ref = torch.nn.functional.silu(d[:, :4].to(torch.bfloat16).float() / HCN).to(torch.bfloat16)
+    for fp32 in (True, False):
+        want = ref.float() if fp32 else ref
+        got = HC.mix_a(d, 4, HCN, fp32=fp32)
+        assert got.dtype == want.dtype
+        it = torch.int32 if fp32 else torch.int16
+        ok = (want.view(it) == got.view(it)) | (torch.isnan(want) & torch.isnan(got))
+        assert bool(ok.all()), f"mix_a (fp32 {fp32}) differs at {int((~ok).sum())} values"
+    return f"{v.numel()} bf16 values, fp32 and bf16 out"
 
 
 def test_inject_norm_equals_fn_kernels(rows=None):
@@ -137,7 +160,10 @@ def test_times_at_4096_rows():
            "inject_norm fn_kernels": _ms(lambda: K.inject_norm(h0, o, d, R, w, 4, 1e-6)),
            "inject_norm fused + n32": _ms(lambda: HC.inject_norm(h0, o, d, R, w, 4, 1e-6, n32=True)),
            "mixer replaced": _ms(lambda: HC.mix_reference(n, wd, wu, R, HCN)),
-           "n.float()": _ms(lambda: n.float())}
+           "n.float()": _ms(lambda: n.float()),
+           "torch silu chain": _ms(lambda: torch.nn.functional.silu(d[:, :R].to(torch.bfloat16).float() / HCN).to(
+               torch.bfloat16).float()),
+           "mix_a": _ms(lambda: HC.mix_a(d, R, HCN))}
     return " ".join(f"{k} {v:.3f} ms;" for k, v in out.items())
 
 
@@ -147,7 +173,8 @@ if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for name, fn in tests:
         try:
-            if all_rows and name in ("test_mix_equals_the_replaced_path", "test_inject_norm_equals_fn_kernels"):
+            if all_rows and name in ("test_mix_equals_the_replaced_path", "test_mix_equals_the_replaced_path_tc",
+                                     "test_inject_norm_equals_fn_kernels"):
                 got = fn(rows=list(range(1, 4097)))
             else:
                 got = fn()

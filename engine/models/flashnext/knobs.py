@@ -64,9 +64,9 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the round runner hands a lane's tree over when its tokens are known (before its cuts and staging): its PLE
     # rows are read into the table's row cache on the reader thread, the verify's own read finds them there; 0: off
     'FN_PLE_PREFETCH': ('0', 'engine/models/flashnext/engine.py'),
-    # SPD-249 P2: a prompt chunk's mixers feed the same library fp32 GEMMs the same inputs with fewer passes: n's fp32
-    # form from the inject's launch (with FN_PF_INJ_FUSED), a's from one launch (tools/fn_pf_hc.py `mix`; the bits of
-    # `mm_rows`, the torch silu, `mm_rows`, `mix_tail`); 0: those
+    # SPD-249 P2: a prompt chunk's mixers feed the same GEMMs the same values with fewer passes, in every
+    # FN_PREFILL_MM mode: a from one launch, and for the fp32 GEMMs n's fp32 form from the inject's launch (with
+    # FN_PF_INJ_FUSED) (tools/fn_pf_hc.py `mix`; the bits of `mm_rows`, the torch silu, `mm_rows`, `mix_tail`); 0: those
     'FN_PF_HC_FUSED': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249 P2: a prompt chunk's injects (the layer output into the streams and the next site's norm) in a CTA a row
     # with 16-byte loads (tools/fn_pf_hc.py `inject_norm`: fn_kernels.inject_norm's bits, the norm's sum in its order);

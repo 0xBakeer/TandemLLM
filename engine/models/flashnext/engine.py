@@ -553,15 +553,16 @@ class FlashNextEngine(FlashNextRef):
     def _mix_pre(self, n, p):
         """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
         a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings. SPD-249 P2
-        (QWEN38_FN_PF_HC_FUSED, the fp32 GEMMs): the same library GEMMs on the same fp32 inputs, n's fp32 form from the
-        inject's launch when it wrote one (`_inject_pre`), a's from one launch (tools/fn_pf_hc.py `mix`)."""
+        (QWEN38_FN_PF_HC_FUSED): the same GEMMs of the `mm_rows` mode that runs on the same values, a from one launch
+        and, where the GEMM reads fp32, n's fp32 form from the inject's launch when it wrote one (`_inject_pre`;
+        tools/fn_pf_hc.py `mix`)."""
         from tools import fn_prefill_kernels as PK
         c = self.cfg
         wd, wu = self.W[p + ".down_inject"], self.W[p + ".input_mix_weight_up.weight"]
         R = self.W[p + ".rank"]
         st = getattr(self, "_n32", None)
         ent = st.pop(id(n), None) if st else None
-        if PF_HC_FUSED and PK.MM == "fp32":
+        if PF_HC_FUSED:
             from tools import fn_pf_hc as HC
             if HC.mix_ok(n, c.hc_count):
                 return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count)
@@ -571,14 +572,14 @@ class FlashNextEngine(FlashNextRef):
 
     def _inject_pre(self, h, out, di, R, w, hc, eps):
         """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits
-        in a CTA a row (tools/fn_pf_hc.py); with QWEN38_FN_PF_HC_FUSED too, the same launch writes n's fp32 form for
-        the next `_mix_pre` (kept by n's identity until that call takes it, or `_n32_clear`)."""
+        in a CTA a row (tools/fn_pf_hc.py); with QWEN38_FN_PF_HC_FUSED too and a mixer GEMM that reads fp32, the same
+        launch writes n's fp32 form for the next `_mix_pre` (kept by n's identity until that call takes it, or
+        `_n32_clear`)."""
         from tools import fn_kernels as K
         if PF_INJ_FUSED:
             from tools import fn_pf_hc as HC
             if HC.inject_ok(h, out, hc):
-                from tools import fn_prefill_kernels as PK
-                want = w is not None and PF_HC_FUSED and PK.MM == "fp32"
+                want = w is not None and PF_HC_FUSED and HC.wants_n32()
                 hn, nn, n32 = HC.inject_norm(h, out, di, R, w, hc, eps, n32=want)
                 if n32 is not None:
                     if getattr(self, "_n32", None) is None:

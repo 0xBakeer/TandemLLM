@@ -1,27 +1,23 @@
-"""SPD-249 P2: the hyper-connection mixer of a prompt chunk in two launches a site, bit for bit the path it replaces.
+"""SPD-249 P2: a prompt chunk's hyper-connection inject and mixer inputs in fewer passes, the bits of what they replace.
 
-The prefill path (engine/models/flashnext/engine.py `_mix_pre`, QWEN38_FN_PREFILL_MM=fp32) runs a site's mixer as
+The prefill path (engine/models/flashnext/engine.py `_mix_pre`) runs a site's mixer as
 
-    di = n.float() @ Wd^T                     # tools/fn_prefill_kernels.mm_rows: the weight's fp32 form, the library GEMM
+    di = mm_rows(n, Wd)                       # tools/fn_prefill_kernels: QWEN38_FN_PREFILL_MM picks the GEMM
     a  = silu(bf16(di[:, :R]).float() / hc).to(bf16)
-    u  = a.float() @ Wu^T                     # [M, hc H] fp32, written and read back
+    u  = mm_rows(a, Wu)                       # [M, hc H] fp32
     x  = mix_tail(u, n, hc)
 
-which at 4,096 rows a chunk moves n twice in fp32, u twice and a few small tensors, around two library fp32 GEMMs, in
-about ten launches. Here:
+Both GEMMs and `mix_tail` stay as they are, in every `mm_rows` mode; only what feeds them changes:
 
-  down     one launch: di and a. Each di is one fp32 fma chain over k = 0 .. K-1 starting from 0 (the library's own
-           sum at every row count a chunk has; tests/gpu/test_fn_pf_hc_gpu.py), the weight float(q) * s
-           (`Int8Rows.dequant`), n read as bf16; a with the torch path's roundings.
-  inject   `inject_norm` (the inject of a layer's output and the next site's norm) with the same bits in a CTA a row
-           (4 x 128 threads, 16-byte loads; QWEN38_FN_PF_INJ_FUSED).
-  up_tail  one launch: u's chains the same way over the R columns, then mix_tail's arithmetic in the epilogue; u is
-           never stored.
+  inject   `inject_norm` (the inject of a layer's output and the next site's norm) in a CTA a row (4 x 128 threads,
+           16-byte loads), the norm's sum in the old kernel's order (QWEN38_FN_PF_INJ_FUSED). The same launch can
+           write n's fp32 form.
+  mix      a in one launch with the torch chain's roundings (bf16(di), fp32 multiply by 1 / hc, silu in fp32, bf16).
+           Where `mm_rows` would take `x.float() @ W32^T` (`lib32`), the GEMM gets the same fp32 values without the
+           `.float()` passes: n's from the inject's launch, a's written as fp32 by the kernel. Any other mode gets the
+           bf16 n and a through `mm_rows` itself (QWEN38_FN_PF_HC_FUSED).
 
-Every rounding fence of the replaced path is kept: di fp32, bf16(di), the fp32 / hc as a multiply by 1 / hc, silu in
-fp32, a bf16, u fp32, bf16(u), bf16(sigmoid), bf16(sigmoid n), the stream sum in stream order, the final bf16. The
-tile shapes (`DOWN_TILE`, `UP_TILE`) never change a sum. Only int8 mixers with group scales (QWEN38_FN_MIX int8 /
-int8rows, the served forms) on a GPU that builds the extension; anything else takes the replaced path.
+A GPU that builds the extension only; anything else takes the replaced path.
 """
 
 from __future__ import annotations
@@ -43,17 +39,13 @@ _CPP = nb.source(__file__, "hc.cpp")
 
 _MOD = None
 
-#: the CTA shapes (hc.cu `pf_hc_down` / `pf_hc_up_tail` cases); measured on a DGX Spark at 4,096 rows
-DOWN_TILE = 0
-UP_TILE = 0
-
 
 def _module():
     global _MOD
     if _MOD is None:
         tag = nb.tag(_CPP, _CUDA)
         _MOD = nb.load(f"fn_pf_hc_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                       functions=["pf_hc_up_tail", "pf_inject_norm", "pf_mix_a", "pf_chain"],
+                       functions=["pf_inject_norm", "pf_mix_a"],
                        extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_pf_hc")], verbose=False)
     return _MOD
 
@@ -64,20 +56,39 @@ def mix_ok(n: torch.Tensor, hc: int) -> bool:
             and _gpu.profile(n.device).inline("fn_pf_hc"))
 
 
-def mix_a(d: torch.Tensor, R: int, hc: int) -> torch.Tensor:
-    """d fp32 [M, >= R] -> fp32 [M, R]: float(bf16(silu(bf16(d) / hc))), the `mm_rows` input the replaced path makes."""
-    a = torch.empty(d.shape[0], R, dtype=torch.float32, device=d.device)
+def lib32(w) -> bool:
+    """Whether `mm_rows` takes a bf16 x with this weight as `x.float() @ W32^T` (then x's fp32 form made elsewhere is
+    the same GEMM input): the fp32 mode, and the tc mode's weights that are not int8."""
+    from tools import fn_prefill_kernels as PK
+    return PK.MM == "fp32" or (PK.MM == "tc" and not hasattr(w, "q"))
+
+
+def wants_n32() -> bool:
+    """Whether an inject should write n's fp32 form for the next mixer (the mode whose down GEMM reads it)."""
+    from tools import fn_prefill_kernels as PK
+    return PK.MM == "fp32"
+
+
+def mix_a(d: torch.Tensor, R: int, hc: int, fp32: bool = True) -> torch.Tensor:
+    """d fp32 [M, >= R] -> [M, R]: bf16(silu(bf16(d) / hc)) as bf16, or with `fp32` its `.float()` (the fp32 GEMM's
+    input), in one launch."""
+    a = torch.empty(d.shape[0], R, dtype=torch.float32 if fp32 else torch.bfloat16, device=d.device)
     _module().pf_mix_a(d, a, hc)
     return a
 
 
 def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int):
-    """A site's mixer, `_mix_pre`'s (x bf16 [M, H], di fp32 [M, R + hc]) bit for bit: the same library fp32 GEMMs on
-    the same fp32 inputs (n's fp32 form from the inject's launch when given, else `n.float()`; a's from `mix_a`), the
-    weights' fp32 forms as `mm_rows` takes them (its cache included), then `mix_tail`."""
+    """A site's mixer, `_mix_pre`'s (x bf16 [M, H], di fp32 [M, R + hc]) bit for bit in the `mm_rows` mode that runs:
+    the same GEMMs on the same values (see `lib32`), then `mix_tail`."""
     from tools import fn_prefill_kernels as PK
-    di = (n32 if n32 is not None else n.float()) @ PK._wf(wd).T
-    u = mix_a(di, R, hc) @ PK._wf(wu).T
+    if lib32(wd):
+        di = (n32 if n32 is not None else n.float()) @ PK._wf(wd).T
+    else:
+        di = PK.mm_rows(n, wd)
+    if lib32(wu):
+        u = mix_a(di, R, hc) @ PK._wf(wu).T
+    else:
+        u = PK.mm_rows(mix_a(di, R, hc, fp32=False), wu)
     return PK.mix_tail(u, n, hc), di
 
 
@@ -102,37 +113,9 @@ def inject_norm(h0: torch.Tensor, out: torch.Tensor, d: torch.Tensor, R: int, w:
     return hn, (nn if w is not None else None), nf
 
 
-def chain(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """x fp32 [M, K] @ w fp32 [N, K]^T with each output one fp32 fma chain over k = 0 .. K-1 from 0 (a reference)."""
-    y = torch.empty(x.shape[0], w.shape[0], dtype=torch.float32, device=x.device)
-    _module().pf_chain(x.contiguous(), w.contiguous(), y)
-    return y
-
-
-def library_id() -> str:
-    """The fp32 GEMM library this process runs: torch and its CUDA, the cuBLAS build loaded (its own version), the
-    device. The row counts measured by tools/fn_pf_hc_rows.py hold for this id only."""
-    import ctypes
-    torch.ones(2, 2, device="cuda") @ torch.ones(2, 2, device="cuda")      # loads cuBLAS
-    path = None
-    with open("/proc/self/maps") as f:
-        for line in f:
-            if "libcublas.so" in line and "Lt" not in line:
-                path = line.split()[-1]
-                break
-    ver = "unknown"
-    if path:
-        lib = ctypes.CDLL(path)
-        v = [ctypes.c_int() for _ in range(3)]
-        if all(lib.cublasGetProperty(i, ctypes.byref(v[i])) == 0 for i in range(3)):
-            ver = ".".join(str(x.value) for x in v)
-    cap = torch.cuda.get_device_capability()
-    return f"torch {torch.__version__} cuda {torch.version.cuda} cublas {ver} {torch.cuda.get_device_name()} sm_{cap[0]}{cap[1]}"
-
-
 def mix_reference(n: torch.Tensor, wd, wu, R: int, hc: int):
-    """The path the launches replace (engine `_mix_pre` at QWEN38_FN_PREFILL_MM=fp32), for the tests."""
+    """The path `mix` replaces (engine `_mix_pre`, the `mm_rows` mode that runs), for the tests."""
     from tools import fn_prefill_kernels as PK
-    di = n.float() @ wd.dequant().T
+    di = PK.mm_rows(n, wd)
     a = torch.nn.functional.silu(di[:, :R].to(torch.bfloat16).float() / hc).to(torch.bfloat16)
-    return PK.mix_tail(a.float() @ wu.dequant().T, n, hc), di
+    return PK.mix_tail(PK.mm_rows(a, wu), n, hc), di
