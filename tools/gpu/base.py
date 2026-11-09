@@ -11,6 +11,9 @@ first build, naming the GPU, instead of building for an architecture the GPU can
     pdl()                   programmatic dependent launch compiled into the extensions
     moe_launch()            (cp.async stages, warps a CTA splits K over) of the fused MoE kernels
     dense_split(N, Kin, kb, table)   (K split S, warps) of an EXL3 projection in the dense kernels
+    moe_group()             the grouped MoE paths' group build (flat partition vs sorted walk)
+    dense_rows_min_m()      rows from which `dense` routes to the row-group kernel (33+: never)
+    lfm2_fused()            the fused LFM2 combine/commit Triton fast paths
     skinny_rows()           rows the NVFP4 register-fed kernel takes (0: never)
     bf16()                  bf16 autocast for the small CUDA models (else fp16)
     e2m1()                  the NVFP4 kernels' e2m1 hardware converter (else a software decode)
@@ -88,6 +91,17 @@ class GpuProfile:
         """Programmatic dependent launch (griddepcontrol, sm_90 and later) compiled into the extensions."""
         return False
 
+    def cluster(self) -> bool:
+        """Threadblock clusters with distributed shared memory (sm_90 and later): the dense kernels'
+        K split reduces the ranks through DSMEM there; below it the split is emulated -- plain CTAs
+        and a python-side partials buffer (tools/fn_kernels.py `dense`)."""
+        return self.cap is not None and self.cap >= (9, 0)
+
+    def sm89(self) -> bool:
+        """Ada sm_89 itself: the sites whose Triton or asm path is written for that arch alone
+        (the IQ2 tl.dot decode)."""
+        return False
+
     # -- launch shapes ----------------------------------------------------------------------
     def moe_launch(self) -> tuple[int, int]:
         """(cp.async stages, warps a CTA splits its K range over) of the fused MoE kernels
@@ -99,6 +113,47 @@ class GpuProfile:
         (tools/fn_kernels.py `dense`): the measured `table` entry, else the adapter's rule. Keyed by
         the shape only: one summation order for every row count."""
         raise NoInlineBuild(f"fn_kernels: no dense split for {self.label()}")
+
+    def moe_group(self) -> bool:
+        """The grouped MoE paths' group build (fn_kernels `moe_experts`, `exl3_relu2`): True
+        partitions the pairs by expert id in `fn_moe_groups` on an empty order (the flat
+        histogram); False keeps main's, a sorted `expert_order` whose runs the groups kernel
+        walks. It is also `MOE_GROUP`'s default; a call site forcing that flag still builds its
+        groups by this answer."""
+        return False
+
+    def moe_group_min_m(self) -> int:
+        """Rows at which a grouped `moe_experts` call groups (fn_kernels): main groups any M > 1."""
+        return 2
+
+    def dense_rows_min_m(self) -> int:
+        """M from which `dense` routes the call to `dense_rows` (fn_kernels `DENSE_ROWS_MIN_M`;
+        calls cap at M <= 32): 33 keeps the per-row kernel always, as on main where the row-group
+        kernel is opt-in only."""
+        return 33
+
+    def dense_st(self) -> int:
+        """cp.async stages of the dense kernels (fn_set_dense_st): main's compiled value."""
+        return 3
+
+    def dense_st_rows(self) -> int:
+        """cp.async stages of `dense_rows` (fn_set_dense_st_rows): main's compiled value."""
+        return 3
+
+    def moe_st_group(self) -> int:
+        """cp.async stages of the grouped MoE kernels (fn_set_moe_st_group): on main they share the
+        MoE launch's stage count."""
+        return self.moe_launch()[0]
+
+    def lfm2_fused(self) -> bool:
+        """The fused LFM2 Triton fast paths (engine/models/lfm2_moe `combine_add_rms`,
+        `commit_conv`/`commit_kv`): False keeps the per-tensor torch ops."""
+        return False
+
+    def verified_build(self) -> bool:
+        """Whether `inline(kind)` also guarantees the toolchain actually builds here (the reference
+        box's env is known-good); other adapters verify once at first use (fn_kernels `_BUILD_OK`)."""
+        return False
 
     # -- paths ------------------------------------------------------------------------------
     def skinny_rows(self) -> int:

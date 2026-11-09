@@ -14,7 +14,8 @@ import torch.nn.functional as F
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
-from tools import exl3_linear as X  # noqa: E402
+from tools import exl3_linear as X
+from tools import gpu as _gpu  # noqa: E402
 
 D, FF = 5120, 17408
 
@@ -51,6 +52,8 @@ def test_bridge_bit_identical():
 
 
 if __name__ == "__main__":
+    if not _gpu.profile(torch.device("cuda")).inline("exl3_linear"):
+        sys.exit("skipped: the slab bridge is the inline path (GB10)")
     passed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

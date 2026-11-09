@@ -203,8 +203,13 @@ template <int n> __device__ __forceinline__ void cp_wait() { asm volatile("cp.as
 #if EXL3_PDL
 // SPD-245: programmatic dependent launch of the skinny GEMM (QWEN38_EXL3_PDL). The trellis is a weight, so
 // its first stages are fetched before the wait; the activations and every store come after it.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+#else
+__device__ __forceinline__ void pdl_wait() {}
+__device__ __forceinline__ void pdl_trigger() {}
+#endif
 #endif
 
 // natural-order Walsh-Hadamard over 128 values held 4 a lane (index 4 lane + e), unnormalised
@@ -539,6 +544,7 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
     const int nthreads = 32 * WN * WK;
     const int rows = min(M, 16 * MT);
     if (S > 1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
         cg::cluster_group cluster = cg::this_cluster();
         cluster.sync();
         if (rank == 0) {
@@ -553,6 +559,7 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
         }
         cluster.sync();
         if (rank != 0) return;
+#endif
     }
 
     // output rotation: one warp a row

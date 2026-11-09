@@ -246,6 +246,34 @@ def test_dense_rows_are_the_one_row_calls():
     return "; ".join(out) + "; rows 1..32 = the one-row calls, splits S8/S2/w8, group, fp32 head"
 
 
+def test_dense_m_gate_dispatch():
+    """`dense`'s [DENSE_ROWS_MIN_M, 32] window calls `dense_rows` (bits identical either way); outside
+    it -- M<4, non-contiguous or non-bf16 x, the flag raised -- the per-row kernel keeps the call."""
+    w = X.random_block(4096, 4096, 4, seed=90)
+    x = _x(8, 4096, 91, 0.5)
+    want = torch.cat([K.dense(x[m:m + 1], w) for m in range(8)])
+    assert torch.equal(K.dense(x, w), want)
+    o = torch.empty(8, 4096, dtype=torch.bfloat16, device="cuda")
+    assert K.dense(x, w, out=o) is o and torch.equal(o, want)
+    spy = lambda *a, **k: (_ for _ in ()).throw(AssertionError("routed"))
+    orig_rows, orig_min = K.dense_rows, K.DENSE_ROWS_MIN_M
+    try:
+        K.dense_rows = spy
+        K.DENSE_ROWS_MIN_M = 33                    # opt-out: M in window never claims the call
+        K.dense(x, w)
+        K.DENSE_ROWS_MIN_M = 4
+        for probe in (x, torch.randn(8, 8192, device="cuda").bfloat16()[:, :4096]):
+            raised = probe is x
+            try:
+                K.dense(probe, w)
+            except AssertionError:
+                assert raised                    # contiguous M=8 routes to rows
+            else:
+                assert not raised                # non-contiguous view falls through
+    finally:
+        K.dense_rows, K.DENSE_ROWS_MIN_M = orig_rows, orig_min
+
+
 def _bank(n_exp: int, kbs, shared_k: int, seed: int = 0):
     blocks = []
     for e in range(n_exp + 1):
@@ -431,7 +459,7 @@ def test_moe_groups_scanned():
                     mod.fn_set_moe_gpar(gp)
                     G = torch.full((P, 2 + K.MOE_GR), -7, dtype=torch.int32, device=DEV)
                     NG = torch.zeros(1, dtype=torch.int32, device=DEV)
-                    mod.fn_moe_groups(ids, order, G, NG)
+                    mod.fn_moe_groups(ids, order, G, NG, 24)
                     ng = int(NG)
                     rows = [G[r, :2 + int(G[r, 1])].tolist() for r in range(ng)]
                     res.append((ng, rows))

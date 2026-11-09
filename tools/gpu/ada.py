@@ -18,7 +18,15 @@ Its knobs are read in this file only, so an Ada default never changes another GP
 
 from __future__ import annotations
 
-from tools.gpu.base import GpuProfile
+from tools.gpu.base import GpuProfile, NoInlineBuild, _known
+
+#: sm_89 gencode for the extensions this adapter builds
+ARCH = ("-gencode=arch=compute_89,code=sm_89",)
+
+#: the inline extensions with sm_89 kernels: the dense/MoE/prefill set. exl3_linear's csrc builds
+#: here but its fused down-silu and slab paths are not proven row-invariant on sm_89, so the Ada
+#: EXL3 blocks take the Triton probes (tools/exl3_ada) -- the dispatch asks `inline` first
+KINDS = ("fn_kernels", "fn_prefill_kernels")
 
 #: the FP8 row kernel's launch on sm_89, (N, K) -> (N tile, K tile, warps, stages); each entry
 #: measured >= 1.03x on its shape with no M=33 regression. Other shapes take the base's rule.
@@ -37,10 +45,87 @@ class Ada(GpuProfile):
     about = "NVIDIA Ada (sm_89), discrete memory: Triton EXL3 and MoE kernels with load-time verdicts"
     arches = ((8, 9),)
 
-    # The Ada kernels are Triton, so this adapter builds no inline extension (arch_flags keeps
-    # the base's NoInlineBuild). It answers the FP8 row kernel's launch, and owns the load-time
-    # probes and verdicts of tools/exl3_ada.py and tools/moe_ada.py -- the dispatch reaches
-    # those kernels only through these answers, so a False verdict always selects reference.
+    names = ("RTX 40", "RTX 6000 ADA", "L4", "L40")
+
+    def arch_flags(self, kind: str) -> list[str]:
+        _known(kind)
+        if kind not in KINDS:
+            raise NoInlineBuild(f"{kind}: no inline CUDA build for {self.label()}")
+        return list(ARCH)
+
+    def moe_launch(self) -> tuple[int, int]:
+        """(cp.async stages, warps): 4 and 8 measured on the RTX 4080."""
+        from engine.settings import SETTINGS as _S
+        # the defaults are this adapter's (the KNOBS entries carry GB10's): 4 and 8 on the 4080
+        return int(_S.get("FN_MOE_ST", "4")), int(_S.get("FN_MOE_WARPS", "8"))
+
+    def dense_split(self, N: int, Kin: int, kb: int, table: dict) -> tuple[int, int]:
+        """No distributed shared memory among the CTAs: a split launches plain CTAs whose last-arriving
+        rank reduces the partials in place (a ticket, one launch). The exchange is nearly free, so a
+        split pays off wherever a rank still holds a real K slice -- and stops paying once the work
+        is already spread thin: 2048+ elems of K below it (a verify-width grid is already saturated
+        there and splitting can lose), the column grid under ~5 waves of CTAs to begin with, 32+
+        K-tiles a rank, the rank slice whole 128 blocks, a grid not already past ~2K CTAs. On a
+        column grid already past half a wave the deeper splits want ~1024 K elems a rank to keep
+        paying (a wide projection's verify rows go through `dense` at M up to 32, where an over-deep
+        split costs more than it buys); past a 4-way split the deeper split also wants a grid still
+        short of a couple of waves or ~2048 K elems a rank."""
+        from engine.settings import SETTINGS as _S
+        got = table.get((N, Kin, kb))
+        if got is None:
+            S = 1
+            while (N // 128) * S < 96 and S < 8 and (Kin // 16) % (8 * S * 2) == 0:
+                S *= 2
+            got = (S, 4)
+        if _S.get("FN_DENSE_SPLIT_FORCE") == "1" and (N, Kin, kb) in table:
+            return got                           # tools/fn_tiles sweeps: the table entry verbatim
+        KT, S = Kin // 16, 1
+        if KT >= 128 and N // 128 <= 384:
+            while (S < 8 and KT % (16 * S) == 0 and KT // (2 * S) >= 32
+                   and (N // 128) * S * 2 <= 2048
+                   and (S < 2 or N // 128 <= 64 or KT // (2 * S) >= 64)
+                   and (S < 4 or (N // 128) * S * 2 <= 192 or KT // (2 * S) >= 128)):
+                S *= 2
+        return S, got[1]
+
+    def moe_group(self) -> bool:
+        """The flat per-expert partition feeding the group kernels: the sorted order and its walk
+        are gone on the 4080 (fn_kernels `moe_experts`, `exl3_relu2`)."""
+        return True
+
+    def moe_group_min_m(self) -> int:
+        # at M=2 the groups-of-1 prep is a net loss; the grouped path wins from 4 (ENG-241)
+        return 4
+
+    def dense_rows_min_m(self) -> int:
+        # the row-group kernel's amortized decode beats the per-row program on every measured pack
+        # shape but 3072x2048 at M=4 (excluded at the call site); at M=2 it is mixed
+        return 4
+
+    def dense_st(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_DENSE_ST") or "4")
+
+    def dense_st_rows(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_DENSE_ST_ROWS") or "3")
+
+    def moe_st_group(self) -> int:
+        from engine.settings import SETTINGS as _S
+        return int(_S.get("FN_MOE_ST_GROUP") or "2")
+
+    def lfm2_fused(self) -> bool:
+        """The fused LFM2 paths measured on the 4080: combine+add+rms in one launch and the
+        pointer-table commit kernels."""
+        return True
+
+    # The EXL3 and MoE kernels are Triton (fn_kernels/fn_prefill_kernels do build, `arch_flags`). It
+    # answers the FP8 row kernel's launch, and owns the load-time probes and verdicts of
+    # tools/exl3_ada.py and tools/moe_ada.py -- the dispatch reaches those kernels only through
+    # these answers, so a False verdict always selects reference.
+    def sm89(self) -> bool:
+        return True
+
     def fp8_rows(self, N: int, K: int, bn: int | None = None) -> tuple:
         got = _FP8_ROWS.get((N, K)) if bn is None else None
         return got or super().fp8_rows(N, K, bn)

@@ -32,12 +32,16 @@ class GB10(GpuProfile):
     def inline(self, kind: str) -> bool:
         return kind in INLINE
 
+    def verified_build(self) -> bool:
+        # the reference box's toolchain is known-good: the runtime build check is skipped
+        return True
+
     def pdl(self) -> bool:
         return True
 
     def moe_launch(self) -> tuple[int, int]:
         from engine.settings import SETTINGS as _S
-        return int(_S.get("FN_MOE_ST")), int(_S.get("FN_MOE_WARPS"))
+        return int(_S.get("FN_MOE_ST") or "3"), int(_S.get("FN_MOE_WARPS") or "4")
 
     def dense_split(self, N: int, Kin: int, kb: int, table: dict) -> tuple[int, int]:
         got = table.get((N, Kin, kb))
