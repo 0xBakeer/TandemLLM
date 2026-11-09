@@ -168,6 +168,7 @@ def main() -> None:
     ap.add_argument("--timed", default="1", help="0: wall time only (no per-part profile)")
     ap.add_argument("--wall-max", type=int, default=1 << 30, help="no untimed run past this context")
     ap.add_argument("--kernels", type=int, default=0, help="also the top N kernels of one untimed run (torch.profiler)")
+    ap.add_argument("--repeat", type=int, default=1, help="untimed runs (wall_s is the last; wall_runs all of them)")
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -191,9 +192,11 @@ def main() -> None:
             row["parts_share"] = {k: round(v / dt, 3) for k, v in parts}
             row["calls"] = dict(T.n)
         if len(ids) <= a.wall_max:
-            dt = run(eng, ids, a.path, a.chunk)
+            walls = [run(eng, ids, a.path, a.chunk) for _ in range(max(1, a.repeat))]
+            dt = walls[-1]
             row["wall_s"] = round(dt, 2)
             row["tok_s"] = round(len(ids) / dt, 1)
+            row["wall_runs"] = [round(w, 3) for w in walls]
         if a.kernels:
             from torch.profiler import ProfilerActivity, profile
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
