@@ -333,13 +333,19 @@ def main() -> None:
             row["stages_s"] = {k: (round(v[0], 3), v[1], v[2]) for k, v in sorted(stages.items(), key=lambda kv: -kv[1][0])}
             row["kernel_kinds"] = len(per)
             del prof
+        def keep():                                                        # a later pass may not fit: keep the rest
+            if a.json:
+                json.dump({**res, "rows": res["rows"] + [row]}, open(a.json, "w"), indent=1)
+        keep()
         if a.sync_sites and len(ids) >= a.sites_min:
             m = SyncSites()
-            with m:
-                row["sync_sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
-            row["sync_sites"] = m.table(a.sync_sites)
-        if a.json:                                                         # the stacks' run may not fit: keep the rest
-            json.dump({**res, "rows": res["rows"] + [row]}, open(a.json, "w"), indent=1)
+            try:
+                with m:
+                    row["sync_sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+                row["sync_sites"] = m.table(a.sync_sites)
+            except Exception as e:  # noqa: BLE001
+                row["sync_sites"] = {"error": f"{type(e).__name__}: {e}"[:400], "partial": m.table(a.sync_sites)}
+            keep()
         if a.sites and len(ids) >= a.sites_min:
             from torch.profiler import ProfilerActivity, profile
             try:
