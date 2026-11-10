@@ -523,7 +523,8 @@ describe('the Log panel', () => {
     const shown = DEV.match(/private renderExportSaved\(\)[^]*?\n  \}\n/)?.[0] ?? '';
     expect(shown).toContain('if (!this.exportSaved) return nothing;');
     expect(shown).toContain('<div class="console-export-saved" role="status">');
-    expect(shown).toContain('<span>Saved as <code>${this.exportSaved}</code></span>');
+    // the check mark is part of the sentence, so a narrow screen cannot leave it on a row of its own
+    expect(shown).toContain("<span>${icon('check')} Saved as <code>${this.exportSaved}</code></span>");
     expect(shown).toContain('${this.exportLink()}');
     expect(DEV).toContain('${this.renderExportSaved()}${this.renderExportError()}');
     // the line wraps on a phone, and a long name breaks inside it
