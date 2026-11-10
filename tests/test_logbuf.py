@@ -744,6 +744,21 @@ def test_export_carries_no_prompt_or_answer_text():
             logbuf.CONFIG["log_content"] = False
 
 
+def test_export_content_logging_is_on():
+    """Scenario: Content logging is on. The header says so, and it says "off" when it is off."""
+    for log_content, want in ((True, "on (--log-content)"), (False, "off")):
+        logbuf.CONFIG["log_content"] = log_content
+        try:
+            serve()
+            with Captured():
+                print("[server] one", flush=True)
+                _, _, raw = _export()
+            _, head, _ = _parse_export(raw.decode())
+            assert head["log content"] == want, head
+        finally:
+            logbuf.CONFIG["log_content"] = False
+
+
 def test_export_the_contract_example():
     """`docs/contract/dashboard-v1/logs-export.example.txt` is a file this server could write: the
     same header fields in the same order, every entry in the line format, the count its own."""
