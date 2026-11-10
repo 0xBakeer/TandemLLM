@@ -59,6 +59,9 @@ from engine.models.flashnext.engine import FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
 from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
 
+#: an environment variable whose name holds one of these never goes into the record
+SECRET = ("KEY", "TOKEN", "SECRET", "PASS", "AUTH", "CRED")
+
 
 def checksum(t: torch.Tensor) -> list:
     """Two int64 sums over a tensor's bits (plain and position-weighted): equal tensors give equal sums, and a single
@@ -226,7 +229,8 @@ def main() -> None:
                      "window_margin_gib": LM.MARGIN / (1 << 30), "window_row_bytes": LM.ROW_BYTES,
                      "FN_MIX": os.environ.get("QWEN38_FN_MIX", "int8"), "kv_dtype": str(eng.dtype),
                      "prefix_cache": "off", "max_len": eng.max_len,
-                     "env": {k: v for k, v in os.environ.items() if k.startswith(("QWEN38_", "QSE_"))}},
+                     "env": {k: v for k, v in os.environ.items() if k.startswith(("QWEN38_", "QSE_"))
+                             and not any(w in k.upper() for w in SECRET)}},
            "rows": [], "joint": [], "ok": True}
     print("[pf-hc] knobs " + json.dumps({k: v for k, v in res["knobs"].items() if k != "env"}), flush=True)
     _count_windows()
