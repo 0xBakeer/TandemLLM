@@ -732,6 +732,30 @@
    "assets": [],
    "docs": "docs/proxy.md",
    "note": "You add the backends later, on the Backends screen."
+  },
+  {
+   "id": "kv_fp8",
+   "label": "Long-context cache (FP8)",
+   "group": "features",
+   "what": "Keeps the attention layers' keys and values in about half the bytes, so long chats take less memory. The answers change a little; off keeps the exact model.",
+   "default": false,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_FN_KV_FP8": {
+     "on": "1",
+     "off": "0"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "Off by default: off keeps the exact model. On (SPD-150), the 12 attention layers keep e4m3 codes with one fp32 scale a head: 18,944 bytes a token of window instead of 31,040 (the indexer keys and the MTP layer stay bf16). A decode token reads at most 2,051 keys a layer, about 50 MB in bf16 beside 4.2 GB of weights on 3.05, so the gain is memory, not speed. Speed and quality are not measured. Turn it on here (Tools, Features), or put QWEN38_FN_KV_FP8=1 at the end of ~/TandemLLM/run/ops/serve.env and run ~/TandemLLM/bin/tandem restart; /health then shows weights.kv_cache e4m3.",
+   "kv_bytes_per_token": 18944
   }
  ],
  "parallelism": {
@@ -1019,6 +1043,11 @@
     {
      "field": "proxy",
      "label": "Other backends",
+     "type": "bool"
+    },
+    {
+     "field": "kv_fp8",
+     "label": "Long-context cache (FP8)",
      "type": "bool"
     }
    ]

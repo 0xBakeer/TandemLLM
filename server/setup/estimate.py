@@ -195,7 +195,7 @@ def defaults(m: dict) -> dict:
 
 def _r(x: float) -> float:
     # the page's r2 (dashboard/src/setup/estimate.ts, Math.round): a tie goes up, as there. round() sent an exact
-    # tie to the even digit, so 4.625 GiB (Flash-Next's e4m3 slot of 262,144 tokens) read 4.62 here and 4.63 there
+    # tie to the even digit, so 4.625 GiB read 4.62 here and 4.63 there
     return math.floor(x * 100 + 0.5) / 100 + 0.0          # never -0.0
 
 
