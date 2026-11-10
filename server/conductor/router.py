@@ -43,6 +43,7 @@ Everything a plan did is in its journal row (server/conductor/decisions.py).
 from __future__ import annotations
 
 import collections
+import copy
 import hashlib
 import re
 import threading
@@ -474,11 +475,7 @@ class Plan:
         the plan turned thinking off, the generation prompt's open `<think>` closed. Returns
         (the prompt to prefill, whether it ends inside `<think>`); the same objects when nothing
         changes. A failure here serves the prompt as rendered and says so in the journal row."""
-        if not self.active or self.session is None or self.prompt_client:
-            # SRV-621: `prompt: client` serves the rendered prompt, the raw path's ids
-            return prompt, in_think
-        if not self.session.notes and self.block is None and not self.thinking_off and \
-                not self.extras:
+        if self._as_rendered():
             return prompt, in_think
         try:
             return self._apply(prompt, tok, in_think)
@@ -487,6 +484,37 @@ class Plan:
             print(f"[conductor] the prompt was served as rendered: {type(exc).__name__}: {exc}",
                   flush=True)
             return prompt, in_think
+
+    def _as_rendered(self) -> bool:
+        """Nothing of this plan goes into the prompt: it is served as rendered."""
+        if not self.active or self.session is None or self.prompt_client:
+            # SRV-621: `prompt: client` serves the rendered prompt, the raw path's ids
+            return True
+        return not self.session.notes and self.block is None and not self.thinking_off and \
+            not self.extras
+
+    def served(self, prompt, tok, in_think: bool) -> tuple[list[int], list[tuple]] | None:
+        """SRV-801: the prompt `apply_prompt` would serve now, asked before the request is admitted, so its
+        admission prices the rows its prefill reads and not the client's tokens alone (a 54-token prompt was
+        served as 3,412 rows): (its ids, [(the client's position, tokens) of every note in it]). None when it is
+        the rendered prompt, or when it cannot be said. A dry run on a copy of the plan and of its session: no
+        note is kept, nothing goes into the journal row. With the in-context stage still to run (`context`) the
+        turn's own notes are not decided and not in it."""
+        if self._as_rendered():
+            return None
+        twin = copy.copy(self)
+        twin.session = copy.copy(self.session)          # its notes are assigned, never changed in place
+        row = self.row or {}
+        twin.row = dict(row, extra=copy.deepcopy(row.get("extra") or {}))
+        twin.injected, twin.spans, twin.changed, twin._probe_at = list(self.injected), [], False, None
+        try:
+            out, _ = twin._apply(prompt, tok, in_think)
+        except Exception:                                          # noqa: BLE001
+            return None
+        if not twin.changed:
+            return None
+        notes = twin._probe_at[1] if twin._probe_at is not None else ()
+        return out.tolist(), [(int(n.pos), len(n.ids)) for n in notes]
 
     def _apply(self, prompt, tok, in_think: bool):
         import torch

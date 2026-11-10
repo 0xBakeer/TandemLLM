@@ -1032,11 +1032,42 @@ def _rows_forward(res, keys: list, mm_ok: bool, seen: dict) -> int | None:
         if seen.get("key") != key:
             seen.update(key=key, ids=_served_rows(res, keys))
         served = seen["ids"]
+        seen["n"] = len(served)
         start, _ = res.resume_estimate(served, len(served), mm_ok)
         return max(1, len(served) - int(start))
     except Exception:                                              # noqa: BLE001
         logbuf.print_exc()
         return None
+
+
+def _plan_served(plan, prompt, in_think: bool) -> tuple:
+    """SRV-801: what a request's admission prices under a plan: the prompt its prefill reads, with the notes the
+    server puts in (`Plan.served`, a dry run before the request is admitted; the notes go in after it). The
+    client's tokens alone were priced: a next turn at 508 rows forwarded 998 and a 54-token prompt 3,412, and the
+    reserve was raised at the first forward or the lane gave way there. (the served ids or None for the rendered
+    prompt, [(the client's position, tokens) of each note], the rows of notes not decided yet)
+
+    With the in-context stage still to run, the turn's class and so its notes are decided by a forward under this
+    admission: the class's note is counted at its cap (`injection.max_note_tokens`), never under it."""
+    if plan is None or not getattr(plan, "active", False):
+        return None, (), 0
+    undecided = 0
+    if getattr(plan, "context", None) is not None and not getattr(plan, "prompt_client", False):
+        inj = (getattr(plan, "router_cfg", None) or {}).get("injection") or {}
+        undecided = int(inj.get("max_note_tokens", 8000))
+    try:
+        got = plan.served(prompt, STATE["tok"], in_think)
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        got = None
+    return (None, (), undecided) if got is None else (got[0], got[1], undecided)
+
+
+def _served_share(share: int, notes) -> int:
+    """SRV-801: a share counted on the client's tokens (`_slot_share`), on the served prompt: the notes before
+    the place the request parts from its slot are in the rows it shares, the ones from there on are forwarded."""
+    share = int(share)
+    return share + sum(int(k) for p, k in notes if int(p) < share) if share > 0 else share
 
 
 #: which test decides that a request continues slot 0's conversation and waits for it: `view`
@@ -8876,7 +8907,8 @@ class Handler(BaseHTTPRequestHandler):
                    stream: bool = False, rows: int | None = None, respond: bool = True,
                    cold: bool = False, home: int = 0, priority: int = 1, hold_s: float = 0.0,
                    limit_s: float | None = None, deadline=None, wait_long: bool = False,
-                   home_rows: bool = False) -> bool:
+                   home_rows: bool = False, home_ask: bool = False, served: list | None = None,
+                   undecided: int = 0) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8944,13 +8976,22 @@ class Handler(BaseHTTPRequestHandler):
         (`Admission.check`'s `kv_prompt`). `deadline` (the request's `Deadline`) is moved on by the time
         it waited: a wait for memory is not generation time (a 20-minute wait ended the answer at an hour's
         `--request-timeout`). `wait_long`: a request not streamed whose client asked to wait for memory as long as a
-        streamed one (`_wait_for_memory`): its bound is `MEM_WAIT_S`, not `--queue-timeout`."""
+        streamed one (`_wait_for_memory`): its bound is `MEM_WAIT_S`, not `--queue-timeout`.
+
+        SRV-801: `served`, the ids the prefill reads (`_plan_served`: the prompt with the server's notes), priced
+        in place of the client's; `home` is then a share of those. `home_ask`: a share on slot 0 is held against
+        the rows' own answer (`_rows_forward`), the next turn's too; `home_rows`, a regenerate or an edit, has no
+        share when the rows cannot be asked. `undecided`: rows of notes the server decides after the admission,
+        forwarded on top. The pages are counted on the client's tokens as before: `PLAN_MARGIN` is the notes'."""
         self._mem_wait = False
         self._mem_refusal = self._mem_refused = None
         adm = pool.admission
         if adm is None:
             return True
-        n = max(int(prompt.numel()), int(rows or 0))
+        n = kv_n = max(int(prompt.numel()), int(rows or 0))
+        if served is not None:
+            n += max(0, len(served) - int(prompt.numel()))
+        undecided = max(0, int(undecided))
         mem = dict.get(STATE, "mem")
         gated = mem is not None and getattr(mem, "on", False)
         if gated and slots_mod.current() is None:
@@ -8959,7 +9000,7 @@ class Handler(BaseHTTPRequestHandler):
         # the keys are the prompt's ids (one placeholder an image), which part from the rows at the first
         # image: more rows charged, never fewer
         res_ = STATE.get("resident")
-        keys = prompt.tolist()
+        keys = prompt.tolist() if served is None else list(served)
         mm_ok = rows is not None and MM_END == "on"
         est: dict = {}
         served_: dict = {}                    # SRV-801: this prompt as the replay serves it (`_rows_forward`)
@@ -8971,20 +9012,25 @@ class Handler(BaseHTTPRequestHandler):
             moves the resume point down, and the charge priced before it is the smaller one."""
             start, kind = ((0, None) if full or res_ is None or cold
                            else res_.resume_estimate(keys, n, mm_ok))
+            n_p = n                           # SRV-801: the rows served, the end anchor's replay in them
             if home and not full and not cold and res_ is not None:
                 # SRV-787: its home slot's rows, read again at every pass (a reclaim empties them)
                 held, at = min(int(home), int(getattr(res_, "valid", 0) or 0)), "home"
-                if home_rows and held > int(start):
+                if (home_rows or home_ask) and held > int(start):
                     # SRV-801: a regenerate or an edit shares slot 0's view, the client's copy of the last prompt,
                     # further than it shares the rows, which hold the served prompt (the spans the server put
                     # there): its prefill resumes at the last anchor below the place the rows part. Priced on the
                     # view, a regenerate was charged 1 row (0.79 GiB) and forwarded 4,197. The rows are asked as
                     # the prefill asks them; with images the keys are not the rows' and the share is not taken
+                    # The next turn is asked too (`home_ask`): it resumes at the end anchor, or at the last line
+                    # below it when that anchor is gone, and keeps its share where the rows cannot be asked
                     fwd_r = None if rows is not None else _rows_forward(res_, keys, mm_ok, served_)
                     if fwd_r is None:
-                        held = 0
-                    elif n - fwd_r < held:
-                        held, at = max(0, n - fwd_r), "rows"
+                        held = 0 if home_rows else held
+                    else:
+                        n_p = max(n, int(served_.get("n") or 0))
+                        if n - fwd_r < held:
+                            held, at = max(0, n - fwd_r), "rows"
                 if held > int(start):
                     start, kind = held, at
             if not full and not cold and res_ is not None and int(start) < n - 1:
@@ -9002,12 +9048,13 @@ class Handler(BaseHTTPRequestHandler):
                         got = None
                     if got is not None and int(got[1]) > int(start):
                         start, kind = min(int(got[1]), n - 1), "spill"
-            fwd = max(1, n - int(start))
-            ws = mem.workspace_rows(n, fwd) if mem is not None else max(
-                cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
+            fwd = max(1, n - int(start)) + undecided
+            n_p += undecided
+            ws = mem.workspace_rows(n_p, fwd) if mem is not None else max(
+                cache.WORKSPACE_FLOOR, n_p * cache.WORKSPACE_PER_TOKEN)
             # SRV-775: the box's floor counts it by its rows alone, a cold prompt without the line's floor the gate
             # keeps (2026-11-02: 8 short cold prompts counted 8 x 2.75 GiB and the eighth waited 12 s; before, all 8 ran)
-            ws_r1 = mem.workspace_rows(n, fwd, line=False) if mem is not None else ws
+            ws_r1 = mem.workspace_rows(n_p, fwd, line=False) if mem is not None else ws
             est.update(fwd=fwd, ws=ws, ws_r1=ws_r1, kind=kind)
             if rec is not None:
                 rec.ws_gib, rec.ws_rows, rec.ws_kind = ws / (1 << 30), fwd, kind
@@ -9076,12 +9123,12 @@ class Handler(BaseHTTPRequestHandler):
                 grow = int(max_new)
                 if KV_RECOMPUTE and KV_ADMIT_ROWS > 0:
                     grow = min(grow, KV_ADMIT_ROWS)
-                kv_rows = min(int(eng.kv.max_len), n + grow + PLAN_MARGIN + SIDE_MARGIN)
+                kv_rows = min(int(eng.kv.max_len), kv_n + grow + PLAN_MARGIN + SIDE_MARGIN)
                 kv = pages.need_bytes(kv_rows)
                 owner = pages.owner
                 # SRV-797: the pages its prefill commits (the prompt and the router's notes), under the pool's floor
                 # while it runs; the rest come after it, under the decode floor (`Admission.check`)
-                kv_prompt = pages.need_bytes(min(int(eng.kv.max_len), n + PLAN_MARGIN + SIDE_MARGIN))
+                kv_prompt = pages.need_bytes(min(int(eng.kv.max_len), kv_n + PLAN_MARGIN + SIDE_MARGIN))
 
         def reserve() -> tuple[bool, dict]:
             """The request's bytes at the box's floor. SRV-775: one the gate admitted over the peak counts its
@@ -9371,7 +9418,8 @@ class Handler(BaseHTTPRequestHandler):
                                      deadline=deadline, rows=rows_of(int(cur.numel())) if rows_of else None,
                                      cold=bool(admit.get("cold")), home=int(admit.get("home") or 0),
                                      priority=int(admit.get("priority", 1)), wait_long=long,
-                                     home_rows=bool(admit.get("home_rows")))
+                                     home_rows=bool(admit.get("home_rows")),
+                                     home_ask=bool(admit.get("home_ask")))
                 waited += time.monotonic() - t_w
                 if not ok:
                     st["gave_up"] += 1
@@ -10877,13 +10925,21 @@ class Handler(BaseHTTPRequestHandler):
             admit_kw = {"rows_of": (lambda n: _mm_rows(n, images)) if images else None, "cold": cold,
                         "home": _slot_share(par_why, side) if par is not None else 0,
                         "priority": _priority_of(body), "wait_long": _wait_for_memory(body, self.headers)}
-            # SRV-801: a regenerate or an edit on slot 0 is priced on the rows, not on the view
-            admit_kw["home_rows"] = bool(side is None and admit_kw["home"] and par_why.get("home_rows"))
+            # SRV-801: a share on slot 0 is held against the rows, not the view alone; a regenerate or an edit
+            # has none when the rows cannot be asked
+            admit_kw["home_ask"] = bool(side is None and admit_kw["home"])
+            admit_kw["home_rows"] = bool(admit_kw["home_ask"] and par_why.get("home_rows"))
+            # SRV-801: the price is the served prompt's, the one the prefill reads (the plan's notes in it)
+            adm_ids, adm_notes, adm_more = (_plan_served(plan, prompt, in_think)
+                                            if par is not None and not micro else (None, (), 0))
+            if adm_ids is not None:
+                admit_kw["home"] = _served_share(admit_kw["home"], adm_notes)
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
                     rows=admit_kw["rows_of"](int(prompt.numel())) if images else None, cold=cold,
                     home=admit_kw["home"], priority=admit_kw["priority"], deadline=deadline,
-                    wait_long=admit_kw["wait_long"], home_rows=admit_kw["home_rows"]):
+                    wait_long=admit_kw["wait_long"], home_rows=admit_kw["home_rows"],
+                    home_ask=admit_kw["home_ask"], served=adm_ids, undecided=adm_more):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
