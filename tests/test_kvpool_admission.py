@@ -1191,8 +1191,10 @@ def test_srv787_a_turn_whose_rows_come_back_from_the_nvme_is_charged_the_rows_pa
 
 def test_srv787_the_handler_passes_the_home_share_to_the_admission():
     """The `[parallel]` line's pick keeps the share of the side slot that holds the conversation (`_side_home`) also
-    when nothing waits, and the handler passes it to `_par_admit` only on that slot."""
+    when nothing waits, and the handler passes it to `_par_admit` only on that slot (SRV-801: `_slot_share`, which
+    answers for slot 0 too, tests/test_memory_wait.py)."""
     import inspect
+    import types
     app = _app()
     src = inspect.getsource(app._par_side_need)
     assert "why.update(home=home[0], home_share=home[1])" in src
@@ -1200,9 +1202,12 @@ def test_srv787_the_handler_passes_the_home_share_to_the_admission():
     # SRV-797: the first admission and a give-way's re-admission take it from one place (`admit_kw`)
     call = handler[handler.index("admit_kw = {"):]
     call = call[:call.index("return")]
-    assert '"home": (int(par_why.get("home_share") or 0)' in call, call
-    assert 'if par is not None and side is not None and par_why.get("home") == side.index' in call, call
+    assert '"home": _slot_share(par_why, side) if par is not None else 0' in call, call
     assert 'home=admit_kw["home"]' in call and "admit=admit_kw" in handler, call
+    why = {"home": 2, "home_share": 57_823}
+    side = lambda i: types.SimpleNamespace(index=i)                      # noqa: E731
+    assert app._slot_share(why, side(2)) == 57_823 and app._slot_share(why, side(1)) == 0
+    assert app._slot_share({}, side(2)) == 0
 
 
 class _Spill:

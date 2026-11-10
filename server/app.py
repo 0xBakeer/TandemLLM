@@ -944,6 +944,39 @@ def _continues_view(view_len: int, common: int, chunk: int, conv: int | None = N
     return view_len >= chunk and common >= view_len - chunk and (conv is None or common >= conv)
 
 
+def _view_share(ids, view, chunk: int, conv: int | None, align=None) -> tuple[int, int]:
+    """(The leading tokens `ids` share with a slot's `view`, how many of them only past a moved block): the
+    client's tokens against the last prompt whose rows the slot kept (`_continues_view`). FX16: where they part
+    early because the client's block moved to its last message, `align` (server/endalign.py) reads past it."""
+    vc = _shared_head(ids, view)
+    if align is not None and not _continues_view(len(view), vc, chunk, conv):
+        vm = int(align.moved_common(view, ids))
+        if vm > vc:
+            return vm, vm - vc
+    return vc, 0
+
+
+def _slot_share(why: dict, side) -> int:
+    """The tokens of a request's prompt its slot holds, for the admission's price (`_par_admit`'s `home`). On a side
+    slot: `_side_home`'s share when the request runs at home there (SRV-787). On slot 0: the share of the
+    conversation it holds, on the client's tokens against the slot's view as the routing judges it
+    (`_par_side_need`), read when the request has the slot; 0 for another conversation.
+
+    SRV-801: slot 0 had no share. A turn of the conversation it holds is priced on the client's tokens, which part
+    from the rows at the first span the server put there, so it was charged a cold prefill of its whole prompt
+    (ws_rows=212938, 10.75 GiB), waited 148 s for that memory and then forwarded 449 rows."""
+    if side is not None:
+        return int(why.get("home_share") or 0) if why.get("home") == side.index else 0
+    ids, view = why.get("ids"), dict.get(STATE, "slot0_view")
+    if SIDE_CONTINUE == "resident" or not ids or not view:
+        return 0
+    res = dict.get(STATE, "resident")
+    chunk = int(getattr(res, "chunk", 0) or dict.get(STATE, "prefix_chunk") or 1024)
+    conv = why.get("conv")
+    vc, _ = _view_share(ids, view, chunk, conv, dict.get(STATE, "end_align"))
+    return int(vc) if _continues_view(len(view), vc, chunk, conv) else 0
+
+
 #: which test decides that a request continues slot 0's conversation and waits for it: `view`
 #: (the client's rendered tokens against the last resident prompt's, `_continues_view`, then the
 #: resident rows' test) or `resident` (the rows' test alone, the old rule; kept for the
@@ -1483,15 +1516,9 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         why["conv"] = conv
     view = dict.get(STATE, "slot0_view")
     if SIDE_CONTINUE != "resident" and view:
-        vc = _shared_head(ids, view)
-        if not _continues_view(len(view), vc, chunk, conv):
-            # FX16: the client's block moved to its last message (server/endalign.py)
-            al0 = dict.get(STATE, "end_align")
-            if al0 is not None:
-                vm = al0.moved_common(view, ids)
-                if vm > vc:
-                    why["view_moved"] = vm - vc
-                    vc = vm
+        vc, moved = _view_share(ids, view, chunk, conv, dict.get(STATE, "end_align"))
+        if moved:
+            why["view_moved"] = moved
         why.update(view=len(view), view_common=vc)
         if _continues_view(len(view), vc, chunk, conv):
             why["wait"] = "view"
@@ -1915,12 +1942,19 @@ def _phased(gen):
         pool.wake()                    # SPD-161: the others' barrier set may be complete now
 
 
-def _par_chunks(on_chunk):
-    """The prefill's chunk hook, then the GPU offered to a waiting slot (a no-op alone)."""
+def _par_chunks(on_chunk, where=None, cid=None):
+    """The prefill's chunk hook, then the GPU offered to a waiting slot (a no-op alone). SRV-801: at its first
+    chunk the admission learns the rows the prefill of request `cid` forwards, from where it started (`where`, the
+    dict the prefill describes itself in): until then its guard's chunk is the admission's price of it."""
+    told = []
+
     def hook(done, total):
         if on_chunk is not None:
             on_chunk(done, total)
         pool = dict.get(STATE, "pool")
+        if cid is not None and not told and where and pool is not None and pool.admission is not None:
+            told.append(True)
+            pool.admission.forwards(cid, int(total) - int(where.get("start") or 0))
         if pool is not None:
             slot = pool.slots[_par_index()]
             if slot.phase == "prefill":
@@ -2767,7 +2801,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
         if STATE.get("lane") is not None:
             on_chunk = _lane_chunks(on_chunk)
         if dict.get(STATE, "pool") is not None:
-            on_chunk = _par_chunks(on_chunk)
+            on_chunk = _par_chunks(on_chunk, where, getattr(getattr(on_prefill, "rec", None), "request_id", None))
         keys = mm.key_ids if mm is not None else None
         if cold:
             # #98: a key no cache holds, so nothing resumes; another session's, so the resident
@@ -5978,6 +6012,42 @@ _OVER_CEILING_LOGGED = [0.0]
 OVER_CEILING_LOG_S = 300.0
 
 
+#: SRV-801: how often a run of hand-backs that freed nothing gets a line while it goes on
+EMPTY_LOG_S = 60.0
+#: why -> [the hand-backs that freed nothing since its last line, their ms, when that line was]
+_EMPTY_RUN: dict = {}
+_EMPTY_LOCK = threading.Lock()
+
+
+def _empty_line(ev: dict, now: float | None = None) -> str | None:
+    """The log line of a hand-back of the allocator's free blocks (`Budget.empty`), or None for one that says
+    nothing new. One that freed memory always has its line. Of a run that freed nothing (0.00 GiB as printed) the
+    first has one; the next are counted and named once every EMPTY_LOG_S, and by the next that frees something.
+
+    SRV-801: a request that waits for memory runs the pool's reclaim again every second, eight hand-backs each
+    (`_kv_reclaim_caches`, one a level): 88 s of `0.00 GiB in 0.37 ms (kv_pool)`, eight lines a second."""
+    why = ev.get("why")
+    freed, ms = int(ev.get("freed") or 0), float(ev.get("ms") or 0.0)
+    now = time.monotonic() if now is None else now
+    head = "[memory] reserve back to the driver:"
+    with _EMPTY_LOCK:
+        run = _EMPTY_RUN.get(why)
+        if f"{freed / 2**30:.2f}" != "0.00":
+            _EMPTY_RUN.pop(why, None)
+            more = f"; {run[0]} more before it freed nothing ({run[1]:.1f} ms)" if run and run[0] else ""
+            return f"{head} {freed / 2**30:.2f} GiB in {ev.get('ms')} ms ({why}){more}"
+        if run is None:
+            _EMPTY_RUN[why] = [0, 0.0, now]
+            return f"{head} 0.00 GiB in {ev.get('ms')} ms ({why})"
+        run[0] += 1
+        run[1] += ms
+        if now - run[2] < EMPTY_LOG_S:
+            return None
+        n, total = run[0], run[1]
+        _EMPTY_RUN[why] = [0, 0.0, now]
+        return f"{head} 0.00 GiB, {n} more times in {total:.1f} ms ({why})"
+
+
 def _memory_event(ev: dict) -> None:
     """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
     kind = ev.get("kind")
@@ -6021,8 +6091,9 @@ def _memory_event(ev: dict) -> None:
             except Exception:                                      # noqa: BLE001
                 pass
     elif kind == "empty" and STATE.get("verbose"):
-        print(f"[memory] reserve back to the driver: {ev.get('freed', 0) / 2**30:.2f} GiB in "
-              f"{ev.get('ms')} ms ({ev.get('why')})", flush=True)
+        line = _empty_line(ev)
+        if line:
+            print(line, flush=True)
 
 
 # ------------------------------------------------------------------ SRV-307: the shared KV pool
@@ -8685,7 +8756,7 @@ class Handler(BaseHTTPRequestHandler):
         that outgrow it give way (`KV_RECOMPUTE`), so more lanes start; `respond=False` (a lane
         resuming inside its own answer) sends nothing on a refusal.
 
-        SRV-787: `home`, on the side slot that holds this conversation (`_side_home`), the tokens of the
+        SRV-787: `home`, on the slot that holds this conversation (`_slot_share`), the tokens of the
         prompt its rows hold: the rows from there, at most from the slot's valid rows, are what is
         charged, not the whole prompt. This gate runs on the client's tokens, which part from the slot's
         rows at the first router note the prefill puts back (`_end_replay`), so where it resumes in place
@@ -8725,7 +8796,7 @@ class Handler(BaseHTTPRequestHandler):
             start, kind = ((0, None) if full or res_ is None or cold
                            else res_.resume_estimate(keys, n, mm_ok))
             if home and not full and not cold and res_ is not None:
-                # SRV-787: its home side slot's rows, read again at every pass (a reclaim empties them)
+                # SRV-787: its home slot's rows, read again at every pass (a reclaim empties them)
                 held = min(int(home), int(getattr(res_, "valid", 0) or 0))
                 if held > int(start):
                     start, kind = held, "home"
@@ -8830,11 +8901,11 @@ class Handler(BaseHTTPRequestHandler):
             workspace past the engine's room, in full less the allocator's free default-pool blocks
             (`Admission.check`)."""
             return adm.reserve(cid, est["ws_r1"] + kv, kv=kv, owner=owner, over_peak=bool(est.get("over_peak")),
-                               rows=n, kv_prompt=kv_prompt)
+                               rows=n, kv_prompt=kv_prompt, fwd=est["fwd"])
 
         def check_now() -> tuple[bool, dict]:
             return adm.check(est["ws_r1"] + kv, count=False, kv=kv, over_peak=bool(est.get("over_peak")), rows=n,
-                             kv_prompt=kv_prompt)
+                             kv_prompt=kv_prompt, fwd=est["fwd"])
         # the chat's priority (`tandem.priority`): the line for memory is by it, and the pool's reclaim takes the
         # idle conversations of lower-priority chats first (`_kv_reclaim_side`)
         slot_now = slots_mod.current()
@@ -10613,9 +10684,7 @@ class Handler(BaseHTTPRequestHandler):
                     "messages" if chat else "prompt", "the prompt is empty").body())
             # SRV-797: how a give-way's continuation is admitted again (`_recomputing`): as this request was
             admit_kw = {"rows_of": (lambda n: _mm_rows(n, images)) if images else None, "cold": cold,
-                        "home": (int(par_why.get("home_share") or 0)
-                                 if par is not None and side is not None and par_why.get("home") == side.index
-                                 else 0),
+                        "home": _slot_share(par_why, side) if par is not None else 0,
                         "priority": _priority_of(body), "wait_long": _wait_for_memory(body, self.headers)}
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
@@ -13605,22 +13674,43 @@ def _par_room() -> int | None:
     return max(0, int(mem.peak) - int(reserved))
 
 
-def _guard(rows: int, cap: int) -> tuple[int, dict] | None:
+def _guard(rows: int, cap: int, fwd: int | None = None) -> tuple[int, dict] | None:
     """SRV-785: the admission's and the KV pool's floor from the live state (server/slots.py `guard`): one prefill
-    chunk's workspace at the class of `rows` (the longest prefill in flight or the one checked; `Budget.workspace_rows`
+    chunk's workspace at the class of `rows` (a prefill in flight or the one checked; `Budget.workspace_rows`
     of a resumed chunk), one KV commit of a chunk's rows (`slots.kv_step`), the last ask of a chat's sandbox
     for `SANDBOX_CLAIM_S`, and `GUARD_MARGIN_GB`, at most `cap`. None without a memory policy: the floor as
-    configured. Every part is slot 0's: the side slots run the same model."""
+    configured. Every part is slot 0's: the side slots run the same model.
+
+    SRV-801: `fwd`, the rows that prefill forwards (the admission's price of it, `_par_admit`): its chunk is at
+    most those rows, by the same model that charges its workspace. None: a whole chunk. The admission and the pool
+    take the largest chunk of the prefills in flight (`Admission.live_guard`)."""
     mem = dict.get(STATE, "mem")
     if mem is None or not getattr(mem, "on", False):
         return None
     chunk = int(dict.get(STATE, "prefix_chunk") or 0) or 4096
     rows = int(rows)
-    step = int(mem.workspace_rows(rows, min(rows, chunk), line=False)) if rows > 0 else 0
+    part = rows if fwd is None else max(1, min(int(fwd), rows))
+    step = int(mem.workspace_rows(rows, min(part, chunk), line=False)) if rows > 0 else 0
     kv = slots_mod.kv_step(getattr(getattr(dict.get(STATE, "engine"), "kv", None), "pages", None), chunk)
     claim, at = _SANDBOX_CLAIM
     sandbox = claim if time.monotonic() - at < SANDBOX_CLAIM_S else 0
     return slots_mod.guard(cap, step=step, kv=kv, sandbox=sandbox, margin=int(GUARD_MARGIN_GB * (1 << 30)))
+
+
+def _wire_guards(adm, kp) -> None:
+    """SRV-785: from here the admission's floor and the KV pool's hard floor (under the pool's own configured value)
+    read the live guard: while the admitted prefills run (`guard`), and with one more being checked (`guard_at`,
+    SRV-797). One function (`Admission.live_guard` over `_guard`) for all three, so the gate holds the chunk the
+    admission counted: a whole one where the forwarded rows are not known, else the chunk the prefill forwards.
+    SRV-797: a request is never admitted under the floor its pages commit under (`pool_floor`)."""
+    adm.guard = lambda rows, fwd=None: _guard(rows, adm.cap, fwd)
+    if isinstance(kp, slots_mod.GuardedPool):
+        def at(rows, fwd=None):
+            return _guard(rows, kp.hard_floor_cfg, fwd)
+        kp.guard = lambda: (adm.live_guard(at) or (None,))[0]
+        kp.guard_at = lambda rows, fwd=None: (adm.live_guard(at, rows, fwd) or (None,))[0]
+    if kp is not None:
+        adm.pool_floor = getattr(kp, "floor_at", None) or (lambda rows: kp.hard_floor)
 
 
 def _wait_for_memory(body, headers) -> bool:
@@ -13646,16 +13736,24 @@ def _priority_of(body) -> int:
 def _mem_wait_of(d: dict, fwd: int, t0: float, limit: float, place: int, freed: int) -> dict:
     """SRV-787: a request's wait for memory as the live view reads it (server/activity.py `memory_of`), in bytes,
     from the admission's last check `d` (the gate's peak wait: its workspace and how far over the peak): what the
-    turn needs past the floor's sum, the rows it reads, MemAvailable, the guard and its inputs, how short it is;
-    `t0` the wait's start (perf_counter), `limit` its bound (s), `place` in line, `freed` what reclaims gave back."""
+    turn needs, the rows it reads, MemAvailable, the guard and its inputs, how short it is;
+    `t0` the wait's start (perf_counter), `limit` its bound (s), `place` in line, `freed` what reclaims gave back.
+
+    SRV-801: the terms of the check that holds it (`Admission.terms`, SRV-797: the shorter one), each by its
+    name: `need` what this turn takes in it, `others` what the caches and the turns in flight take, `check` which
+    one. `need` was all that check subtracts from MemAvailable, the others' bytes with this turn's."""
+    others = check = None
     if d.get("peak_wait"):
-        need, free, floor, short = int(d.get("ws") or 0), None, None, int(d.get("over") or 0)
+        need, free, floor, short, check = int(d.get("ws") or 0), None, None, int(d.get("over") or 0), "peak"
     else:
-        (after, floor), avail = slots_mod.Admission.binding(d), d.get("avail")    # SRV-797: the shorter check
-        need = int(avail - after) if avail is not None and after is not None else int(d.get("need") or 0)
-        free = avail
-        short = max(0, int(floor) - int(after)) if after is not None and floor is not None else None
-    return {"need": need, "rows": int(fwd), "free": free, "guard": floor, "short": short,
+        t = slots_mod.Admission.terms(d)
+        if t is None:
+            need, free, floor, short = int(d.get("need") or 0), d.get("avail"), d.get("floor"), None
+        else:
+            need, others, free, floor, check = t["mine"], t["others"], t["avail"], t["floor"], t["check"]
+            short = max(0, t["floor"] - t["after"])
+    return {"need": need, "others": others, "check": check, "rows": int(fwd), "free": free, "guard": floor,
+            "short": short,
             "peak_wait": bool(d.get("peak_wait")), "guard_inputs": d.get("guard"), "freed": int(freed),
             "t0": float(t0), "bound_s": float(limit), "place": int(place)}
 
@@ -14096,14 +14194,7 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     # SRV-785: the slots are built under the configured floor; from now on both checks read the live guard
-    adm.guard = lambda rows: _guard(rows, adm.cap)
-    kp = kvpool.POOL
-    if isinstance(kp, slots_mod.GuardedPool):
-        kp.guard = lambda: (_guard(adm.ctx_rows(), kp.hard_floor_cfg) or (None,))[0]
-        kp.guard_at = lambda rows: (_guard(max(int(rows), adm.ctx_rows()), kp.hard_floor_cfg) or (None,))[0]
-    if kp is not None:
-        # SRV-797: a request is never admitted under the floor its pages commit under
-        adm.pool_floor = getattr(kp, "floor_at", None) or (lambda rows: kp.hard_floor)
+    _wire_guards(adm, kvpool.POOL)
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
     pool.lru = SIDE_LRU == "on"           # SPD-257: a new chat takes the slot served longest ago
     pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`

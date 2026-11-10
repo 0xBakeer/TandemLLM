@@ -514,7 +514,7 @@ def test_srv785_the_guard_is_the_live_sum_and_never_above_the_floor():
     assert a.ctx_rows() == 0
     a.release("short")
     assert a.reserve("long", 0, rows=128_343)[0] and a.ctx_rows() == 128_343
-    assert a.floor_at(2_000)[0] == 10 * GiB and seen[-1] == 128_343, "the longest prefill in flight sets the class"
+    assert a.floor_at(2_000)[0] == 10 * GiB and seen[-2:] == [128_343, 2_000], "the longest prefill's chunk"
     a.release("long")
     assert a.ctx_rows() == 0 and a.floor == int(6.95 * GiB)
     for bad in (lambda rows: 1 / 0, lambda rows: None, lambda rows: (40 * GiB, {})):

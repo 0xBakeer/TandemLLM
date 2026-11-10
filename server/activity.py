@@ -726,7 +726,8 @@ def memory_of(m: dict | None, now_p: float, way: dict | None = None) -> dict | N
     waited = max(0.0, now_p - m["t0"])
     left = max(0.0, m["bound_s"] - waited)
     g = m.get("guard_inputs")
-    out = {"need_gib": gib(m["need"]), "rows": m["rows"], "free_gib": gib(m.get("free")),
+    out = {"need_gib": gib(m["need"]), "others_gib": gib(m.get("others")), "check": m.get("check"),
+           "rows": m["rows"], "free_gib": gib(m.get("free")),
            "guard_gib": gib(m.get("guard")), "short_gib": gib(m.get("short")),
            "peak_wait": bool(m.get("peak_wait")),
            "guard": ({k: gib(g[k]) for k in ("step", "kv", "sandbox", "margin", "cap")} if g else None),
@@ -744,8 +745,15 @@ def memory_lines(m: dict, waited: float, left: float, way: dict | None = None) -
         why = (f"This turn needs about {_gb(m['need'])} GiB to read {rows} new tokens, {_gb(m.get('short') or 0)} "
                f"GiB more than the engine's peak allows while another turn reads")
     else:
-        why = (f"This turn needs about {_gb(m['need'])} GiB to read {rows} new tokens; "
-               f"{_gb(m.get('free') or 0)} GiB is free and {_gb(m.get('guard') or 0)} must stay free for the system")
+        # SRV-801: free - others - need against the guard, each term named as the wait line names it
+        # (server/slots.py `Admission.terms`). In the prefill's check the need is the prompt's pages (a chat read
+        # back from the NVMe maps all of them for a few new tokens) and the floor holds while the turn reads
+        held = m.get("others") or 0
+        others = f", other turns and the caches hold {_gb(held)} of it," if _gb(held) != "0.0" else ""
+        pages = m.get("check") == "prefill"
+        why = (f"This turn needs about {_gb(m['need'])} GiB {'for its pages ' if pages else ''}to read {rows} new "
+               f"tokens; {_gb(m.get('free') or 0)} GiB is free{others} and {_gb(m.get('guard') or 0)} must stay free "
+               f"{'while it reads' if pages else 'for the system'}")
     if m.get("higher"):
         k = int(m["higher"])
         now = (f"{k} chat{'s' if k > 1 else ''} with a higher priority {'are' if k > 1 else 'is'} ahead in the "
@@ -772,7 +780,8 @@ def refusal_words(m: dict, long: bool = True) -> str:
         what = f"needed {_gb(m['need'])} GiB, {_gb(m.get('short') or 0)} over the engine's peak"
     else:
         what = (f"needed {_gb(m['need'])} GiB, "
-                f"{_gb(max(0, (m.get('free') or 0) - (m.get('guard') or 0)))} free above the guard")
+                f"{_gb(max(0, (m.get('free') or 0) - (m.get('others') or 0) - (m.get('guard') or 0)))} free above "
+                f"the guard")
     if not long:
         return (f"Memory stayed full for {_span(m.get('bound_s') or 0)} ({what}): this turn did not start; send it "
                 f"again, or stream it (or send `wait_for_memory: true`) to wait longer.")

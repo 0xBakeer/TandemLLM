@@ -107,7 +107,8 @@ class GuardedPool(kvpool.KVPool):
     engine/kvpool.py: that file counts in the spill's and the disk tier's fingerprints, and new bytes there would
     leave every entry on the NVMe unreadable."""
     guard = None
-    #: SRV-797: (rows) -> bytes or None, the guard while a prefill of `rows` runs beside the admitted ones
+    #: SRV-797: (rows) -> bytes or None, the guard while a prefill of `rows` runs beside the admitted ones;
+    #: SRV-801: (rows, fwd) for one known to forward `fwd` of them
     guard_at = None
 
     def _capped(self, fn, *args) -> int:
@@ -123,13 +124,17 @@ class GuardedPool(kvpool.KVPool):
             return self.hard_floor_cfg
         return self._capped(self.guard)
 
-    def floor_at(self, rows: int = 0) -> int:
+    def floor_at(self, rows: int = 0, fwd: int | None = None) -> int:
         """SRV-797: the hard floor the gate holds while a prefill of `rows` runs (the guard at the class of it or of
         the longest admitted prefill, at most the configured value): what the admission checks a request's pages
-        against, so it never admits one whose pages the gate then refuses. `hard_floor` without `guard_at` or rows."""
+        against, so it never admits one whose pages the gate then refuses. `hard_floor` without `guard_at` or rows.
+        SRV-801: `fwd`, the rows that prefill forwards where the admission knows them: the guard's chunk is then
+        the chunk it forwards (`Admission.live_guard`)."""
         if self.guard_at is None or self.hard_floor_cfg <= 0 or int(rows) <= 0:
             return self.hard_floor
-        return self._capped(self.guard_at, int(rows))
+        if fwd is None:
+            return self._capped(self.guard_at, int(rows))
+        return self._capped(self.guard_at, int(rows), int(fwd))
 
     @hard_floor.setter
     def hard_floor(self, value: int) -> None:
@@ -200,6 +205,7 @@ class Admission:
         self.held: dict = {}
         self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
         self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
+        self.fwd: dict = {}                # SRV-801: key -> the rows that prefill forwards, where known
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
         self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
         self.holds: dict = {}              # SRV-797: key -> until when (monotonic) a lane backs off, out of the line
@@ -241,13 +247,39 @@ class Admission:
         with self.lock:
             return max(self.rows.values(), default=0)
 
-    def floor_at(self, rows: int = 0) -> tuple[int, dict | None]:
-        """SRV-785: the floor a check holds, (bytes, the guard's inputs): the live guard at the class of the
-        longest prefill in flight or `rows`, at most `cap`; `cap` without a guard or an answer from it."""
+    def prefills(self, rows: int = 0, fwd: int | None = None) -> list:
+        """SRV-801: (rows, the rows it forwards or None) of every admitted prefill that has not run yet, and of
+        one of `rows` being checked."""
+        with self.lock:
+            out = [(r, self.fwd.get(k)) for k, r in self.rows.items()]
+        if int(rows) > 0:
+            out.append((int(rows), None if fwd is None else max(1, int(fwd))))
+        return out
+
+    def live_guard(self, fn, rows: int = 0, fwd: int | None = None):
+        """SRV-801: the guard while the admitted prefills run, and one of `rows` that forwards `fwd`: `fn`'s
+        answer, (bytes, inputs) or None, with the largest chunk among them. `fn(rows, fwd)` for a prefill whose
+        forwarded rows the admission knows: the most it allocates between two checks is the chunk it forwards.
+        `fn(rows)` for one it does not: a whole chunk at its class, as every turn counted before (a turn that read
+        180 new tokens was held under the floor of a 4,096-row chunk, 9.7 GiB with 4.4 for the chunk where its own
+        is 1.2, and waited minutes at 11 GiB free)."""
+        best = None
+        for r, f in self.prefills(rows, fwd) or [(0, None)]:
+            got = fn(r) if f is None else fn(r, f)
+            if not got:
+                return None
+            if best is None or int(got[1].get("step", 0)) > int(best[1].get("step", 0)):
+                best = got
+        return best
+
+    def floor_at(self, rows: int = 0, fwd: int | None = None) -> tuple[int, dict | None]:
+        """SRV-785: the floor a check holds, (bytes, the guard's inputs): the live guard at the largest chunk of
+        the prefills in flight and of `rows` (`live_guard`), at most `cap`; `cap` without a guard or an answer from
+        it."""
         if self.guard is None:
             return self.cap, None
         try:
-            got = self.guard(max(int(rows), self.ctx_rows()))
+            got = self.live_guard(self.guard, rows, fwd)
         except Exception:                                          # noqa: BLE001
             got = None
         if not got:
@@ -260,12 +292,13 @@ class Admission:
         return self.floor_at()[0]
 
     def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False,
-              rows: int = 0, kv_prompt: int | None = None) -> tuple[bool, dict]:
+              rows: int = 0, kv_prompt: int | None = None, fwd: int | None = None) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
         it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
         the allocator's free default-pool blocks it takes before any new memory (`spare`), against the room's
         charge, the larger of the two (SRV-787). `rows`: its prompt's rows, the class of the guard's chunk
-        (SRV-785, `floor_at`).
+        (SRV-785, `floor_at`); `fwd`: the rows of them its prefill forwards, the size of that chunk (None: a whole
+        chunk).
 
         SRV-797: with the KV pool (`pool_floor`), also what its gate sees at the prefill's pages: `kv_prompt` (of
         `kv`; all of it when None) commits while the prefill runs, under the pool's floor at its class, and this
@@ -276,7 +309,7 @@ class Admission:
         commits once the prefill has run, under the admission's floor as before. (The one overlap: a cold prompt's
         first 4,096 rows' workspace at its second chunk's commit; a refusal there gives way once, and the
         continuation resumes past 4,096 rows.)"""
-        floor, gin = self.floor_at(rows)
+        floor, gin = self.floor_at(rows, fwd)
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
         held_ws, held_kv = self._held()
@@ -302,7 +335,7 @@ class Admission:
         pf = None
         if self.pool_floor is not None and int(kv) > 0:
             try:
-                pf = int(self.pool_floor(int(rows)))
+                pf = int(self.pool_floor(int(rows)) if fwd is None else self.pool_floor(int(rows), int(fwd)))
             except Exception:                                      # noqa: BLE001
                 pf = None
         spare = 0
@@ -362,7 +395,7 @@ class Admission:
         return d["ok"], d
 
     def reserve(self, key, need: int, kv: int = 0, owner=None, over_peak: bool = False,
-                rows: int = 0, kv_prompt: int | None = None) -> tuple[bool, dict]:
+                rows: int = 0, kv_prompt: int | None = None, fwd: int | None = None) -> tuple[bool, dict]:
         """Check and record in one step, so two requests cannot both take the last bytes. SRV-775: a
         request with nothing else in flight is checked as well (`alone` and `lone_checked` count it):
         the engine's memory policy keeps it under the declared peak, not the box above its floor
@@ -373,7 +406,8 @@ class Admission:
         floor is what bounds it.
 
         `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit. `rows`: its prompt's
-        rows, kept until its prefill has run (`prefilled`): the class of the guard's chunk (SRV-785)."""
+        rows, kept until its prefill has run (`prefilled`): the class of the guard's chunk (SRV-785), and `fwd`, the
+        rows of them it forwards, with them."""
         with self._admit:
             with self.lock:
                 alone = not self.held
@@ -383,7 +417,7 @@ class Admission:
                     base = int(self.committed(owner))
                 except Exception:                                  # noqa: BLE001
                     base = 0
-            ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows, kv_prompt=kv_prompt)
+            ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows, kv_prompt=kv_prompt, fwd=fwd)
             if not ok and self.relieve is not None and d.get("after") is not None:
                 # the whole request's check short too: the answer's pages need the room after its prefill as well
                 life = d["after"] < d["floor"]
@@ -395,7 +429,7 @@ class Admission:
                     cut = 0
                 if cut:
                     ok, d = self.check(need, kv=kv, over_peak=over_peak, rows=rows, kv_prompt=kv_prompt,
-                                       count=False)
+                                       count=False, fwd=fwd)
                     if ok:
                         d["relieved"], d["relieved_life"] = cut, life
                         self.relieved[key] = life
@@ -410,8 +444,11 @@ class Admission:
                 with self.lock:
                     self.held[key] = int(need)
                     self.kv[key] = (int(kv), owner, base)
+                    self.fwd.pop(key, None)
                     if rows:
                         self.rows[key] = int(rows)
+                        if fwd is not None:
+                            self.fwd[key] = max(1, int(fwd))
                     self.waiting.pop(key, None)
                     self.prio.pop(key, None)
                     self.holds.pop(key, None)
@@ -434,8 +471,17 @@ class Admission:
             self._unrelieve(key)
         with self.lock:
             self.rows.pop(key, None)
+            self.fwd.pop(key, None)
             if key in self.held:
                 self.held[key] = self.kv.get(key, (0,))[0]
+
+    def forwards(self, key, rows: int) -> None:
+        """SRV-801: the rows `key`'s prefill forwards as the prefill found them (server/app.py `_par_chunks`, once
+        its first chunk has run): the guard's chunk is at least theirs from here. A resume that failed forwards more
+        than the admission priced; one whose forwarded rows were never known holds a whole chunk already."""
+        with self.lock:
+            if key in self.rows and key in self.fwd:
+                self.fwd[key] = max(int(self.fwd[key]), int(rows))
 
     def wait(self, key, prio: int = 1) -> int:
         """SRV-305: `key` waits for memory; returns its place in line (1 = next). The line is by the chat's priority
@@ -505,6 +551,7 @@ class Admission:
             self.held.pop(key, None)
             self.kv.pop(key, None)
             self.rows.pop(key, None)
+            self.fwd.pop(key, None)
             self.waiting.pop(key, None)
             self.prio.pop(key, None)
             self.holds.pop(key, None)
@@ -517,6 +564,27 @@ class Admission:
         if p is not None and d.get("after") is not None and p["floor"] - p["after"] > d["floor"] - d["after"]:
             return p["after"], p["floor"]
         return d.get("after"), d.get("floor")
+
+    @staticmethod
+    def terms(d: dict) -> dict | None:
+        """SRV-801: the check that holds a request back (`binding`), term by term in bytes, for the words a user
+        reads (server/app.py `_mem_wait_of`): `avail - others - mine = after` against `floor`. `mine`: what this
+        request takes in that check, its workspace and KV pages, or in the prefill's check its prompt's pages (its
+        chunk is in that floor); `others`: the caches' growth and the requests in flight. None without a reading.
+        The same numbers as the wait line's (`describe`): the live view named the sum of both as the turn's need
+        ("needs about 4.3 GiB to read 180 new tokens")."""
+        avail, after = d.get("avail"), d.get("after")
+        if avail is None or after is None:
+            return None
+        p = d.get("prefill")
+        if p is not None and p["floor"] - p["after"] > d["floor"] - after:
+            check, after, floor, mine = "prefill", p["after"], p["floor"], int(p["kv"])
+        else:
+            check, floor, mine = "request", d["floor"], int(d["need"]) - int(d.get("spare") or 0)
+        take = int(avail) - int(after)
+        mine = max(0, min(mine, take))
+        return {"check": check, "avail": int(avail), "mine": mine, "others": take - mine, "after": int(after),
+                "floor": int(floor)}
 
     @staticmethod
     def describe(d: dict) -> str:
@@ -556,7 +624,7 @@ class Admission:
         # SRV-797: the prefill's pages against the KV pool's floor, when that is what holds it back
         pre = ("" if p is None or p["ok"] else
                f"; its prefill's pages: MemAvailable {g(d['avail'])} - "
-               + "the other workspaces" + f" - KV pages {g(p['kv'])} = "
+               + f"growth and in flight {g(d['avail'] - p['after'] - p['kv'])} - its KV pages {g(p['kv'])} = "
                f"{g(p['after'])} GiB (< the KV pool's floor {g(p['floor'])} while its prefill runs)")
         return (f"{alone}MemAvailable {g(d['avail'])} GiB - " + mid
                 + f" = {g(d['after'])} GiB ({'>=' if ok_all else '<'} floor {g(d['floor'])}"

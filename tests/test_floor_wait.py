@@ -136,8 +136,8 @@ def test_failure_1_the_admission_checks_the_prefills_pages_as_the_gate_will_and_
     assert (after, floor) == (p["after"], p["floor"]) and abs((floor - after) / GiB - 0.28) < 0.01
     words = slots.Admission.describe(d)
     assert words.startswith("alone: MemAvailable 9.8 GiB") and "= 6.9 GiB (>= floor 5.4" in words, words
-    assert ("; its prefill's pages: MemAvailable 9.8 - the other workspaces - KV pages 1.7 = 8.1 GiB (< the KV "
-            "pool's floor 8.4 while its prefill runs)") in words, words
+    assert ("; its prefill's pages: MemAvailable 9.8 - growth and in flight 0.0 - its KV pages 1.7 = 8.1 GiB "
+            "(< the KV pool's floor 8.4 while its prefill runs)") in words, words
     ok0, d0 = adm.check(WS, kv=0, over_peak=True, rows=ROWS)
     assert ok0 and "prefill" not in d0, "no KV pages (a static KV, the fake engine): nothing for the gate"
     return words

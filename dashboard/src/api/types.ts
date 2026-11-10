@@ -660,6 +660,9 @@ export interface LiveActivity {
  *  the server's words (what and why, what happens meanwhile, how it ends) and are shown as sent. */
 export interface MemoryWait {
   need_gib: number | null;
+  /** SRV-801: what the caches and the turns in flight take in the same check, and which check holds it */
+  others_gib?: number | null;
+  check?: 'request' | 'prefill' | 'peak' | null;
   rows: number | null;
   free_gib?: number | null;
   guard_gib?: number | null;

@@ -1439,6 +1439,20 @@
                 "null"
               ]
             },
+            "others_gib": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "SRV-801: what the caches and the turns in flight take in the same check; free_gib - others_gib - need_gib against guard_gib"
+            },
+            "check": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "SRV-801: the check that holds it: request (the whole request under the admission's floor), prefill (its prompt's pages under the KV pool's floor) or peak"
+            },
             "rows": {
               "type": [
                 "integer",
