@@ -221,6 +221,32 @@ The reference forward (`ref.py`) follows transformers' NemotronH and the CUDA pa
 - Load-time self-check: a 24-token decode replayed as one verify block, every row and the committed states compared bit for bit (with taps, each row's taps and the committed ring too); a difference turns speculation off.
 - Caches: sections `mamba.conv.<L>` (bf16 [3, conv_dim]) and `mamba.S.<L>` (fp32 [heads, 64, state]), views K and V. Lightning: 46.8 MiB of sections a sequence, 6,144 bytes of KV a token.
 
+## The e4m3 KV cache (`NH_KV_FP8`, off)
+
+With `NH_KV_FP8=1` the attention layers keep each key and value as e4m3 codes with one fp32 scale a (head, token): 528 bytes a layer and token instead of 1,024.
+
+| model | attention layers | bytes a token, BF16 / e4m3 | at the full window, BF16 / e4m3 |
+|-|-|-|-|
+| Lightning 30B-A3B | 6 | 6,144 / 3,168 | 1.5 / 0.77 GiB at 262,144 |
+| Bolt 74B-A9B | 8 | 8,192 / 4,224 | 2.0 / 1.03 GiB at 262,144 |
+| Super VL 120B-A12B | 8 | 8,192 / 4,224 | 8.0 / 4.13 GiB at 1,048,576 |
+
+The output is no longer the exact model's. The knob is off by default, and the exactness checks hold only with it off. The manifest names it `nemotron_h-kvfp8`, so its cache entries are never read by the exact cache.
+
+One launch codes a decode or verify row's K and V into the cache straight from the projection (`tools/kv_fp8.py`). Attention turns the codes back into BF16 as it loads them. A verify row is still the decode step's row bit for bit, so speculation and the load-time self-check work as before. A prompt chunk attends to its own rows in BF16 and to the cached rows decoded, then codes its rows. That decoded copy is one layer's K and V in BF16, 1,024 bytes a token (1 GiB at 1,048,576 tokens), and the adapter adds it to the cap of the prefill workspace (not measured). The MTP head keeps its own cache in BF16.
+
+To turn it on in the Setup Guide (the dashboard's `#/setup`), pick the model, go to the Tools step and switch on "Long-context cache (FP8)" under Features. Then finish Review and Install, which restarts the engine. To turn it off, switch it off there and install again.
+
+To turn it on from the command line, add this line at the end of `~/TandemLLM/run/ops/serve.env`:
+
+```
+QWEN38_NH_KV_FP8=1
+```
+
+Then run `~/TandemLLM/bin/tandem restart`. Check that it took: `curl -s localhost:8000/health` shows `"kv_cache": "e4m3"` under `weights`, and the engine log's load line says `KV cache e4m3`. To turn it off, delete the line and run `tandem restart` again; `/health` then shows `"kv_cache": "bf16"`. Use one way or the other: a line in serve.env wins over the Setup Guide's switch.
+
+Quality and speed against the exact cache: not measured.
+
 ## Weights
 
 | source | reader | notes |
