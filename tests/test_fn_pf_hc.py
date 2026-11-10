@@ -7,7 +7,8 @@ tests/gpu/test_fn_pf_hc_gpu.py's and tools/fn_pf_hc_check.py's).
   * `fn_pf_hc.mix_ok` / `inject_ok` refuse CPU tensors
   * `_mix_pre` takes the replaced path when its switch is off and `fn_pf_hc.mix` otherwise, whatever `mm_rows` mode
     runs; `_inject_pre` likewise with `fn_kernels.inject_norm` / `fn_pf_hc.inject_norm`
-  * `fn_pf_hc.mix` gives the fp32 GEMMs fp32 inputs and every other mode `mm_rows` itself with bf16 inputs
+  * `fn_pf_hc.mix` gives the fp32 GEMMs fp32 inputs and every other mode `mm_rows` itself with bf16 inputs; under tcn
+    the up projection and tail are `mix_up_tail`'s one launch
   * n's fp32 form goes from an inject to the next mixer of that same n only (by identity), and `_n32_clear` drops
     what no mixer took (stand-in modules record the calls)
 
@@ -114,7 +115,7 @@ def test_dispatch():
             eng = _eng()
             n = torch.zeros(2, 16, dtype=torch.bfloat16)
             for hc_on, mm, fused in ((False, "fp32", False), (True, "fp32", True), (True, "tc", True), (True, "fp16", True),
-                                     (False, "tc", False)):
+                                     (False, "tc", False), (True, "tcn", True), (False, "tcn", False)):
                 s.calls.clear()
                 E.PF_HC_FUSED, s.PK.MM = hc_on, mm
                 out = eng._mix_pre(n, "s")
@@ -130,7 +131,7 @@ def test_dispatch():
                 eng._inject_pre(torch.zeros(1), torch.zeros(1), torch.zeros(1), 320, w, 4, 1e-6)
                 assert [c if c[0] == "inject" else c[0] for c in s.calls] == want, (inj_on, hc_on, w, s.calls)
                 eng._n32_clear()
-            for mm in ("tc", "fp16"):                                         # no fp32 form for a GEMM that reads bf16
+            for mm in ("tc", "tcn", "fp16"):                                  # no fp32 form for a GEMM that reads bf16
                 s.calls.clear()
                 E.PF_INJ_FUSED, E.PF_HC_FUSED, s.PK.MM = True, True, mm
                 eng._inject_pre(torch.zeros(1), torch.zeros(1), torch.zeros(1), 320, "w", 4, 1e-6)
@@ -158,15 +159,36 @@ def test_mix_follows_the_mm_rows_mode():
                 ("fp32", f16, f16, [("wf",), ("mix_a", True), ("wf",)]),
                 ("tc", q8, q8, [("mm_rows", torch.bfloat16), ("mix_a", False), ("mm_rows", torch.bfloat16)]),
                 ("tc", f16, q8, [("wf",), ("mix_a", False), ("mm_rows", torch.bfloat16)]),
+                ("tcn", f16, f16, [("wf",), ("mix_a", True), ("wf",)]),
                 ("fp16", q8, f16, [("mm_rows", torch.bfloat16), ("mix_a", False), ("mm_rows", torch.bfloat16)])):
             calls.clear()
             PK.MM = mm
-            assert HC.lib32(wd) is (mm == "fp32" or (mm == "tc" and wd is f16))
+            assert HC.lib32(wd) is (mm == "fp32" or (mm in ("tc", "tcn") and wd is f16))
             assert HC.wants_n32() is (mm == "fp32")
             x, di = HC.mix(n, None, wd, wu, 3, 4)
             assert x == "x" and calls == want, (mm, calls)
     finally:
         PK.MM, PK.mm_rows, PK._wf, PK.mix_tail, HC.mix_a = saved
+
+
+def test_mix_takes_the_one_launch_up_tail_under_tcn():
+    from tools import fn_pf_hc as HC
+    from tools import fn_prefill_kernels as PK
+    saved = (PK.MM, PK.mm_rows, PK.mix_up_tail, HC.mix_a)
+    calls = []
+    q8 = types.SimpleNamespace(q=1)
+    out = torch.zeros(2, 1, dtype=torch.bfloat16)
+    try:
+        PK.MM = "tcn"
+        PK.mm_rows = lambda x, w: calls.append(("mm_rows", x.dtype)) or torch.zeros(2, 3)
+        PK.mix_up_tail = lambda a, w, n, hc, out=None: calls.append(("mix_up_tail", a.dtype, out is not None)) or "x"
+        HC.mix_a = lambda d, R, hc, fp32=True: calls.append(("mix_a", fp32)) or torch.zeros(
+            2, 4, dtype=torch.float32 if fp32 else torch.bfloat16)
+        x, di = HC.mix(torch.zeros(2, 4, dtype=torch.bfloat16), None, q8, q8, 3, 4, out)
+        assert x == "x" and calls == [("mm_rows", torch.bfloat16), ("mix_a", False),
+                                      ("mix_up_tail", torch.bfloat16, True)], calls
+    finally:
+        PK.MM, PK.mm_rows, PK.mix_up_tail, HC.mix_a = saved
 
 
 def test_n32_goes_to_the_next_mixer_of_the_same_n_only():

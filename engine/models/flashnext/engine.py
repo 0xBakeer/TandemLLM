@@ -558,9 +558,9 @@ class FlashNextEngine(FlashNextRef):
         return out
 
     def _mix_pre(self, n, p, out=None):
-        """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
-        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings (into `out` [M, H] bf16 when
-        given). SPD-249 P2
+        """The mixer of a chunk: down and inject on `mm_rows` (the library GEMM in fp32 by default), the up
+        projection of a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings (into `out`
+        [M, H] bf16 when given; `mix_up_tail`: one launch for both under QWEN38_FN_PREFILL_MM=tcn). SPD-249 P2
         (QWEN38_FN_PF_HC_FUSED): the same GEMMs of the `mm_rows` mode that runs on the same values, a from one launch
         and, where the GEMM reads fp32, n's fp32 form from the inject's launch when it wrote one (`_inject_pre`;
         tools/fn_pf_hc.py `mix`)."""
@@ -576,7 +576,7 @@ class FlashNextEngine(FlashNextRef):
                 return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count, out)
         di = PK.mm_rows(n, wd)
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_tail(PK.mm_rows(a, wu), n, c.hc_count, out), di
+        return PK.mix_up_tail(a, wu, n, c.hc_count, out), di
 
     def _inject_pre(self, h, out, di, R, w, hc, eps):
         """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits

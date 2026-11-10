@@ -454,7 +454,8 @@ KNOBS: dict[str, tuple] = {
     # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
     'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),
     # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =
-    # weights rounded to fp16 on the tensor cores
+    # weights rounded to fp16 on the tensor cores, "tc" / "tcn" = int8 weights unrounded on the tensor cores
+    # (a Triton kernel / the native kernel, which also folds the mixer's tail into its up projection)
     'FN_PREFILL_MM': ('fp32', 'tools/fn_prefill_kernels.py'),
     # 1: the indexer's top-k past 8,192 blocks (contexts > 32k) on the torch sort, not the radix-select kernel
     'FN_QSA_TORCH_BIG': ('0', 'tools/fn_seq_kernels.py'),

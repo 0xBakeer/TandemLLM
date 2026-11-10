@@ -109,7 +109,8 @@ def instrument(eng: FlashNextEngine) -> PartTimer:
     def mm_label(x, w):
         return "library GEMM rows: " + fam.get(id(w), "other")
     T.wrap(PK, "mm_rows", mm_label)
-    for name, lab in (("moe_grouped", "moe experts"), ("mix_tail", "mixer up"), ("qsa_scores_rows", "attention qsa")):
+    for name, lab in (("moe_grouped", "moe experts"), ("mix_tail", "mixer up"), ("mix_up_tail", "mixer up"),
+                      ("qsa_scores_rows", "attention qsa")):
         T.wrap(PK, name, lab)
     T.wrap(GK, "fused_chunk_prefill", "gdn delta rule")
     return T
@@ -140,6 +141,7 @@ STAGES = (
                                            "mix_up", "combine_inject", "pf_mix_a_kernel")),
     ("EXL3 projections: rotations", ("rot_in_kernel", "rot_out_kernel")),
     ("EXL3 projections: slab decode", ("recon_kernel",)),
+    ("int8 GEMM on the tensor cores (mm_rows tc, tcn)", ("mix_gemm_kernel", "mm_i8_kernel")),
     ("library fp32 GEMM (mm_rows)", ("magma_sgemm", "sgemm", "gemmSN", "gemv2T", "gemvx")),
     ("library fp16 GEMM (EXL3 slabs)", ("s16816gemm", "s1688gemm", "nvjet", "cutlass_80_tensorop", "xmma")),
     ("DeltaNet kernels", ("_scan", "_intra", "gdn_pre_kernel", "gated_norm_kernel", "fused_chunk", "_prep",

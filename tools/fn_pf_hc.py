@@ -58,9 +58,9 @@ def mix_ok(n: torch.Tensor, hc: int) -> bool:
 
 def lib32(w) -> bool:
     """Whether `mm_rows` takes a bf16 x with this weight as `x.float() @ W32^T` (then x's fp32 form made elsewhere is
-    the same GEMM input): the fp32 mode, and the tc mode's weights that are not int8."""
+    the same GEMM input): the fp32 mode, and the tc and tcn modes' weights that are not int8."""
     from tools import fn_prefill_kernels as PK
-    return PK.MM == "fp32" or (PK.MM == "tc" and not hasattr(w, "q"))
+    return PK.MM == "fp32" or (PK.MM in ("tc", "tcn") and not hasattr(w, "q"))
 
 
 def wants_n32() -> bool:
@@ -79,17 +79,16 @@ def mix_a(d: torch.Tensor, R: int, hc: int, fp32: bool = True) -> torch.Tensor:
 
 def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int, out: torch.Tensor | None = None):
     """A site's mixer, `_mix_pre`'s (x bf16 [M, H], di fp32 [M, R + hc]) bit for bit in the `mm_rows` mode that runs:
-    the same GEMMs on the same values (see `lib32`), then `mix_tail` (into `out` when given)."""
+    the same GEMMs on the same values (see `lib32`), then `mix_tail`, or `mix_up_tail` for a bf16 a (one launch under
+    tcn), into `out` when given."""
     from tools import fn_prefill_kernels as PK
     if lib32(wd):
         di = (n32 if n32 is not None else n.float()) @ PK._wf(wd).T
     else:
         di = PK.mm_rows(n, wd)
     if lib32(wu):
-        u = mix_a(di, R, hc) @ PK._wf(wu).T
-    else:
-        u = PK.mm_rows(mix_a(di, R, hc, fp32=False), wu)
-    return PK.mix_tail(u, n, hc, out), di
+        return PK.mix_tail(mix_a(di, R, hc) @ PK._wf(wu).T, n, hc, out), di
+    return PK.mix_up_tail(mix_a(di, R, hc, fp32=False), wu, n, hc, out), di
 
 
 def inject_ok(h0: torch.Tensor, out: torch.Tensor, hc: int) -> bool:

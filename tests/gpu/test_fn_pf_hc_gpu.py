@@ -1,9 +1,9 @@
 """On the board (SPD-249 P2): tools/fn_pf_hc.py equals the prefill mixer and inject it replaces, bit for bit.
 
   * mix: (x, di) equal `_mix_pre`'s replaced path (fn_prefill_kernels `mm_rows`, the torch silu, `mm_rows`,
-    `mix_tail`) in each `mm_rows` mode (QWEN38_FN_PREFILL_MM fp32, tc, fp16) at the mixer shapes for every row count
-    in ROWS (`--all-rows`: 1 .. 4,096 each for fp32 and tc), with n's fp32 form given (as the inject's launch makes
-    it) and without it;
+    `mix_tail`) in each `mm_rows` mode (QWEN38_FN_PREFILL_MM fp32, tc, tcn, fp16) at the mixer shapes for every row
+    count in ROWS (`--all-rows`: 1 .. 4,096 each for fp32 and tc), with n's fp32 form given (as the inject's launch
+    makes it) and without it, and x written into rows of a larger buffer (a window's `out`);
   * mix_a, fp32 and bf16 output, over every bf16 value of bf16(di) (a NaN aside: both NaN);
   * inject_norm: (h, n) equal tools/fn_kernels.inject_norm's at stream widths 2,560 (the model's), 512, 1,024,
     2,048, 3,000 and 4,096, norm weights fp16, bf16 and none, every row count in ROWS; its n32 is n.float();
@@ -71,6 +71,10 @@ def _mix_mode(mode, rows):
                 x2, di2 = HC.mix(n, n32, wd, wu, R, HCN)
                 if not (_same(x, x2) and _same(di, di2)):
                     bad.append((M, n32 is not None, int((x != x2).sum()), int((di != di2).sum())))
+            buf = torch.zeros(M + 2, H, dtype=torch.bfloat16, device=DEV)
+            x3, _ = HC.mix(n, None, wd, wu, R, HCN, buf[1:M + 1])
+            if not (x3.data_ptr() == buf[1].data_ptr() and _same(x, x3) and not buf[0].any() and not buf[-1].any()):
+                bad.append((M, "out", int((x != x3).sum()), 0))
     finally:
         PK.MM = saved
     assert not bad, f"mix ({mode}) differs at (rows, n32, x diffs, di diffs) {bad[:12]}"
@@ -83,6 +87,10 @@ def test_mix_equals_the_replaced_path(rows=None):
 
 def test_mix_equals_the_replaced_path_tc(rows=None):
     return _mix_mode("tc", rows or ROWS)
+
+
+def test_mix_equals_the_replaced_path_tcn():
+    return _mix_mode("tcn", ROWS)
 
 
 def test_mix_equals_the_replaced_path_fp16():
