@@ -154,7 +154,12 @@ def test_chatd_sends_nothing():
 
 
 def test_chatd_closes_the_connection():
-    def handle(c):                       # a reset at once: the forward's send of the body fails
+    def handle(c):                       # a reset while the body goes: the forward's send fails
+        # The reset waits for the forward's first bytes. A reset at accept could reach the forward
+        # before its connect had read the socket's state, and on a busy runner the connect then
+        # failed with ECONNRESET: "the chat service is not running", a case test_nothing_listens
+        # covers. Bytes on the wire mean the connect has returned and the body is under way.
+        c.recv(1)
         c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         c.close()
     s, port = _listener(handle)
