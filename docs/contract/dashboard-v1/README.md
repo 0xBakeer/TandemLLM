@@ -15,6 +15,7 @@ These files are the truth for `/v1/dashboard/*`. Every response the server sends
 | `session.schema.json` | `GET /v1/dashboard/session` (200 body) |
 | (none: Prometheus text) | `GET /v1/dashboard/metrics`, the `/metrics` page under the dashboard's access rule |
 | `live.schema.json` | `GET /v1/dashboard/live?follow=0`, and the `data:` of one `event: live` on `follow=1` (events after the first omit `history`) |
+| `parallel.schema.json` | `GET /v1/dashboard/parallel?since=`, every request in flight on the engine and every backend |
 | `error.schema.json` | every 401, 400, 404 and 429 body |
 | `tandem-eval.schema.json` | not an endpoint: the report `tools/tandem_eval.py` writes (`~/pub-results/tandem-eval/<night>/report.json`) and keeps on the box for the Conductor view's Compare screen (`POST /v1/conductor/evals`, listed by `GET /v1/conductor/evals`) |
 

@@ -81,6 +81,7 @@ After a save the panel shows "Saved as" with the file name and an "Open the file
 | `GET /v1/dashboard/system` | settings, memory, caches, ledger and disk |
 | `GET /v1/dashboard/logs` | the server log, as JSON or as a stream |
 | `GET /v1/dashboard/logs/export` | the whole log ring as one text file with a build header (plain text, no schema) |
+| `GET /v1/dashboard/parallel` | every request in flight on the engine and every backend, for the Parallel page: one lane each (`lanes`), the ones just finished (`recent`), each backend's figures (`backends`), the sums (`totals`), one decode sample a second per backend (`series`) and the engine's slots (`engine_slots`); `?since=<unix s>` sends only the newer samples. The engine and the standalone proxy both answer it ([schema](contract/dashboard-v1/parallel.schema.json), [example](contract/dashboard-v1/parallel.example.json)) |
 | `GET /v1/dashboard/metrics` | the `/metrics` page, for the Performance view's 5-minute figures |
 | `GET /v1/dashboard/session` | whether an admin password is set (`password_set`), whether the login is on, and the session's expiry |
 | `POST /v1/dashboard/session` | a session cookie for the admin token (only with a password set and the login on; the page has no sign-in screen yet) |
