@@ -160,6 +160,8 @@ kernels:
       - tests/gpu/test_fn_pf_nocopy_gpu.py
       - tests/gpu/test_fn_pf_window_gpu.py
       - tests/gpu/test_fn_prefill_mm_gpu.py
+      - tests/gpu/test_fn_pack_graph_gpu.py
+      - tests/gpu/test_fn_route_gpu.py
   - paths: ['engine/gdn.py', 'tools/gdn_*.py']
     tests:
       - tests/gpu/test_gdn_gpu.py
