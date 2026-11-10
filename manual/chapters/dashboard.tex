@@ -8,6 +8,8 @@ The engine serves its own web page at \code{/dashboard/}, and the standalone pro
 \caption[The dashboard's views]{The dashboard's seven views, in the order of its navigation rail, and the server routes each reads. Every view only reads, except where an edit makes a new version of a document or a configuration row.}\label{fig:dashboard-map}
 \end{figure}
 
+The navigation also holds Chat, the Chat tab (Chapter~\ref{ch:chat}), and Setup, the Setup Guide that picks and installs a model (Section~\ref{sec:new-box}); a box in setup mode opens on it. On a phone a bottom bar keeps Chat beside Usage and Performance, and a More button opens the rest.
+
 \section{Performance: the live panel}\index{Live panel}
 
 The Performance view has two pages. Engine shows the engine's own requests; Parallel shows every request on every backend (Section~\ref{sec:parallel}).
@@ -40,17 +42,35 @@ Every state and every sentence comes from the server (\code{server/activity.py})
 
 Below the Live panel: the time to first token, tokens per round and acceptance over the last 5 minutes, then speed history from the usage ledger. The Recent requests chart plots decode tok/s against prompt length, one dot per request. A replay (a response-cache hit, a summary written ahead) decoded nothing and is never a dot there, nor in any average, percentile or live rate; a switch lists the replays with their time to first token. Side-lane requests are not plotted either, because a short plain decode beside a turn says nothing about the engine's decode rate. The y axis ends at twice the 95th percentile, and a point above it is a triangle at the top edge with its value in the tooltip. Each request's cache source (\code{end}, \code{resident}, \code{disk}, \code{spill}, \code{continuation} and the others) is shown with it, so a slow first token can be read at once.
 
+\section{Performance: the lanes}\label{sec:dash-lanes}\index{Lanes view}
+
+The Parallel page of Performance (\code{#/performance?tab=parallel}) ends with the Lanes panel: one row per request in flight, on the engine and on every backend, kept in its place until a few seconds after the request ends. A row names the backend and the model, the engine's slot, the client and the session, the state, the tokens with the thinking part apart, the decode rate now and on average, the time to first token, the prefill rate, the cache hit, the cost so far and the time since it arrived. Section~\ref{sec:parallel} has the rest of the page and where each number comes from.
+
+\section{A request held for memory}\label{sec:dash-held}\index{waiting for memory}
+
+A request that waits for memory before its prefill (Section~\ref{sec:memory-wait}) is shown as held, never as a hang. The server writes three lines for it, and the page shows them as they come:
+
+\begin{itemize}
+\item what the turn needs and why it waits: \enquote{This turn needs about \textit{x}~GiB to read \textit{n} new tokens; \textit{y}~GiB is free, other turns and the caches hold \textit{z} of it, and \textit{g} must stay free for the system}. When the check of its pages holds it, the line says \enquote{for its pages} and \enquote{while it reads} (0.15.4);
+\item what happens meanwhile: chats with a higher priority ahead in the line, another chat's turn that is reading and its time left, idle cache being given back, or the time it has waited so far;
+\item how the wait ends: the chat continues by itself as soon as memory frees, Stop cancels it, and it gives up only after 3~hours without memory, with the time left.
+\end{itemize}
+
+On the Engine page, when the request the Now line follows is held, the line reads \enquote{Waiting for memory} with the three lines in place of a rate. The request's card lists them, and in the table, which cards replace below 1,100~pixels of width, they are the state cell's tooltip. In the Lanes panel the state says that the request waits for memory and continues by itself, its tooltip holds the three lines, the TTFT cell counts the wait, and the prefill cell stays empty. The live view's \code{activity.memory} carries the same figures as numbers for other clients.
+
 \section{Usage}\index{Usage view}
 
 A year of tokens as a heatmap, with totals for today, 7 days, 30 days and the year, split four ways: input, cached input, output, reasoning. Filters by model, client, backend (\code{engine} is the engine's own rows) and user, and the cost of priced models. The view reads the usage ledger, which keeps at least 400 days and never stores prompt or answer text (Section~\ref{sec:ledger}). TandemLLM's own calls to itself (the router's question to the engine, client kind \code{internal}) are left out of the totals, the filters and Dev's recent requests unless the \enquote{show internal} switch is on; each names the request it served. In the Live panel the cached tokens never read above the client's prompt, and TandemLLM's notes show as their own figure, \enquote{+5,235 hidden}.
 
 \screenshot{dashboard-usage}{The Usage view: a year of tokens, requests and cost, filtered by model, client, backend and user. Demo data from the dashboard's mock server (\texttt{npm run preview:mock}), not a measurement.}{fig:shot-usage}
 
-\section{Dev}
+\section{Dev}\label{sec:dash-dev}
 
 The live server log, filterable, with a detail view for each request: its timings, its cache source, its tokens, the conductor's decisions for it and the reason it ended. A memory-gate refusal is an error line here with the allocated and reserved figures.
 
 The Export button in the log's toolbar saves the whole log as one text file, to attach to a bug report. The file holds every line the server keeps (the newest 10,000, at all levels), whatever level and search the page shows. It starts with a header: the version, the commit, the uptime, the time of export in UTC, the line count, the time of the first and the last line, whether older lines have already left the ring, and whether \code{--log-content} is on. The file is named \code{tandemllm-<version>-<time>.log}. After a save the panel shows that name, with a link that opens the file from the server directly, for a browser that kept no file. A server that sends no file within 60 seconds shows as an error, and the button can be pressed again. Like the log itself it holds no prompt or answer text unless the server runs with \code{--log-content}.
+
+The file comes from \code{GET /v1/dashboard/logs/export} (0.15.4, SRV-803), under the same access rule as the log itself; the server sets the file name and takes one snapshot of the ring, without the engine lock or a stream place, and leaves the ring as it was. Each line reads \code{<UTC time> <level> <message>}, as the copy button writes it, and a traceback stays one entry. The export adds the header and nothing else, so the file follows the log's own rule: the engine writes no prompt or answer text into its log, and it withholds an exception message that quotes the request, unless \code{--log-content} is on. The standalone proxy answers the same route from its own log with \code{commit: unknown} and \code{log content: unknown}, because it has no such flag and does not vouch for its lines. A browser that cannot save a file the page builds is told so and gets the link to the server's file instead. On a phone the toolbar wraps, so the button stays in view.
 
 \screenshot{dashboard-dev}{The Dev view: the live log, which never holds prompt or answer text, and the recent requests. Demo data from the dashboard's mock server (\texttt{npm run preview:mock}), not a measurement.}{fig:shot-dev}
 
