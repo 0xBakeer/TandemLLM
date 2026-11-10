@@ -20,7 +20,8 @@
   8  LFM2's tiny engine with the e4m3 cache (Triton on a GPU, or TRITON_INTERPRET=1): the first
      prompt chunk is the bf16 engine's bit for bit and codes its rows as quantize_kv does; a second
      chunk and decode steps follow the bf16 engine closely; a verify block's rows are the decode
-     steps' bit for bit; a moved path's codes and scales commit; the self-check passes
+     steps' bit for bit; a moved path's codes and scales commit; a joint decode step and a joint
+     verify pass over two coded states give each state's lone bits; the self-check passes
                                                                           test_8_lfm2_engine
   9  the same on NemotronH's tiny engine                                  test_9_nemotron_engine
 
@@ -329,6 +330,21 @@ def _engine_check(build, prompt, cap: int):
     assert st.length == L + 2 and torch.equal(st.k[li][:, L + 1], k2) and torch.equal(st.ks[li][:, L + 1], s2)
     rest = _decode(eng, st, toks[2:])
     assert torch.equal(rest, dec[2:]), "the committed moved path does not continue the chain"
+    # joint passes over two coded states: each state's rows are its lone call's
+    a2, b2, a3, b3 = (eng.new_state(cap) for _ in range(4))
+    for s_, n_ in ((a2, len(prompt)), (b2, 12), (a3, len(prompt)), (b3, 12)):
+        eng.prefill(prompt[:n_], s_)
+    rbs = eng.decode_multi([(5, a2, "j0"), (9, b2, "j1")])
+    la, lb = rbs[0]["logits"][0].clone(), rbs[1]["logits"][0].clone()
+    a2.length += 1
+    b2.length += 1
+    assert torch.equal(la, _decode(eng, a3, [5])[0]) and torch.equal(lb, _decode(eng, b3, [9])[0]), "joint decode"
+    rbs = eng.verify_multi([([7, 8, 9], [-1, 0, 1], a2), ([4, 6], [-1, 0], b2)])
+    ja, jb = rbs[0]["logits"][:3].clone(), rbs[1]["logits"][:2].clone()
+    eng.stage_rows([7, 8, 9], [-1, 0, 1], a3)
+    assert torch.equal(ja, eng.rows_step(a3, 3)), "joint verify"
+    eng.stage_rows([4, 6], [-1, 0], b3)
+    assert torch.equal(jb, eng.rows_step(b3, 2)), "joint verify"
     res = eng.self_check([int(t) for t in prompt], steps=6, log=None)
     assert res["ok"], res
     return f"second chunk {e_chunk:.3f}, decode {e_dec:.3f} of the bf16 engine's largest logit ({DEV})"
