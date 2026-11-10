@@ -649,6 +649,58 @@ def test_a_next_turn_the_floor_holds_at_its_clients_rows_only_waits_at_the_gate(
     return f"with {low / GiB:.2f} to {up / GiB:.2f} GiB of workspace free it waits at the gate; admitted at 998 rows"
 
 
+IM_S, USER, IM_E, ASSIST, THINK, NL, NL2, THINK_END, ANSWER, REASON = 90, 91, 92, 93, 94, 95, 96, 97, 98, 99
+
+
+def _reasoned(answer: int, reasoning: int = 30, prompt_n: int = 203_415, new: int = 500):
+    """Slot 0 after a turn that thought: the last prompt as the client rendered it (the view, ending in the generation
+    prompt's `<think>\\n`), the rows of that prompt, its reasoning, `</think>`, `\\n\\n` and an answer of `answer`
+    tokens up to the end anchor, and the next turn's copy as a client that does not send the reasoning back renders
+    it: `<think>\\n\\n</think>\\n\\n`, the answer, a new message. (the copy, the view, the rows, the server's state)"""
+    from server import endalign
+
+    def tb(i):
+        return {NL: b"\n", NL2: b"\n\n", THINK: b"<think>", THINK_END: endalign.THINK_END}.get(int(i), b"<%d>" % i)
+    view = [1] * (prompt_n - 5) + [IM_S, ASSIST, NL, THINK, NL]
+    res = _rows(view + [REASON] * reasoning + [THINK_END, NL2] + [ANSWER] * answer, prompt_n + reasoning + 2 + answer,
+                [])
+    al = endalign.EndAlign(tb)
+    al._for, al._regions = res.end, [(prompt_n, res.end["at"], prompt_n + reasoning)]
+    copy = (view[:-1] + [NL2, THINK_END, NL2] + [ANSWER] * answer + [IM_E, NL, IM_S, USER, NL] + [4] * new
+            + [IM_E, NL, IM_S, ASSIST, NL, THINK, NL])
+    return copy, view, res, dict(resident=res, slot0_view=view, engine=_engine(res.valid), end_align=al)
+
+
+def test_a_next_turn_whose_copy_left_the_reasoning_out_is_charged_from_the_end_anchor():
+    """The box's plain follow-ups: the gate's rows were 4 above the rows forwarded on all 11 (1,002 for 998). The view
+    ends in the generation prompt's `<think>\\n`, so the share ends one token before the view's end; the copy holds
+    no reasoning, so it parts from the rows right there and its own estimate stays below the share. The prefill reads
+    it aligned (`EndAlign`) and resumes at the end anchor, past the copy's empty think block (3 tokens) and the answer
+    ("OK", 1 token). Priced at the share, the gate charged those rows again: 4 on the box, and a 50-token answer 53.
+    The rows' answer is the prefill's own, above the share as below it."""
+    app = _app()
+    old = app._CONV_MARKS
+    app._CONV_MARKS = (IM_S, [USER], IM_E)
+    said = []
+    try:
+        for answer in (1, 50):
+            copy, view, res, st = _reasoned(answer)
+            with _box(app, AVAIL, **st) as b:
+                ok, rec, ws, log = _priced(app, b, f"f{answer}", copy)
+                served = app._end_replay(res, list(copy))[0]
+                start, kind = res.resume_estimate(served, len(served), False)
+                fwd = len(served) - start
+                assert kind == "end" and start == res.end["at"] and fwd == 512, (kind, start, fwd)
+                assert rec.ws_rows == fwd, \
+                    f"charged {rec.ws_rows:,} rows ({rec.ws_kind}) for a next turn that forwards {fwd:,}"
+                assert ok is True and ws == b.mem.model(len(served), fwd, line=False), (vars(rec), log)
+                assert _first(app, b, f"f{answer}", len(served), start) == (None, "") and not b.adm.stats.get("raised")
+            said.append(f"answer of {answer}: {rec.ws_rows} rows")
+    finally:
+        app._CONV_MARKS = old
+    return "; ".join(said) + ", the rows its prefill forwards from the end anchor"
+
+
 def test_a_new_chat_is_priced_on_the_prompt_it_is_served_as():
     """`t1`: a new chat of 54 client tokens, served as 3,412 rows with the server's notes. Its price was the 54 rows
     (0.81 GiB of workspace) and the prefill forwarded 3,412. Priced on the served prompt it is charged those, its
