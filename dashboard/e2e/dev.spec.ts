@@ -1,7 +1,7 @@
 // the LM Studio-style developer view.
 import { readFileSync } from 'node:fs';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { IS_MOCK, finishRequest, injectLogLines, login, setMode } from './helpers';
+import { expect, test, type APIRequestContext, type Page, type Route } from '@playwright/test';
+import { IS_MOCK, TOKEN, finishRequest, injectLogLines, login, setMode } from './helpers';
 
 // SRV-804: the Log panel's export (SRV-803)
 const EXPORT = '/v1/dashboard/logs/export';
@@ -21,6 +21,7 @@ async function exportLog(page: Page): Promise<{ name: string; type: string; head
   }
   return { name: download.suggestedFilename(), type, head: text.slice(0, cut).split('\n'), entries };
 }
+const NAME = /^tandemllm-[A-Za-z0-9.-]+-\d{8}T\d{6}Z\.log$/;
 const field = (head: string[], label: string) => head.find((l) => l.startsWith(`${label}: `))?.slice(label.length + 2) ?? '';
 /** How many lines the mock engine's ring holds now. */
 const ringLines = async (request: APIRequestContext) => Number((await (await request.get('/__mock/mode')).json()).logLines);
@@ -233,6 +234,8 @@ test.describe('dev', () => {
       // the file name carries the version the header gives, made safe for a file name
       expect(file.name).toContain(`tandemllm-${field(file.head, 'version').replace(/[^A-Za-z0-9.-]/g, '-')}-`);
     }
+    // the panel names the file the browser was handed
+    await expect(page.locator('#console [data-log-export-saved] code')).toHaveText(file.name);
     // the export left the page as it was: no error, the same stream, still live
     await expect(page.locator('[data-log-export-error]')).toHaveCount(0);
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
@@ -286,6 +289,7 @@ test.describe('dev', () => {
     await expect(error).toContainText('Could not export the log from');
     await expect(error.locator('code')).toHaveText(EXPORT);
     await expect(error).toContainText('session expired. No file was saved.');
+    await expect(page.locator('[data-log-export-saved]')).toHaveCount(0);
     await page.waitForTimeout(500);
     expect(downloads).toBe(0);
     // the log itself is still there and live under the error
@@ -330,8 +334,145 @@ test.describe('dev', () => {
     await expect(error).toContainText('No file was saved.');
     const link = error.locator('a[data-log-export-link]');
     await expect(link).toHaveAttribute('href', new RegExp(`${EXPORT}$`));
+    await expect(link).toHaveText('Open the file');
+    await expect(page.locator('[data-log-export-saved]')).toHaveCount(0);
     expect(asked).toBe(0);
     expect(downloads).toBe(0);
+  });
+
+  test('export: A good export says under which name the file was saved, with a link to the file; the next press clears the line', async ({ page }) => {
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    const button = page.locator('[data-log-export]');
+    const saved = page.locator('#console [data-log-export-saved]');
+    const error = page.locator('#console [data-log-export-error] .state-error');
+    await expect(saved).toHaveCount(0);
+    const file = await exportLog(page);
+    await expect(saved).toHaveCount(1);
+    await expect(saved.locator('[role="status"] > span')).toHaveText(`Saved as ${file.name}`);
+    const link = saved.locator('a[data-log-export-link]');
+    await expect(link).toHaveText('Open the file');
+    await expect(link).toHaveAttribute('href', new RegExp(`${EXPORT}$`));
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener');
+    // the link's address gives the same file, as an attachment
+    const direct = await page.request.get(await link.evaluate((a) => (a as HTMLAnchorElement).href));
+    expect(direct.status()).toBe(200);
+    expect(direct.headers()['content-type']).toMatch(/^text\/plain/);
+    expect(direct.headers()['content-disposition']).toMatch(/^attachment; filename="tandemllm-[A-Za-z0-9.-]+\.log"$/);
+    expect((await direct.text()).startsWith('TandemLLM engine log\n')).toBe(true);
+    await expect(error).toHaveCount(0);
+
+    // the next press clears the line at once, while the engine has not answered yet
+    let answer!: () => void;
+    const asked = new Promise<void>((r) => (answer = r));
+    await page.route(`**${EXPORT}`, async (route) => {
+      await asked;
+      await route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { type: 'unauthorized', message: 'a session or an admin token is required' } }) });
+    });
+    await button.click();
+    await expect(saved).toHaveCount(0);
+    await expect(button).toBeDisabled();
+    answer();
+    // a press that failed leaves no "Saved as" line, only its error
+    await expect(error).toContainText('No file was saved.');
+    await expect(saved).toHaveCount(0);
+    await expect(button).toBeEnabled();
+    // and a good one after it shows the line again, in place of the error
+    await page.unroute(`**${EXPORT}`);
+    const [download] = await Promise.all([page.waitForEvent('download'), error.getByRole('button', { name: 'Try again' }).click()]);
+    await expect(saved.locator('code')).toHaveText(download.suggestedFilename());
+    await expect(error).toHaveCount(0);
+    await saved.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(saved).toHaveCount(0);
+    await expect(button).toBeEnabled();
+  });
+
+  test('export: with a password set on the server, the "Open the file" link is let in by the page\'s own session', { tag: '@mock' }, async ({ page, browser }) => {
+    test.skip(!IS_MOCK, 'needs the mock password switch');
+    try {
+      await setMode(page.request, 'ok', { password: true });
+      // the browser gets a session; the cookie is HttpOnly, the page holds no token
+      expect((await page.request.post('/v1/dashboard/session', { data: { token: TOKEN } })).status()).toBe(204);
+      await login(page, '#/dev');
+      await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+      expect(await page.evaluate(() => document.cookie)).not.toContain('qse_dash');
+      const file = await exportLog(page);
+      expect(file.name).toMatch(NAME);
+      const link = page.locator('#console [data-log-export-saved] a[data-log-export-link]');
+      const href = await link.evaluate((a) => (a as HTMLAnchorElement).href);
+      expect(new URL(href).pathname).toBe(EXPORT);
+      expect(new URL(href).search).toBe(''); // no token in the address
+      // a browser with no session is refused at that address
+      const stranger = await browser.newContext();
+      expect((await stranger.request.get(href)).status()).toBe(401);
+      await stranger.close();
+      // a tab of this browser that goes to it gets the file
+      const tab = await page.context().newPage();
+      const [download] = await Promise.all([tab.waitForEvent('download'), tab.goto(href).catch(() => null)]);
+      expect(download.suggestedFilename()).toMatch(NAME);
+      expect(readFileSync(await download.path(), 'utf8').startsWith('TandemLLM engine log\n')).toBe(true);
+      await tab.close();
+    } finally {
+      await setMode(page.request, 'ok');
+    }
+  });
+
+  test('export: with a password set on the server, a press on the "Open the file" link is answered with the file', { tag: '@mock' }, async ({ page }) => {
+    test.skip(!IS_MOCK, 'needs the mock password switch');
+    try {
+      await setMode(page.request, 'ok', { password: true });
+      expect((await page.request.post('/v1/dashboard/session', { data: { token: TOKEN } })).status()).toBe(204);
+      await login(page, '#/dev');
+      await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+      await exportLog(page);
+      // the press opens a new tab; the engine's answer to that tab is what counts
+      const answer = page.context().waitForEvent('response', (r) => new URL(r.url()).pathname === EXPORT && r.request().isNavigationRequest());
+      await page.locator('#console [data-log-export-saved] a[data-log-export-link]').click();
+      const got = await answer;
+      expect(got.status()).toBe(200);
+      expect(got.headers()['content-disposition']).toMatch(/^attachment; filename="tandemllm-[A-Za-z0-9.-]+\.log"$/);
+      // the page the press came from is as it was
+      await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+      await expect(page.locator('#console [data-log-export-saved]')).toHaveCount(1);
+    } finally {
+      await setMode(page.request, 'ok');
+    }
+  });
+
+  test('export: An engine that takes the request and sends nothing: the page gives up at 60 s, shows the error, and the button can be pressed again', async ({ page }) => {
+    let downloads = 0;
+    page.on('download', () => downloads++);
+    await page.clock.install();
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    const held: Route[] = [];
+    await page.route(`**${EXPORT}`, (route) => void held.push(route));
+    const button = page.locator('[data-log-export]');
+    const error = page.locator('#console [data-log-export-error] .state-error');
+    await button.click();
+    await expect.poll(() => held.length).toBe(1);
+    await expect(button).toBeDisabled();
+    // 50 s on, the page still waits
+    await page.clock.fastForward(50_000);
+    await expect(button).toBeDisabled();
+    await expect(error).toHaveCount(0);
+    // past 60 s it gives up
+    await page.clock.fastForward(10_000);
+    await expect(error).toBeVisible();
+    await expect(error.locator('code')).toHaveText(EXPORT);
+    await expect(error).toContainText('the engine did not send the log within 60 s. No file was saved.');
+    await expect(button).toBeEnabled();
+    await expect(page.locator('[data-log-export-saved]')).toHaveCount(0);
+    expect(held).toHaveLength(1);
+    expect(downloads).toBe(0);
+    // the engine answers again: the same button saves the file
+    await page.unroute(`**${EXPORT}`);
+    const [download] = await Promise.all([page.waitForEvent('download'), button.click()]);
+    expect(download.suggestedFilename()).toMatch(NAME);
+    await expect(error).toHaveCount(0);
+    await expect(page.locator('#console [data-log-export-saved] code')).toHaveText(download.suggestedFilename());
+    expect(downloads).toBe(1);
   });
 
   test('export: Every existing feature of the page stays with the button added', { tag: '@mock' }, async ({ page, request }) => {

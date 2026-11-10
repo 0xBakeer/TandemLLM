@@ -191,3 +191,34 @@ test('phone 390 dark: a refused export shows its error inside the panel, within 
   expect(await noHorizontalOverflow(page)).toBe(true);
   await shot(page, 'log-export-error-390-dark');
 });
+
+test('phone 390 dark: the line after a save stays within the screen, with the longest file name too', async ({ page }) => {
+  await page.setViewportSize(SIZES[390]);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await login(page, '#/dev');
+  await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+  const button = page.locator('[data-log-export]');
+  const saved = page.locator('#console [data-log-export-saved]');
+  const within = async () => {
+    for (const part of [saved, saved.locator('code'), saved.locator('a[data-log-export-link]'), saved.getByRole('button', { name: 'Dismiss' })]) {
+      await expect(part).toBeVisible();
+      const box = await part.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(SIZES[390].width);
+    }
+    expect(await noHorizontalOverflow(page)).toBe(true);
+  };
+  const [first] = await Promise.all([page.waitForEvent('download'), button.click()]);
+  await expect(saved.locator('code')).toHaveText(first.suggestedFilename());
+  await within();
+  await shot(page, 'log-export-saved-390-dark');
+  // the longest name the engine gives: 120 characters before ".log"
+  const long = `tandemllm-${'0.15.3-rc1.'.repeat(9).slice(0, 93)}-20261109T003959Z.log`;
+  expect(long.length).toBe(124);
+  await page.route('**/v1/dashboard/logs/export', (route) => route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', headers: { 'Content-Disposition': `attachment; filename="${long}"` }, body: 'TandemLLM engine log\n' }));
+  const [second] = await Promise.all([page.waitForEvent('download'), button.click()]);
+  expect(second.suggestedFilename()).toBe(long);
+  await expect(saved.locator('code')).toHaveText(long);
+  await within();
+  await shot(page, 'log-export-saved-long-390-dark');
+});

@@ -1,13 +1,14 @@
 // SRV-804: the Log panel's export (SRV-803). The file name's rule, the save step against a
 // stand-in browser, the mock engine's file in the contract's form, the route fetched by the page's
-// own client from the mock engine over HTTP, and the panel's source: the button sits beside
-// "Clear view" and every control the panel had is still there.
+// own client from the mock engine over HTTP, the fetch's time limit, and the panel's source: the
+// button sits beside "Clear view" and every control the panel had is still there. The engine's own
+// file is tested in tests/test_logbuf.py, the panel in a browser in e2e/dev.spec.ts.
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, onApi, setApiBase } from '../src/api/client';
-import { CannotSave, canSave, exportName, LOGS_EXPORT, nameFrom, saveFile, sentence, type SaveEnv } from '../src/lib/log-export';
+import { CannotSave, canSave, EXPORT_LIMIT_MS, EXPORT_NAME_MAX, exportName, LOGS_EXPORT, nameFrom, releaseSaved, saveFile, sentence, type SaveEnv } from '../src/lib/log-export';
 import { EXPORT_TITLE, exportText, uptimeText } from '../mock/log-export.ts';
 import { LogRing } from '../mock/logs.ts';
 import { createMockMiddleware } from '../mock/server.ts';
@@ -15,6 +16,8 @@ import { createMockMiddleware } from '../mock/server.ts';
 const EXAMPLE = readFileSync(new URL('../../docs/contract/dashboard-v1/logs-export.example.txt', import.meta.url), 'utf8');
 const DEV = readFileSync(new URL('../src/views/dev.ts', import.meta.url), 'utf8');
 const CSS = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
+const LOGBUF = readFileSync(new URL('../../server/logbuf.py', import.meta.url), 'utf8');
+const ENGINE = readFileSync(new URL('../../server/app.py', import.meta.url), 'utf8');
 const NAME = /^[A-Za-z0-9.-]+$/;
 const ENTRY = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (debug|info|warning|error) /;
 
@@ -43,6 +46,21 @@ describe('the file name', () => {
     for (const v of [null, undefined, '', '   ']) expect(exportName(v, new Date('2026-11-09T00:39:59Z'))).toBe('tandemllm-unknown-20261109T003959Z.log');
   });
 
+  it('a long version is cut: the name before ".log" is at most 120 characters and still ends with the time', () => {
+    const at = new Date('2026-11-09T00:39:59Z');
+    const room = EXPORT_NAME_MAX - 'tandemllm--20261109T003959Z'.length;
+    expect(EXPORT_NAME_MAX).toBe(120);
+    expect(room).toBe(93);
+    for (const n of [1, room - 1, room]) expect(exportName('v'.repeat(n), at)).toBe(`tandemllm-${'v'.repeat(n)}-20261109T003959Z.log`);
+    for (const n of [room + 1, 400, 5000]) {
+      const name = exportName('v'.repeat(n), at);
+      expect(name, String(n)).toBe(`tandemllm-${'v'.repeat(room)}-20261109T003959Z.log`);
+      expect(name.length).toBe(EXPORT_NAME_MAX + '.log'.length);
+    }
+    // the engine's limit is the same number
+    expect(LOGBUF).toMatch(/^EXPORT_NAME_MAX = 120\b/m);
+  });
+
   it("the engine's name is taken from Content-Disposition, and no other kind of name is", () => {
     expect(nameFrom('attachment; filename="tandemllm-0.15.3-20261109T003959Z.log"')).toBe('tandemllm-0.15.3-20261109T003959Z.log');
     expect(nameFrom('attachment; filename=tandemllm-0.15.3-20261109T003959Z.log')).toBe('tandemllm-0.15.3-20261109T003959Z.log');
@@ -53,9 +71,10 @@ describe('the file name', () => {
 });
 
 /** a stand-in for what `saveFile` needs of a browser */
-function browser(opts: { download?: boolean; url?: boolean } = {}) {
+function browser(opts: { download?: boolean; url?: boolean; events?: boolean } = {}) {
   const did: string[] = [];
-  const later: { fn: () => void; ms: number }[] = [];
+  const heard: { type: string; fn: () => void }[] = [];
+  let made = 0;
   const env = {
     document: {
       createElement: (tag: string) => {
@@ -67,22 +86,66 @@ function browser(opts: { download?: boolean; url?: boolean } = {}) {
       },
       body: { append: () => did.push('append') },
     },
-    URL: opts.url === false ? {} : { createObjectURL: () => (did.push('url'), 'blob:stand-in'), revokeObjectURL: (u: string) => did.push(`revoke ${u}`) },
-    later: (fn: () => void, ms: number) => later.push({ fn, ms }),
+    URL: opts.url === false ? {} : { createObjectURL: () => (did.push('url'), `blob:stand-in-${++made}`), revokeObjectURL: (u: string) => did.push(`revoke ${u}`) },
+    ...(opts.events === false ? {} : { addEventListener: (type: string, fn: () => void) => heard.push({ type, fn }) }),
   };
-  return { env: env as unknown as SaveEnv, did, later };
+  return { env: env as unknown as SaveEnv, did, heard, freed: () => did.filter((d) => d.startsWith('revoke ')) };
 }
 
 describe('the save step', () => {
+  afterEach(() => {
+    releaseSaved(); // the held object URL is the module's own state
+    vi.useRealTimers();
+  });
+
   it('hands the bytes to the browser as a download under the given name', () => {
     const b = browser();
     saveFile(new Blob(['x']), 'tandemllm-0.15.3-20261109T003959Z.log', b.env);
-    expect(b.did).toEqual(['url', 'append', 'click tandemllm-0.15.3-20261109T003959Z.log blob:stand-in', 'remove']);
-    // the object URL is freed later, once the download has had time to start
-    expect(b.later).toHaveLength(1);
-    expect(b.later[0].ms).toBeGreaterThanOrEqual(10_000);
-    b.later[0].fn();
-    expect(b.did.at(-1)).toBe('revoke blob:stand-in');
+    expect(b.did).toEqual(['url', 'append', 'click tandemllm-0.15.3-20261109T003959Z.log blob:stand-in-1', 'remove']);
+  });
+
+  it('the object URL is not freed after a fixed time: a browser that reads it late still finds it', () => {
+    vi.useFakeTimers();
+    const b = browser();
+    saveFile(new Blob(['x']), 'a.log', b.env);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(3_600_000);
+    expect(b.freed()).toEqual([]);
+  });
+
+  it('the next export frees the one before it, and only that one', () => {
+    const b = browser();
+    saveFile(new Blob(['x']), 'a.log', b.env);
+    saveFile(new Blob(['y']), 'b.log', b.env);
+    expect(b.freed()).toEqual(['revoke blob:stand-in-1']);
+    // freed before the next one is made, so the page holds one file at most
+    expect(b.did.indexOf('revoke blob:stand-in-1')).toBeLessThan(b.did.lastIndexOf('url'));
+    saveFile(new Blob(['z']), 'c.log', b.env);
+    expect(b.freed()).toEqual(['revoke blob:stand-in-1', 'revoke blob:stand-in-2']);
+  });
+
+  it('the page frees the last one when it goes: one pagehide listener, however many exports', () => {
+    const b = browser();
+    saveFile(new Blob(['x']), 'a.log', b.env);
+    saveFile(new Blob(['y']), 'b.log', b.env);
+    expect(b.heard.map((h) => h.type)).toEqual(['pagehide']);
+    b.heard[0].fn();
+    expect(b.freed()).toEqual(['revoke blob:stand-in-1', 'revoke blob:stand-in-2']);
+    b.heard[0].fn(); // nothing is held any more
+    expect(b.freed()).toHaveLength(2);
+    // and an export after the page came back holds its own again
+    saveFile(new Blob(['z']), 'c.log', b.env);
+    expect(b.freed()).toHaveLength(2);
+    releaseSaved();
+    expect(b.freed().at(-1)).toBe('revoke blob:stand-in-3');
+  });
+
+  it('a browser with no page events still saves, and the next export frees the URL', () => {
+    const b = browser({ events: false });
+    saveFile(new Blob(['x']), 'a.log', b.env);
+    saveFile(new Blob(['y']), 'b.log', b.env);
+    expect(b.did.filter((d) => d.startsWith('click '))).toHaveLength(2);
+    expect(b.freed()).toEqual(['revoke blob:stand-in-1']);
   });
 
   it('a browser that cannot save a generated file is told apart, and nothing is clicked', () => {
@@ -98,11 +161,13 @@ describe('the save step', () => {
   });
 });
 
-describe('the mock engine builds the file as the engine does', () => {
+// These cases prove the mock engine's file builder, the one the e2e mock tier downloads from. The
+// engine's own file has its cases in tests/test_logbuf.py.
+describe("the mock engine's own file builder", () => {
   const NOW = new Date('2026-11-09T00:39:59.500Z');
   const build = { version: '0.15.3+flashnext-3.05', gitSha: '952d072d1a2b', uptimeS: 7 * 3600 + 131, now: NOW, dropped: 0, capacity: 10_000, logContent: false };
 
-  it('the header has the fields of the contract example, in its order', () => {
+  it("the mock's header has the fields of the contract example, in its order", () => {
     const ring = new LogRing();
     ring.push('info', 'server', '[server] queue depth 0/8');
     const mine = parts(exportText(ring.all(), build));
@@ -122,7 +187,7 @@ describe('the mock engine builds the file as the engine does', () => {
     expect(parts(EXAMPLE).entries).toHaveLength(6);
   });
 
-  it('a missing value reads unknown, and the flag reads on when content logging is on', () => {
+  it('the mock writes unknown for a missing value and on for content logging', () => {
     const head = parts(exportText([], { now: NOW })).head;
     for (const label of ['version', 'commit', 'uptime', 'log content']) expect(field(head, label), label).toBe('unknown');
     expect(field(parts(exportText([], { ...build, logContent: true })).head, 'log content')).toBe('on (--log-content)');
@@ -131,7 +196,7 @@ describe('the mock engine builds the file as the engine does', () => {
     expect(uptimeText(-1)).toBe('unknown');
   });
 
-  it('The ring is empty: the header and 0 lines', () => {
+  it("the mock's file for an empty ring is the header and 0 lines", () => {
     const text = exportText(new LogRing().all(), build);
     const { head, entries } = parts(text);
     expect(field(head, 'count')).toBe('0 lines');
@@ -141,7 +206,7 @@ describe('the mock engine builds the file as the engine does', () => {
     expect(text.endsWith('\n\n')).toBe(true);
   });
 
-  it('The file holds the whole ring: 10,000 entries at all levels in order, and it says the ring was full', () => {
+  it("the mock's file for a full ring has its 10,000 entries at all levels in order and says the ring was full", () => {
     const ring = new LogRing(10_000);
     const levels = ['debug', 'info', 'warning', 'error'] as const;
     for (let i = 1; i <= 10_050; i++) ring.push(levels[i % 4], 'server', `[server] line ${i}`, null, Date.parse('2026-11-09T00:00:00Z') + i);
@@ -159,7 +224,16 @@ describe('the mock engine builds the file as the engine does', () => {
     expect(field(head, 'last line')).toBe(`${all[all.length - 1].ts} (UTC)`);
   });
 
-  it('a traceback stays one entry with its lines in order', () => {
+  it('the mock keeps a header value on one line, as the engine does', () => {
+    const text = exportText([], { ...build, version: '1.0\nlog content: on (--log-content)', gitSha: 'ab\r\ncd\u0000\u2028ef' });
+    const head = parts(text).head;
+    expect(head).toHaveLength(10);
+    expect(field(head, 'version')).toBe('1.0 log content: on (--log-content)');
+    expect(field(head, 'commit')).toBe('ab cd ef');
+    expect(head.filter((l) => l.startsWith('log content: '))).toEqual(['log content: off']);
+  });
+
+  it('the mock keeps a traceback as one entry with its lines in order', () => {
     const ring = new LogRing();
     ring.push('error', 'traceback', 'Traceback (most recent call last):\n  File "server/app.py", line 1440, in _complete\nRuntimeError: decode step failed');
     ring.push('info', 'server', '[server] after');
@@ -282,6 +356,90 @@ describe('the page fetches the route from the mock engine', () => {
   });
 });
 
+describe('the fetch has a time limit', () => {
+  const LATE = 'the engine did not send the log within 60 s';
+  /** a fetch that takes the request and never answers: it ends only when the caller gives it up */
+  const hang = (seen: { asked: number; given_up: number }) => (_url: string, init?: RequestInit) => {
+    seen.asked++;
+    return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => (seen.given_up++, reject(new DOMException('The operation was aborted.', 'AbortError')))));
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("the limit is the engine's own handler timeout, 60 s", () => {
+    expect(EXPORT_LIMIT_MS).toBe(60_000);
+    expect(ENGINE).toMatch(/^HANDLER_TIMEOUT_S = float\(os\.environ\.get\("QSE_HANDLER_TIMEOUT_S", 60\.0\)\)$/m);
+  });
+
+  it('An engine that takes the request and sends nothing: the fetch is given up at 60 s, with an error that names the route', async () => {
+    const seen = { asked: 0, given_up: 0 };
+    vi.stubGlobal('fetch', hang(seen));
+    let settled = false;
+    const result = api.logsExport().catch((x) => x).finally(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(seen).toEqual({ asked: 1, given_up: 0 });
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const e = await result;
+    expect(seen).toEqual({ asked: 1, given_up: 1 });
+    expect(e).toBeInstanceOf(ApiError);
+    expect(e.endpoint).toBe(LOGS_EXPORT);
+    expect(e.status).toBe(0);
+    expect(e.type).toBe('timeout');
+    expect(e.message).toBe(LATE);
+    expect(`${sentence(e.message)} No file was saved.`).toBe(`${LATE}. No file was saved.`);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a body that stalls after the headers is given up at the same limit, counted from the start', async () => {
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      await new Promise((r) => setTimeout(r, 20_000)); // the headers take 20 s
+      return { ok: true, status: 200, headers: new Headers({ 'Content-Type': 'text/plain; charset=utf-8' }), blob: () => new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))) };
+    });
+    let settled = false;
+    const result = api.logsExport().catch((x) => x).finally(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const e = await result;
+    expect(e).toBeInstanceOf(ApiError);
+    expect(e.type).toBe('timeout');
+    expect(e.message).toBe(LATE);
+  });
+
+  it('a good answer leaves no timer behind, and a failure before the limit keeps its own message', async () => {
+    vi.stubGlobal('fetch', async () => new Response('TandemLLM engine log\n', { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment; filename="tandemllm-1-20261109T003959Z.log"' } }));
+    const got = await api.logsExport();
+    expect(got.name).toBe('tandemllm-1-20261109T003959Z.log');
+    expect(await got.blob.text()).toBe('TandemLLM engine log\n');
+    expect(vi.getTimerCount()).toBe(0);
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('fetch failed');
+    });
+    const e = await api.logsExport().catch((x) => x);
+    expect(e.type).toBe('offline');
+    expect(e.message).toBe('engine unreachable (fetch failed)');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('the call can be made again after it was given up', async () => {
+    const seen = { asked: 0, given_up: 0 };
+    vi.stubGlobal('fetch', hang(seen));
+    for (const round of [1, 2]) {
+      const result = api.logsExport(5_000).catch((x) => x);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect((await result).message).toBe('the engine did not send the log within 5 s');
+      expect(seen).toEqual({ asked: round, given_up: round });
+    }
+  });
+});
+
 describe('the Log panel', () => {
   const tools = DEV.slice(DEV.indexOf('const tools = html`'), DEV.indexOf('const body = html`'));
   const run = DEV.match(/private async exportLog\(\): Promise<void> \{\n(?:.*\n)*?  \}\n/)?.[0] ?? '';
@@ -346,9 +504,31 @@ describe('the Log panel', () => {
     expect(shown).toContain('Try again');
     expect(shown).toContain('Dismiss');
     // a browser that cannot save gets the engine's own attachment instead
-    expect(shown).toContain('href=${api.logsExportUrl()}');
+    expect(shown).toContain("? this.exportLink('btn')");
+    const link = DEV.match(/private exportLink\([^]*?\n  \}\n/)?.[0] ?? '';
+    expect(link).toContain('href=${api.logsExportUrl()} target="_blank" rel="noopener"');
+    expect(link).toContain('Open the file</a>');
     expect(DEV).toContain('This browser cannot save a file that the page hands it.');
     expect(DEV.indexOf('${this.renderExportError()}')).toBeLessThan(DEV.indexOf('<div class="console ${this.wrap'));
+  });
+
+  it('a good export leaves one line with the name and the link, and the next press clears it', () => {
+    // set only after the file was handed over, under the name it was handed over with
+    expect(run).toContain('saveFile(blob, file);\n      this.exportSaved = file;');
+    // cleared at the press, before the fetch, with the old error
+    const cleared = run.indexOf('this.exportSaved = null;');
+    expect(cleared).toBeGreaterThan(run.indexOf('this.exportError = null;'));
+    expect(cleared).toBeLessThan(run.indexOf('await api.logsExport()'));
+    expect(run.slice(run.indexOf('} catch (e) {'))).not.toContain('exportSaved');
+    const shown = DEV.match(/private renderExportSaved\(\)[^]*?\n  \}\n/)?.[0] ?? '';
+    expect(shown).toContain('if (!this.exportSaved) return nothing;');
+    expect(shown).toContain('<div class="console-export-saved" role="status">');
+    expect(shown).toContain('<span>Saved as <code>${this.exportSaved}</code></span>');
+    expect(shown).toContain('${this.exportLink()}');
+    expect(DEV).toContain('${this.renderExportSaved()}${this.renderExportError()}');
+    // the line wraps on a phone, and a long name breaks inside it
+    expect(CSS).toMatch(/\.console-export-saved \{\n  display: flex;\n  flex-wrap: wrap;/);
+    expect(CSS).toMatch(/\.console-export-saved code \{\n  overflow-wrap: anywhere;\n\}/);
   });
 
   it('the error block is inset like the panel at both widths', () => {
