@@ -243,8 +243,8 @@ def test_the_window_takes_the_memory_that_is_free(monkeypatch):
                                (LM.MARGIN + 1 * G, 1 * G, 4096 + (2 * G // LM.ROW_BYTES) // 4096 * 4096),
                                (LM.MARGIN // 2, 0, 4096)):                         # short of the margin: chunk-major
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda f=free: (f, 128 * G))
-        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda c=cached: 3 * G + c)
-        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 3 * G)
+        nested = {"reserved_bytes": {"all": {"current": 3 * G + cached}}, "allocated_bytes": {"all": {"current": 3 * G}}}
+        monkeypatch.setattr(torch.cuda, "memory_stats_as_nested_dict", lambda n=nested: n)   # cache.cuda_stats' source
         got = LM.rows_now(4096, 32768)
         assert got == min(32768, want) and got % 4096 == 0, (free, cached, got, want)
     return "free + cached memory past the margin buys rows at ROW_BYTES each, in whole chunks, at most the knob"
