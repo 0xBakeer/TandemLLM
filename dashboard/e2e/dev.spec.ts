@@ -285,8 +285,7 @@ test.describe('dev', () => {
     await expect(error).toHaveAttribute('role', 'alert');
     await expect(error).toContainText('Could not export the log from');
     await expect(error.locator('code')).toHaveText(EXPORT);
-    await expect(error).toContainText('session expired');
-    await expect(error).toContainText('No file was saved.');
+    await expect(error).toContainText('session expired. No file was saved.');
     await page.waitForTimeout(500);
     expect(downloads).toBe(0);
     // the log itself is still there and live under the error
@@ -305,7 +304,7 @@ test.describe('dev', () => {
     await page.locator('[data-log-export]').click();
     const error = page.locator('#console [data-log-export-error] .state-error');
     await expect(error).toContainText('engine unreachable');
-    await expect(error).toContainText('No file was saved.');
+    await expect(error).toContainText(/[.!?] No file was saved\./);
     await page.waitForTimeout(500);
     expect(downloads).toBe(0);
     await page.unroute(`**${EXPORT}`);

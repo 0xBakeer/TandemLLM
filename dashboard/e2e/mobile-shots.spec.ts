@@ -184,7 +184,7 @@ test('phone 390 dark: a refused export shows its error inside the panel, within 
   await page.route('**/v1/dashboard/logs/export', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: '{"error":{"type":"unauthorized","message":"no session"}}' }));
   await page.locator('[data-log-export]').click();
   const error = page.locator('#console [data-log-export-error] .state-error');
-  await expect(error).toContainText('No file was saved.');
+  await expect(error).toContainText(/[.!?] No file was saved\./);
   const box = await error.boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(SIZES[390].width);
