@@ -144,7 +144,7 @@ kernels:
       - tests/gpu/test_exl3_slab_gemm_gpu.py
       - tests/gpu/test_exl3_silu_gpu.py
       - tests/gpu/test_skinny_gpu.py
-  - paths: ['engine/models/flashnext/**', 'tools/fn_*kernels*.py', 'tools/csrc/fn_*/**']
+  - paths: ['engine/models/flashnext/**', 'tools/fn_*kernels*.py', 'tools/fn_pf_hc.py', 'tools/csrc/fn_*/**']
     tests:
       - tests/gpu/test_fn_kernels_gpu.py
       - tests/gpu/test_fn_prefill_kernels_gpu.py
@@ -154,12 +154,19 @@ kernels:
       - tests/gpu/test_fn_mixer_mma_gpu.py
       - tests/gpu/test_fn_joint_graph_gpu.py
       - tests/gpu/test_fn_joint_prefill_gpu.py
+      - tests/gpu/test_fn_attn_rows_big_gpu.py
+      - tests/gpu/test_fn_attn_stages_gpu.py
+      - tests/gpu/test_fn_pf_hc_gpu.py
+      - tests/gpu/test_fn_pf_nocopy_gpu.py
+      - tests/gpu/test_fn_pf_window_gpu.py
+      - tests/gpu/test_fn_prefill_mm_gpu.py
   - paths: ['engine/gdn.py', 'tools/gdn_*.py']
     tests:
       - tests/gpu/test_gdn_gpu.py
       - tests/gpu/test_gdn_chunked_gpu.py
       - tests/gpu/test_gdn_prep_gpu.py
       - tests/gpu/test_gdn_wy_gpu.py
+      - tests/gpu/test_fn_pf_nocopy_gpu.py
   - paths: ['engine/linear.py', 'tools/exl3_*.py', 'tools/csrc/exl3_*/**', 'ops/*-tiles*.json']
     tests:
       - tests/gpu/test_exl3_mlp_bridge_gpu.py

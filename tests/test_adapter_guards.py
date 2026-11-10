@@ -79,8 +79,10 @@ from engine.models import REGISTRY  # noqa: E402
 #: generation (engine/spill.py, engine/cache.py, engine/disk_cache.py's write guard): v2's second value again
 #: SRV-797 (2026-11-08): the policy holds the caches' room a turn was let in on (`Budget.hold_growth`,
 #: engine/cache.py): v2's second value again
-GOLDEN_V2 = ("3ae282292ea19b56921784a1ce75814dda978e50c5d9e51afe2814aa3bf9e9b9",
-             "d8fad801bcefe7d7e13b7fcc753365eb5516818d8ab27d674635142417ff3f03")
+#: SPD-249: tools/gdn_prefill_kernels.py's `view` (off unless Flash-Next's QWEN38_FN_PF_NOCOPY asks) and the
+#: fn_pf_hc extension in tools/gpu/base.py's inline list; no row changes on the GB10: v2 again
+GOLDEN_V2 = ("fc7ccaed9feffdbe43ec4147f552a6052829438d0f2b2c138eb1c63946af6fb9",
+             "6a6d431e289bf70a0a9b26aeabdc898518d47be78ea63c9812ef44757cdb1a0d")
 GOLDEN_FP4 = {
     # SPD-201 (2026-10-24): the speed setup's knobs default on, so every family's fingerprint moved once;
     # SPD-215: Flash-Next's joint pass row-wise and grouped experts by default (its two adapters again);
@@ -159,15 +161,18 @@ GOLDEN_FP4 = {
     # tools/gguf_quants.py, tools/gguf_grids.py): nemotron_h
     # #158: the indexer's radix select past 8,192 blocks, its fused score epilogue and live pool slice (the bits
     # the same; tools/fn_seq_kernels, tools/fn_prefill_kernels.py, knobs): qwen4_exp, nemotron_h, lfm2_moe, qwen3_5_moe, flint
-    "qwen3_5": "648168a9ee7f1b516b70380c4884a5c7ac06579061755016f15c70282090f229",
+    # SPD-249: the layer-major prefill windows, the fused hyper-connection inputs, the attention stages and fewer
+    # copies (QWEN38_FN_PF_*, all off, the bits the same), the tensor-core mixer modes (QWEN38_FN_PREFILL_MM, fp32 by
+    # default); tools/gdn_prefill_kernels.py's `view` and tools/gpu/base.py's fn_pf_hc: every adapter
+    "qwen3_5": "8cda55ed3a16bc084685cdf040f31151800c4dab822497c3452dbab4bae89a1d",
     # the prefill's indexer scores and PLE decode in row tiles (engine/models/flashnext/engine.py): qwen4_exp, qwen3_5_moe
     # SRV-795: each graph captured on its slot's own stream (engine/models/flashnext/engine.py; the same rows, its
     # SAME_ROWS entry): qwen4_exp, qwen3_5_moe
-    "qwen4_exp": "a8dc17f3ef2b9422e4f315358fddfc2ad8b4a7cf0061a1ce62c28bfb6e527992",
-    "nemotron_h": "7e42cc390f3fff2b373e47d1dc7e46bc3b26d7948a13ea3dc53adc1dca718c6b",
-    "lfm2_moe": "73d224baccec5ff53847027176a38c9a72aeee3665e82178a426f6a341688904",
-    "qwen3_5_moe": "62919c616be83191cd83c95c89326f75f9a1bffd53e526b932920e009be442ee",
-    "flint": "b3d2ef12774d32e91fdf1ec5a43743d6bc12a312853f2dd9e8a4615c3e85d224",
+    "qwen4_exp": "9c1f6a5dc12f3f39881123be4ee793cceefb4a1e46012588d81519d5b374f46a",
+    "nemotron_h": "0da1cfeb821d1d657f78455f7b325a9b691704efa1202c322a510a58e1788846",
+    "lfm2_moe": "e6b9d858da7627b878662c97485e408e639b40ac269e6aef1001ef6bcda97ecd",
+    "qwen3_5_moe": "dc5e81cf346b1f9343cab67efaf31e8eebceb325bb127f4397f81524a8803e8d",
+    "flint": "a2d781443f467bb6d36583810a148fefedd173a8addb91a1c196b99352989d3b",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
