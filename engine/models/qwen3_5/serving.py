@@ -89,7 +89,8 @@ def serve(a, ctx) -> dict:
             "cfg": cfg, "w": w, "describe": describe,
             "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax,
                         # SPD-150: which cache the attention layers keep (QWEN38_KV_FP8), /health's weights
-                        "weights_info": {"kv_cache": "e4m3" if eng.kv.fp8 else "bf16"}},
+                        "weights_info": {"kv_cache": "e4m3" if getattr(getattr(eng, "kv", None), "fp8", False)
+                                                    else "bf16"}},
             "side_slots": side_slots(a, ctx, cfg, w)}
 
 
