@@ -225,6 +225,17 @@
     "conflicts": [],
     "memory_gib": 0.0,
     "memory_max_gib": null
+   },
+   {
+    "id": "kv_fp8",
+    "label": "Long-context cache (FP8)",
+    "default": false,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null,
+    "kv_bytes_per_token": 74496
    }
   ],
   "parallelism": {
@@ -499,6 +510,17 @@
      "conflicts": [],
      "memory_gib": 0.0,
      "memory_max_gib": null
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 18944
     }
    ],
    "parallelism": {
@@ -850,6 +872,17 @@
      "conflicts": [],
      "memory_gib": 0.49,
      "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 12480
     }
    ],
    "parallelism": {
@@ -2961,6 +2994,117 @@
    }
   },
   {
+   "name": "kv_fp8 on",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "kv_fp8": true,
+     "laya": false,
+     "shadow": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 70.55,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 18.19,
+      "kind": "kv",
+      "worst_gb": 145.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 782216,
+    "kv_bytes_per_token": 74496,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 145.5,
+    "room_gb": 54.27,
+    "lane_full_gb": 18.19,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (18.19 GiB each); every lane at it would need 91.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 782,216 tokens of conversation fit in all, 97,777 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
    "name": "1 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
@@ -4904,7 +5048,8 @@
      "response_cache": false,
      "disk_tier": false,
      "nvme_spill": false,
-     "proxy": false
+     "proxy": false,
+     "kv_fp8": false
     }
    },
    "expect": {
@@ -6972,6 +7117,418 @@
     "lanes_full": 8,
     "notes": [
      "All 8 lanes can hold the full 262,144-token window at once (3.61 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "qwen3.8-flash-next, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 95.04,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 5.69,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+      "gb": 10.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 60.62
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 663179,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 60.62,
+    "room_gb": 19.17,
+    "lane_full_gb": 7.58,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "qwen3.8-flash-next, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 92.08,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 5.69,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+      "gb": 10.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 4.62,
+      "kind": "kv",
+      "worst_gb": 37.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 1086627,
+    "kv_bytes_per_token": 18944,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 37.0,
+    "room_gb": 19.17,
+    "lane_full_gb": 4.62,
+    "lanes_full": 4,
+    "notes": [
+     "4 of 8 lanes can hold the full 262,144-token window at once (4.62 GiB each); every lane at it would need 17.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 1,086,627 tokens of conversation fit in all, 135,828 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "ornith-1.5-122b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "ornith-1.5-122b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 126.05,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 48.0,
+      "kind": "kv",
+      "worst_gb": 48.0
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 1248679,
+    "kv_bytes_per_token": 24576,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 48.0,
+    "room_gb": 28.58,
+    "lane_full_gb": 6.0,
+    "lanes_full": 4,
+    "notes": [
+     "Over the budget by 19.42 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 1,248,679 tokens of conversation fit in all, 156,084 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "ornith-1.5-122b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "ornith-1.5-122b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 102.42,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 24.38,
+      "kind": "kv",
+      "worst_gb": 24.38
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 2097152,
+    "kv_bytes_per_token": 12480,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 24.38,
+    "room_gb": 28.58,
+    "lane_full_gb": 3.05,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 262,144-token window at once (3.05 GiB each).",
      "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
     ]
    }

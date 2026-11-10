@@ -29,8 +29,9 @@ The test matrix:
      window; 6.05 fits no window and says by how much; a window above a profile's largest is a 422;
      the fixture holds a case per pack at 131,072 and 262,144     test_flash_next_packs
  11  #104, Ornith (no side slots): one chat fits, two are a 422 in both copies of the check   test_the_fixture
- 10  SPD-150, Flint's e4m3 cache: the fixture holds Flint with the cache off and on, so the page's copy
-     counts the component's 14,784 KV bytes a token as the server does   test_the_fixture
+ 10  SPD-150, the e4m3 caches: the fixture holds Flint, Flash-Next and Ornith with the cache off and on (the
+     27B's with its components), so the page's copy counts a component's KV bytes a token as the server
+     does                                                         test_the_fixture
 
  12  SRV-707, one window for every lane: the KV is lanes x window (worst) and lanes x min(window, fill)
      with the pool; lanes_full is min(lanes, floor(room / one lane at the full window)), every lane
@@ -293,6 +294,11 @@ def _cases() -> list[dict]:
         out.append({"name": f"Flint, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
                     "selection": {"model": fl["id"], "components": {"kv_fp8": on}}})
     orn = _orn()
+    # SPD-150: the other families' e4m3 caches, off and on (the 27B's is among its components above)
+    for x in (f, orn):
+        for on in (False, True):
+            out.append({"name": f"{x['id']}, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
+                        "selection": {"model": x["id"], "components": {"kv_fp8": on}}})
     out.append({"name": "Ornith, one chat (its engine has no side slots, #104)", "selection": {"model": orn["id"]}})
     out.append({"name": "refused: Ornith, two chats", "selection": {"model": orn["id"], "slots": 2}})
     models = {m["id"]: m, f["id"]: f, fl["id"]: fl, orn["id"]: orn}
