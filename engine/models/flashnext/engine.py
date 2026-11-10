@@ -104,6 +104,10 @@ JG_PLE_LATE = _S.get("FN_JG_PLE_LATE") == "1"
 #: drafts' collect): its PLE rows are read into the table's row cache on the reader thread, so the verify's own read
 #: (the same ids, the same rows) finds them there; 0: off
 PLE_PREFETCH = _S.get("FN_PLE_PREFETCH") == "1"
+#: SPD-249 (T8): the MoE's router, the pad rows' ids and the experts' launch index (the stable expert order, or the expert
+#: groups) in one launch (`fn_kernels.route`) for calls of up to 32 rows: the same ids, weights, order and groups as the
+#: router, the mask, the sort and the groups launches it replaces; 0: those launches
+ROUTE_FUSED = _S.get("FN_ROUTE_FUSED") == "1"
 #: SPD-249: the joint graphs kept (the least recently replayed go first)
 JOINT_GRAPH_MAX = int(_S.get("FN_JOINT_GRAPH_MAX") or 12)
 #: SPD-249: a key is captured at its n-th pass (the eager ones before it compile every kernel it runs)
@@ -151,6 +155,9 @@ class FlashNextEngine(FlashNextRef):
     #: SPD-249 (T1): FN_PACK_GRAPH acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
     #: its packed drafts stay eager, whatever the knob says
     pack_knobs = True
+    #: SPD-249 (T8): FN_ROUTE_FUSED acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
+    #: its MoE calls and its load-time self-check stay the router, mask, sort and groups launches, whatever the knob says
+    route_knobs = True
 
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, tables, dtype=torch.bfloat16, device=device)
@@ -360,19 +367,46 @@ class FlashNextEngine(FlashNextRef):
     def moe_parts(self, x, li, pad=None):
         """The router and the experts of every (row, slot) pair, without the combine (the trunk
         folds it into the next inject): (yd [M S, H] fp32, ids, wts). `pad` (SPD-249, a joint graph): bool [M, 1]
-        on the device, its rows' ids set to -1 (the grouped kernels skip them: they pull no expert)."""
+        on the device, its rows' ids set to -1 (the grouped kernels skip them: they pull no expert). SPD-249 (T8):
+        QWEN38_FN_ROUTE_FUSED, `_moe_routed`, for this family only (`route_knobs`)."""
         from tools import fn_kernels as K
         c = self.cfg
-        logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
-        ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
-        if pad is not None:
-            ids.masked_fill_(pad, -1)
+        if ROUTE_FUSED and self.route_knobs and x.shape[0] <= K.ROUTE_ROWS and K.route_ok(x.device):
+            yd, ids, wts = self._moe_routed(x, li, pad)
+        else:
+            logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
+            ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
+            if pad is not None:
+                ids.masked_fill_(pad, -1)
+            yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
-        yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
         if self._moe_record is not None:
             self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), yd.clone()))
         return yd, ids, wts
+
+    def _moe_routed(self, x, li, pad):
+        """SPD-249 (T8): `moe_parts` for M <= 32 rows: the router (after its GEMV), the pad rows' ids and the launch index
+        in one launch (`fn_kernels.route`; one row keeps the router launch, it needs no index), then the experts from
+        that index (`fn_kernels.moe_experts_ix`). The ids, weights, order and groups are those of the router, the mask,
+        the sort and the groups launches it replaces, so every pair's output and the combine's sum are the same bits."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        E, k = c.num_experts, c.num_experts_per_tok
+        M = x.shape[0]
+        logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
+        if K.MOE_GROUP and M > 1:
+            ids, wts, g, ng = K.route(logits, E, k, pad=pad, groups=True)
+            ix = ("groups", g, ng)
+        elif M == 1:
+            ids, wts = K.router(logits, E, k)                  # one row: nothing to order (today's launch)
+            if pad is not None:
+                ids.masked_fill_(pad, -1)
+            ix = ("order", self._order1)
+        else:
+            ids, wts, order = K.route(logits, E, k, pad=pad)
+            ix = ("order", order)
+        return K.moe_experts_ix(x, ids, self.banks[li], ix), ids, wts
 
     _moe_record = None
     spec_ok = False            # the load-time self-check passed (speculation may run)
@@ -391,9 +425,9 @@ class FlashNextEngine(FlashNextRef):
         TREE_ROWS, out of order), with the router recomputed from the recorded inputs, and compare
         every row bit for bit (the
         combine is per row and per column, so equal pairs give an equal sum). Any difference
-        leaves `spec_ok` False and the log names the layer and the row."""
-        from tools import fn_kernels as K
-        c = self.cfg
+        leaves `spec_ok` False and the log names the layer and the row. SPD-249 (T8): with
+        QWEN38_FN_ROUTE_FUSED the same calls also run through the code a verify block runs
+        (`_check_twins`' routed arms)."""
         st = self.new_state(self.max_len)
         logits = self.prefill(torch.tensor(prompt), st)
         tok = int(logits[0].argmax())
@@ -406,29 +440,77 @@ class FlashNextEngine(FlashNextRef):
         by_layer: dict = {}
         for li, x, ids, wts, out in rec:
             by_layer.setdefault(li, []).append((x, ids, wts, out))
-        bad = None
-        checked = 0
-        S = c.num_experts_per_tok + 1
-        for li, rows in sorted(by_layer.items()):
-            X = torch.cat([r[0] for r in rows])
-            I = torch.cat([r[1] for r in rows])
-            Wt = torch.cat([r[2] for r in rows])
-            Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
-            ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
-            calls = [(f"chain{w}", list(range(w))) for w in self.CHAIN_WIDTHS if w <= len(rows)]
-            calls.append(("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)]))
-            for name, sel in calls:
-                sl = torch.tensor(sel, device=X.device)
-                got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
-                for j, t in enumerate(sel):
-                    checked += 1
-                    if bad is None and not (torch.equal(got[j], Y[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
-                        bad = {"layer": li, "row": t, "call": name}
+        bad, arms = self._check_twins(by_layer)
         self.spec_ok = bad is None
-        res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": checked, "first_diff": bad}
+        res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": sum(arms.values()),
+               "first_diff": bad}
+        if len(arms) > 1:
+            res["arms"] = arms
         if log:
             log(f"[fn-selfcheck] {'PASS' if self.spec_ok else 'FAIL: speculation stays off'}: {res}")
         return res
+
+    def _check_twins(self, by_layer: dict) -> tuple:
+        """`self_check`'s compare over the decode step's records {layer: [(x, ids, wts, yd)]}: (the first difference or
+        None, rows compared by arm). Arm 'experts': the router recomputed over every row and `fn_kernels.moe_experts` on
+        each call's rows (today's launches). SPD-249 (T8), with ROUTE_FUSED: arms 'routed' (`moe_parts` with the
+        per-pair kernels: the lone verify's call) and 'routed_grouped' (`moe_parts` with the grouped kernels and every
+        third row a pad row: the joint graph's call), each call's ids, weights and every real pair's output against the
+        decode step's, a pad row's ids -1 in every slot. `moe_parts` takes `_moe_routed` for calls of up to ROUTE_ROWS
+        rows: every call here. A family with `route_knobs` False: arm 'experts' only."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        S = c.num_experts_per_tok + 1
+        bad = None
+        arms = {"experts": 0}
+        fused = ROUTE_FUSED and self.route_knobs and K.route_ok(self.device)
+        if fused:
+            arms["routed"] = arms["routed_grouped"] = 0
+        trace, self.route_trace = self.route_trace, None
+        try:
+            for li, rows in sorted(by_layer.items()):
+                X = torch.cat([r[0] for r in rows])
+                I = torch.cat([r[1] for r in rows])
+                Wt = torch.cat([r[2] for r in rows])
+                Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
+                ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
+                calls = [(f"chain{w}", list(range(w))) for w in self.CHAIN_WIDTHS if w <= len(rows)]
+                calls.append(("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)]))
+                for name, sel in calls:
+                    sl = torch.tensor(sel, device=X.device)
+                    got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
+                    for j, t in enumerate(sel):
+                        arms["experts"] += 1
+                        if bad is None and not (torch.equal(got[j], Y[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
+                            bad = {"layer": li, "row": t, "call": name}
+                    if not fused or len(sel) > K.ROUTE_ROWS:
+                        continue
+                    for arm, grouped in (("routed", False), ("routed_grouped", True)):
+                        pads = [grouped and j % 3 == 2 for j in range(len(sel))]
+                        pm = torch.tensor(pads, device=X.device)
+                        grp, K.MOE_GROUP = K.MOE_GROUP, grouped
+                        try:
+                            yd, gi, gw = self.moe_parts(X[sl].contiguous(), li, pad=pm.view(-1, 1) if grouped else None)
+                        finally:
+                            K.MOE_GROUP = grp
+                        yd = yd.view(len(sel), S, -1)
+                        real = ~pm
+                        rt = sl[real]
+                        arms[arm] += int(real.sum())
+                        ok = (torch.equal(yd[real], Y[rt]) and torch.equal(gi[real], I[rt]) and torch.equal(gw[real], Wt[rt])
+                              and bool((gi[pm] == -1).all()))
+                        if bad is None and not ok:
+                            row = None
+                            for j, t in enumerate(sel):
+                                fine = (bool((gi[j] == -1).all()) if pads[j] else
+                                        torch.equal(yd[j], Y[t]) and torch.equal(gi[j], I[t]) and torch.equal(gw[j], Wt[t]))
+                                if not fine:
+                                    row = t
+                                    break
+                            bad = {"layer": li, "row": row, "call": f"{arm}:{name}"}
+        finally:
+            self.route_trace = trace
+        return bad, arms
 
     # ------------------------------------------------------------------------- the trunk
     def _mix(self, n, p):

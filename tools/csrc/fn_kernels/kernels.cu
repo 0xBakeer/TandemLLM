@@ -599,6 +599,50 @@ __global__ void __launch_bounds__(32) router_kernel(const float* __restrict__ L,
     }
 }
 
+// SPD-249 (T8): router_kernel's arithmetic for one row in one warp (its code, statement for statement): the selected
+// expert and weight of slot `lane` (lanes < k) and the sum of the k selected probabilities in selection order
+template <int PER>
+__device__ __forceinline__ void route_row(const float* __restrict__ l, int E, int k, int lane, int& idsel, float& wsel,
+                                          float& tot) {
+    float v[PER];
+    float mx = -INFINITY;
+#pragma unroll
+    for (int i = 0; i < PER; ++i) {
+        const int e = lane + 32 * i;
+        v[i] = e < E ? bfr(l[e]) : -INFINITY;
+        mx = fmaxf(mx, v[i]);
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    float sum = 0.f;
+#pragma unroll
+    for (int i = 0; i < PER; ++i) { v[i] = (lane + 32 * i < E) ? ::expf(v[i] - mx) : 0.f; sum += v[i]; }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+#pragma unroll
+    for (int i = 0; i < PER; ++i) v[i] = (lane + 32 * i < E) ? v[i] / sum : -1.f;
+    tot = 0.f; wsel = 0.f;
+    idsel = 0;
+    for (int s = 0; s < k; ++s) {
+        float bv = -1.f; int bi = 0x7fffffff;
+#pragma unroll
+        for (int i = 0; i < PER; ++i) {
+            const int e = lane + 32 * i;
+            if (v[i] > bv || (v[i] == bv && e < bi)) { bv = v[i]; bi = e; }
+        }
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+        }
+#pragma unroll
+        for (int i = 0; i < PER; ++i) if (lane + 32 * i == bi) v[i] = -2.f;
+        tot += bv;
+        if (lane == s) { wsel = bv; idsel = bi; }
+    }
+}
+
 // --------------------------------------------------------------------------------- MoE GEMV
 
 // One row of one expert matrix over one 128-column block: XH (fp16 [Kin], shared memory) @ Wi, the
@@ -1435,6 +1479,93 @@ __global__ void __launch_bounds__(1024) moe_groups_par_kernel(const int* __restr
     __syncthreads();
     if (valid) { gg[2 + slot] = p; atomicMax(&gg[1], slot + 1); }
     if (i == 1023) NG[0] = sa[1023];
+}
+
+// SPD-249 (T8): the MoE's routing chain in one launch, M <= 32 rows, one CTA of 1024 threads.
+//  1. warp m routes row m (route_row: router_kernel's ids and weights, the shared slot id E with its sigmoid weight);
+//     a pad row (PAD[m], a joint graph's) gets ids -1 in every slot, its weights as computed (`masked_fill_`'s result);
+//  2. thread e holds expert e's rows as a bit mask (an expert is in a row at most once: top-k picks distinct experts,
+//     the shared id E is past them), so its pairs in stable order are its rows in ascending order;
+//  3. one scan over the experts gives each expert's first place in the stable order and (G) its first group;
+//  4. ORDER: pair p's place in `torch.sort(ids, stable=True)` (pad pairs first, in pair order), ORDER[place] = p;
+//     G / NG: moe_groups_kernel's table over that order (a run of one expert, split every GR pairs; pad pairs left out).
+#define ROUTE_THREADS 1024
+template <int PER>
+__global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const float* __restrict__ L, int ldl, int E, int k,
+        const bool* __restrict__ PAD, int M, int* __restrict__ IDS, float* __restrict__ WTS, int* __restrict__ G,
+        int* __restrict__ NG, int GR, int* __restrict__ ORDER) {
+    __shared__ unsigned rows[ROUTE_THREADS];           // expert e's rows (bit m), e <= E < ROUTE_THREADS
+    __shared__ int sid[ROUTE_THREADS];                 // pair p's expert (-1: a pad row's)
+    __shared__ int below[ROUTE_THREADS];               // expert e: (groups << 16) | pairs of the experts below it
+    __shared__ int wsum[32];
+    __shared__ unsigned padm;
+    pdl_wait();                                        // the router GEMV's logits
+    pdl_trigger();
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, S = k + 1, P = M * S;
+    rows[t] = 0u;
+    if (t == 0) padm = 0u;
+    __syncthreads();
+    if (warp < M) {
+        const int m = warp;
+        const float* l = L + (size_t)m * ldl;
+        int idsel; float wsel, tot;
+        route_row<PER>(l, E, k, lane, idsel, wsel, tot);
+        const bool pd = PAD != nullptr && PAD[m];
+        if (pd && lane == 0) atomicOr(&padm, 1u << m);
+        if (lane < k) {
+            IDS[(size_t)m * S + lane] = pd ? -1 : idsel;
+            WTS[(size_t)m * S + lane] = bfr(wsel / tot);
+            sid[m * S + lane] = pd ? -1 : idsel;
+            if (!pd && (unsigned)idsel < (unsigned)E) atomicOr(&rows[idsel], 1u << m);
+        }
+        if (lane == k) {
+            IDS[(size_t)m * S + k] = pd ? -1 : E;
+            WTS[(size_t)m * S + k] = bfr(sigm(bfr(l[E])));
+            sid[m * S + k] = pd ? -1 : E;
+            if (!pd) atomicOr(&rows[E], 1u << m);
+        }
+    }
+    __syncthreads();
+    // expert t's pairs and groups, packed, then an exclusive scan over the experts (a warp's, then the warps')
+    const int cnt = __popc(rows[t]);
+    const int own = (G != nullptr ? (cnt + GR - 1) / GR : 0) << 16 | cnt;
+    int v = own;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        const int y = __shfl_up_sync(0xffffffffu, v, o);
+        if (lane >= o) v += y;
+    }
+    if (lane == 31) wsum[warp] = v;
+    __syncthreads();
+    if (warp == 0) {
+        int w = wsum[lane];
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            const int y = __shfl_up_sync(0xffffffffu, w, o);
+            if (lane >= o) w += y;
+        }
+        wsum[lane] = w;
+    }
+    __syncthreads();
+    below[t] = v - own + (warp > 0 ? wsum[warp - 1] : 0);
+    __syncthreads();
+    if (t < P) {
+        const int m = t / S, e = sid[t];
+        const unsigned lower = (1u << m) - 1u;
+        if (ORDER != nullptr) {
+            const int r = e < 0 ? __popc(padm & lower) * S + (t - m * S)
+                                : __popc(padm) * S + (below[e] & 0xffff) + __popc(rows[e] & lower);
+            ORDER[r] = t;
+        }
+        if (G != nullptr && e >= 0) {
+            const int place = __popc(rows[e] & lower);
+            const int gi = (below[e] >> 16) + place / GR, slot = place % GR;
+            int* g = G + (size_t)gi * (2 + MOE_GR);
+            g[2 + slot] = t;
+            if (slot == 0) { g[0] = e; g[1] = min(GR, __popc(rows[e]) - place); }
+        }
+    }
+    if (G != nullptr && t == 0) NG[0] = wsum[31] >> 16;
 }
 
 // grid (H/256, M), 256 threads: out[m, c] = bf16(sum over slots in ascending expert id of w * y)
@@ -2764,6 +2895,34 @@ void fn_moe_down_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, to
     moe_group_attrs(kern, (int)cudaSharedmemCarveoutMaxShared);
     launch(kern, dim3(H / 128, P), dim3(32 * g_moe_warps), smem, st, (const int*)g.data_ptr(), (const int*)ng.data_ptr(),
         moe_args(tr, kb, su, sv), (const __half*)xd.data_ptr(), (void*)yd.data_ptr(), H, I, g_moe_gr);
+}
+
+// SPD-249 (T8): the router of M <= 32 rows with the pad rows' ids -1 and the experts' launch index in one launch:
+// `order` int32 [M S] (the pairs' stable order by expert id) or `g` / `ng` (the expert groups); pad: bool [M] or empty
+void fn_route(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor pad, torch::Tensor ids, torch::Tensor wts,
+              torch::Tensor g, torch::Tensor ng, torch::Tensor order) {
+    const at::cuda::OptionalCUDAGuard guard(logits.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int M = logits.size(0), S = (int)k + 1, P = M * S;
+    TORCH_CHECK(logits.dtype() == torch::kFloat && logits.stride(1) == 1 && logits.size(1) >= E + 1, "logits fp32 [M, E + 1]");
+    TORCH_CHECK(ids.dtype() == torch::kInt && wts.dtype() == torch::kFloat && ids.is_contiguous() && wts.is_contiguous(), "ids int32, wts fp32");
+    TORCH_CHECK(ids.numel() == P && wts.numel() == P && k < 32, "slots");
+    TORCH_CHECK(M >= 1 && M <= 32, "route: 1..32 rows (a warp a row, a row a bit)");
+    TORCH_CHECK(E <= 512 && E + 1 <= ROUTE_THREADS, "route kernel is built for up to 512 experts");
+    TORCH_CHECK(pad.numel() == 0 || (pad.dtype() == torch::kBool && pad.is_contiguous() && pad.numel() == M), "pad bool [M] or empty");
+    const bool grp = g.numel() > 0, ord = order.numel() > 0;
+    TORCH_CHECK(grp != ord, "route: the groups or an order");
+    if (grp) {
+        TORCH_CHECK(g.dtype() == torch::kInt && g.is_contiguous() && g.size(0) >= P && g.size(1) == 2 + MOE_GR &&
+                    ng.dtype() == torch::kInt && ng.numel() == 1, "groups");
+    } else {
+        TORCH_CHECK(order.dtype() == torch::kInt && order.is_contiguous() && order.numel() == P, "order int32 [M S]");
+    }
+    auto kern = E <= 256 ? route_kernel<8> : route_kernel<16>;
+    launch(kern, dim3(1), dim3(ROUTE_THREADS), 0, st, (const float*)logits.data_ptr(), (int)logits.stride(0), (int)E,
+        (int)k, pad.numel() ? (const bool*)pad.data_ptr() : (const bool*)nullptr, M, (int*)ids.data_ptr(),
+        (float*)wts.data_ptr(), grp ? (int*)g.data_ptr() : (int*)nullptr, grp ? (int*)ng.data_ptr() : (int*)nullptr,
+        g_moe_gr, ord ? (int*)order.data_ptr() : (int*)nullptr);
 }
 
 void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out) {

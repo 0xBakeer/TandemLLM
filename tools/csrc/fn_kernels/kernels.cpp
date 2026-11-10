@@ -15,6 +15,7 @@ void fn_moe_gud(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tens
 void fn_set_moe_gpar(int64_t v);
 void fn_moe_down_stage(torch::Tensor ygu, torch::Tensor ids, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xd);
 void fn_moe_down_group_s(torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor xd, torch::Tensor yd, int64_t kbmax);
+void fn_route(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor pad, torch::Tensor ids, torch::Tensor wts, torch::Tensor g, torch::Tensor ng, torch::Tensor order);
 void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps);
 void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);
 void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);

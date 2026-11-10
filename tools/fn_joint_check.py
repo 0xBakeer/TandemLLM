@@ -36,6 +36,9 @@ each lane's block width varies by round (1..`--block` rows, a tree on odd rounds
 first five lanes run, so the keys' padding, the lanes' row cuts and other lane sets are replayed; per round whether it
 ran from a graph, its pad rows' expert ids (all -1) and its real rows' (none -1). The timing then alternates eager and
 graph passes (`joint_eager_ms`, `joint_graph_ms`, without the part marks).
+`--dump-logits F` (SPD-249, T8): every round's lone and joint logits and each lane's end sections as sha256 digests of
+their bytes, and the greedy continuations (the decode step), saved to F, so two runs of one setup with different knobs
+compare bit for bit (tools/fn_route_check.py --compare A B).
 """
 
 from __future__ import annotations
@@ -63,6 +66,12 @@ def block_of(cont: list[int], at: int, n: int, tree: bool) -> tuple[list[int], l
         toks = toks[:2] + [(toks[2] + 17) % 200000] + toks[2:]
         parents = [-1, 0, 1, 1] + list(range(3, len(toks) - 1))
     return toks, parents
+
+
+def _digest(t: torch.Tensor) -> str:
+    """SPD-249: a tensor's bytes as a sha256 (an end state's sections, compared across runs without their bulk)."""
+    import hashlib
+    return hashlib.sha256(t.detach().contiguous().reshape(-1).view(torch.uint8).cpu().numpy().tobytes()).hexdigest()
 
 
 def _twin_diff(s_l, s_j) -> dict:
@@ -223,6 +232,8 @@ def main() -> None:
     ap.add_argument("--prompts-json", help="SPD-249: a bench JSON whose first row's prompts are the first burst")
     ap.add_argument("--long", type=int, default=1800, help="SPD-249: the rows of the last burst's three prompts")
     ap.add_argument("--steps", type=int, default=6, help="SPD-249: greedy decode steps after the prefill")
+    ap.add_argument("--dump-logits", help="SPD-249 (T8): every round's lone and joint logits, the continuations and the "
+                    "end sections to this file (torch.save, sha256 digests), for tools/fn_route_check.py --compare")
     ap.add_argument("--json")
     a = ap.parse_args()
     if a.joint_prefill:
@@ -282,6 +293,7 @@ def main() -> None:
         return json.loads(json.dumps(fn.joint_graph_stats())) if a.graph else {}
 
     rounds = []
+    dump = {"conts": conts, "lone": [], "joint": [], "end": []} if a.dump_logits else None
     for r in range(a.rounds):
         on = list(range(len(prompts)))
         if a.graph:
@@ -304,6 +316,9 @@ def main() -> None:
         outs = FlashNextServing.forward_tree_multi(
             [(joint[j], torch.tensor(blocks[j][0], device="cuda"), blocks[j][1], joint[j].st.length) for j in on])
         same = [bool(torch.equal(lone_out[j], o)) for j, o in zip(on, outs)]
+        if dump is not None:
+            dump["lone"].append({j: _digest(lone_out[j]) for j in on})
+            dump["joint"].append({j: _digest(o) for j, o in zip(on, outs)})
         diff = [float((lone_out[j] - o).abs().max()) for j, o in zip(on, outs)]
         rows = sum(len(blocks[j][0]) for j in on)
         info = {}
@@ -470,9 +485,15 @@ def main() -> None:
         views = [n for (n, t, ax), (_, u, _) in zip(s_l.state.views(), s_j.state.views())
                  if not torch.equal(t.narrow(ax, 0, s_l.st.length), u.narrow(ax, 0, s_j.st.length))]
         end.append({"length": [s_l.st.length, s_j.st.length], "sections_differ": bad, "views_differ": views})
+        if dump is not None:
+            dump["end"].append({"length": s_j.st.length, "sections": {k: _digest(v) for k, v in secs_j.items()}})
         print(f"[joint] end: {end[-1]}", flush=True)
     if a.graph:
         print(f"[joint] graphs: {jstats()}", flush=True)
+    if dump is not None:
+        torch.save(dump, a.dump_logits)
+        print(f"[joint] logits of {len(dump['lone'])} rounds, {len(conts)} continuations, {len(dump['end'])} end states "
+              f"to {a.dump_logits}", flush=True)
     if a.json:
         json.dump({"rounds": rounds, "end": end, "timing": timing, "kernels": kern, "lone_kernels": lone_k}, open(a.json, "w"), indent=1)
 

@@ -98,6 +98,10 @@ KNOBS: dict[str, tuple] = {
     # that took a row the lookup shaped (its own, or a spine row it agreed with) starts over, a lone round always looks
     # (engine/methods/mtp_drafter.py `mtp_look_backoff`; the lookup only adds rows to the verified tree); 0: off
     'FN_LOOK_BACKOFF': ('0', 'engine/models/flashnext/serving.py'),
+    # SPD-249 (T8): the MoE's router, the pad rows' ids and the experts' launch index (stable expert order or expert
+    # groups) in one launch for calls of up to 32 rows (the ids, weights, order and groups of the launches it replaces:
+    # router, mask, sort, groups); Flash-Next only (Qwen3.5-MoE keeps those launches); 0: those launches
+    'FN_ROUTE_FUSED': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: the joint graphs kept (the least recently replayed go first)
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)
