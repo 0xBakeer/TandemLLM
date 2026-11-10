@@ -187,7 +187,11 @@ class LogBuffer:
 # header and nothing else, so the file holds what the ring holds and the no-content rule above is
 # the file's rule too. Every time is UTC and says so: the page shows local time.
 EXPORT_TITLE = "TandemLLM engine log"
+EXPORT_NAME_MAX = 120          # the file name's length before ".log": every file system takes it
 _UNSAFE = re.compile(r"[^A-Za-z0-9.-]")
+# what would break a header value into a second line: C0 and C1 controls, the line separators
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+_OWN_FLAG = object()           # `export(log_content=...)` not given: this process's own flag
 
 
 def _utc(now: _dt.datetime | None) -> _dt.datetime:
@@ -211,17 +215,21 @@ def _uptime(seconds) -> str:
 
 
 def export_name(version: str | None, now: _dt.datetime | None = None) -> str:
-    """`tandemllm-<version>-<time of export>.log`, in letters, digits, dot and dash only."""
+    """`tandemllm-<version>-<time of export>.log`, in letters, digits, dot and dash only. A long
+    version is cut, so the name before ".log" is never longer than `EXPORT_NAME_MAX`."""
     v = _UNSAFE.sub("-", str(version or "").strip()) or "unknown"
-    return f"tandemllm-{v}-{_utc(now).strftime('%Y%m%dT%H%M%SZ')}.log"
+    stamp = _utc(now).strftime("%Y%m%dT%H%M%SZ")
+    v = v[:EXPORT_NAME_MAX - len(f"tandemllm--{stamp}")]
+    return f"tandemllm-{v}-{stamp}.log"
 
 
 def export_text(entries: list[dict], *, version: str | None = None, git_sha: str | None = None,
                 uptime_s: float | None = None, now: _dt.datetime | None = None,
                 dropped: int = 0, capacity: int = RING, log_content: bool | None = None) -> str:
-    """The file's text. `entries` is one `LogBuffer.snapshot()`; a missing value reads "unknown"."""
+    """The file's text. `entries` is one `LogBuffer.snapshot()`; a missing value reads "unknown".
+    A header value is one line: a newline or another control character in it reads as a space."""
     def known(v) -> str:
-        return str(v).strip() or "unknown" if v is not None else "unknown"
+        return _CONTROL.sub(" ", str(v)).strip() or "unknown" if v is not None else "unknown"
 
     head = [EXPORT_TITLE,
             f"version: {known(version)}",
@@ -244,14 +252,20 @@ def export_text(entries: list[dict], *, version: str | None = None, git_sha: str
 
 def export(buf: "LogBuffer", *, version: str | None = None, git_sha: str | None = None,
            started: float | None = None, now: _dt.datetime | None = None,
-           clock=None) -> tuple[str, bytes]:
-    """`(file name, body)` of one export of `buf`. `started` is the process's start (unix s)."""
+           clock=None, log_content=_OWN_FLAG) -> tuple[str, bytes]:
+    """`(file name, body)` of one export of `buf`. `started` is the process's start (unix s).
+
+    `log_content` is what the header says of content logging. Not given, it is this process's
+    `--log-content`. A process that has no such flag and does not write its lines through
+    `safe_message` passes None, and the header reads "unknown": it cannot vouch for "off"."""
+    if log_content is _OWN_FLAG:
+        log_content = bool(CONFIG["log_content"])
     entries, dropped = buf.snapshot()
     now = _utc(now)
     uptime = None if started is None else (clock or time.time)() - started
     text = export_text(entries, version=version, git_sha=git_sha, uptime_s=uptime, now=now,
                        dropped=dropped, capacity=buf.ring.maxlen or RING,
-                       log_content=bool(CONFIG["log_content"]))
+                       log_content=log_content)
     return export_name(version, now), text.encode("utf-8", "replace")
 
 

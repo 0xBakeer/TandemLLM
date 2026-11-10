@@ -422,9 +422,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/dashboard/metrics":
             return self._metrics()
         if path == "/v1/dashboard/logs/export":
-            # the whole ring as one text file (SRV-803); the proxy has no commit of its own
+            # the whole ring as one text file (SRV-803). The proxy has no commit of its own and
+            # no --log-content flag, so the header says "unknown" for both.
             return logbuf.serve_export(self, logbuf.BUFFER, version=STATE.get("version"),
-                                       started=getattr(STATE.get("svc"), "started", None))
+                                       started=getattr(STATE.get("svc"), "started", None),
+                                       log_content=None)
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
         try:
             if path == "/v1/dashboard/live":
