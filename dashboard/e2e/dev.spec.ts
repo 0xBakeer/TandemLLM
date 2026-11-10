@@ -1,6 +1,29 @@
 // the LM Studio-style developer view.
-import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { IS_MOCK, finishRequest, injectLogLines, login, setMode } from './helpers';
+
+// SRV-804: the Log panel's export (SRV-803)
+const EXPORT = '/v1/dashboard/logs/export';
+const ENTRY = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (debug|info|warning|error) /;
+
+/** Press the export button and read the file the browser saved. */
+async function exportLog(page: Page): Promise<{ name: string; type: string; head: string[]; entries: string[] }> {
+  const answer = page.waitForResponse((r) => r.url().includes(EXPORT));
+  const [download] = await Promise.all([page.waitForEvent('download'), page.locator('[data-log-export]').click()]);
+  const type = (await answer).headers()['content-type'] ?? '';
+  const text = readFileSync(await download.path(), 'utf8');
+  const cut = text.indexOf('\n\n');
+  const entries: string[] = [];
+  for (const line of text.slice(cut + 2).split('\n')) {
+    if (ENTRY.test(line)) entries.push(line);
+    else if (line && entries.length) entries[entries.length - 1] += `\n${line}`;
+  }
+  return { name: download.suggestedFilename(), type, head: text.slice(0, cut).split('\n'), entries };
+}
+const field = (head: string[], label: string) => head.find((l) => l.startsWith(`${label}: `))?.slice(label.length + 2) ?? '';
+/** How many lines the mock engine's ring holds now. */
+const ringLines = async (request: APIRequestContext) => Number((await (await request.get('/__mock/mode')).json()).logLines);
 
 test.describe('dev', () => {
   test.beforeEach(async ({ request }) => {
@@ -169,5 +192,173 @@ test.describe('dev', () => {
     await page.locator('.log-line a.log-req', { hasText: rid }).first().click();
     await expect(page.locator('.req-row.is-open')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.req-expand code')).toHaveText(rid);
+  });
+
+  test('export: The button downloads the log as a text file with a header', async ({ page, request }) => {
+    const streams: string[] = [];
+    page.on('request', (r) => r.url().includes('/v1/dashboard/logs?') && streams.push(r.url()));
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    const button = page.locator('[data-log-export]');
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAttribute('title', 'Export the whole log as a text file');
+    await expect(button).toHaveText('Export');
+    // beside "Clear view", in the same toolbar and of its size
+    const clear = page.locator('#console .panel-tools button[title="Clear view"]');
+    const [a, b] = [await clear.boundingBox(), await button.boundingBox()];
+    expect(b?.height).toBe(a?.height);
+    expect(await page.locator('#console .panel-tools button').last().getAttribute('title')).toBe('Export the whole log as a text file');
+    const opened = streams.length;
+    const before = IS_MOCK ? await ringLines(request) : 0;
+    const file = await exportLog(page);
+    const after = IS_MOCK ? await ringLines(request) : 0;
+    expect(file.type).toMatch(/^text\/plain/);
+    expect(file.name).toMatch(/^tandemllm-[A-Za-z0-9.-]+-\d{8}T\d{6}Z\.log$/);
+    expect(file.head[0]).toBe('TandemLLM engine log');
+    expect(file.head.slice(1).map((l) => l.slice(0, l.indexOf(':')))).toEqual(['version', 'commit', 'uptime', 'exported', 'count', 'first line', 'last line', 'ring', 'log content']);
+    expect(field(file.head, 'exported')).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(UTC\)$/);
+    expect(field(file.head, 'uptime')).toMatch(/\d+ s$/);
+    expect(field(file.head, 'count')).toBe(`${file.entries.length} lines`);
+    if (IS_MOCK) {
+      // @mock: the mock engine's version and commit, and the count against what its ring holds
+      expect(file.name).toContain('tandemllm-0.1.0-rc4-');
+      expect(field(file.head, 'version')).toBe('0.1.0-rc4');
+      expect(field(file.head, 'commit')).toBe('7d0b176');
+      expect(file.entries.length).toBeGreaterThanOrEqual(before);
+      expect(file.entries.length).toBeLessThanOrEqual(after);
+    } else {
+      // the file name carries the version the header gives, made safe for a file name
+      expect(file.name).toContain(`tandemllm-${field(file.head, 'version').replace(/[^A-Za-z0-9.-]/g, '-')}-`);
+    }
+    // the export left the page as it was: no error, the same stream, still live
+    await expect(page.locator('[data-log-export-error]')).toHaveCount(0);
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await expect(button).toBeEnabled();
+    expect(streams.length).toBe(opened);
+  });
+
+  test('export: The file holds the whole ring, not the lines on screen', { tag: '@mock' }, async ({ page, request }) => {
+    test.skip(!IS_MOCK, 'needs the mock log injector');
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    // the page shows warnings that match one search term
+    await page.getByRole('radio', { name: 'warning' }).click();
+    await page.getByPlaceholder('search (server-side)').fill('needle-803');
+    // the ring fills past its 10,000 lines at every level
+    for (const level of ['debug', 'info', 'error']) await injectLogLines(request, 3400, level);
+    await injectLogLines(request, 5, 'warning', '[server] needle-803 on screen');
+    await expect(page.locator('.log-line:not(.log-gap)')).toHaveCount(5, { timeout: 15_000 });
+    expect(await ringLines(request)).toBe(10_000);
+    const file = await exportLog(page);
+    expect(field(file.head, 'count')).toBe('10000 lines');
+    expect(file.entries).toHaveLength(10_000);
+    expect(field(file.head, 'ring')).toMatch(/^full, the \d+ lines before the first one are not in this file \(the ring keeps 10000\)$/);
+    // every level is in the file, the debug lines the page never asked for included
+    for (const level of ['debug', 'info', 'warning', 'error']) expect(file.entries.some((e) => e.split(' ')[1] === level), level).toBe(true);
+    expect(file.entries.filter((e) => e.includes('needle-803'))).toHaveLength(5);
+    // in the ring's order: the time never runs back, and each injected run counts up
+    const times = file.entries.map((e) => e.slice(0, 24));
+    expect(times.every((t, i) => i === 0 || t >= times[i - 1])).toBe(true);
+    for (const level of ['debug', 'info', 'error']) {
+      const ns = file.entries.filter((e) => e.includes(` ${level} [server] injected line `)).map((e) => Number(e.slice(e.lastIndexOf(' ') + 1)));
+      expect(ns.length, level).toBeGreaterThan(1000);
+      expect(ns.every((n, i) => i === 0 || n === ns[i - 1] + 1), level).toBe(true);
+    }
+    // the page still shows its own five lines at its own level and search
+    await expect(page.getByRole('radio', { name: 'warning' })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByPlaceholder('search (server-side)')).toHaveValue('needle-803');
+    await expect(page.locator('.log-line:not(.log-gap)')).toHaveCount(5);
+  });
+
+  test('export: The session is refused: a 401 shows the error and no download starts', async ({ page }) => {
+    let downloads = 0;
+    page.on('download', () => downloads++);
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await page.route(`**${EXPORT}`, (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { type: 'unauthorized', message: 'a session or an admin token is required' } }) }));
+    await page.locator('[data-log-export]').click();
+    const error = page.locator('#console [data-log-export-error] .state-error');
+    await expect(error).toBeVisible();
+    await expect(error).toHaveAttribute('role', 'alert');
+    await expect(error).toContainText('Could not export the log from');
+    await expect(error.locator('code')).toHaveText(EXPORT);
+    await expect(error).toContainText('session expired');
+    await expect(error).toContainText('No file was saved.');
+    await page.waitForTimeout(500);
+    expect(downloads).toBe(0);
+    // the log itself is still there and live under the error
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await error.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(page.locator('[data-log-export-error]')).toHaveCount(0);
+    expect(downloads).toBe(0);
+  });
+
+  test('export: The engine cannot be reached: the error shows, no file is saved, and "Try again" saves it once the engine answers', async ({ page }) => {
+    let downloads = 0;
+    page.on('download', () => downloads++);
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await page.route(`**${EXPORT}`, (route) => route.abort('connectionrefused'));
+    await page.locator('[data-log-export]').click();
+    const error = page.locator('#console [data-log-export-error] .state-error');
+    await expect(error).toContainText('engine unreachable');
+    await expect(error).toContainText('No file was saved.');
+    await page.waitForTimeout(500);
+    expect(downloads).toBe(0);
+    await page.unroute(`**${EXPORT}`);
+    const [download] = await Promise.all([page.waitForEvent('download'), error.getByRole('button', { name: 'Try again' }).click()]);
+    expect(download.suggestedFilename()).toMatch(/^tandemllm-[A-Za-z0-9.-]+\.log$/);
+    await expect(page.locator('[data-log-export-error]')).toHaveCount(0);
+  });
+
+  test('export: a browser that cannot save a generated file is told so and offered the file from the engine', async ({ page }) => {
+    let asked = 0;
+    let downloads = 0;
+    page.on('request', (r) => r.url().includes(EXPORT) && asked++);
+    page.on('download', () => downloads++);
+    // a browser with no way to hand a page-built file to the user
+    await page.addInitScript(() => {
+      Object.defineProperty(URL, 'createObjectURL', { value: undefined, configurable: true });
+    });
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await page.locator('[data-log-export]').click();
+    const error = page.locator('#console [data-log-export-error] .state-error');
+    await expect(error).toContainText('This browser cannot save a file that the page hands it.');
+    await expect(error).toContainText('No file was saved.');
+    const link = error.locator('a[data-log-export-link]');
+    await expect(link).toHaveAttribute('href', new RegExp(`${EXPORT}$`));
+    expect(asked).toBe(0);
+    expect(downloads).toBe(0);
+  });
+
+  test('export: Every existing feature of the page stays with the button added', { tag: '@mock' }, async ({ page, request }) => {
+    test.skip(!IS_MOCK, 'needs the mock log injector');
+    await login(page, '#/dev');
+    await expect(page.locator('.console[data-state="open"]')).toBeVisible();
+    await exportLog(page);
+    // wrap
+    const wrap = page.locator('#console button[title="Wrap long lines"]');
+    await wrap.click();
+    await expect(page.locator('.console')).toHaveClass(/is-wrap/);
+    await wrap.click();
+    await expect(page.locator('.console')).not.toHaveClass(/is-wrap/);
+    // pause, then follow again
+    await page.getByRole('button', { name: 'following' }).click();
+    await injectLogLines(request, 4, 'info', '[server] after the export');
+    await expect(page.locator('.chip-float')).toContainText('new line');
+    await page.locator('.chip-float').click();
+    await expect(page.getByRole('button', { name: 'following' })).toBeVisible();
+    await expect(page.locator('.log-line', { hasText: 'after the export' }).first()).toBeVisible();
+    // copy line is still on each line
+    await expect(page.locator('.log-line .log-copy button').first()).toBeAttached();
+    // clear view empties the view, not the ring: the next export still has the lines
+    await page.locator('#console button[title="Clear view"]').click();
+    await expect(page.locator('.log-line', { hasText: 'after the export' })).toHaveCount(0);
+    const file = await exportLog(page);
+    expect(file.entries.filter((e) => e.endsWith(' info [server] after the export'))).toHaveLength(4);
+    // and the stream goes on into the cleared view
+    await injectLogLines(request, 1, 'info', '[server] still live');
+    await expect(page.locator('.log-line', { hasText: 'still live' })).toBeVisible();
   });
 });
