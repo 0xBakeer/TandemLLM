@@ -71,11 +71,14 @@ test.describe('dev', () => {
     expect(bad).toBe(0);
   });
 
-  test('search: only matching lines, the match highlighted', async ({ page }) => {
+  test('search: only matching lines, the match highlighted', async ({ page, request }) => {
     await login(page, '#/dev');
     await expect(page.locator('.console[data-state="open"]')).toBeVisible();
     // @mock: an error line is the mock's; on a real engine every [req] line carries finish=
     const term = IS_MOCK ? 'finish=error' : 'finish=';
+    // @mock: the mock's own ring holds such a line at some hours only (its rows follow the clock),
+    // so the case brings two of its own
+    if (IS_MOCK) await injectLogLines(request, 2, 'error', '[server] the search case: finish=error');
     await page.getByPlaceholder('search (server-side)').fill(term);
     await expect(page.locator('mark').first()).toHaveText(term, { timeout: 15_000 });
     // read the lines in one go (a live console re-renders between a count and an nth()), until the
