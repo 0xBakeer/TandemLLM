@@ -8265,7 +8265,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 102.42,
+    "total_gb": 102.43,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,

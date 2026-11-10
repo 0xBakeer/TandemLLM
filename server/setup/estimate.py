@@ -195,8 +195,10 @@ def defaults(m: dict) -> dict:
 
 def _r(x: float) -> float:
     # the page's r2 (dashboard/src/setup/estimate.ts, Math.round): a tie goes up, as there. round() sent an exact
-    # tie to the even digit, so 4.625 GiB read 4.62 here and 4.63 there
-    return math.floor(x * 100 + 0.5) / 100 + 0.0          # never -0.0
+    # tie to the even digit, so 4.625 GiB read 4.62 here and 4.63 there. The cents are rounded to 6 places first: a
+    # sum of parts lands a few ulps either side of a tie by Python version (3.12's sum() compensates), 102.425 as
+    # 102.42 on one and 102.43 on another
+    return math.floor(round(x * 100, 6) + 0.5) / 100 + 0.0          # never -0.0
 
 
 def kv_bytes(m: dict, sel: dict) -> int:
