@@ -42,6 +42,7 @@ Run: python tests/test_end_anchor_memory.py
 
 from __future__ import annotations
 
+import functools
 import io
 import os
 import sys
@@ -523,7 +524,8 @@ def test_spd257_the_scratch_the_ceiling_leaves_out_stops_short_of_the_peak():
     assert len(ev) == 1 and ev[0]["shed"] == ["store", "park"] and ev[0]["exempt"] == exempt, ev
     lines = io.StringIO()
     with redirect_stdout(lines):
-        app._OVER_CEILING_LOGGED[0] = 0.0
+        # last logged OVER_CEILING_LOG_S ago: 0.0 is that long ago only on a machine up longer than that
+        app._OVER_CEILING_LOGGED[0] = time.monotonic() - app.OVER_CEILING_LOG_S
         app._memory_event(ev[0])
     assert lines.getvalue().startswith("[memory] over the ceiling by ") and "after shedding store,park" in \
         lines.getvalue(), lines.getvalue()
@@ -1120,6 +1122,22 @@ def test_spd257_the_side_slots_log_line_names_its_policy():
 
 # ------------------------------------------------------------------ a guest chat on a side slot keeps its end
 
+def _up_a_day(fn):
+    """`fn` runs on a `time.monotonic()` a day further on. That clock counts from boot (Linux): on a
+    runner up for less than SIDE_GUEST_IDLE_S, a `t_used` aged by it goes below 0.0, and `take_side`'s
+    LRU reads it as older than a slot never served (0.0). The server never moves a stamp back: there
+    `t_used` is 0.0 or a positive `time.monotonic()`."""
+    @functools.wraps(fn)
+    def run(*a, **kw):
+        real = time.monotonic
+        time.monotonic = lambda: real() + 86400.0
+        try:
+            return fn(*a, **kw)
+        finally:
+            time.monotonic = real
+    return run
+
+
 def _pool_sides(k: int):
     """Slot 0 and `k` side slots, each with a resident prefix that keeps its end."""
     _state(park_bytes=BIG)
@@ -1145,6 +1163,7 @@ def _guest_reference():
     return out1, out2
 
 
+@_up_a_day
 def _guest_then_follow_up(mode: str, idle: bool = True, no_carry: bool = False):
     old = app.SIDE_GUEST_END
     try:
@@ -1191,6 +1210,7 @@ def test_spd257_the_routers_question_never_takes_the_slot():
     assert r.promoted == 0
 
 
+@_up_a_day
 def test_spd257_a_waiting_parent_or_worker_keeps_its_side_slot():
     """ENG-371 against the promotion: S on a side slot waits for its worker (or is the worker),
     idle past SIDE_GUEST_IDLE_S, and a short new chat G runs there as a guest. G is not promoted, the
@@ -1257,6 +1277,7 @@ def test_spd257_an_end_that_cannot_be_kept_cuts_nothing():
         app.SIDE_GUEST_END = old
 
 
+@_up_a_day
 def test_spd257_side_home_routes_the_promoted_guests_follow_up_to_its_slot():
     """The follow-up is routed (`_side_home`, then LRU `take_side`), not forced onto the slot: promoted, G's
     next turn names slot 1 its home and resumes at its end there; off, it names no home, LRU sends it to
