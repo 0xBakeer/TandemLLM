@@ -26,11 +26,22 @@ A verify twin is the multi-row form of a one-row decode kernel, and its rows mus
 A prompt chunk is not verified against anything, so its kernels have no twin contract: they share work across rows and are checked by next-token agreement (`tools/fn_prefill_check.py`): the kernel path against the decode path at least as close as the decode path is to the reference forward (within one point), no disagreement where both paths are sure (margins above 5), greedy continuations equal or first differing at a near tie. It is reported as agreement and margins, never as lossless. `tools/fn_prefill_kernels.py`:
 
 - `moe_grouped`: a chunk's (row, expert) pairs sorted by expert, each pair's input rotated with its expert's factors into the mma A-fragment order (an expert's rows padded to 16, one 16-byte load a lane and row tile), one GEMM over the experts' row groups that decodes each expert's trellis tiles once for up to 32 rows. The CTAs of one item (its matrix and column blocks) are adjacent on the grid, so its rows stream from memory once.
-- `mm_rows`: the mixers, the router, PLE and GDN a/b on the library GEMM with the weights exact in fp32 (`QWEN38_FN_PREFILL_MM=fp32`; fp16 weights failed the agreement gate at 3k). `tc` and `tcn` put the int8 weights on the tensor cores with nothing rounded (bf16 inputs, fp32 sums a scale group, the group's sum times its scale): `tc` a Triton kernel, `tcn` the native `mix_gemm_kernel`, which also applies the mixer's tail to its up products and writes x in bf16. Both are off by default.
+- `mm_rows`: the mixers, the router, PLE and GDN a/b on the library GEMM with the weights exact in fp32 (`QWEN38_FN_PREFILL_MM=fp32`; fp16 weights failed the agreement gate at 3k). `tc` and `tcn` put the int8 weights on the tensor cores with nothing rounded (bf16 inputs, fp32 sums a scale group, the group's sum times its scale): `tc` a Triton kernel, `tcn` the native `mix_gemm_kernel`, which also applies the mixer's tail to its up products and writes x in bf16. Both are off by default, and neither gives `fp32`'s bits.
 - `qsa_scores_rows`: a chunk's QSA block scores as one GEMM, the reference's arithmetic.
 - Attention, the GDN conv and gates, the PLE gate and conv reuse the decode path's sequence kernels with M rows (`attn_rows`, `gdn_pre`, `ple_gate`, `ple_conv`); the delta rule is `tools/gdn_prefill_kernels.py` with the key heads as they are.
 
 `QWEN38_FN_PREFILL=ref` keeps the reference's batched forward; `QWEN38_FN_PREFILL_CHUNK` is the chunk length (4,096). `QWEN38_FN_GROUP_ROWS` is the rows an item of the MoE group GEMM takes (64; 32 is the earlier tile, any other value refuses at import).
+
+Layer-major windows (SPD-249, `engine/models/flashnext/layer_major.py`): a prompt's chunks can run layer by layer in windows, each layer's experts once over the window's rows and the rest a chunk at a time at its own rows, so every chunk keeps the bits of its chunk-major forward. These knobs leave the prefill as it was by default, and each gives the same bits on:
+
+- `QWEN38_FN_PF_WINDOW`: the most rows a layer-major window takes (a multiple of the chunk); 0 (the default) runs chunk-major.
+- `QWEN38_FN_PF_ROT_ROWS`: 1 rotates a chunk's (row, expert) pairs in row order, a row read once, each pair's arithmetic the same; 0 (the default) keeps the grouped order.
+- `QWEN38_FN_PF_HC_FUSED`: 1 feeds a chunk's mixer GEMMs from fewer launches (`tools/fn_pf_hc.py`), in every `QWEN38_FN_PREFILL_MM` mode; 0 (the default) keeps the separate launches.
+- `QWEN38_FN_PF_INJ_FUSED`: 1 runs a chunk's hyper-connection inject and the next norm in one CTA a row; 0 (the default) keeps `fn_kernels.inject_norm`.
+- `QWEN38_FN_PF_ATTN_STAGES`: the pipeline stages (1 to 4) of a chunk's attention split launch, a launch setting only; 2 (the default) is the decode path's launch.
+- `QWEN38_FN_PF_NOCOPY`: 1 leaves out a chunk's copies that a view or the reading kernel's stride serves; 0 (the default) keeps the copies.
+
+`tools/fn_window_check.py` and `tools/fn_pf_hc_check.py` compare a prefill with the knobs off and on, bit for bit; `tools/fn_prefill_mm_ref.py` checks the `QWEN38_FN_PREFILL_MM` modes against a prefill with fp64 mixers.
 
 ## NVFP4 matrix products
 

@@ -255,6 +255,6 @@ Nobody has measured a pack's quality against the BF16 model yet. The BF16 releas
 | `ops/use-profile.sh flashnext-<bpw>` | switch to a pack; fetches the branch when it is missing |
 | `QWEN38_FN_MIX` | `int8` (the default): int8 with an fp32 scale a group of 128 weights; `int8rows`: one scale a row; `fp16`: the pack's values |
 | `QWEN38_FN_TABLE`, `QWEN38_FN_TABLE_CACHE_GB` | the n-gram table's policy (`warm` or `cold`) and the cold row cache in GiB |
-| `QWEN38_FN_PREFILL_MM` | the prefill's weights for the mixers, router and small projections: `fp32` (the default); `tc`, `tcn`: the int8 weights unrounded on the tensor cores |
+| `QWEN38_FN_PREFILL_MM` | the prefill's weights for the mixers, router and small projections: `fp32` (the default); `tc`, `tcn`: the int8 weights unrounded on the tensor cores, opt-in and not bit-identical to `fp32` |
 | `tools/fn_exl3_xcheck.py` | our reading of a pack against the converter's |
 | `tools/fn_mix_quality.py` | a mixer weight form against the pack's fp16 mixers |
