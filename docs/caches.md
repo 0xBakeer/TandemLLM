@@ -306,6 +306,9 @@ Each model can keep its attention layers' keys and values as e4m3 codes with one
 | Qwen3.8-Flash-Next | `FN_KV_FP8` | 31,040 -> 18,944 | the indexer keys, the MTP layer's cache |
 | Ornith-1.5-122B | `Q35M_KV_FP8` | 24,576 -> 12,480 | the MTP layer's cache |
 | Qwen3.8-27B | `KV_FP8` | 106,752 -> 74,496 | the drafters' KV |
+| LFM2.5-24B-A2B | `LFM2_KV_FP8` | 20,480 -> 10,880 | none |
+| Nemotron 3.5 Bolt and Super VL | `NH_KV_FP8` | 8,192 -> 4,224 | the MTP head's cache |
+| Nemotron 3.5 Lightning | `NH_KV_FP8` | 6,144 -> 3,168 | the MTP head's cache |
 
 The bytes are the Setup Guide's (`kv_bytes_per_token` of the model's `kv_fp8` component), and the engines' `cost()` counts the same.
 
@@ -315,6 +318,7 @@ How each engine keeps it:
 
 - Flint: [flint.md](flint.md#the-e4m3-kv-cache-flint_kv_fp8-off), with its measured cost.
 - Flash-Next and Ornith: a call's rows are written in bf16 to staging buffers and coded at their slots in one launch (`tools/kv_fp8.py`) before anything reads them, so a verify row and a prompt chunk read their own key decoded, as the decode step does. The decode, verify, commit and MTP graphs hold it. On Flash-Next a joint pass's attention goes a lane at a time with the cache on, and its joint graph (`FN_JOINT_GRAPH`) stays eager. A decode token there reads at most 2,051 keys a layer (about 50 MB in bf16 beside 4.2 GB of weights on 3.05), so the gain is memory, not speed. Ornith's prompt chunk attends over the cache's rows decoded to bf16, and its prompt workspace counts that copy.
+- LFM2.5 and Nemotron 3.5: [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md) and [nemotron-h.md](nemotron-h.md). A prompt chunk attends to its own rows in bf16 and to the cached ones decoded; the decode, verify and joint graphs hold the cache.
 - The 27B: the knob turns off the verify graphs and the joint graphs, and its cache is never paged, so each slot holds its whole window from the start.
 
 Not measured: the decode and prompt speed and the KL against the exact cache, on every model but Flint. `tests/gpu/test_kv_fp8_gpu.py` holds the kernels to the decoded cache's bits on the GPU.
