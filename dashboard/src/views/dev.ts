@@ -10,7 +10,7 @@ import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow
 import { exact, fixed, money, ms, NOT_REPORTED, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { isReplay } from '../lib/cache-source';
-import { CannotSave, canSave, exportName, LOGS_EXPORT, saveFile } from '../lib/log-export';
+import { CannotSave, canSave, exportName, LOGS_EXPORT, saveFile, sentence } from '../lib/log-export';
 import '../ui/speed-check';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
 import { badge } from '../lib/supervisor';
@@ -202,7 +202,7 @@ export class QseDev extends LightElement {
     return html`<div class="console-export" data-log-export-error>
       <div class="state state-error" role="alert">
         <div class="state-title">${icon('warn')} <span>Could not export the log from <code>${x.endpoint}</code></span></div>
-        <div class="state-body">${x.message} No file was saved.</div>
+        <div class="state-body">${sentence(x.message)} No file was saved.</div>
         <div class="console-export-actions">
           ${x.cannotSave
             ? html`<a class="btn" href=${api.logsExportUrl()} target="_blank" rel="noopener" data-log-export-link>${icon('external')} Open the file</a>`

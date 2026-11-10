@@ -20,6 +20,12 @@ export function nameFrom(disposition: string | null | undefined): string | null 
   return /^[A-Za-z0-9.-]+$/.test(name) && !name.startsWith('.') ? name : null;
 }
 
+/** An error's message as a whole sentence, so the next one can follow it on the same line. */
+export function sentence(message: string): string {
+  const s = message.trim();
+  return !s || /[.!?]$/.test(s) ? s : `${s}.`;
+}
+
 /** What `saveFile` needs of the browser; a test passes its own. */
 export interface SaveEnv {
   document: Pick<Document, 'createElement'> & { body: { append(node: unknown): void } };
