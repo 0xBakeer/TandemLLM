@@ -2006,6 +2006,8 @@ class ForwardShort(kvpool.PoolFull):
 
 #: SRV-801: thread -> (the request's id, its prompt's rows), from the prefill's call to its first forward
 _FWD_ASK: dict = {}
+#: SPD-249: thread -> the request's id for the whole prefill: what a layer-major window asks the admission as
+_PF_REQ: dict = {}
 
 
 @contextlib.contextmanager
@@ -2015,10 +2017,48 @@ def _forward_ask(cid, rows: int):
     me = threading.get_ident()
     if cid is not None:
         _FWD_ASK[me] = (cid, int(rows))
+        _PF_REQ[me] = cid
     try:
         yield
     finally:
         _FWD_ASK.pop(me, None)
+        _PF_REQ.pop(me, None)
+
+
+def _window_grant(nbytes: int) -> bool:
+    """SPD-249, engine/cache.py `WINDOW_GRANT`: a layer-major window asks for `nbytes` past its chunks' chunk-major
+    workspace before it allocates them. The engine's peak (`Budget.window`), then, for a request's prefill, the
+    admission's floor with them added to its reserve until its prefill has run (`Admission.window`). Either says no:
+    the chunks run one at a time, the same bits, and nothing waits. An error: no."""
+    gib = 1 << 30
+    mem, more = dict.get(STATE, "mem"), 0
+    try:
+        if mem is not None and getattr(mem, "on", False):
+            more = mem.window(int(nbytes))
+            if more is None:
+                print(f"[pf-window] {nbytes / gib:.2f} GiB past the chunks' workspace: over the engine's peak; "
+                      f"chunk-major", flush=True)
+                return False
+        pool = dict.get(STATE, "pool")
+        adm = getattr(pool, "admission", None) if pool is not None else None
+        cid = _PF_REQ.get(threading.get_ident())
+        if adm is not None and cid is not None:
+            ok, d = adm.window(cid, int(nbytes))
+            if not ok:
+                if more:
+                    mem.window_undo(more)
+                print(f"[pf-window] {cid} {nbytes / gib:.2f} GiB past the chunks' workspace: not there "
+                      f"({slots_mod.Admission.describe(d)}); chunk-major", flush=True)
+                return False
+        if more:
+            print(f"[pf-window] {cid or 'engine'} granted {nbytes / gib:.2f} GiB past the chunks' workspace",
+                  flush=True)
+        return True
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        if more:
+            mem.window_undo(more)
+        return False
 
 
 def _forward_backstop(start: int):
@@ -13841,6 +13881,7 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
     # cache's whole buffer against the peak) only under expandable segments: without them the policy as before
     mem.pools_probe = cache.TorchPools() if capture_lock.alloc_expandable() else None
     mem.strict = PEAK_STRICT               # SRV-775: the strict peak's gates all take the policy's lock
+    cache.WINDOW_GRANT = _window_grant      # SPD-249: a layer-major window asks the policy for its bytes
     pin = int(a.resident_pin_gb * gib) if resident_on else 0
     store = cache.StateStore(budget, chunk=a.prefix_chunk,
                              max_entry_bytes=int(a.store_entry_gb * gib),

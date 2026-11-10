@@ -92,6 +92,12 @@ PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
 #: three decoding chats wrote ~1 token a second). The windows' chunks are the same chunks in the
 #: same order, so the cap changes when the turn is offered, never a bit.
 WINDOW_CAP = None
+#: SPD-249: (nbytes) -> bool, set by the server: may this thread's prefill take `nbytes` more for a layer-major window
+#: now (the engine's peak, and the admission's floor with them added to what the request holds until its prefill has
+#: run)? Asked by the chunk loop of an engine that prices its windows (`window_bytes(plan, lines)`) before it hands
+#: the engine a plan; no: the chunks run one at a time, the same bits, and nothing waits. None: no policy (an
+#: engine's window then sizes itself, Flash-Next's by `layer_major.rows_now`).
+WINDOW_GRANT = None
 #: SPD-245: (eng, tokens, start, whole) -> logits or None, called before the first forward of a prefill
 #: (server/app.py `_joint_forward`, the prefill burst): `whole` when that forward is the prompt's only one
 #: (then the logits are what `eng.forward(tokens, start, last_only=True)` returns, from a joint forward
@@ -637,13 +643,16 @@ class Budget:
         self._ws_lock = threading.Lock()
         # SRV-797: key -> bytes of the caches' room an admitted request was let in on (`hold_growth`)
         self._growth_holds: dict = {}
+        # SPD-249: thread -> the bytes of `_ws_live` that are its prefill's layer-major windows (`window`)
+        self._win: dict = {}
         self.stats = {"gates": 0, "refused": 0, "admitted": 0, "admit_refused": 0,
                       "empties": 0, "empty_ms": 0.0, "empty_freed": 0, "last_empty_ms": 0.0,
                       "shed": {lv: 0 for lv in self.LEVELS},
                       "shed_bytes": {lv: 0 for lv in self.LEVELS},
                       "observed": None, "last_gate": None, "prefill_peak": 0,
                       "last_prefill_peak": None, "stale_admits": 0, "over_ceiling": 0, "last_done_ms": 0.0,
-                      "over_peak_admits": 0, "last_over_peak": None, "fast_gates": 0}
+                      "over_peak_admits": 0, "last_over_peak": None, "fast_gates": 0,
+                      "windows": 0, "window_refused": 0}
         # SRV-775: the gate counters a side slot's gate far under the peak (`_fast_gate`) moves without `lock`
         self._stats_lock = threading.Lock()
         # SRV-775: the server's strict peak (QSE_PEAK_STRICT): every gate takes `lock`, a side slot's too
@@ -735,10 +744,62 @@ class Budget:
         """This thread's prefill's workspace (0: none)."""
         tid = threading.get_ident()
         with self._ws_lock:
+            self._win.pop(tid, None)               # SPD-249: a new workspace, or none: no window granted on it
             if int(v):
                 self._ws_live[tid] = int(v)
             else:
                 self._ws_live.pop(tid, None)
+
+    def window(self, nbytes: int) -> int | None:
+        """SPD-249: may this thread's prefill take `nbytes` more for a layer-major window (server/app.py
+        `_window_grant`)? The gate's peak test on the live reserve (`_peak_over`, the stale rule included, nothing
+        shed) with this prefill's workspace, the window's bytes and the workspaces of every other prefill admitted and
+        not yet run (`_ws_live`, summed). Granted, they join this prefill's workspace in `ws_now` until it has run, so
+        no cache grows into them (`admit`). Returns the bytes added (0: granted before in this prefill), or None.
+        Without a policy: 0."""
+        if not self.on or int(nbytes) <= 0:
+            return 0
+        tid = threading.get_ident()
+        with self.lock:
+            with self._ws_lock:
+                got = int(self._win.get(tid, 0))
+                own = int(self._ws_live.get(tid, 0))
+                others = sum(int(v) for k, v in self._ws_live.items() if k != tid)
+            more = int(nbytes) - got
+            if more <= 0:
+                return 0
+            over = self._peak_over(own + more + others)
+            if over > 0:
+                with self._stats_lock:
+                    self.stats["window_refused"] += 1
+                self._event("window_refused", nbytes=int(nbytes), ws=own, others=others, over=int(over))
+                return None
+            with self._ws_lock:
+                self._ws_live[tid] = own + more
+                self._win[tid] = got + more
+            with self._stats_lock:
+                self.stats["windows"] += 1
+        return more
+
+    def window_undo(self, more: int) -> None:
+        """SPD-249: `more` bytes `window` granted this thread's prefill are not taken after all (the admission's
+        floor said no): its workspace as before."""
+        tid = threading.get_ident()
+        with self._ws_lock:
+            got = int(self._win.get(tid, 0))
+            more = min(int(more), got)
+            if more <= 0:
+                return
+            if got - more:
+                self._win[tid] = got - more
+            else:
+                self._win.pop(tid, None)
+            if tid in self._ws_live:
+                left = int(self._ws_live[tid]) - more
+                if left > 0:
+                    self._ws_live[tid] = left
+                else:
+                    self._ws_live.pop(tid, None)
 
     @property
     def growth_held(self) -> int:
@@ -3355,10 +3416,13 @@ def _layer_marks(live: dict, device):
     return mark
 
 
-def _window_plan(eng, i: int, n: int, chunk: int, win: int, grid: "Grid | None" = None) -> list | None:
+def _window_plan(eng, i: int, n: int, chunk: int, win: int, grid: "Grid | None" = None,
+                 lines: bool = False) -> list | None:
     """The chunks (start, rows) one layer-major window takes from row `i`: the chunk loop's own
     grid, as many chunks as fit in `win` rows; None when fewer than two would (or the engine
-    cannot run the window), and the loop forwards one chunk the usual way."""
+    cannot run the window), and the loop forwards one chunk the usual way. SPD-249: an engine that
+    prices its windows (`window_bytes(plan, lines)`, `lines`: the loop keeps a state buffer a chunk)
+    asks the server's memory policy for those bytes first (`WINDOW_GRANT`); None when it says no."""
     if win <= 0 or chunk <= 0 or n - i <= chunk or not hasattr(eng, "prefill_window"):
         return None
     if not eng.window_ok(i):
@@ -3370,7 +3434,14 @@ def _window_plan(eng, i: int, n: int, chunk: int, win: int, grid: "Grid | None" 
             break
         plan.append((j, t))
         j += t
-    return plan if len(plan) > 1 else None
+    if len(plan) < 2:
+        return None
+    ask = getattr(eng, "window_bytes", None)
+    if ask is not None and WINDOW_GRANT is not None:
+        nb = int(ask(plan, lines))
+        if nb > 0 and not WINDOW_GRANT(nb):
+            return None
+    return plan
 
 
 def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim, keys,
@@ -3640,7 +3711,7 @@ def _prefill(eng, drafter, ids, device, *, store, chunk, conv_id, checkpoint, re
     try:
         while i < n:
             cap = WINDOW_CAP() if WINDOW_CAP is not None else None
-            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)), grid)
+            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)), grid, lines)
             if plan is not None:
                 # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
                 # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The
