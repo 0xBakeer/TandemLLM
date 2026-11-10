@@ -28,6 +28,7 @@ import json
 import re
 import sys
 import threading
+import time
 import traceback
 
 RING = 10_000
@@ -130,6 +131,14 @@ class LogBuffer:
                and LEVELS[e["level"]] >= lv and (not grep or grep in e["msg"])]
         return out[-limit:] if limit else []
 
+    def snapshot(self) -> tuple[list[dict], int]:
+        """Every entry the ring holds, in `seq` order, and how many older ones it has dropped.
+
+        One copy under the buffer's own lock, for the export: lines that arrive while the file is
+        built are not in it, and the ring and its subscribers are left as they are."""
+        with self.lock:
+            return list(self.ring), self.seq - len(self.ring)
+
     def after_time(self, iso: str) -> int | None:
         """The last seq before an RFC 3339 time, for `since=<time>`."""
         with self.lock:
@@ -170,6 +179,97 @@ class LogBuffer:
     def subscribers(self) -> int:
         with self.lock:
             return len(self.subs)
+
+
+# ---------------------------------------------------------------------- the export (SRV-803)
+# The whole ring as one text file: a short header, then every entry at every level in `seq` order,
+# a line as the page's copy button writes it (`<UTC time> <level> <msg>`). The export adds the
+# header and nothing else, so the file holds what the ring holds and the no-content rule above is
+# the file's rule too. Every time is UTC and says so: the page shows local time.
+EXPORT_TITLE = "TandemLLM engine log"
+_UNSAFE = re.compile(r"[^A-Za-z0-9.-]")
+
+
+def _utc(now: _dt.datetime | None) -> _dt.datetime:
+    return (now or _dt.datetime.now(_dt.timezone.utc)).astimezone(_dt.timezone.utc)
+
+
+def _uptime(seconds) -> str:
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if s < 0:
+        return "unknown"
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    parts = [(d, "d"), (h, "h"), (m, "min")]
+    while parts and not parts[0][0]:
+        parts.pop(0)
+    return " ".join([f"{n} {unit}" for n, unit in parts] + [f"{s} s"])
+
+
+def export_name(version: str | None, now: _dt.datetime | None = None) -> str:
+    """`tandemllm-<version>-<time of export>.log`, in letters, digits, dot and dash only."""
+    v = _UNSAFE.sub("-", str(version or "").strip()) or "unknown"
+    return f"tandemllm-{v}-{_utc(now).strftime('%Y%m%dT%H%M%SZ')}.log"
+
+
+def export_text(entries: list[dict], *, version: str | None = None, git_sha: str | None = None,
+                uptime_s: float | None = None, now: _dt.datetime | None = None,
+                dropped: int = 0, capacity: int = RING, log_content: bool | None = None) -> str:
+    """The file's text. `entries` is one `LogBuffer.snapshot()`; a missing value reads "unknown"."""
+    def known(v) -> str:
+        return str(v).strip() or "unknown" if v is not None else "unknown"
+
+    head = [EXPORT_TITLE,
+            f"version: {known(version)}",
+            f"commit: {known(git_sha)}",
+            f"uptime: {_uptime(uptime_s)}",
+            f"exported: {_utc(now).strftime('%Y-%m-%dT%H:%M:%SZ')} (UTC)",
+            f"count: {len(entries)} lines",
+            f"first line: {entries[0]['ts'] + ' (UTC)' if entries else 'none'}",
+            f"last line: {entries[-1]['ts'] + ' (UTC)' if entries else 'none'}"]
+    if dropped > 0:
+        head.append(f"ring: full, the {dropped} lines before the first one are not in this file "
+                    f"(the ring keeps {capacity})")
+    else:
+        head.append("ring: not full, no line was dropped")
+    head.append("log content: " + ("unknown" if log_content is None else
+                                   "on (--log-content)" if log_content else "off"))
+    body = [f"{e['ts']} {e['level']} {e['msg']}" for e in entries]
+    return "\n".join(head + [""] + body) + "\n"
+
+
+def export(buf: "LogBuffer", *, version: str | None = None, git_sha: str | None = None,
+           started: float | None = None, now: _dt.datetime | None = None,
+           clock=None) -> tuple[str, bytes]:
+    """`(file name, body)` of one export of `buf`. `started` is the process's start (unix s)."""
+    entries, dropped = buf.snapshot()
+    now = _utc(now)
+    uptime = None if started is None else (clock or time.time)() - started
+    text = export_text(entries, version=version, git_sha=git_sha, uptime_s=uptime, now=now,
+                       dropped=dropped, capacity=buf.ring.maxlen or RING,
+                       log_content=bool(CONFIG["log_content"]))
+    return export_name(version, now), text.encode("utf-8", "replace")
+
+
+def serve_export(handler, buf: "LogBuffer", **build) -> None:
+    """Answer `GET /v1/dashboard/logs/export` on `handler`: the file as an attachment. Takes no
+    stream place and no lock but the buffer's own; a reader that hung up is not an error."""
+    name, raw = export(buf, **build)
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionResetError):
+        handler.close_connection = True
 
 
 _WRITE = threading.Lock()      # one for both tees: stdout and stderr are one file (start.sh 2>&1)

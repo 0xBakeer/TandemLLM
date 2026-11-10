@@ -1,0 +1,20 @@
+TandemLLM engine log
+version: 0.15.3+flashnext-3.05
+commit: 952d072d1a2b
+uptime: 7 h 2 min 11 s
+exported: 2026-11-09T00:39:59Z (UTC)
+count: 6 lines
+first line: 2026-11-09T00:39:20.884Z (UTC)
+last line: 2026-11-09T00:39:58.402Z (UTC)
+ring: not full, no line was dropped
+log content: off
+
+2026-11-09T00:39:20.884Z info [req] chatcmpl-5b1e2c9a7d0f4e635b1e2c9a stream prompt=1959 completion=412 finish=stop 8261 ms 49.87 tok/s blocks=90 ttft=2240 ms cache=prefix
+2026-11-09T00:39:21.010Z debug 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+2026-11-09T00:39:30.127Z warning [cache] put declined: over the budget
+2026-11-09T00:39:44.561Z error Traceback (most recent call last):
+  File "server/app.py", line 1440, in _complete
+    for piece in eng.generate(ids):
+RuntimeError: decode step failed
+2026-11-09T00:39:44.563Z error [req] chatcmpl-0c4d7e1f9a2b3c5d0c4d7e1f !! RuntimeError: decode step failed
+2026-11-09T00:39:58.402Z info [server] queue depth 0/8

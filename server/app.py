@@ -8425,7 +8425,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _dashboard_get(self, path: str) -> None:
-        """`GET /v1/dashboard/{summary,usage,requests,system,logs,live,metrics}`."""
+        """`GET /v1/dashboard/{summary,usage,requests,system,logs,logs/export,live,metrics}`."""
         from urllib.parse import parse_qs, urlsplit
         if path == "/v1/dashboard/session":
             return self._session("GET")
@@ -8436,6 +8436,8 @@ class Handler(BaseHTTPRequestHandler):
             # 5-minute figures from it, and with the login off a browser has no session that
             # /metrics would take. /metrics itself keeps its own rule for the scrapers.
             return metrics.serve(self)
+        if path == "/v1/dashboard/logs/export":
+            return self._dashboard_logs_export()
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
         if path in ("/v1/dashboard/logs", "/v1/dashboard/live"):
             try:
@@ -8462,6 +8464,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, fn(q), extra_headers=(("Cache-Control", "no-store"),))
         except dashboard_api.ApiError as exc:
             return self._json(exc.status, exc.body())
+
+    def _dashboard_logs_export(self) -> None:
+        """`GET /v1/dashboard/logs/export`: the whole ring as one text file (SRV-803).
+
+        A header (version, commit, uptime, the time of export) and every entry at every level in
+        `seq` order, whatever a page's level or search is. One snapshot under the buffer's own
+        lock: never the engine lock, no stream place, and the ring stays as it is."""
+        logbuf.serve_export(self, STATE.get("log_buffer") or logbuf.BUFFER,
+                            version=STATE.get("version"), git_sha=STATE.get("git_sha"),
+                            started=STATE.get("started"))
 
     def _dashboard_logs(self, q: dict) -> None:
         """`GET /v1/dashboard/logs`: the backlog, then live lines, as server-sent events.

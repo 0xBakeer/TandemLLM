@@ -421,6 +421,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/v1/dashboard/metrics":
             return self._metrics()
+        if path == "/v1/dashboard/logs/export":
+            # the whole ring as one text file (SRV-803); the proxy has no commit of its own
+            return logbuf.serve_export(self, logbuf.BUFFER, version=STATE.get("version"),
+                                       started=getattr(STATE.get("svc"), "started", None))
         q = {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
         try:
             if path == "/v1/dashboard/live":
