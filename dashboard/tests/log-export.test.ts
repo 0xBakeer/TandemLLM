@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, onApi, setApiBase } from '../src/api/client';
-import { CannotSave, canSave, exportName, LOGS_EXPORT, nameFrom, saveFile, type SaveEnv } from '../src/lib/log-export';
+import { CannotSave, canSave, exportName, LOGS_EXPORT, nameFrom, saveFile, sentence, type SaveEnv } from '../src/lib/log-export';
 import { EXPORT_TITLE, exportText, uptimeText } from '../mock/log-export.ts';
 import { LogRing } from '../mock/logs.ts';
 import { createMockMiddleware } from '../mock/server.ts';
@@ -323,6 +323,14 @@ describe('the Log panel', () => {
     for (const untouched of ['this.lines', 'this.pending', 'this.stream', 'this.level', 'this.grep', 'this.follow', 'openStream']) expect(run, untouched).not.toContain(untouched);
   });
 
+  it('an error message with no full stop gets one, so "No file was saved." reads as its own sentence', () => {
+    expect(sentence('session expired')).toBe('session expired.');
+    expect(sentence(' the engine did not answer ')).toBe('the engine did not answer.');
+    expect(sentence('Open the file from the engine instead.')).toBe('Open the file from the engine instead.');
+    expect(sentence('Is the engine up?')).toBe('Is the engine up?');
+    expect(sentence('')).toBe('');
+  });
+
   it('the page checks that it can save before it asks, and saves only what the engine answered', () => {
     expect(run.indexOf('if (!canSave()) throw new CannotSave();')).toBeGreaterThan(0);
     expect(run.indexOf('if (!canSave()) throw new CannotSave();')).toBeLessThan(run.indexOf('await api.logsExport()'));
@@ -334,7 +342,7 @@ describe('the Log panel', () => {
     const shown = DEV.match(/private renderExportError\(\)[^]*?\n  \}\n/)?.[0] ?? '';
     expect(shown).toContain('<div class="state state-error" role="alert">');
     expect(shown).toContain('Could not export the log from <code>${x.endpoint}</code>');
-    expect(shown).toContain('No file was saved.');
+    expect(shown).toContain('${sentence(x.message)} No file was saved.');
     expect(shown).toContain('Try again');
     expect(shown).toContain('Dismiss');
     // a browser that cannot save gets the engine's own attachment instead
