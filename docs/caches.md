@@ -296,6 +296,29 @@ The writes run where they are safe, and otherwise do not run: a parked parent or
 
 `--response-cache` answers an identical greedy request (same prompt, same parameters) from memory. Greedy output is a function of its input, so this is memoisation and not an approximation. It is off by default, so a benchmark can never be pointed at a dictionary by accident.
 
+## The e4m3 KV cache (opt-in, every model with attention)
+
+Each model can keep its attention layers' keys and values as e4m3 codes with one fp32 scale a (KV head, token) instead of bf16 (SPD-150). A row is coded on its own, the scale is its absolute maximum over 448, and a reader multiplies a code by its scale in fp32 and rounds to bf16 before the product with the query. The cache then takes about half the bytes a token, so a long chat takes less memory, and the attention reads fewer bytes a token. The answers are no longer the exact model's, so every switch is off by default, and the exactness checks hold only with it off. With it on, the manifest names another arch (`<arch>-kvfp8`), so the disk tier and the state store never read an entry of one form as the other.
+
+| model | knob (`QWEN38_` + ...) | bytes a token of window, bf16 -> e4m3 | stays bf16 |
+|-|-|-|-|
+| Flint | `FLINT_KV_FP8` | 28,672 -> 14,784 | the sliding layers' rings |
+| Qwen3.8-Flash-Next | `FN_KV_FP8` | 31,040 -> 18,944 | the indexer keys, the MTP layer's cache |
+| Ornith-1.5-122B | `Q35M_KV_FP8` | 24,576 -> 12,480 | the MTP layer's cache |
+| Qwen3.8-27B | `KV_FP8` | 106,752 -> 74,496 | the drafters' KV |
+
+The bytes are the Setup Guide's (`kv_bytes_per_token` of the model's `kv_fp8` component), and the engines' `cost()` counts the same.
+
+To turn it on in the Setup Guide (the dashboard's `#/setup`), pick the model, go to the Tools step and switch on "Long-context cache (FP8)" under Features, then finish Review and Install. The memory bar counts the smaller cache. From the command line, add the model's line at the end of `~/TandemLLM/run/ops/serve.env`, for example `QWEN38_FN_KV_FP8=1`, and run `~/TandemLLM/bin/tandem restart`. `/health` then shows `"kv_cache": "e4m3"` under `weights`, and the load line says `KV cache e4m3`. To turn it off, switch it off there, or delete the line and restart. A line in serve.env wins over the Setup Guide's switch.
+
+How each engine keeps it:
+
+- Flint: [flint.md](flint.md#the-e4m3-kv-cache-flint_kv_fp8-off), with its measured cost.
+- Flash-Next and Ornith: a call's rows are written in bf16 to staging buffers and coded at their slots in one launch (`tools/kv_fp8.py`) before anything reads them, so a verify row and a prompt chunk read their own key decoded, as the decode step does. The decode, verify, commit and MTP graphs hold it. On Flash-Next a joint pass's attention goes a lane at a time with the cache on, and its joint graph (`FN_JOINT_GRAPH`) stays eager. A decode token there reads at most 2,051 keys a layer (about 50 MB in bf16 beside 4.2 GB of weights on 3.05), so the gain is memory, not speed. Ornith's prompt chunk attends over the cache's rows decoded to bf16, and its prompt workspace counts that copy.
+- The 27B: the knob turns off the verify graphs and the joint graphs, and its cache is never paged, so each slot holds its whole window from the start.
+
+Not measured: the decode and prompt speed and the KL against the exact cache, on every model but Flint. `tests/gpu/test_kv_fp8_gpu.py` holds the kernels to the decoded cache's bits on the GPU.
+
 ## Memory
 
 All caches share the board's 128 GB with everything else, the weights and the KV buffer first. At the 262,144-token window the engine holds 57 GiB after its load with empty caches; what grew from there to 75 and 83 GiB on 2026-10-01 was the caches at their old caps (14.5 GiB), a long prefill's workspace, and the allocator's reserve, which kept every freed block. `engine/cache.py::Budget` holds them to three limits:

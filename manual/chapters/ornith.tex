@@ -70,6 +70,10 @@ DFlash2 + lookup & 67.3 & 91.7 & 92.2 & 106.9 & 122.8 & 96.8 \\
 
 One slot, a window up to 262,144 tokens, the pack's own vision tower on the EXL3 kernels (0.35~GB at load). The model thinks in a \code{<think>} block and calls tools in the XML form. The checkpoint's generation config sets the defaults: temperature 0.6, \code{top_k} 20, \code{top_p} 0.95. The conductor and Laya are on and the narrator is off; the conductor runs its default fit, which is not measured on this model yet. A start loads the pack in 65~s: the weights take 59.95~GiB, 61.16 with the MTP layer, and a start needs 93~GiB of free memory. \code{models/ornith-1.5-122b/measurements/0.13.0-summary.json} has the runs.
 
+\section{The e4m3 KV cache}
+
+\code{Q35M_KV_FP8=1} keeps the 12 attention layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 12,480 bytes a token of window instead of 24,576, the MTP layer's cache in bf16 (SPD-150). The output is no longer the exact model's, so the knob is off by default. Turn it on with \emph{Long-context cache (FP8)} under Features in the Setup Guide's Tools step, or with \code{QWEN38_Q35M_KV_FP8=1} at the end of \code{~/TandemLLM/run/ops/serve.env} and \code{~/TandemLLM/bin/tandem restart}. Its speed and cost are not measured.
+
 \section{What is not measured}
 
 \begin{itemize}
@@ -77,4 +81,5 @@ One slot, a window up to 262,144 tokens, the pack's own vision tower on the EXL3
 \item Prompt reading speed, first-token times, images, sampled decoding and repeat runs.
 \item Any task benchmark beyond tool-eval-bench. On the 0.13.0 code, one run a row, it scored 93 and 94 on the raw path at every thinking setting, 96 with the conductor's \code{tools} profile, and 80 raw against 84 with the conductor in hard mode (\code{docs/tool-eval-bench.md}).
 \item The cause of the 14 differences from the converter's forward.
+\item The e4m3 KV cache's speed and its cost against the exact cache.
 \end{itemize}

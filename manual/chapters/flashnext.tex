@@ -147,6 +147,10 @@ Every cache tier keeps Flash-Next's state through its adapter (\code{eng.cache_s
 
 \code{tools/fn_cache_check.py} sent a request sequence to a server with its caches on and the same requests to a cold server. Restores from grid anchors, the state store, the session spill after a restart and the disk tier after a restart answered bit for bit (logprobs equal). Two restores from end anchors answered the same first token: one the same text, logprobs within 0.044, and one a longer list from its 13th token at a near tie. A reset keeps the KV rows in place; before that fix, a short request run between the turns of a long conversation zeroed rows the conversation resumed over.
 
+\section{The e4m3 KV cache}\label{sec:fn-kvfp8}
+
+\code{FN_KV_FP8=1} keeps the 12 attention layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 18,944 bytes a token of window instead of 31,040, with the indexer keys and the MTP layer's cache in bf16 (SPD-150). The output is no longer the exact model's, so the knob is off by default and the exactness checks hold only with it off. A decode token reads at most 2,051 keys a layer, so the gain is memory rather than speed. Its speed and its cost against the exact cache are not measured. To turn it on, switch on \emph{Long-context cache (FP8)} under Features in the Setup Guide's Tools step, or add \code{QWEN38_FN_KV_FP8=1} at the end of \code{~/TandemLLM/run/ops/serve.env} and run \code{~/TandemLLM/bin/tandem restart}; \code{/health} then shows \code{"kv_cache": "e4m3"} under \code{weights}. \code{docs/caches.md} covers every model's switch.
+
 \section{Memory}
 
 MemAvailable counts page cache as free. Under the warm policy the n-gram table is page cache the engine keeps on purpose, so every floor check (the residency planner, the roles' governor, the side slots' admission, the KV pool) takes the table's resident bytes off first. After a load of 3.05, MemAvailable read 68.0~GiB with 46.9~GiB allocated (\measured).
@@ -190,4 +194,5 @@ memory ceiling, peak, reserve slack & 66, 77, 2~GiB \\
 \item A sweep of StairCut's prices. The price file is provisional: class 0 holds online-learned prices, and the other classes single requests.
 \item Full-pack load and generation of the 5.05 pack after the 7-bit dense-dispatch fix, and the 6.05 pack, which needs more than one board.
 \item Whether parallel requests pay on Flash-Next: one run of three, and no timing of the joint pass on its own.
+\item The e4m3 KV cache (Section~\ref{sec:fn-kvfp8}): its speed and its cost against the exact cache.
 \end{itemize}

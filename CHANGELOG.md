@@ -2,6 +2,12 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+### Models
+
+- Every model with attention layers offers "Long-context cache (FP8)" in the Setup Guide's Tools step, under Features (SPD-150). On, the attention layers keep their keys and values as e4m3 codes with one fp32 scale a (head, token): about half the bytes a token, so long chats take less memory. The answers change a little, so it is off by default, and off keeps the exact model. Flint's switch stays as it was. Flash-Next (`QWEN38_FN_KV_FP8`, 31,040 -> 18,944 bytes a token) and Ornith (`QWEN38_Q35M_KV_FP8`, 24,576 -> 12,480) are new; the 27B's switch is its existing `QWEN38_KV_FP8` (106,752 -> 74,496), which still turns off its verify graphs and is never paged. Speed and quality with the switch on are not measured. `/health` shows `weights.kv_cache` (`bf16` or `e4m3`), and the engine's manifest names the e4m3 form as another arch, so the caches never mix the two. [docs/caches.md](docs/caches.md#the-e4m3-kv-cache-opt-in-every-model-with-attention) has the steps.
+
 ## 0.15.4, 2026-11-10
 
 0.15.4 fixes the charge that made short turns on long chats wait minutes for memory. The admission charged a turn of the chat slot 0 holds a cold read of the whole chat, and held a whole chunk of workspace for its pages whatever the turn read; a turn is now charged the rows it forwards. The Dev view's log gets an Export button that saves the whole log as one text file. The docs now explain the wait for memory, a chat's priority, the swap of long chats to the SSD and the dashboard's lanes.
