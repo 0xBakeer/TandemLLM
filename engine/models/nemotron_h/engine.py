@@ -31,6 +31,12 @@ the row buffers ("taps"), inside the graphs; a committed row's taps go to the st
 position modulo its rows): a decode step's in the step, a verify block's kept path's in the commit, a
 prompt chunk's last rows in the chunk. They are copies of values the rows compute anyway, so the rows'
 bits do not change.
+
+NH_KV_FP8=1 (SPD-150, off): the attention layers keep K and V as e4m3 codes with one fp32 scale a (head,
+token), tools/kv_fp8.py: a call's K and V rows are coded into the cache at their slots straight from the
+projection (one launch for K and V); attention decodes codes times scale to bf16 on load. A row is coded on
+its own, so a verify row is still the decode step's bit for bit. A prompt chunk attends to its own rows in
+bf16 and to the cached ones decoded, then codes its rows. The MTP head (mtp.py) keeps its own bf16 cache.
 """
 
 from __future__ import annotations
@@ -45,6 +51,8 @@ import torch.nn.functional as F
 from engine import capture_lock
 from engine.models.nemotron_h import kernels as K
 from engine.models.nemotron_h.ref import NemotronHRef, NhState, softplus
+from engine.settings import SETTINGS as _S
+from tools import kv_fp8 as _kv8
 
 #: rows a prompt chunk takes (the caches' anchor grid)
 PREFILL_CHUNK = 4096
@@ -136,6 +144,9 @@ class NemotronHEngine(NemotronHRef):
         self._f32 = {(li, n): W[m[li] + n].float().contiguous() for li in c.mamba_layers for n in ("dt_bias", "D")}
         self._f32.update({(li, "bias"): W[m[li] + "gate.e_score_correction_bias"].float().contiguous()
                           for li in c.moe_layers})
+        # NH_KV_FP8: a call's own rows 0 .. M - 1, the row index the coding reads K and V by (a fixed buffer)
+        self.kv_fp8 = _S.get("NH_KV_FP8") == "1"
+        self._kix = torch.arange(BLOCK_ROWS, device=self.device) if self.kv_fp8 else None
 
     #: the tapped layers (`set_taps`) and each one's column in the taps; the ring's rows
     taps: tuple = ()
@@ -169,15 +180,19 @@ class NemotronHEngine(NemotronHRef):
             st.ring = torch.zeros(self.ring_rows, len(self.taps), c.hidden_size, dtype=self.dtype, device=self.device)
         if paged and _kvp.POOL is not None and cap >= _kvp.PAGED_MIN_ROWS and str(self.device).startswith("cuda"):
             st.pages = _kvp.PagedSet(_kvp.OWNER)
+        dt = torch.uint8 if self.kv_fp8 else self.dtype
         for li, t in enumerate(c.layer_types):
             if t == "attention":
                 for kind, d in (("k", st.k), ("v", st.v)):
                     shape = (c.num_key_value_heads, cap, c.head_dim)
                     if st.pages is None:
-                        d[li] = torch.zeros(*shape, dtype=self.dtype, device=self.device)
+                        d[li] = torch.zeros(*shape, dtype=dt, device=self.device)
                     else:
-                        d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, self.dtype, self.device, owner=st.pages.owner,
+                        d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, dt, self.device, owner=st.pages.owner,
                                                               name=f"nh.{kind}.{li}")).tensor
+                if self.kv_fp8:
+                    st.ks[li] = torch.zeros(c.num_key_value_heads, cap, dtype=torch.float32, device=self.device)
+                    st.vs[li] = torch.zeros_like(st.ks[li])
             elif t == "mamba":
                 st.conv[li] = torch.zeros(c.conv_state_len, c.conv_dim, dtype=self.dtype, device=self.device)
                 st.ssm[li] = torch.zeros(c.mamba_num_heads, c.mamba_head_dim, c.ssm_state_size, dtype=torch.float32,
@@ -430,6 +445,14 @@ class NemotronHEngine(NemotronHRef):
                 for (st, rb, M, ns), r in zip(parts, sl):
                     d = rb["d"]
                     kv = qkv[r]
+                    if li in st.ks:
+                        # NH_KV_FP8: the rows coded into the cache at their slots, read from the projection
+                        _kv8.kv_quant2(kv[:, Hq * D:(Hq + Hk) * D].reshape(M, Hk, D).transpose(0, 1),
+                                       kv[:, (Hq + Hk) * D:].reshape(M, Hk, D).transpose(0, 1), self._kix[:M],
+                                       st.k[li], st.ks[li], st.v[li], st.vs[li], d["slot"])
+                        K.attn_rows(q[r], st.k[li], st.v[li], d["ctl"], d["anc"], ns,
+                                    bufs=self._attn_bufs(rb["tag"], M, ns), out=o[r], ks=st.ks[li], vs=st.vs[li])
+                        continue
                     st.k[li].index_copy_(1, d["slot"], kv[:, Hq * D:(Hq + Hk) * D].reshape(M, Hk, D).transpose(0, 1))
                     st.v[li].index_copy_(1, d["slot"], kv[:, (Hq + Hk) * D:].reshape(M, Hk, D).transpose(0, 1))
                     K.attn_rows(q[r], st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=self._attn_bufs(rb["tag"], M, ns),
@@ -612,6 +635,9 @@ class NemotronHEngine(NemotronHRef):
             for li in c.attention_layers:
                 st.k[li].index_copy_(1, d["dst"], st.k[li].index_select(1, d["src"]))
                 st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
+                if li in st.ks:
+                    st.ks[li].index_copy_(1, d["dst"], st.ks[li].index_select(1, d["src"]))
+                    st.vs[li].index_copy_(1, d["dst"], st.vs[li].index_select(1, d["src"]))
         if st.ring is not None:
             st.ring.index_copy_(0, d["ring"], rb["taps"].index_select(0, d["idx"]))
 
@@ -696,7 +722,8 @@ class NemotronHEngine(NemotronHRef):
 
     def _attn_chunk(self, n, li, st, L):
         """Attention of a prompt chunk: q|k|v, the chunk's K and V into the cache at their positions,
-        SDPA over the cache's rows [0, L + T) with the lower-right causal mask, o_proj (NoPE)."""
+        SDPA over the cache's rows [0, L + T) with the lower-right causal mask, o_proj (NoPE). NH_KV_FP8: the
+        chunk's own rows in bf16 as computed, the cached ones decoded; then the chunk's rows coded."""
         from torch.nn.attention.bias import causal_lower_right
         c = self.cfg
         m = self.pre(li) + "mixer."
@@ -704,6 +731,16 @@ class NemotronHEngine(NemotronHRef):
         Hq, Hk, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
         qkv = self.qkv(n, m, self.mm)
         q = qkv[:, :Hq * D].reshape(T, Hq, D)
+        if li in st.ks:
+            kt = qkv[:, Hq * D:(Hq + Hk) * D].reshape(T, Hk, D).transpose(0, 1)
+            vt = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
+            k = _kv8.kv_dequant_cat(st.k[li], st.ks[li], L, kt).unsqueeze(0)
+            v = _kv8.kv_dequant_cat(st.v[li], st.vs[li], L, vt).unsqueeze(0)
+            o = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k, v,
+                                               attn_mask=causal_lower_right(T, L + T), enable_gqa=True)
+            _kv8.kv_quant2(kt, vt, torch.arange(T, device=n.device), st.k[li], st.ks[li], st.v[li], st.vs[li],
+                           torch.arange(L, L + T, device=n.device))
+            return self.mm(o[0].transpose(0, 1).reshape(T, -1), self.W[m + "o_proj.weight"])
         st.k[li][:, L:L + T] = qkv[:, Hq * D:(Hq + Hk) * D].reshape(T, Hk, D).transpose(0, 1)
         st.v[li][:, L:L + T] = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
         k = st.k[li][:, :L + T].unsqueeze(0)
@@ -982,11 +1019,11 @@ def _restore(st: NhState, snap: list) -> None:
 
 
 def _state_saved(eng: NemotronHEngine, st: NhState) -> list:
-    """What a capture's warm-up may write, cloned: the conv and SSM states whole, the K and V rows from
-    the length on (`CAPTURE_ROWS`)."""
+    """What a capture's warm-up may write, cloned: the conv and SSM states whole, the K and V rows (and their
+    e4m3 scales, NH_KV_FP8) from the length on (`CAPTURE_ROWS`)."""
     L = st.length
     out = [(t, 0, 0, t.shape[0]) for t in list(st.conv.values()) + list(st.ssm.values())]
-    for d in (st.k, st.v):
+    for d in (st.k, st.v, st.ks, st.vs):
         for t in d.values():
             out.append((t, 1, L, min(CAPTURE_ROWS, t.shape[1] - L)))
     return [(t, ax, lo, n, t.narrow(ax, lo, n).clone()) for t, ax, lo, n in out if n > 0]

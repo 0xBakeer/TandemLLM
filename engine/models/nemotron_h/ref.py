@@ -71,6 +71,8 @@ class NhState:
     ring: object = None
     tap_from: int = 0
     tap_gen: int = 0
+    ks: dict = field(default_factory=dict)     # NH_KV_FP8: an attention layer's e4m3 scales [kv heads, cap] fp32
+    vs: dict = field(default_factory=dict)
 
     def reset_inplace(self) -> None:
         """A new sequence in the same buffers: conv and SSM states zeroed, the length 0."""

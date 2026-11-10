@@ -30,12 +30,14 @@ from engine.models.graph_lru import joint_graphs
 from engine.models.nemotron_h import kernels as K
 from engine.models.nemotron_h.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, NemotronHEngine
 from engine.models.state import SectionState
+from engine.settings import SETTINGS as _S
+from tools.kv_fp8 import bytes_per_token as _kv_bytes
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/config.py",
            "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/gguf.py",
            "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
-           "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
+           "engine/models/nemotron_h/knobs.py", "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py", "engine/vision.py")
 #: the engine/ modules those files import (top level or inside a function) that compute no row, and why;
@@ -73,7 +75,9 @@ TABLES = ()
 
 
 def manifest() -> Manifest:
-    return Manifest(arch="nemotron_h", modules=MODULES, data=TABLES)
+    # an e4m3 cache (NH_KV_FP8) stores other rows: its entries are another arch's, never read as the bf16 cache's
+    return Manifest(arch="nemotron_h-kvfp8" if _S.get("NH_KV_FP8") == "1" else "nemotron_h", modules=MODULES,
+                    data=TABLES)
 
 
 def _tensors(o) -> list:
@@ -136,7 +140,7 @@ class NemotronHCacheState(SectionState):
     """What the caches keep of a sequence (engine/models/state.py): sections the conv state
     ("mamba.conv.<layer>", [conv_kernel - 1, conv_dim] bf16) and the SSM state ("mamba.S.<layer>",
     [heads, head_dim, state] fp32) of every Mamba layer; views K and V of every attention layer
-    ([kv heads, rows, D], axis 1)."""
+    ([kv heads, rows, D], axis 1), and with NH_KV_FP8 their e4m3 scales ([kv heads, rows], axis 1)."""
 
     def __init__(self, serving: "NemotronHServing"):
         self.s = serving
@@ -152,6 +156,8 @@ class NemotronHCacheState(SectionState):
         out = []
         for li in sorted(st.k):
             out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+            if li in st.ks:
+                out += [(f"ks.{li}", st.ks[li], 1), (f"vs.{li}", st.vs[li], 1)]
         return out
 
 
@@ -217,9 +223,20 @@ class NemotronHServing:
         prefill runs in 4,096-row chunks and attention reads the cache in place, so it does not grow with
         the prompt: a floor of 3.5 GiB, the line through the 131k point, capped at 4.0 GiB (the policy
         raises the cap if a prefill ever needs more). Without it the 27B's line (30 kB a token, no cap)
-        refused a 1,000,000-token prefill as 29 GiB of workspace."""
+        refused a 1,000,000-token prefill as 29 GiB of workspace.
+
+        NH_KV_FP8 (SPD-150): e4m3 codes and one fp32 scale a KV head a token; a prompt chunk decodes one
+        layer's cached K and V to bf16 (2 x kv_dim x 2 bytes a token), so the cap grows by that over the
+        window (not measured)."""
+        c = self.cfg
         conv = sum(t.numel() * t.element_size() for t in self.st.conv.values())
         rec = sum(t.numel() * t.element_size() for t in self.st.ssm.values())
+        if getattr(self.fn, "kv_fp8", False):
+            per_tok = _kv_bytes(c.num_key_value_heads, c.head_dim, True) * len(c.attention_layers)
+            return CostModel(section_bytes=conv + rec, view_bytes_per_token=per_tok,
+                             workspace_floor=int(3.5 * (1 << 30)), workspace_per_token=27370,
+                             workspace_cap=int(4.0 * (1 << 30)) + 2 * c.kv_dim * 2 * self.max_len,
+                             parts={"recurrent": rec, "conv": conv})
         return CostModel(section_bytes=conv + rec, view_bytes_per_token=self.cfg.kv_bytes_per_token(2),
                          workspace_floor=int(3.5 * (1 << 30)), workspace_per_token=27370,
                          workspace_cap=int(4.0 * (1 << 30)), parts={"recurrent": rec, "conv": conv})
@@ -274,7 +291,7 @@ class NemotronHServing:
                     seen.add(s.data_ptr())
                     w += s.nbytes()
         st = self.st
-        kv = sum(int(t.numel() * t.element_size()) for d in (st.k, st.v) for t in d.values())
+        kv = sum(int(t.numel() * t.element_size()) for d in (st.k, st.v, st.ks, st.vs) for t in d.values())
         return {"weights": w, "kv_pool": kv, "drafter_kv": 0,
                 "gdn_state": sum(int(t.numel() * t.element_size()) for d in (st.conv, st.ssm) for t in d.values())}
 
@@ -646,15 +663,17 @@ def serve(a, ctx) -> dict:
     fmt = "gguf" if gguf_of(a.model) else ("exl3" if info["exl3"] else "bf16")
     what = ("LiLiCorr + lookup + StairCut" if lc_head is not None else
             "MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
+    # SPD-150: which cache the attention layers keep, so a box can see NH_KV_FP8 took effect (/health's weights)
+    kv = "e4m3" if srv.fn.kv_fp8 else "bf16"
     describe = (f"NemotronH {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
-                f"{what if drafter is not None else 'none'}, max_len {a.max_len:,},")
+                f"{what if drafter is not None else 'none'}, KV cache {kv}, max_len {a.max_len:,},")
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": (what if drafter is not None else None),
                                          "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"],
+                                         "self_check": info["self_check"], "kv_cache": kv,
                                          "lilicorr": _lc_info(info["lilicorr"])}}}
 
 
