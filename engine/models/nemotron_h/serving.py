@@ -231,7 +231,7 @@ class NemotronHServing:
         c = self.cfg
         conv = sum(t.numel() * t.element_size() for t in self.st.conv.values())
         rec = sum(t.numel() * t.element_size() for t in self.st.ssm.values())
-        if getattr(self.fn, "kv_fp8", False):
+        if getattr(getattr(self, "fn", None), "kv_fp8", False):
             per_tok = _kv_bytes(c.num_key_value_heads, c.head_dim, True) * len(c.attention_layers)
             return CostModel(section_bytes=conv + rec, view_bytes_per_token=per_tok,
                              workspace_floor=int(3.5 * (1 << 30)), workspace_per_token=27370,

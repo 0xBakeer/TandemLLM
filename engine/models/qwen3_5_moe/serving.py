@@ -88,7 +88,7 @@ class Qwen35MoeServing(FlashNextServing):
         prefill, a resumed one too, until its own rows are measured."""
         c, base = self.cfg, super().cost()
         per = int(c.num_attention_heads) * int(c.head_dim) * 2 * 2
-        if getattr(self.fn, "kv_fp8", False):
+        if getattr(getattr(self, "fn", None), "kv_fp8", False):
             # SPD-150: the prompt's attention reads the e4m3 cache decoded to bf16, K and V a token of context
             per += int(c.num_key_value_heads) * int(c.head_dim) * 2 * 2
         floor = int(2.75 * (1 << 30))

@@ -411,7 +411,7 @@ class FlashNextServing:
         codes and one fp32 scale a head with QWEN38_FN_KV_FP8)."""
         sec = {k: t.numel() * t.element_size() for k, t in self.state.buffers().items()}
         c = self.cfg
-        per_tok = len(c.attention_layers) * self._kv_layer_bytes(getattr(self.fn, "kv_fp8", False))
+        per_tok = len(c.attention_layers) * self._kv_layer_bytes(getattr(getattr(self, "fn", None), "kv_fp8", False))
         # the prefill workspace, measured 2026-10-12 on 3.05: 2.51 GiB at 8k and 2.40 GiB at 32k
         # (tools/fn_memory_check.py; the 4,096-row chunk's activations), 10.46 GiB above the engine at a
         # 147,149-token prefill and 10.47 GiB at 261,549 (SPD-99): it grows to about 140k tokens and then
@@ -557,7 +557,7 @@ class FlashNextServing:
         captures (SIDE_SLOT_CONST, measured)."""
         cost = self.cost()
         # the MTP layer's own cache beside the trunk's, bf16 (SPD-150: with an e4m3 trunk cache too)
-        fp8 = getattr(self.fn, "kv_fp8", False)
+        fp8 = getattr(getattr(self, "fn", None), "kv_fp8", False)
         per_token = 0 if paged else (cost.view_bytes_per_token + self._kv_layer_bytes(False) if fp8
                                      else cost.view_bytes_per_token * 13 // 12)
         return per_token, cost.section_bytes + SIDE_SLOT_CONST

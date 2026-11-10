@@ -219,7 +219,7 @@ class Lfm2MoeServing:
         one fp32 scale a KV head with LFM2_KV_FP8)."""
         c = self.cfg
         sec = sum(t.numel() * t.element_size() for t in self.st.conv.values())
-        fp8 = getattr(self.fn, "kv_fp8", False)
+        fp8 = getattr(getattr(self, "fn", None), "kv_fp8", False)
         per_tok = (_kv_bytes(c.num_key_value_heads, c.head_dim, True) * len(c.attention_layers) if fp8
                    else c.kv_bytes_per_token(2))
         return CostModel(section_bytes=sec, view_bytes_per_token=per_tok, parts={"recurrent": 0, "conv": sec})
