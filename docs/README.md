@@ -9,11 +9,11 @@ TandemLLM is an inference engine, and we measure its speed on raw `/v1/completio
 | [kernels.md](kernels.md) | row invariance, the 4-bit and 8-bit matrix products, the recurrent-layer kernels, graphs |
 | [speculative-decoding.md](speculative-decoding.md) | the block drafter, the lookup drafter, StairCut, the older length router, tree verify through recurrent layers, Flash-Next's MTP drafter |
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
-| [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
+| [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store, the swap of long chats to the SSD (session spill) |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
 | [conductor.md](conductor.md) | the conductor in one page (its chat profiles in beta): modes and headers, profiles, the router, effort, packages, the note, side requests, sessions, the monitor and loop guards, the journal, raw mode, measured effect |
-| [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text, Flash-Next |
-| [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
+| [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, waiting for memory and chat priority, speed, the text, Flash-Next |
+| [dashboard.md](dashboard.md) | the Live activity view, the lanes, a request held for memory, the log export, the other views, the API contract |
 | [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |

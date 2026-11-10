@@ -58,9 +58,15 @@
 
 \item[memory note]\index{memory note} One fact the model keeps as a file, written from a block in its answer or by the background writer, read back in later turns.
 
+\item[memory priority]\index{memory priority} A chat's place in the line for memory, \code{tandem.priority} in the request: \code{"high"}, \code{"normal"} or \code{"low"}. Set per chat in the Chat tab (Section~\ref{sec:chat-priority}).
+
+\item[memory wait]\index{memory wait} A request that does not fit above the floor waits before its prefill and starts by itself once memory frees; \code{waiting_memory} on the dashboard, \code{X-Tandem-Wait: memory} on the response (Section~\ref{sec:memory-wait}).
+
 \item[narrator]\index{narrator} The small model that writes status lines: rewritten templates, thought summaries, or the voice.
 
 \item[near tie]\index{near tie} A position where the two best tokens score within one unit in the last place, where a batched verify and a one-token step may choose differently.
+
+\item[NVMe]\index{NVMe} The box's SSD. The disk tier and the session spill keep their files on it.
 
 \item[note]\index{note} The router's hidden text at the end of a turn's last message: the effort sentence, rules, packages. Replayed at the same position on later turns.
 
@@ -96,7 +102,7 @@
 
 \item[session monitor]\index{session monitor} The conductor's watch over a running turn: loop guards, the empty-turn continue, tool-call checks, the claim check, session tasks.
 
-\item[session spill]\index{session spill} Whole live conversations written to the NVMe at a planned stop or before an eviction, and read back.
+\item[session spill]\index{session spill} Whole live conversations written to the NVMe at a planned stop, while idle or before an eviction, and read back: the swap of long chats to the SSD (Section~\ref{sec:spill}).
 
 \item[shadow]\index{shadow mode} A mode in which a part decides and journals what it would do and changes nothing.
 
@@ -108,6 +114,8 @@
 
 \item[spill]\index{spill} See session spill.
 
+\item[SSD]\index{SSD} Two things. The box's NVMe drive, where the session spill swaps long chats out (Section~\ref{sec:spill}). In NemotronH, Mamba2's chunked state-space form of the prefill (Chapter~\ref{ch:nemotron}).
+
 \item[StairCut]\index{StairCut} The router that cuts each round's draft tree to the node count with the most expected tokens per millisecond on the measured verify-cost staircase.
 
 \item[state store]\index{state store} Whole state snapshots, for the session cache and the prefix cache.
@@ -115,6 +123,8 @@
 \item[status line]\index{status line} One short line in the client for a step the conductor takes, stripped from whatever the client sends back.
 
 \item[suffix store]\index{suffix store} An append-only log of the token ids the engine read and wrote, with a suffix array, for the lookup drafter.
+
+\item[swap]\index{swap} Two things. The swap of long chats to the SSD is the session spill (Section~\ref{sec:spill}). The park swaps two sessions' rows in the engine's memory (Section~\ref{sec:resident}).
 
 \item[taint]\index{taint} The lowest row that a session resume wrote. Below it the caches are a cold prefill's bit for bit.
 

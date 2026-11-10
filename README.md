@@ -360,12 +360,12 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 - [Kernels](docs/kernels.md)
 - [Drafters and tree verify](docs/speculative-decoding.md)
 - [Exactness](docs/exactness.md): what the engine promises about its text, and the near-tie exception
-- [Caches](docs/caches.md)
+- [Caches](docs/caches.md), the swap of long chats to the SSD among them
 - [Server and API](docs/server.md)
 - [The conductor](docs/conductor.md): what `TandemLLM` decides for each request, and where each rule is described
 - [Dashboard](docs/dashboard.md)
 - [The Chat tab](docs/chat.md), in beta: the sandbox, the permission modes, the known limitations
-- [Parallel requests](docs/parallel-requests.md)
+- [Parallel requests](docs/parallel-requests.md), waiting for memory and chat priority among them
 - [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`pip install .` gives `tandem-dash`, no GPU needed), the host collector, the docker image
 - [Operations](docs/operations.md)
 - [Measurement](docs/measurement.md)
