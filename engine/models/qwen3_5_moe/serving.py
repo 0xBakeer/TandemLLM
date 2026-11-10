@@ -33,7 +33,7 @@ MODULES = ("engine/models/qwen3_5_moe/__init__.py", "engine/models/qwen3_5_moe/c
            "engine/models/qwen3_5_moe/load.py", "engine/models/qwen3_5_moe/pack.py",
            "engine/models/qwen3_5_moe/ref.py", "engine/models/flashnext/engine.py",
            "engine/models/flashnext/load.py", "engine/models/flashnext/ref.py", "engine/models/flashnext/vision.py",
-           "engine/models/flashnext/knobs.py", "engine/settings.py")
+           "engine/models/flashnext/knobs.py", "engine/models/qwen3_5_moe/knobs.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 #: the model's name in ops/prices/ and models/
@@ -41,7 +41,9 @@ MODEL_ID = "ornith-1.5-122b"
 
 
 def manifest() -> Manifest:
-    return Manifest(arch="qwen3_5_moe", modules=MODULES, data=TABLES)
+    # SPD-150: an e4m3 cache stores other rows: its entries are another arch's, never read as the bf16 cache's
+    return Manifest(arch="qwen3_5_moe-kvfp8" if _S.get("Q35M_KV_FP8") == "1" else "qwen3_5_moe", modules=MODULES,
+                    data=TABLES)
 
 
 class Qwen35MoeServing(FlashNextServing):
@@ -86,6 +88,9 @@ class Qwen35MoeServing(FlashNextServing):
         prefill, a resumed one too, until its own rows are measured."""
         c, base = self.cfg, super().cost()
         per = int(c.num_attention_heads) * int(c.head_dim) * 2 * 2
+        if getattr(self.fn, "kv_fp8", False):
+            # SPD-150: the prompt's attention reads the e4m3 cache decoded to bf16, K and V a token of context
+            per += int(c.num_key_value_heads) * int(c.head_dim) * 2 * 2
         floor = int(2.75 * (1 << 30))
         return replace(base, workspace_floor=floor, workspace_per_token=per,
                        workspace_cap=floor + per * int(self.max_len), workspace_rows=None)
@@ -273,7 +278,7 @@ def serve(a, ctx) -> dict:
     describe = (f"Qwen3.5 MoE {a.model}: load {info['load'].get('total_s')} s, drafter "
                 f"{what + ' + StairCut' if drafter is not None else 'none'}"
                 f"{' + lookup' if getattr(drafter, 'ngram', None) is not None else ''}, "
-                f"max_len {a.max_len:,},")
+                f"KV cache {'e4m3' if eng.fn.kv_fp8 else 'bf16'}, max_len {a.max_len:,},")
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
@@ -281,4 +286,6 @@ def serve(a, ctx) -> dict:
                                          "drafters": (what if drafter is not None else None),
                                          "dflash2": info.get("dflash2"),
                                          "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"]}}}
+                                         "self_check": info["self_check"],
+                                         # SPD-150: which cache the attention layers keep (QWEN38_Q35M_KV_FP8)
+                                         "kv_cache": "e4m3" if eng.fn.kv_fp8 else "bf16"}}}
