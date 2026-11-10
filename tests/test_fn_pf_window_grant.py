@@ -38,8 +38,9 @@ def test_the_window_prices_its_bytes():
     assert LM.window_bytes(C, C) == 0 and LM.window_bytes(100, C) == 0           # one chunk: chunk-major
     w8 = LM.window_bytes(8192, C)
     assert w8 == int(LM.WIN_MARGIN * (LM.WIN_FIXED + LM.WIN_ROW * C))
-    # the offline 32k peaks above the held bytes it was fitted on: 4.68 - 2.57 GiB (8,192), 8.97 - 2.57 (32,768)
-    assert w8 >= (4.68 - 2.57) * GIB and LM.window_bytes(32768, C) >= (8.97 - 2.57) * GIB
+    # the 32k figures it was fitted on: offline 4.68 - 2.57 GiB (8,192) and 8.97 - 2.57 (32,768) above the held
+    # bytes; served, the reserve 3.17 GiB above chunk-major (8,192, with its two state buffers)
+    assert w8 >= 3.17 * GIB and LM.window_bytes(32768, C) >= (8.97 - 2.57) * GIB
     assert LM.plan_bytes([C, C], 8192, C) == w8
     assert LM.plan_bytes([C, C, C, C], 8192, C) == w8                            # two windows, one after another
     assert LM.plan_bytes([C, C, 100], 8192, C) == w8

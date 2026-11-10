@@ -48,10 +48,11 @@ ROW_BYTES = 256 * 1024
 MARGIN = 6 << 30
 #: SPD-249: a window's bytes above its chunks' chunk-major workspace (`window_bytes`): a fixed part (a layer's EXL3
 #: slabs and fp32 weight forms, decoded once for the window) and a part a row past one chunk (the experts' buffers of
-#: all its rows, the held streams and mixer inputs), with `WIN_MARGIN`. Measured offline at 32k on 3.05 (2026-11-10,
-#: the peak above the held bytes): chunk-major 2.57 GiB, window 8,192 4.68, window 32,768 8.97, so 2.11 GiB for
-#: 4,096 rows past the chunk and 6.40 for 28,672
-WIN_FIXED = int(1.40 * (1 << 30))
+#: all its rows, the held streams and mixer inputs), with `WIN_MARGIN`. Measured at 32k on 3.05 (2026-11-10): offline,
+#: the peak above the held bytes was 2.11 GiB more than chunk-major for a window of 8,192 rows and 6.40 for 32,768
+#: (`WIN_ROW`); served, a server's first cold prompt in windows of 8,192 raised the allocator's reserve 3.17 GiB more
+#: than chunk-major (6.54 against 3.37), the window's two state buffers included (`WIN_FIXED`)
+WIN_FIXED = int(2.50 * (1 << 30))
 WIN_ROW = 187_500
 WIN_MARGIN = 1.15
 
