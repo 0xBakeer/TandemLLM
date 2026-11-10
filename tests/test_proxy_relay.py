@@ -384,6 +384,14 @@ def test_responses_passthrough_and_deepseek_usage_and_contract():
         assert u["totals"]["requests"] == 2 and u["totals"]["cost_micros"] > 0
         assert json.loads(px.get("/v1/dashboard/usage?backend=engine")[2])["totals"][
             "requests"] == 0
+        # the log export (SRV-804): the standalone proxy answers the route too, as a text file
+        # with the same header; it has no commit of its own
+        st, hdr, got = px.get("/v1/dashboard/logs/export")
+        assert st == 200 and hdr["Content-Type"] == "text/plain; charset=utf-8", (st, hdr)
+        assert hdr["Content-Disposition"].startswith('attachment; filename="tandemllm-'), hdr
+        text = got.decode()
+        assert text.startswith("TandemLLM engine log\nversion: "), text[:120]
+        assert "\ncommit: unknown\n" in text and "\nlog content: " in text, text[:400]
     srv.shutdown()
 
 

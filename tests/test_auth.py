@@ -74,6 +74,7 @@ def bearer(tok):
 def test_admin_routes_need_a_token_through_the_proxy():
     _setup()
     for method, path in (("GET", "/v1/dashboard/summary"), ("GET", "/v1/dashboard/logs"),
+                         ("GET", "/v1/dashboard/logs/export"),
                          ("GET", "/metrics"), ("GET", "/v1/cache/stats"),
                          ("POST", "/v1/cache/clear")):
         code, head, body = call(method, path, PROXY)
@@ -270,6 +271,7 @@ def test_the_public_liveness_page():
 
 
 ADMIN_ROUTES = (("GET", "/v1/dashboard/summary"), ("GET", "/v1/dashboard/metrics"),
+                ("GET", "/v1/dashboard/logs/export"),
                 ("GET", "/v1/cache/stats"), ("POST", "/v1/cache/clear"), ("GET", "/metrics"))
 
 
@@ -376,7 +378,8 @@ def test_tokens_never_leak():
                                 ("GET", "/metrics", bearer(METRICS)),
                                 ("GET", "/v1/dashboard/logs?follow=0&level=debug", bearer(ADMIN)),
                                 ("GET", "/health", bearer(ADMIN)),
-                                ("GET", "/v1/dashboard/session", {"Cookie": cookie})):
+                                ("GET", "/v1/dashboard/session", {"Cookie": cookie}),
+                                ("GET", "/v1/dashboard/logs/export", bearer(ADMIN))):
             req = Req(path, {})
             req.command = method
             req.headers.update(dict(PROXY, **h))
@@ -399,7 +402,7 @@ def test_tokens_never_leak():
 DASH_READS = ("/v1/dashboard/summary", "/v1/dashboard/usage?bucket=day",
               "/v1/dashboard/requests?limit=5", "/v1/dashboard/system",
               "/v1/dashboard/logs?follow=0", "/v1/dashboard/live?follow=0",
-              "/v1/dashboard/metrics")
+              "/v1/dashboard/metrics", "/v1/dashboard/logs/export")
 
 
 def test_login_off_opens_the_read_api_without_a_token():
@@ -462,6 +465,163 @@ def test_login_on_guards_the_dashboards_metrics_copy():
     _, _, cookie = _login()
     code, _, text = call("GET", "/v1/dashboard/metrics", dict(PROXY, Cookie=cookie))
     assert code == 200 and "qse_" in text
+
+
+# ------------------------------------------------------------- the log export (SRV-804)
+EXPORT = "/v1/dashboard/logs/export"
+FILE = 'Content-Disposition: attachment; filename="tandemllm-'
+
+
+def test_export_follows_the_rule_of_the_log_route():
+    """`/v1/dashboard/logs/export` answers whoever `/v1/dashboard/logs` answers and nobody else:
+    a 401 and no file without a token or a session, with the metrics token and with a wrong
+    token; the file with the admin token and with the session cookie; a 401 again once the
+    session is logged out."""
+    _setup()
+    for headers in (PROXY, dict(PROXY, **bearer(METRICS)),
+                    dict(PROXY, **bearer(ADMIN[:-1] + "x")), dict(PROXY, Cookie="qse_dash=nope")):
+        codes = []
+        for path in ("/v1/dashboard/logs?follow=0", EXPORT):
+            code, head, body = call("GET", path, headers)
+            codes.append(code)
+            assert "WWW-Authenticate: Bearer" in head, (path, head)
+            assert not contract_check.check(body, "error"), body
+            assert "Content-Disposition" not in head, "a refusal is not a file"
+        assert codes == [401, 401], (headers, codes)
+    code, head, text = call("GET", EXPORT, dict(PROXY, **bearer(ADMIN)))
+    assert code == 200 and "Content-Type: text/plain; charset=utf-8" in head, (code, head)
+    assert FILE in head and text.startswith(logbuf.EXPORT_TITLE + "\n"), (head, text[:80])
+    _, _, cookie = _login()
+    code, head, text = call("GET", EXPORT, dict(PROXY, Cookie=cookie))
+    assert code == 200 and FILE in head and text.startswith(logbuf.EXPORT_TITLE + "\n")
+    code, _, _ = call("DELETE", "/v1/dashboard/session", dict(PROXY, Cookie=cookie))
+    assert code == 204
+    code, head, _ = call("GET", EXPORT, dict(PROXY, Cookie=cookie))
+    assert code == 401 and "Content-Disposition" not in head, "a logged-out session gets no file"
+
+
+def test_export_is_no_route_when_the_dashboard_is_off():
+    """The policy's `absent` verdict (the old fail-closed rule; `decide` no longer returns it, the
+    handler still honours it) is a 404 for the export exactly as for the log route, admin token
+    or not."""
+    _setup()
+
+    class Off(auth.Auth):
+        def decide(self, route, peer, headers):
+            return "absent" if route == "dashboard" else super().decide(route, peer, headers)
+
+    app.STATE["auth"] = Off(ADMIN, METRICS)
+    for path in ("/v1/dashboard/logs?follow=0", EXPORT):
+        code, head, body = call("GET", path, dict(PROXY, **bearer(ADMIN)))
+        assert code == 404 and body["error"]["type"] == "not_found", (path, code, body)
+        assert "Content-Disposition" not in head
+
+
+def _get(port, path, token=ADMIN):
+    """One GET over a real socket, read to the end of its body: (status line, head, body)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n"
+              f"Connection: close\r\n\r\n".encode())
+    raw = b""
+    while True:
+        head, sep, body = raw.partition(b"\r\n\r\n")
+        if sep and len(body) >= int(head.split(b"Content-Length: ")[1].split(b"\r\n")[0]):
+            break
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        raw += chunk
+    s.close()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    return head.split(b"\r\n")[0].decode(), head.decode(), body
+
+
+def test_export_does_not_use_a_stream_place():
+    """Four log streams are open, the cap: a fifth stream is refused with a 429, the export is
+    not. It is answered in full, it leaves the four places as they were, and the ring is neither
+    cleared nor moved by it."""
+    _setup()
+    buf = logbuf.LogBuffer()
+    for i in range(30):
+        buf.append(f"[server] line {i}")
+    app.STATE["log_buffer"] = buf
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port, streams = httpd.server_address[1], []
+    try:
+        for _ in range(logbuf.MAX_SUBSCRIBERS):
+            s = socket.create_connection(("127.0.0.1", port), timeout=10)
+            s.sendall(f"GET /v1/dashboard/logs?follow=1 HTTP/1.1\r\nHost: x\r\n"
+                      f"Authorization: Bearer {ADMIN}\r\n\r\n".encode())
+            streams.append(s)
+        end = time.time() + 5
+        while buf.subscribers < logbuf.MAX_SUBSCRIBERS and time.time() < end:
+            time.sleep(0.05)
+        assert buf.subscribers == logbuf.MAX_SUBSCRIBERS, buf.subscribers
+        status, _, _ = _get(port, "/v1/dashboard/logs?follow=1")
+        assert " 429 " in status, "the cap holds for a fifth stream"
+        before = buf.snapshot()
+        for _ in range(3):
+            status, head, body = _get(port, EXPORT)
+            assert " 200 " in status and FILE in head, (status, head)
+            text = body.decode()
+            assert "count: 30 lines" in text and text.count("[server] line ") == 30, text[:300]
+        assert buf.subscribers == logbuf.MAX_SUBSCRIBERS, "the export took or freed no place"
+        assert buf.snapshot() == before, "the export cleared or moved the ring"
+    finally:
+        for s in streams:
+            s.close()
+        end = time.time() + 5
+        while buf.subscribers and time.time() < end:
+            buf.append("[server] tick")
+            time.sleep(0.1)
+        httpd.shutdown()
+    assert buf.subscribers == 0, "the closed streams gave their places back"
+
+
+def test_export_does_not_take_the_engine_lock():
+    """A generation holds the engine lock from its prefill to its last token. The export is
+    answered while the lock is held, and it never asks for the lock: a stand-in lock that fails
+    the test on any acquire sees none."""
+    _setup()
+    done = {}
+
+    def ask():
+        done["answer"] = call("GET", EXPORT, dict(PROXY, **bearer(ADMIN)))
+
+    with app.LOCK:
+        t = threading.Thread(target=ask, daemon=True)
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), "the export waited for the engine lock"
+    code, head, text = done["answer"]
+    assert code == 200 and FILE in head and text.startswith(logbuf.EXPORT_TITLE + "\n")
+
+    class Spy:
+        asked = 0
+
+        def acquire(self, *a, **kw):
+            Spy.asked += 1
+            return True
+
+        def release(self):
+            pass
+
+        def locked(self):
+            return False
+
+        def __enter__(self):
+            return self.acquire() and self
+
+        def __exit__(self, *exc):
+            return False
+
+    real, app.LOCK = app.LOCK, Spy()
+    try:
+        code, _, _ = call("GET", EXPORT, dict(PROXY, **bearer(ADMIN)))
+    finally:
+        app.LOCK = real
+    assert code == 200 and Spy.asked == 0, (code, Spy.asked)
 
 
 def test_the_login_setting():

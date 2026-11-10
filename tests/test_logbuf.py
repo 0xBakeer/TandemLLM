@@ -5,15 +5,21 @@ resume by Last-Event-ID, a slow reader bounded and told about its gap, four stre
 request text in the log through every error path we know, and the `[body]` keys line. Also: a
 traceback is one entry, the heartbeat, `follow=0`, and every SSE payload against the contract.
 
+The export (SRV-804, the Gherkin of SRV-803 as the matrix): the header and the file name, the whole
+ring whatever a page filters, an empty ring, the ring-full note, one snapshot while lines arrive, a
+long traceback kept whole, no request text in the file, and the example in the contract folder.
+
 Run: python tests/test_logbuf.py
 """
 
 from __future__ import annotations
 
 import contextlib
+import datetime
 import io
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -364,10 +370,14 @@ class TemplateBoom(UTok):
         raise ValueError(f"cannot render message {messages[-1]['content']!r}")
 
 
-def test_no_content_in_the_log_by_default():
-    body = {"messages": [{"role": "user", "content": f"please {SENTINEL} now"}], "stream": False,
+def _sentinel_body():
+    return {"messages": [{"role": "user", "content": f"please {SENTINEL} now"}], "stream": False,
             "tools": [{"type": "function", "function": {"name": "f", "description": SENTINEL}}]}
 
+
+def _every_error_path(body):
+    """Each path we know that raises with the request's text in the message: the template, the
+    engine (sync and streamed), the tool-call parser, and a body that is not JSON."""
     def engine_boom(*a, **k):
         yield 65
         raise RuntimeError(f"the engine choked on {SENTINEL}")
@@ -375,40 +385,44 @@ def test_no_content_in_the_log_by_default():
     def parser_boom(text):
         raise ValueError(f"bad call in {SENTINEL}")
 
+    # the template
+    serve()
+    app.STATE["tok"] = TemplateBoom()
+    head, _ = Req("/v1/chat/completions", body).response()
+    assert head.startswith("HTTP/1.1 500"), head
+    # the engine, both paths
+    for stream in (False, True):
+        serve()
+        app.STATE["tok"] = UTok()
+        real = app.generate_stream
+        app.generate_stream = engine_boom
+        try:
+            Req("/v1/chat/completions", dict(body, stream=stream)).response()
+        finally:
+            app.generate_stream = real
+    # the tool-call parser
+    serve()
+    app.STATE["tok"] = UTok()
+    real_gen, real_parse = app.generate_stream, app.parse_tool_calls
+    app.generate_stream = _script(_ids("x"))
+    app.parse_tool_calls = parser_boom
+    try:
+        Req("/v1/chat/completions", body).response()
+    finally:
+        app.generate_stream, app.parse_tool_calls = real_gen, real_parse
+    # a body that is not JSON
+    req = Req("/v1/chat/completions", {})
+    req.rfile = io.BytesIO(f'{{"messages": "{SENTINEL}'.encode())
+    req.headers["Content-Length"] = str(len(req.rfile.getvalue()))
+    req.response()
+
+
+def test_no_content_in_the_log_by_default():
     for log_content in (False, True):
         logbuf.CONFIG["log_content"] = log_content
         try:
             with Captured() as cap:
-                # the template
-                serve()
-                app.STATE["tok"] = TemplateBoom()
-                head, _ = Req("/v1/chat/completions", body).response()
-                assert head.startswith("HTTP/1.1 500"), head
-                # the engine, both paths
-                for stream in (False, True):
-                    serve()
-                    app.STATE["tok"] = UTok()
-                    real = app.generate_stream
-                    app.generate_stream = engine_boom
-                    try:
-                        Req("/v1/chat/completions", dict(body, stream=stream)).response()
-                    finally:
-                        app.generate_stream = real
-                # the tool-call parser
-                serve()
-                app.STATE["tok"] = UTok()
-                real_gen, real_parse = app.generate_stream, app.parse_tool_calls
-                app.generate_stream = _script(_ids("x"))
-                app.parse_tool_calls = parser_boom
-                try:
-                    Req("/v1/chat/completions", body).response()
-                finally:
-                    app.generate_stream, app.parse_tool_calls = real_gen, real_parse
-                # a body that is not JSON
-                req = Req("/v1/chat/completions", {})
-                req.rfile = io.BytesIO(f'{{"messages": "{SENTINEL}'.encode())
-                req.headers["Content-Length"] = str(len(req.rfile.getvalue()))
-                req.response()
+                _every_error_path(_sentinel_body())
             text = cap.text()
             assert "Traceback" in text and "RuntimeError" in text, "the errors were logged"
             if log_content:
@@ -446,6 +460,314 @@ def test_the_request_keys_line():
                  '"messages": 1', '"tools": 1', "user"):
         assert part in msg, (part, msg)
     assert lines[0]["request_id"] is not None
+
+
+# ------------------------------------------------------------------ the export (SRV-803)
+HEADER_KEYS = ["version", "commit", "uptime", "exported", "count", "first line", "last line",
+               "ring", "log content"]
+UTC_S = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(UTC\)$")
+UTC_MS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \(UTC\)$")
+ENTRY = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z (debug|info|warning|error) ")
+EXPORT = "/v1/dashboard/logs/export"
+
+
+def _parse_export(text):
+    """`(title, {field: value}, body)` of an exported file; the body is what follows the header's
+    blank line, without the file's last newline."""
+    head, sep, body = text.partition("\n\n")
+    assert sep and (not body or body.endswith("\n")), "a header, a blank line, whole lines"
+    title, *fields = head.split("\n")
+    assert all(": " in f for f in fields), fields
+    pairs = [f.split(": ", 1) for f in fields]
+    assert [k for k, _ in pairs] == HEADER_KEYS, "the header holds these fields and no other"
+    return title, dict(pairs), body[:-1]
+
+
+def _as_lines(entries):
+    return "\n".join(f"{e['ts']} {e['level']} {e['msg']}" for e in entries)
+
+
+def _export(headers=None):
+    req = Req(EXPORT, {})
+    req.headers.update({"Authorization": f"Bearer {ADMIN}"} if headers is None else headers)
+    req.command = "GET"
+    req.do_GET()
+    head, _, body = req.wfile.getvalue().partition(b"\r\n\r\n")
+    head = head.decode()
+    hdr = dict(line.split(": ", 1) for line in head.split("\r\n")[1:])
+    return int(head.split(" ", 2)[1]), hdr, body
+
+
+def test_export_the_button_downloads_the_log_as_a_text_file_with_a_header():
+    """Scenario: The button downloads the log as a text file with a header."""
+    serve()
+    with Captured() as cap:
+        app.STATE.update(version="0.15.3+flashnext-3.05", git_sha="952d072d1a2b",
+                         started=time.time() - 7 * 3600 - 125)
+        print("[server] one", flush=True)
+        print("[cache] put declined: x", flush=True)
+        code, hdr, raw = _export()
+    assert code == 200, code
+    assert hdr["Content-Type"] == "text/plain; charset=utf-8", hdr
+    assert hdr["Cache-Control"] == "no-store" and int(hdr["Content-Length"]) == len(raw), hdr
+    title, head, body = _parse_export(raw.decode("utf-8"))
+    assert title == logbuf.EXPORT_TITLE
+    assert head["version"] == "0.15.3+flashnext-3.05" and head["commit"] == "952d072d1a2b", head
+    assert re.match(r"^7 h 2 min \d+ s$", head["uptime"]), head["uptime"]
+    assert UTC_S.match(head["exported"]), "the time of export is UTC and says so"
+    assert head["count"] == "2 lines" and head["log content"] == "off", head
+    assert UTC_MS.match(head["first line"]) and UTC_MS.match(head["last line"]), head
+    assert head["first line"] <= head["last line"]
+    assert body == _as_lines(cap.buf.ring), "a line reads as the copy button writes it"
+    # the file name: the version and the time of export, in letters, digits, dot and dash only
+    m = re.match(r'^attachment; filename="([^"]+)"$', hdr["Content-Disposition"])
+    assert m, hdr
+    name = m.group(1)
+    assert re.match(r"^[A-Za-z0-9.-]+$", name), name
+    stamp = re.sub(r"[-:]", "", head["exported"].split(" ")[0])
+    assert name == f"tandemllm-0.15.3-flashnext-3.05-{stamp}.log", (name, head["exported"])
+
+
+def test_export_a_missing_value_reads_unknown():
+    """An empty commit, no version and an unknown uptime read "unknown", in the header and in the
+    file name; a time given in another zone is written in UTC."""
+    serve()
+    with Captured():
+        app.STATE.update(version="", git_sha="")              # and no `started` at all
+        code, hdr, raw = _export()
+    _, head, _ = _parse_export(raw.decode())
+    assert (head["version"], head["commit"], head["uptime"]) == ("unknown",) * 3, head
+    assert re.match(r'^attachment; filename="tandemllm-unknown-\d{8}T\d{6}Z\.log"$',
+                    hdr["Content-Disposition"]), hdr
+    # the pure parts
+    at = datetime.datetime(2026, 11, 9, 0, 39, 59, tzinfo=datetime.timezone.utc)
+    assert logbuf.export_name("0.15.3+flashnext-3.05", at) == \
+        "tandemllm-0.15.3-flashnext-3.05-20261109T003959Z.log"
+    for version in ("1.0 beta/2", "v1_\u00e9\u4e2d+x", "../../etc", 'a"b\r\nc', None, "  "):
+        assert re.match(r"^tandemllm-[A-Za-z0-9.-]+-20261109T003959Z\.log$",
+                        logbuf.export_name(version, at)), version
+    cet = at.astimezone(datetime.timezone(datetime.timedelta(hours=1)))
+    assert logbuf.export_name("1", cet) == logbuf.export_name("1", at)
+    text = logbuf.export_text([], version="1", now=cet, uptime_s=None, log_content=None)
+    assert "exported: 2026-11-09T00:39:59Z (UTC)\n" in text and "log content: unknown\n" in text
+    for seconds, want in ((0, "0 s"), (59, "59 s"), (3600, "1 h 0 min 0 s"),
+                          (90061.7, "1 d 1 h 1 min 1 s"), (None, "unknown"), (-5, "unknown"),
+                          ("x", "unknown"), (float("inf"), "unknown")):
+        assert f"uptime: {want}\n" in logbuf.export_text([], uptime_s=seconds, now=at), seconds
+
+
+def test_export_the_file_holds_the_whole_ring_not_the_lines_on_screen():
+    """Scenario: The file holds the whole ring, not the lines on screen."""
+    serve()
+    kinds = ('127.0.0.1 - "GET /health HTTP/1.1" 200 -',                  # debug
+             "[server] needle queue depth 2/8",                            # info
+             "[cache] put declined: needle too large",                     # warning
+             "[req] cmpl-0123456789abcdef01234567 !! needle RuntimeError")  # error
+    with Captured() as cap:
+        for i in range(logbuf.RING):
+            cap.buf.append(f"{kinds[i % 4]} n={i}")
+        assert len(cap.buf.ring) == 10_000
+        # what a page shows: one level, one search term, 500 lines
+        _, page = _get("/v1/dashboard/logs?follow=0&level=info&grep=needle&backlog=500")
+        assert len(page["lines"]) == 500 and all("needle" in l["msg"] for l in page["lines"])
+        code, _, raw = _export()
+        ring = list(cap.buf.ring)
+    _, head, body = _parse_export(raw.decode())
+    assert code == 200 and head["count"] == "10000 lines", head
+    assert head["ring"] == "not full, no line was dropped", head
+    lines = body.split("\n")
+    assert len(lines) == 10_000
+    assert [int(l.rsplit("n=", 1)[1]) for l in lines] == list(range(10_000)), "in order of seq"
+    assert body == _as_lines(ring)
+    assert {l.split(" ", 2)[1] for l in lines} == {"debug", "info", "warning", "error"}
+    assert sum(" debug " in l for l in lines) == 2500, "debug lines included"
+    assert head["first line"] == ring[0]["ts"] + " (UTC)"
+    assert head["last line"] == ring[-1]["ts"] + " (UTC)"
+    # the level and search of the request change nothing either
+    with Captured() as cap:
+        for i in range(40):
+            cap.buf.append(f"{kinds[i % 4]} n={i}")
+        req = Req(EXPORT + "?level=error&grep=nothing&backlog=1&follow=1", {})
+        req.headers["Authorization"] = f"Bearer {ADMIN}"
+        req.command = "GET"
+        req.do_GET()
+        text = req.wfile.getvalue().partition(b"\r\n\r\n")[2].decode()
+    assert _parse_export(text)[1]["count"] == "40 lines"
+
+
+def test_export_the_ring_is_empty():
+    """Scenario: The ring is empty."""
+    serve()
+    with Captured() as cap:
+        code, hdr, raw = _export()
+        assert cap.buf.seq == 0 and not cap.buf.ring, "the export itself logs nothing"
+    title, head, body = _parse_export(raw.decode())
+    assert code == 200 and title == logbuf.EXPORT_TITLE and "filename=" in hdr["Content-Disposition"]
+    assert head["count"] == "0 lines", head
+    assert (head["first line"], head["last line"]) == ("none", "none") and body == "", head
+    assert head["ring"] == "not full, no line was dropped"
+
+
+def test_export_says_when_the_ring_was_full():
+    """Where the ring was full, the header says that older lines are not in the file."""
+    serve()
+    with Captured() as cap:
+        cap.buf = app.STATE["log_buffer"] = logbuf.LogBuffer(size=50)
+        for i in range(50):
+            cap.buf.append(f"[server] n={i}")
+        _, _, raw = _export()
+        assert _parse_export(raw.decode())[1]["ring"] == "not full, no line was dropped", \
+            "a ring that holds exactly its size has dropped nothing yet"
+        for i in range(50, 80):
+            cap.buf.append(f"[server] n={i}")
+        _, _, raw = _export()
+        before = list(cap.buf.ring), cap.buf.seq
+        _export()
+        assert (list(cap.buf.ring), cap.buf.seq) == before, "the ring is not cleared or moved"
+    _, head, body = _parse_export(raw.decode())
+    assert head["ring"] == ("full, the 30 lines before the first one are not in this file "
+                            "(the ring keeps 50)"), head
+    assert head["count"] == "50 lines"
+    assert [int(l.rsplit("n=", 1)[1]) for l in body.split("\n")] == list(range(30, 80))
+
+
+def test_export_lines_arrive_while_the_file_is_built():
+    """Scenario: Lines arrive while the file is built. 50 lines a second, then as fast as the
+    writer can: every file is one snapshot with no repeated and no missing seq."""
+    serve()
+    with Captured() as cap:
+        buf = cap.buf = app.STATE["log_buffer"] = logbuf.LogBuffer(size=2_000)
+        for pace, exports in ((0.02, 12), (0.0, 60)):
+            stop = threading.Event()
+
+            def write():
+                while not stop.is_set():
+                    buf.append(f"[server] n={buf.seq + 1}")     # the only writer: n is the seq
+                    if pace:
+                        time.sleep(pace)
+
+            t = threading.Thread(target=write, daemon=True)
+            t.start()
+            try:
+                files, last = [], 0
+                for _ in range(exports):
+                    code, _, raw = _export()
+                    assert code == 200
+                    files.append(_parse_export(raw.decode()))
+                    snap, dropped = buf.snapshot()
+                    seqs = [e["seq"] for e in snap]
+                    assert seqs == list(range(dropped + 1, dropped + 1 + len(seqs))), "a snapshot"
+                    if pace:
+                        time.sleep(0.1)
+            finally:
+                stop.set()
+                t.join(5)
+            assert buf.seq > (20 if pace else 2_000), "lines did arrive meanwhile"
+            for _, head, body in files:
+                ns = [int(l.rsplit("n=", 1)[1]) for l in body.split("\n")] if body else []
+                assert head["count"] == f"{len(ns)} lines", head
+                assert ns == list(range(ns[0], ns[0] + len(ns))) if ns else True, \
+                    "no repeated and no missing seq"
+                if ns:
+                    assert ns[-1] >= last, "a later file never ends earlier"
+                    last = ns[-1]
+                    assert head["ring"].startswith("full") == (ns[0] > 1), head
+            # the writer was never held up for good, and the ring is whole afterwards
+            seqs = [e["seq"] for e in buf.ring]
+            assert seqs == list(range(buf.seq - len(seqs) + 1, buf.seq + 1))
+
+
+def test_export_a_long_line_and_a_long_traceback_stay_whole():
+    """A very long line or a long traceback is kept whole, as one entry with its lines in order."""
+    serve()
+    frames = "".join(f'  File "server/app.py", line {i}, in step_{i}\n    step_{i + 1}()\n'
+                     for i in range(400))
+    tb = "Traceback (most recent call last):\n" + frames + "RuntimeError: decode step failed"
+    long_line = "[server] " + "x" * 200_000 + " end"
+    with Captured() as cap:
+        print("[server] before", flush=True)
+        sys.stderr.write(tb + "\n")
+        sys.stderr.flush()
+        print(long_line, flush=True)
+        print("[server] after \u00e9\u4e2d\u6587", flush=True)
+        _, hdr, raw = _export()
+        ring = list(cap.buf.ring)
+    assert [e["source"] for e in ring] == ["server", "traceback", "server", "server"], \
+        [e["source"] for e in ring]
+    text = raw.decode("utf-8")
+    _, head, body = _parse_export(text)
+    assert head["count"] == "4 lines", "a traceback is one line of the count"
+    assert f" error {tb}\n" in text and f" info {long_line}\n" in text
+    assert body == _as_lines(ring) and body.endswith("after \u00e9\u4e2d\u6587")
+    assert int(hdr["Content-Length"]) == len(raw) > 200_000
+
+
+def test_export_carries_no_prompt_or_answer_text():
+    """Scenarios: The export carries no prompt or answer text; Content logging is on."""
+    for log_content in (False, True):
+        logbuf.CONFIG["log_content"] = log_content
+        try:
+            with Captured() as cap:
+                _every_error_path(_sentinel_body())
+                # a request that works, with the sentinel in every field that holds text
+                serve()
+                app.STATE.update(tok=UTok(), log_request_keys=True)
+                real = app.generate_stream
+                app.generate_stream = _script(_ids("ok"))
+                try:
+                    Req("/v1/chat/completions", {
+                        "stream": False, "messages": [{"role": "user", "content": SENTINEL}],
+                        "user": SENTINEL, "stop": [SENTINEL]}).response()
+                finally:
+                    app.generate_stream = real
+                    app.STATE["log_request_keys"] = False
+                # serve() started the state afresh: the buffer under test and the token again
+                app.STATE.update(log_buffer=cap.buf, auth=auth.Auth(ADMIN),
+                                 version="0.15.3+flashnext-3.05", git_sha="952d072d1a2b")
+                code, hdr, raw = _export()
+            text = raw.decode()
+            assert code == 200 and "Traceback" in text and "RuntimeError" in text, \
+                "the errors are in the file"
+            title, head, body = _parse_export(text)       # the fields of the header, and no other
+            assert body == _as_lines(cap.buf.ring), "the file takes only what the ring holds"
+            everything = text + json.dumps(hdr)
+            if log_content:
+                assert head["log content"] == "on (--log-content)", head
+                assert SENTINEL in text, "the test can see content when it is let through"
+            else:
+                assert head["log content"] == "off", head
+                assert SENTINEL not in everything, \
+                    [l for l in text.splitlines() if SENTINEL in l][:3]
+                assert "message withheld" in text
+                assert SENTINEL not in "\n".join([title, *head.keys(), *head.values()])
+        finally:
+            logbuf.CONFIG["log_content"] = False
+
+
+def test_export_the_contract_example():
+    """`docs/contract/dashboard-v1/logs-export.example.txt` is a file this server could write: the
+    same header fields in the same order, every entry in the line format, the count its own."""
+    with open(os.path.join(contract_check.ROOT, "logs-export.example.txt"), encoding="utf-8") as f:
+        example = f.read()
+    title, head, body = _parse_export(example)
+    serve()
+    with Captured():
+        print("[server] one", flush=True)
+        _, _, raw = _export()
+    real_title, real_head, _ = _parse_export(raw.decode())
+    assert title == real_title and list(head) == list(real_head)
+    assert UTC_S.match(head["exported"]) and UTC_MS.match(head["first line"]) \
+        and UTC_MS.match(head["last line"]), head
+    entries = [l for l in body.split("\n") if ENTRY.match(l)]
+    assert head["count"] == f"{len(entries)} lines", (head["count"], len(entries))
+    assert entries[0].startswith(head["first line"].split(" ")[0])
+    assert entries[-1].startswith(head["last line"].split(" ")[0])
+    assert [l.split(" ")[0] for l in entries] == sorted(l.split(" ")[0] for l in entries)
+    assert any(not ENTRY.match(l) for l in body.split("\n")), "the example shows a traceback"
+    # the README names the route and the example
+    with open(os.path.join(contract_check.ROOT, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+    assert "GET /v1/dashboard/logs/export" in readme and "logs-export.example.txt" in readme
 
 
 if __name__ == "__main__":
