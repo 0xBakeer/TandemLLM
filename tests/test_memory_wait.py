@@ -652,7 +652,7 @@ def test_a_next_turn_the_floor_holds_at_its_clients_rows_only_waits_at_the_gate(
 IM_S, USER, IM_E, ASSIST, THINK, NL, NL2, THINK_END, ANSWER, REASON = 90, 91, 92, 93, 94, 95, 96, 97, 98, 99
 
 
-def _reasoned(answer: int, reasoning: int = 30, prompt_n: int = 203_415, new: int = 500):
+def _reasoned(answer: int, reasoning: int = 30, prompt_n: int = 203_415, new: int = 500, head=()):
     """Slot 0 after a turn that thought: the last prompt as the client rendered it (the view, ending in the generation
     prompt's `<think>\\n`), the rows of that prompt, its reasoning, `</think>`, `\\n\\n` and an answer of `answer`
     tokens up to the end anchor, and the next turn's copy as a client that does not send the reasoning back renders
@@ -661,7 +661,7 @@ def _reasoned(answer: int, reasoning: int = 30, prompt_n: int = 203_415, new: in
 
     def tb(i):
         return {NL: b"\n", NL2: b"\n\n", THINK: b"<think>", THINK_END: endalign.THINK_END}.get(int(i), b"<%d>" % i)
-    view = [1] * (prompt_n - 5) + [IM_S, ASSIST, NL, THINK, NL]
+    view = list(head) + [1] * (prompt_n - 5 - len(head)) + [IM_S, ASSIST, NL, THINK, NL]
     res = _rows(view + [REASON] * reasoning + [THINK_END, NL2] + [ANSWER] * answer, prompt_n + reasoning + 2 + answer,
                 [])
     al = endalign.EndAlign(tb)
@@ -699,6 +699,72 @@ def test_a_next_turn_whose_copy_left_the_reasoning_out_is_charged_from_the_end_a
     finally:
         app._CONV_MARKS = old
     return "; ".join(said) + ", the rows its prefill forwards from the end anchor"
+
+
+SYS = 89
+
+
+def _compaction(res, copy: list, tail: int = 300):
+    """A compaction served as the continuation (`_compaction_plan`): the record's rows up to the end anchor, then the
+    turn the server adds, with thinking off. The prefill reads it after images too (`end_mm`); no replay runs on it.
+    (the prompt, the row it resumes at)"""
+    e = int(res.end["at"])
+    prompt = (res.tokens[:e] + [IM_E, NL, IM_S, USER, NL] + [8] * tail
+              + [IM_E, NL, IM_S, ASSIST, NL, THINK, NL2, THINK_END, NL2])
+    start, kind = res.resume_estimate(prompt, len(prompt), True)
+    assert kind == "end" and start == e, (kind, start)
+    return prompt, start
+
+
+def test_a_compaction_after_a_turn_that_thought_is_never_priced_under_its_forward():
+    """The handler serves a compaction (`_compaction_plan`) as the record's rows plus a turn of its own, without the end
+    anchor's replay; the gate asks the rows with the client's copy, which the replay would serve. Its copy is the
+    client's text rendering of the history in one user message (`compaction.split`: a system and a user message, no
+    tools), so it shares the view only up to that message: no share, the rows are not asked, and the copy is priced
+    from the line it resumes at in place. Sent again at once, the copy is the view and has a share, and the rows answer
+    below it (they part at the head). Either way the gate charges at least the rows the compaction forwards and its
+    first forward raises nothing. The chat's own head and system text are the copy's here, the closest a compaction
+    can come to the chat."""
+    from server import compaction, endalign
+    body = {"messages": [{"role": "system", "content": "Summarize."},
+                         {"role": "user", "content": "<conversation>\n[User]: what the user asked\n</conversation>\n"
+                                                     "The instructions."}]}
+    assert compaction.split(body) is not None, "the shape the handler serves as a continuation"
+    app = _app()
+    old = app._CONV_MARKS
+    app._CONV_MARKS = (IM_S, [USER], IM_E)
+    head = [IM_S, SYS, NL] + [1] * 2_000 + [IM_E, NL, IM_S, USER, NL]
+    copy = head + [6] * 20_000 + [IM_E, NL, IM_S, ASSIST, NL, THINK, NL]
+    said = []
+    try:
+        _, view, res, st = _reasoned(1, head=head + [2] * 500 + [IM_E, NL])
+        prompt, start = _compaction(res, copy)
+        conv = app._conv_start(copy)
+        with _box(app, AVAIL, **st) as b:
+            assert app._slot_share({"ids": copy, "conv": conv}, None) == 0, "no share: it parts in its first message"
+            ok, rec, ws, log = _priced(app, b, "compact", copy, conv=conv)
+            assert ok is True and rec.ws_rows >= len(prompt) - start, \
+                f"charged {rec.ws_rows:,} rows for a compaction that forwards {len(prompt) - start:,}"
+            assert _first(app, b, "compact", len(prompt), start) == (None, "") and not b.adm.stats.get("raised")
+        said.append(f"{rec.ws_rows:,} rows for {len(prompt) - start:,}")
+        # the same compaction sent again: the rows hold the record, its turn and the summary; the view is the copy
+        rows = prompt + [5] * 40
+        res = _rows(rows, len(rows), [])
+        al = endalign.EndAlign(st["end_align"].tbytes)
+        al._for, al._regions = res.end, [(len(prompt), len(rows), -1)]
+        prompt, start = _compaction(res, copy)
+        st = dict(resident=res, slot0_view=list(copy), engine=_engine(res.valid), end_align=al)
+        with _box(app, AVAIL, **st) as b:
+            why = {"ids": copy, "conv": conv}
+            assert app._slot_share(why, None) == len(copy) and why["home_rows"], "a share: the whole view"
+            ok, rec, ws, log = _priced(app, b, "again", copy, conv=conv)
+            assert ok is True and rec.ws_rows >= len(prompt) - start, \
+                f"charged {rec.ws_rows:,} rows for a compaction that forwards {len(prompt) - start:,}"
+            assert _first(app, b, "again", len(prompt), start) == (None, "") and not b.adm.stats.get("raised")
+        said.append(f"sent again {rec.ws_rows:,} for {len(prompt) - start:,}")
+    finally:
+        app._CONV_MARKS = old
+    return "; ".join(said)
 
 
 def test_a_new_chat_is_priced_on_the_prompt_it_is_served_as():
