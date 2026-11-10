@@ -138,6 +138,9 @@ kernels:
   - paths: ['tools/gpu/**']
     tests:
       - tests/gpu/test_gpu_profile_gpu.py
+  - paths: ['tools/kv_fp8.py', 'engine/models/qwen3_5_moe/kernels.py']
+    tests:
+      - tests/gpu/test_kv_fp8_gpu.py
       - tests/gpu/test_fn_kernels_gpu.py
       - tests/gpu/test_fn_prefill_kernels_gpu.py
       - tests/gpu/test_fn_seq_kernels_gpu.py
