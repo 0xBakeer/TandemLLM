@@ -2,6 +2,41 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.15.4, 2026-11-10
+
+0.15.4 fixes the charge that made short turns on long chats wait minutes for memory. The admission charged a turn of the chat slot 0 holds a cold read of the whole chat, and held a whole chunk of workspace for its pages whatever the turn read; a turn is now charged the rows it forwards. The Dev view's log gets an Export button that saves the whole log as one text file. The docs now explain the wait for memory, a chat's priority, the swap of long chats to the SSD and the dashboard's lanes.
+
+### Memory
+
+- A turn on a long chat is charged the rows it forwards, not a cold read of the whole chat (SRV-801). Slot 0 had no share of its own conversation, so a turn of the chat it held was priced on its whole prompt: on a user's box a turn charged 212,938 rows (10.75 GiB) waited 148.6 s for that memory and then forwarded 449. Slot 0 now counts the share it holds, as a side slot does. The gate prices the served prompt, with the server's notes in it; notes decided after the admission count at their cap.
+- A regenerate or an edit asks the slot's rows where its prefill will resume and pays the rows from there. A next turn whose copy leaves out the last answer's reasoning is charged from the end anchor, so the gate no longer charges the last answer twice.
+- Before a prefill's first forward the server compares the rows it forwards with the price. When the request's own reserve is short, the server raises it at the first forward, checked at the floor (`[memory] <id> forwards <n> rows, priced at <m>` in the log), or the lane gives way before the forward allocates.
+- The floor a prefill's pages commit under holds the chunk the turn forwards, not a whole 4,096-row chunk; with the rows unknown it holds a whole one, as before.
+- A retry that frees nothing prints its line once, then a count once a minute and at the wait's end (`--verbose` only). Before, each one-second retry printed eight.
+- The live view names the terms of the check that holds a turn: `activity.memory` gains `others_gib` and `check`, and its first line says "for its pages" and "while it reads" when the check of the prompt's pages holds it.
+
+On one DGX Spark with Flash-Next 3.05 and 8 lanes, a synthetic chat of about 203,000 tokens and short turns on it, every request line had `ws_rows` equal to `fwd`: follow-ups of 931 to 1,059 rows, a regenerate of 7,281 and an edit of 2,737. No turn waited in that run. Open: a cold read takes more host memory than its reserve, 0.37 GiB for a 3,412-row prompt and 0.44 GiB for a 203,415-row one, cause not known (SRV-805).
+
+### Dashboard
+
+- The Log panel of the Dev view has an Export button (SRV-803). It saves every line the server keeps (the newest 10,000, at all levels) as `tandemllm-<version>-<time>.log`, after a header with the version, the commit, the uptime, the time of export in UTC, the line count, whether older lines left the ring, and whether `--log-content` is on. The route is `GET /v1/dashboard/logs/export`, under the log's own access rule; it takes one snapshot of the ring with no engine lock and no stream place. The file follows the log's no-content rule. The standalone proxy answers the route from its own log with `commit: unknown` and `log content: unknown`. After a save the panel says "Saved as" with the name and a link to the file on the server; a fetch that gets no file in 60 s shows as an error.
+
+### Docs
+
+- parallel-requests.md and a new section of the manual's Serving chapter explain the wait for memory: what a client sees, the line by priority and arrival, the bounds, the 503 `memory_wait_timeout` and how a turn is charged. `QSE_MEM_WAIT_S` defaults to 10800, not 600 as the table said.
+- The Chat chapter and chat.md describe the Memory priority control; the HTTP reference lists `tandem.priority` and `wait_for_memory`, and ref-env the wait's knobs with their defaults.
+- caches.md and the manual call the session spill the swap of long chats to the SSD and keep it apart from the park; the glossary gains five entries, among them SSD and swap; troubleshooting has an entry for a turn that waits for memory.
+- The Dashboard chapter and dashboard.md describe the Lanes panel, a request held for memory and the log export.
+- Text that main no longer matched: a side slot keeps its conversation (the manual's Parallel requests), the shipped profile runs 8 lanes (intro, FAQ, architecture), the dashboard map shows all nine views, and the contract tables list `GET /v1/dashboard/parallel`.
+
+### For contributors
+
+- Four tests that failed only on CI hold now. Three failed under a parallel run: the export case that wanted a writer thread past 2,000 lines after a fixed 60 files (SRV-804), the chat-down case whose reset could reach the forward before its connect returned, and the live-rates case that read a prefill row's progress before the server had counted its prompt (VIS-40). The fourth, the end-anchor memory test, failed on a runner up for less than 300 s: its side-slot cases aged a `time.monotonic()` stamp below 0.0, and its over-ceiling case reset the log throttle to 0.0 (SPD-257).
+
+### Text and fingerprints
+
+- No file under `engine/` or `tools/` changed since 0.15.3, so every family's fingerprint stays, and 0.15.3's prompt-cache files and spilled conversations carry over.
+
 ## 0.15.3, 2026-11-09
 
 0.15.3 fixes a server that refused requests with `memory_full` after a day of use, and lets long chats wait for memory and share the box instead of being cancelled. Flash-Next's CUDA graphs no longer hold memory that nothing gives back, and a request short of memory waits at one floor, the KV pool's, and goes on. Long chats fit side by side: a chat waits up to 3 hours for memory, a conversation the pool needs the room of is written to the NVMe before its pages go, and its return reads it back. Flash-Next prefills long prompts faster and drafts past 32k again. Ten pull requests from four contributors are in it.
