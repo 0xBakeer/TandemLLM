@@ -88,7 +88,7 @@ def mix(n: torch.Tensor, n32: torch.Tensor | None, wd, wu, R: int, hc: int, out:
         di = PK.mm_rows(n, wd)
     if lib32(wu):
         return PK.mix_tail(mix_a(di, R, hc) @ PK._wf(wu).T, n, hc, out), di
-    return PK.mix_up_tail(mix_a(di, R, hc, fp32=False), wu, n, hc, out), di
+    return PK.mix_up_tail(mix_a(di, R, hc, fp32=False), wu, n, hc, out=out), di
 
 
 def inject_ok(h0: torch.Tensor, out: torch.Tensor, hc: int) -> bool:

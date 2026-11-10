@@ -399,8 +399,8 @@ def gated_norm_rows(o: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: floa
     return y
 
 
-def mix_up_tail(a: torch.Tensor, w, n: torch.Tensor, hc: int, out: torch.Tensor | None = None,
-                tile: int = 0) -> torch.Tensor:
+def mix_up_tail(a: torch.Tensor, w, n: torch.Tensor, hc: int, tile: int = 0,
+                out: torch.Tensor | None = None) -> torch.Tensor:
     """`mix_tail` of the up projection's products of a [M, R] bf16 with w: x [M, H] bf16 (`out`: written there).
     "tcn": one pass, the native kernel's sums through the tail's arithmetic without leaving the CTA (the bits of
     `mix_tail(mm_i8(a, w), n, hc)`)."""

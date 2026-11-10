@@ -576,7 +576,7 @@ class FlashNextEngine(FlashNextRef):
                 return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count, out)
         di = PK.mm_rows(n, wd)
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_up_tail(a, wu, n, c.hc_count, out), di
+        return PK.mix_up_tail(a, wu, n, c.hc_count, out=out), di
 
     def _inject_pre(self, h, out, di, R, w, hc, eps):
         """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits
