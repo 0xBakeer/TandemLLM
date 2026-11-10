@@ -53,8 +53,10 @@ def rows_now(chunk: int, cap: int) -> int:
         return chunk
     if not torch.cuda.is_available():
         return cap
+    from engine.cache import cuda_stats                    # the nested dict: no cyclic garbage a call
     free, _ = torch.cuda.mem_get_info()
-    free += torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+    reserved, allocated = cuda_stats("reserved_bytes.all.current", "allocated_bytes.all.current")
+    free += reserved - allocated
     fit = chunk + max(0, free - MARGIN) // ROW_BYTES
     return max(chunk, min(cap, fit // chunk * chunk))
 
