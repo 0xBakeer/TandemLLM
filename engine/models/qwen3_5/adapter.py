@@ -34,7 +34,7 @@ def cost(eng) -> CostModel:
     cfg = eng.cfg
     rec = eng.state.S.numel() * 4
     conv = eng.state.conv.numel() * eng.state.conv.element_size()
-    fp8 = bool(getattr(eng.kv, "fp8", False))
+    fp8 = bool(getattr(getattr(eng, "kv", None), "fp8", False))
     return CostModel(section_bytes=eng.state.nbytes,
                      view_bytes_per_token=len(cfg.attention_layers) * bytes_per_token(cfg.num_key_value_heads,
                                                                                       cfg.head_dim, fp8),
