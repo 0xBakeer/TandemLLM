@@ -225,6 +225,17 @@
     "conflicts": [],
     "memory_gib": 0.0,
     "memory_max_gib": null
+   },
+   {
+    "id": "kv_fp8",
+    "label": "Long-context cache (FP8)",
+    "default": false,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null,
+    "kv_bytes_per_token": 74496
    }
   ],
   "parallelism": {
@@ -499,6 +510,17 @@
      "conflicts": [],
      "memory_gib": 0.0,
      "memory_max_gib": null
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 18944
     }
    ],
    "parallelism": {
@@ -850,6 +872,17 @@
      "conflicts": [],
      "memory_gib": 0.49,
      "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 12480
     }
    ],
    "parallelism": {
@@ -878,6 +911,824 @@
     "kv_bytes_per_token": 24576,
     "typical_fill_tokens": 32768,
     "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
+   }
+  },
+  "lfm2.5-24b-a2b": {
+   "id": "lfm2.5-24b-a2b",
+   "profiles": [
+    {
+     "id": "lfm25-bf16",
+     "label": "BF16 (Liquid's checkpoint)",
+     "weights_gib": 44.95,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-2.5",
+     "label": "EXL3 2.5 bpw",
+     "weights_gib": 7.64,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-3.0",
+     "label": "EXL3 3.0 bpw",
+     "weights_gib": 9.4,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-3.5",
+     "label": "EXL3 3.5 bpw",
+     "weights_gib": 10.56,
+     "drafters_gib": 0.0,
+     "recommended": true,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-4.0",
+     "label": "EXL3 4.0 bpw",
+     "weights_gib": 12.06,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-4.5",
+     "label": "EXL3 4.5 bpw",
+     "weights_gib": 13.31,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    },
+    {
+     "id": "lfm25-exl3-6.0",
+     "label": "EXL3 6.0 bpw",
+     "weights_gib": 17.37,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 131072
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gib": 1.6,
+      "kind": "fixed",
+      "source": "measured on 4.0, 2026-10-14: the load stages engine, drafters and warm-up took 0.68, 0.67 and 0.27 GiB of MemAvailable beyond the weights (server [memory] line); a decode run peaked 0.37 GiB allocated above them"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 1.5,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark (SPD-107)"
+     }
+    ],
+    "per_window_parts": [
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "bytes_per_token": 8192,
+      "max_gib": 3.0,
+      "kind": "reserve",
+      "source": "an estimate until measured (SPD-107): the chunk's keys and values repeated for the 32 query heads grow with the context (8 KiB a token over the 10 layers, one at a time), the chunk's own activations are fixed"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Chat (beta)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.16,
+     "memory_max_gib": 2.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 10880
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
+     "engine_max_reason": null
+    },
+    "window": {
+     "min": 8192,
+     "max": 131072,
+     "default": 131072,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 20480,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
+   }
+  },
+  "nemotron-3.5-bolt-74b-a9b": {
+   "id": "nemotron-3.5-bolt-74b-a9b",
+   "profiles": [
+    {
+     "id": "nemotron-bolt-iq2",
+     "label": "IQ2 GGUF (NVIDIA's 24 GB release)",
+     "weights_gib": 22.19,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-2.0",
+     "label": "EXL3 2.0 bpw experts, 4-bit dense",
+     "weights_gib": 20.22,
+     "drafters_gib": 1.32,
+     "recommended": true,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-2.5",
+     "label": "EXL3 2.5 bpw",
+     "weights_gib": 24.07,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-3.0",
+     "label": "EXL3 3.0 bpw",
+     "weights_gib": 27.92,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-3.5",
+     "label": "EXL3 3.5 bpw",
+     "weights_gib": 32.01,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-4.0",
+     "label": "EXL3 4.0 bpw",
+     "weights_gib": 36.18,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-5.0",
+     "label": "EXL3 5.0 bpw",
+     "weights_gib": 44.42,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    },
+    {
+     "id": "nemotron-bolt-exl3-6.0",
+     "label": "EXL3 6.0 bpw",
+     "weights_gib": 53.0,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 262144
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gib": 1.4,
+      "kind": "fixed",
+      "source": "an estimate until measured on Bolt (Lightning BF16: 1.4)"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 1.5,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark"
+     }
+    ],
+    "per_window_parts": [
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "bytes_per_token": 8192,
+      "max_gib": 3.0,
+      "kind": "reserve",
+      "source": "an estimate until measured"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Chat (beta)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.16,
+     "memory_max_gib": 2.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 4224
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 8,
+     "default": 8,
+     "engine_max": 64,
+     "engine_max_reason": null
+    },
+    "window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 262144,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 8192,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
+   }
+  },
+  "nemotron-3.5-lightning-30b-a3b": {
+   "id": "nemotron-3.5-lightning-30b-a3b",
+   "profiles": [
+    {
+     "id": "nemotron-lightning-bf16",
+     "label": "BF16 (NVIDIA's checkpoint)",
+     "weights_gib": 59.04,
+     "drafters_gib": 0.0,
+     "recommended": true,
+     "max_window": 262144
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gib": 1.4,
+      "kind": "fixed",
+      "source": "measured 2026-10-15 on the BF16 checkpoint: the load stages engine, drafters and warm-up took 0.26, 1.14 and -0.08 GiB of MemAvailable beyond the weights (server [memory] line, lookup server); 0.23 + 0.06 + 0.02 GiB allocated"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 1.5,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark"
+     }
+    ],
+    "per_window_parts": [
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "bytes_per_token": 8192,
+      "max_gib": 3.0,
+      "kind": "reserve",
+      "source": "an estimate until measured"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Chat (beta)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.16,
+     "memory_max_gib": 2.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 3168
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 3,
+     "default": 3,
+     "engine_max": 64,
+     "engine_max_reason": null
+    },
+    "window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 262144,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 6144,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
+   }
+  },
+  "nemotron-3.5-super-vl-120b-a12b": {
+   "id": "nemotron-3.5-super-vl-120b-a12b",
+   "profiles": [
+    {
+     "id": "nemotron-super-vl-exl3-4.0",
+     "label": "EXL3 4.0 bpw",
+     "weights_gib": 58.35,
+     "drafters_gib": 1.32,
+     "recommended": true,
+     "max_window": 1048576
+    },
+    {
+     "id": "nemotron-super-vl-exl3-2.0",
+     "label": "EXL3 2.0 bpw experts, 4-bit dense",
+     "weights_gib": 31.24,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 1048576
+    },
+    {
+     "id": "nemotron-super-vl-nvfp4",
+     "label": "NVFP4 (NVIDIA's checkpoint)",
+     "weights_gib": 66.63,
+     "drafters_gib": 1.32,
+     "recommended": false,
+     "max_window": 1048576
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gib": 1.1,
+      "kind": "fixed",
+      "source": "measured 2026-10-16 at load (ENG-363): the engine 0.67 GiB of MemAvailable beyond slot 0's KV, the warm-up 0.43"
+     },
+     {
+      "id": "lilicorr",
+      "label": "LiLiCorr drafter (its head, taps and rings)",
+      "gib": 3.9,
+      "kind": "fixed",
+      "source": "measured 2026-10-16 at load: 2.26 GiB allocated, 3.90 of MemAvailable"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 1.5,
+      "kind": "reserve",
+      "source": "an estimate until measured on the Spark"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gib": 3.4,
+      "kind": "reserve",
+      "source": "measured 2026-10-16 (the memory policy's observed workspace, ENG-363): 3.34 GiB above the engine at a 131,054-token prefill, 3.18 at 249,983; it does not grow with the window (4,096-row chunks, attention reads the cache in place)"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Chat (beta)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "vision",
+     "label": "Vision",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": 2.1
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.16,
+     "memory_max_gib": 2.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "kv_fp8",
+     "label": "Long-context cache (FP8)",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null,
+     "kv_bytes_per_token": 4224
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 3,
+     "default": 3,
+     "engine_max": 64,
+     "engine_max_reason": null
+    },
+    "window": {
+     "min": 8192,
+     "max": 1048576,
+     "default": 262144,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 8192,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 1.1,
     "knobs": {
      "slots": "QSE_PARALLEL",
      "window": "MAX_LEN",
@@ -2961,6 +3812,117 @@
    }
   },
   {
+   "name": "kv_fp8 on",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "kv_fp8": true,
+     "laya": false,
+     "shadow": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 70.55,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 8.33,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 18.19,
+      "kind": "kv",
+      "worst_gb": 145.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 782216,
+    "kv_bytes_per_token": 74496,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 145.5,
+    "room_gb": 54.27,
+    "lane_full_gb": 18.19,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (18.19 GiB each); every lane at it would need 91.23 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 782,216 tokens of conversation fit in all, 97,777 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
    "name": "1 lane(s)",
    "selection": {
     "model": "qwen3.8-27b",
@@ -3147,7 +4109,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 6.52,
       "kind": "kv",
-      "worst_gb": 52.12
+      "worst_gb": 52.13
      }
     ],
     "fits": true,
@@ -3155,7 +4117,7 @@
     "context_tokens_fit": 617679,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 52.12,
+    "kv_worst_gb": 52.13,
     "room_gb": 61.41,
     "lane_full_gb": 26.06,
     "lanes_full": 2,
@@ -3786,7 +4748,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 26.06,
       "kind": "kv",
-      "worst_gb": 52.12
+      "worst_gb": 52.13
      }
     ],
     "fits": true,
@@ -3794,7 +4756,7 @@
     "context_tokens_fit": 545863,
     "kv_bytes_per_token": 106752,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 52.12,
+    "kv_worst_gb": 52.13,
     "room_gb": 54.27,
     "lane_full_gb": 6.52,
     "lanes_full": 8,
@@ -4904,7 +5866,8 @@
      "response_cache": false,
      "disk_tier": false,
      "nvme_spill": false,
-     "proxy": false
+     "proxy": false,
+     "kv_fp8": false
     }
    },
    "expect": {
@@ -5990,7 +6953,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 60.62
+      "worst_gb": 60.63
      }
     ],
     "fits": true,
@@ -5998,7 +6961,7 @@
     "context_tokens_fit": 406504,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 60.62,
+    "kv_worst_gb": 60.63,
     "room_gb": 11.75,
     "lane_full_gb": 7.58,
     "lanes_full": 1,
@@ -6206,7 +7169,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 60.62
+      "worst_gb": 60.63
      }
     ],
     "fits": true,
@@ -6214,7 +7177,7 @@
     "context_tokens_fit": 663179,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 60.62,
+    "kv_worst_gb": 60.63,
     "room_gb": 19.17,
     "lane_full_gb": 7.58,
     "lanes_full": 2,
@@ -6566,7 +7529,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 60.62
+      "worst_gb": 60.63
      }
     ],
     "fits": false,
@@ -6574,7 +7537,7 @@
     "context_tokens_fit": 0,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 60.62,
+    "kv_worst_gb": 60.63,
     "room_gb": -24.83,
     "lane_full_gb": 7.58,
     "lanes_full": 0,
@@ -6779,7 +7742,7 @@
       "label": "Conversations (KV), committed as they grow",
       "gb": 7.58,
       "kind": "kv",
-      "worst_gb": 60.62
+      "worst_gb": 60.63
      }
     ],
     "fits": true,
@@ -6787,7 +7750,7 @@
     "context_tokens_fit": 663179,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
-    "kv_worst_gb": 60.62,
+    "kv_worst_gb": 60.63,
     "room_gb": 19.17,
     "lane_full_gb": 7.58,
     "lanes_full": 2,
@@ -6973,6 +7936,1156 @@
     "notes": [
      "All 8 lanes can hold the full 262,144-token window at once (3.61 GiB each).",
      "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "qwen3.8-flash-next, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 95.04,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 5.69,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+      "gb": 10.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 60.63
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 663179,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 60.63,
+    "room_gb": 19.17,
+    "lane_full_gb": 7.58,
+    "lanes_full": 2,
+    "notes": [
+     "2 of 8 lanes can hold the full 262,144-token window at once (7.58 GiB each); every lane at it would need 41.45 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 663,179 tokens of conversation fit in all, 82,897 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "qwen3.8-flash-next, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 92.08,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 5.69,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+      "gb": 10.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 4.63,
+      "kind": "kv",
+      "worst_gb": 37.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 1086627,
+    "kv_bytes_per_token": 18944,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 37.0,
+    "room_gb": 19.17,
+    "lane_full_gb": 4.63,
+    "lanes_full": 4,
+    "notes": [
+     "4 of 8 lanes can hold the full 262,144-token window at once (4.63 GiB each); every lane at it would need 17.83 GiB more than there is. Past that the lanes share what is left: a new request waits for memory before it starts, idle conversations give their memory back first, and a lane that would take the box under its floor stops with memory_full; the Chat tab continues it once memory is free.",
+     "Fewer lanes, or a shorter side window (QSE_SIDE_MAX_LEN), gives each lane its full window.",
+     "About 1,086,627 tokens of conversation fit in all, 135,828 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "ornith-1.5-122b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "ornith-1.5-122b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 126.05,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 48.0,
+      "kind": "kv",
+      "worst_gb": 48.0
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 1248679,
+    "kv_bytes_per_token": 24576,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 48.0,
+    "room_gb": 28.58,
+    "lane_full_gb": 6.0,
+    "lanes_full": 4,
+    "notes": [
+     "Over the budget by 19.42 GiB. The largest parts: Weights (EXL3 4.0 bpw) 59.95 GiB, Conversations (KV), every window at load 48.00 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 1,248,679 tokens of conversation fit in all, 156,084 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "ornith-1.5-122b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "ornith-1.5-122b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 102.42,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 59.95,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 4.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.35,
+      "kind": "reserve",
+      "worst_gb": 0.85
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 24.38,
+      "kind": "kv",
+      "worst_gb": 24.38
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 2097152,
+    "kv_bytes_per_token": 12480,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 24.38,
+    "room_gb": 28.58,
+    "lane_full_gb": 3.05,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 262,144-token window at once (3.05 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "lfm2.5-24b-a2b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "lfm2.5-24b-a2b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 45.31,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.5 bpw)",
+      "gb": 10.56,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 1.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 20.0,
+      "kind": "kv",
+      "worst_gb": 20.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 1048576,
+    "kv_bytes_per_token": 20480,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 20.0,
+    "room_gb": 81.32,
+    "lane_full_gb": 2.5,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 131,072-token window at once (2.50 GiB each).",
+     "About 1,048,576 tokens of conversation fit in all, 131,072 a lane when all 8 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "lfm2.5-24b-a2b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "lfm2.5-24b-a2b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 35.94,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.5 bpw)",
+      "gb": 10.56,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+      "gb": 1.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 10.63,
+      "kind": "kv",
+      "worst_gb": 10.63
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 1048576,
+    "kv_bytes_per_token": 10880,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 10.63,
+    "room_gb": 81.32,
+    "lane_full_gb": 1.33,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 131,072-token window at once (1.33 GiB each).",
+     "About 1,048,576 tokens of conversation fit in all, 131,072 a lane when all 8 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-bolt-74b-a9b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-bolt-74b-a9b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 51.77,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.0 bpw experts, 4-bit dense)",
+      "gb": 20.22,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 2.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 16.0,
+      "kind": "kv",
+      "worst_gb": 16.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 2097152,
+    "kv_bytes_per_token": 8192,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 16.0,
+    "room_gb": 70.86,
+    "lane_full_gb": 2.0,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 262,144-token window at once (2.00 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-bolt-74b-a9b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-bolt-74b-a9b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 44.02,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.0 bpw experts, 4-bit dense)",
+      "gb": 20.22,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 2.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "7 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 8.25,
+      "kind": "kv",
+      "worst_gb": 8.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 2097152,
+    "kv_bytes_per_token": 4224,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 8.25,
+    "room_gb": 70.86,
+    "lane_full_gb": 1.03,
+    "lanes_full": 8,
+    "notes": [
+     "All 8 lanes can hold the full 262,144-token window at once (1.03 GiB each).",
+     "About 2,097,152 tokens of conversation fit in all, 262,144 a lane when all 8 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-30b-a3b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-lightning-30b-a3b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 79.09,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (BF16 (NVIDIA's checkpoint))",
+      "gb": 59.04,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 2.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "2 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 4.5,
+      "kind": "kv",
+      "worst_gb": 4.5
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 786432,
+    "kv_bytes_per_token": 6144,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 4.5,
+    "room_gb": 32.04,
+    "lane_full_gb": 1.5,
+    "lanes_full": 3,
+    "notes": [
+     "All 3 lanes can hold the full 262,144-token window at once (1.50 GiB each).",
+     "About 786,432 tokens of conversation fit in all, 262,144 a lane when all 3 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-lightning-30b-a3b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-lightning-30b-a3b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 76.91,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (BF16 (NVIDIA's checkpoint))",
+      "gb": 59.04,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 2.0,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "2 more slot(s), beyond their KV",
+      "gb": 0.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 2.32,
+      "kind": "kv",
+      "worst_gb": 2.32
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 786432,
+    "kv_bytes_per_token": 3168,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 2.32,
+    "room_gb": 32.04,
+    "lane_full_gb": 0.77,
+    "lanes_full": 3,
+    "notes": [
+     "All 3 lanes can hold the full 262,144-token window at once (0.77 GiB each).",
+     "About 786,432 tokens of conversation fit in all, 262,144 a lane when all 3 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-super-vl-120b-a12b, the e4m3 cache off (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-super-vl-120b-a12b",
+    "components": {
+     "kv_fp8": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 88.7,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 58.35,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.1,
+      "kind": "fixed"
+     },
+     {
+      "id": "lilicorr",
+      "label": "LiLiCorr drafter (its head, taps and rings)",
+      "gb": 3.9,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 3.4,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "2 more slot(s), beyond their KV",
+      "gb": 2.2,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 1.6,
+      "kind": "reserve",
+      "worst_gb": 2.1
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 6.0,
+      "kind": "kv",
+      "worst_gb": 6.0
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 3136552,
+    "kv_bytes_per_token": 8192,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 6.0,
+    "room_gb": 23.93,
+    "lane_full_gb": 2.0,
+    "lanes_full": 3,
+    "notes": [
+     "All 3 lanes can hold the full 262,144-token window at once (2.00 GiB each).",
+     "About 3,136,552 tokens of conversation fit in all, 262,144 a lane when all 3 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nemotron-3.5-super-vl-120b-a12b, the e4m3 cache on (SPD-150)",
+   "selection": {
+    "model": "nemotron-3.5-super-vl-120b-a12b",
+    "components": {
+     "kv_fp8": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 85.79,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 58.35,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the decode graphs and warm-up",
+      "gb": 1.1,
+      "kind": "fixed"
+     },
+     {
+      "id": "lilicorr",
+      "label": "LiLiCorr drafter (its head, taps and rings)",
+      "gb": 3.9,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 1.5,
+      "kind": "reserve"
+     },
+     {
+      "id": "prefill_workspace",
+      "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+      "gb": 3.4,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "2 more slot(s), beyond their KV",
+      "gb": 2.2,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 1.6,
+      "kind": "reserve",
+      "worst_gb": 2.1
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.16,
+      "kind": "reserve",
+      "worst_gb": 2.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.09,
+      "kind": "kv",
+      "worst_gb": 3.09
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 3145728,
+    "kv_bytes_per_token": 4224,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.09,
+    "room_gb": 23.93,
+    "lane_full_gb": 1.03,
+    "lanes_full": 3,
+    "notes": [
+     "All 3 lanes can hold the full 262,144-token window at once (1.03 GiB each).",
+     "About 3,145,728 tokens of conversation fit in all, 262,144 a lane when all 3 are full (the window is 262,144)."
     ]
    }
   },

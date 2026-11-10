@@ -45,6 +45,8 @@ class Qwen35MoeEngine(FlashNextEngine):
     #: SPD-249: Flash-Next's T8 knob (FN_ROUTE_FUSED) leaves this family on the router, mask, sort and groups launches
     #: (`FlashNextEngine.moe_parts`, `_check_twins`): no A/B covered it
     route_knobs = False
+    #: SPD-150: this family's e4m3 cache knob (Flash-Next's FN_KV_FP8 leaves it bf16)
+    kv_fp8_knob = "Q35M_KV_FP8"
 
     #: the tapped layers (`set_taps`) and the ring's rows
     taps: tuple = ()
@@ -320,10 +322,14 @@ class Qwen35MoeEngine(FlashNextEngine):
         from tools import fn_kernels as K
         c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "self_attn."
+        kc, vc, _, kidx = self._kv_targets(st, li, qkv.shape[0])
         q = K.attn_prep(qkv, None, d["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
-                        self.rope_cos, self.rope_sin, st.k[li], st.v[li], None, c.num_attention_heads,
-                        c.num_key_value_heads, 0, c.rms_norm_eps, slot=d["slot"])
-        o = AK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], self._cls, bufs=self._cur["attn"])
+                        self.rope_cos, self.rope_sin, kc, vc, None, c.num_attention_heads,
+                        c.num_key_value_heads, 0, c.rms_norm_eps, slot=d["slot"] if kidx is None else kidx)
+        if kidx is not None:
+            self._kv_code(st, li, kc, vc, None, kidx, d["slot"])          # SPD-150: the rows coded at their slots
+        o = AK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], self._cls, bufs=self._cur["attn"],
+                         ks=st.ks.get(li), vs=st.vs.get(li))
         return K.gate_mul(o, qkv, c.head_dim)
 
     def _attn_pre(self, x, li, st):
@@ -336,9 +342,24 @@ class Qwen35MoeEngine(FlashNextEngine):
         L = st.length
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
         qkv = self.lin(x, self.W[p + "qkv"])
-        q = K.attn_prep(qkv, None, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
-                        P["cos"], P["sin"], st.k[li], st.v[li], None, Hq, Hk, 0, c.rms_norm_eps, slot=P["pos"])
-        o = AK.prompt_attention(q, st.k[li], st.v[li], L)
+        if li in st.ks:
+            # SPD-150: the chunk's rows staged in bf16, coded at their positions, then the attention over the cache's
+            # rows [0, L + T) decoded (its own rows too: the decode step reads them so)
+            from tools.kv_fp8 import kv_dequant
+            T = x.shape[0]
+            kt = torch.empty(Hk, T, D, dtype=self.dtype, device=x.device)
+            vt = torch.empty_like(kt)
+            idx = torch.arange(T, dtype=torch.int64, device=x.device)
+            q = K.attn_prep(qkv, None, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+                            P["cos"], P["sin"], kt, vt, None, Hq, Hk, 0, c.rms_norm_eps, slot=idx)
+            self._kv_code(st, li, kt, vt, None, idx, P["pos"])
+            del kt, vt
+            o = AK.prompt_attention(q, kv_dequant(st.k[li][:, :L + T], st.ks[li][:, :L + T]),
+                                    kv_dequant(st.v[li][:, :L + T], st.vs[li][:, :L + T]), L)
+        else:
+            q = K.attn_prep(qkv, None, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+                            P["cos"], P["sin"], st.k[li], st.v[li], None, Hq, Hk, 0, c.rms_norm_eps, slot=P["pos"])
+            o = AK.prompt_attention(q, st.k[li], st.v[li], L)
         y = K.gate_mul(o, qkv, D)
         return self.lin(y, self.W[p + "o_proj.weight"])
 

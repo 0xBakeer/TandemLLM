@@ -108,6 +108,10 @@ The conductor, Laya and the narrator are on by default. The model's adapter decl
 
 Caches: with the prefix resumed at 4,096 and 12,288 tokens, warm answers equal cold ones with equal logprobs (\code{tools/fn_cache_check.py}). The session spill drains 13,650 tokens in 309~ms and reads them back in 163~ms; the disk tier restores 12,288 tokens in 0.96~s against 2.6~s cold; both give the cold answer (\measured). Parallel: three slots over one copy of the weights; a slot's plain step joins the round as one row, from a graph when every slot takes one. On 4.0, 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8~tok/s in total, every answer equal to its request alone (\measured).
 
+\section{The e4m3 KV cache}
+
+\code{LFM2_KV_FP8=1} keeps the 10 attention layers' keys and values as e4m3 codes with one fp32 scale a (head, token): 10,880 bytes a token instead of 20,480 (SPD-150). The output is no longer the exact model's, so the knob is off by default. Turn it on with \emph{Long-context cache (FP8)} under Features in the Setup Guide's Tools step, or with \code{QWEN38_LFM2_KV_FP8=1} at the end of \code{~/TandemLLM/run/ops/serve.env} and \code{~/TandemLLM/bin/tandem restart}; \code{/health} then shows \code{"kv_cache": "e4m3"} under \code{weights}. Its speed and cost are not measured.
+
 \section{What is not measured}
 
 \begin{itemize}

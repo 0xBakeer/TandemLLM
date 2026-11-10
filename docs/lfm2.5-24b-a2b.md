@@ -135,6 +135,24 @@ Each row adds about 3 ms because a block reads the union of its rows' experts. A
 - Resident prefix and state store: 30 convolution states (240 KiB) as sections, K and V of the 10 attention layers as views, 4,096-token grid. A warm answer equals the cold one with equal logprobs at 4,096 and 12,288 tokens (`tools/fn_cache_check.py`).
 - Disk tier: 12,288 tokens restored in 0.96 s against 2.6 s cold, answer and logprobs equal. Session spill: 13,650 tokens drained in 309 ms (0.19 GB), read back in 163 ms. One tier folder a pack.
 
+## The e4m3 KV cache (`LFM2_KV_FP8`, off)
+
+With `LFM2_KV_FP8=1` the 10 attention layers keep each key and value as e4m3 codes with one fp32 scale a (head, token): 10,880 bytes a token instead of 20,480, so 1.33 GiB instead of 2.5 GiB at 131,072 tokens. The output is no longer the exact model's. The knob is off by default, and the exactness checks hold only with it off. The manifest names it `lfm2_moe-kvfp8`, so its cache entries are never read by the exact cache.
+
+A decode step or verify block writes each row's K and V in BF16 to a staging buffer, then one launch codes them into the cache (`tools/kv_fp8.py`). Attention turns the codes back into BF16 as it loads them. A verify row is still the decode step's row bit for bit, so speculation and the load-time self-check work as before. A prompt chunk attends to its own rows in BF16 and to the cached rows decoded, then codes its rows.
+
+To turn it on in the Setup Guide (the dashboard's `#/setup`), pick LFM2.5-24B-A2B, go to the Tools step and switch on "Long-context cache (FP8)" under Features. Then finish Review and Install, which restarts the engine. To turn it off, switch it off there and install again.
+
+To turn it on from the command line, add this line at the end of `~/TandemLLM/run/ops/serve.env`:
+
+```
+QWEN38_LFM2_KV_FP8=1
+```
+
+Then run `~/TandemLLM/bin/tandem restart`. Check that it took: `curl -s localhost:8000/health` shows `"kv_cache": "e4m3"` under `weights`, and the engine log's load line says `KV cache e4m3`. To turn it off, delete the line and run `tandem restart` again; `/health` then shows `"kv_cache": "bf16"`. Use one way or the other: a line in serve.env wins over the Setup Guide's switch.
+
+Quality and speed against the exact cache: not measured.
+
 ## Not supported yet
 
 - A draft head (none published for this model).

@@ -123,6 +123,9 @@ class FNState:
     # the server sets both per request (FlashNextServing `mm`, `pos_delta`)
     mm: object = None
     delta: int = 0
+    # SPD-150 (QWEN38_FN_KV_FP8): an attention layer's e4m3 scales [kv heads, cap] fp32 (its k / v are then uint8 codes)
+    ks: dict = field(default_factory=dict)
+    vs: dict = field(default_factory=dict)
 
     def reset_inplace(self) -> None:
         """A fresh sequence in the SAME tensors (a captured decode graph holds them)."""
@@ -144,7 +147,7 @@ class FNState:
         c = lambda d: {k: v.clone() for k, v in d.items()}   # noqa: E731
         return FNState(self.length, c(self.k), c(self.v), c(self.ik), c(self.conv), c(self.S),
                        c(self.ple_ctx), c(self.ple_conv), self.cap, c(self.pool), dict(self.pool_n),
-                       pool_ratio=self.pool_ratio, mm=self.mm, delta=self.delta)
+                       pool_ratio=self.pool_ratio, mm=self.mm, delta=self.delta, ks=c(self.ks), vs=c(self.vs))
 
 
 class FNModelState(SectionState):

@@ -28,13 +28,16 @@ MODULES = ("engine/config.py", "engine/drafters/__init__.py", "engine/drafters/d
 def cost(eng) -> CostModel:
     """The 27B's snapshot bytes: the GDN state and conv tails whole (the state's own count,
     `GDNState.nbytes`, as the caches budgeted before ENG-157), K and V of every attention layer a
-    token (bf16); the parts as the dashboard showed them (server/app.py `cache_stats`, before
-    2026-10-11)."""
+    token (bf16, or SPD-150's e4m3 codes and one fp32 scale a head with QWEN38_KV_FP8); the parts as the
+    dashboard showed them (server/app.py `cache_stats`, before 2026-10-11)."""
+    from tools.kv_fp8 import bytes_per_token
     cfg = eng.cfg
     rec = eng.state.S.numel() * 4
     conv = eng.state.conv.numel() * eng.state.conv.element_size()
+    fp8 = bool(getattr(getattr(eng, "kv", None), "fp8", False))
     return CostModel(section_bytes=eng.state.nbytes,
-                     view_bytes_per_token=len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2,
+                     view_bytes_per_token=len(cfg.attention_layers) * bytes_per_token(cfg.num_key_value_heads,
+                                                                                      cfg.head_dim, fp8),
                      parts={"recurrent": rec, "conv": conv})
 
 
@@ -104,7 +107,8 @@ def resident_files(eng) -> list:
 
 
 def manifest(eng=None) -> Manifest:
-    return Manifest(arch="qwen3_5", modules=MODULES)
+    # SPD-150: an e4m3 cache (QWEN38_KV_FP8) stores other rows: its entries are another arch's
+    return Manifest(arch="qwen3_5-kvfp8" if _S.get("KV_FP8") == "1" else "qwen3_5", modules=MODULES)
 
 
 #: SPD-153: a chain-shaped tree block shares the joint verify pass of a parallel round. Alone, a chain

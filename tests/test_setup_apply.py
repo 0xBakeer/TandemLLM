@@ -57,6 +57,8 @@ The test matrix:
  15  SPD-150, Flint's e4m3 cache as a tool: off by default and then written nowhere (the engine's default);
      on, the overlay sets QWEN38_FLINT_KV_FP8=1, serve.env resolves it, the box's seed reads it back on, and
      the estimate counts 14,784 KV bytes a token instead of 28,672        test_flints_fp8_cache_switch
+ 16  SPD-150, every model's e4m3 cache switch: off by default, one registered QWEN38_ knob, the estimate's bytes
+     a token on and off for each model that has one                    test_every_fp8_cache_switch
 
 Run: python tests/test_setup_apply.py
 """
@@ -830,9 +832,44 @@ def test_flints_fp8_cache_switch():
     kv = {e["kv_bytes_per_token"]: next(x for x in e["parts"] if x["id"] == "kv")["gb"] for e in (e_off, e_on)}
     assert abs(kv[14784] / kv[28672] - 14784 / 28672) < 0.01, kv
     assert e_on["context_tokens_fit"] >= e_off["context_tokens_fit"]
-    # every other model's estimate is its own: no component of theirs changes the bytes a token
-    assert all(not x.get("kv_bytes_per_token") for x in M["components"])
     return f"KV {kv[28672]:.2f} -> {kv[14784]:.2f} GiB at the default window"
+
+
+#: SPD-150: the KV bytes a token of window with each model's e4m3 cache off and on (the engines' cost())
+FP8_BYTES = {"flint": (28672, 14784), "qwen3.8-flash-next": (31040, 18944), "ornith-1.5-122b": (24576, 12480),
+             "qwen3.8-27b": (106752, 74496), "lfm2.5-24b-a2b": (20480, 10880),
+             "nemotron-3.5-bolt-74b-a9b": (8192, 4224), "nemotron-3.5-lightning-30b-a3b": (6144, 3168),
+             "nemotron-3.5-super-vl-120b-a12b": (8192, 4224)}
+
+
+def test_every_fp8_cache_switch():
+    """SPD-150: every model with an attention cache offers "Long-context cache (FP8)" under Features: off by default
+    (the overlay writes the engine's own off), one QWEN38_ knob the engine registers, on '1'; on, the estimate
+    counts the component's bytes a token; a model without the switch counts its own."""
+    from engine.settings import KNOBS
+    seen = {}
+    base = os.path.join(REPO, "models")
+    for mid in sorted(d for d in os.listdir(base) if os.path.isfile(os.path.join(base, d, "model.yaml"))):
+        m = registry.get(mid)
+        c = next((x for x in m["components"] if x["id"] == "kv_fp8"), None)
+        if c is None:
+            assert not any(x.get("kv_bytes_per_token") for x in m["components"]), mid
+            continue
+        assert c["label"] == "Long-context cache (FP8)" and c["group"] == "features", (mid, c)
+        assert c["default"] is False and not c["required"] and len(c["knobs"]) == 1, (mid, c)
+        key, vals = next(iter(c["knobs"].items()))
+        assert key.startswith("QWEN38_") and key[7:] in KNOBS and KNOBS[key[7:]][0] == "0", (mid, key)
+        assert vals == {"on": "1", "off": "0"}, (mid, vals)
+        off = estimate.check(m, {"model": mid})
+        on = estimate.check(m, {"model": mid, "components": dict(off["components"], kv_fp8=True)})
+        assert off["components"]["kv_fp8"] is False
+        assert apply.overlay_values(m, off)[key] == "0" and apply.overlay_values(m, on)[key] == "1"
+        got = (estimate.estimate(m, off)["kv_bytes_per_token"], estimate.estimate(m, on)["kv_bytes_per_token"])
+        assert got == (m["parallelism"]["kv_bytes_per_token"], c["kv_bytes_per_token"]), (mid, got)
+        assert got[1] < got[0], (mid, got)
+        seen[mid] = got
+    assert seen == FP8_BYTES, seen
+    return ", ".join(f"{k} {a:,} -> {b:,}" for k, (a, b) in sorted(seen.items()))
 
 
 def test_the_routes():

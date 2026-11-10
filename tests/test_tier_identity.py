@@ -325,7 +325,7 @@ def test_nemotron_hs_manifest_is_pinned_and_a_left_out_module_moves_no_fingerpri
         "engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/config.py",
         "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/gguf.py",
         "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
-        "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
+        "engine/models/nemotron_h/knobs.py", "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
         "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py",
         "engine/models/lfm2_moe/kernels.py", "engine/models/lfm2_moe/pack.py", "engine/settings.py",
         "engine/vision.py"), serving.MODULES

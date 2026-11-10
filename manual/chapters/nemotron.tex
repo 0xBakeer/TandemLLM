@@ -99,6 +99,10 @@ The 4.0 pack has every projection at 4 bits, head 6; it is the default, within 0
 
 Super VL's LiLiCorr drafter carries its own NVFP4 head over the target's vocabulary and reads five taps with a window of 8,192. Its accepted length is 4.65 tokens a block on the 4.0 pack (4 prompts of 192 tokens, thinking on). The price files carry a \code{spec} prior, the 8-row chain plus the draft over 0.75 of that length, so StairCut drafts from the first request. Every drafted text equals the plain run's.
 
+\section{The e4m3 KV cache}
+
+\code{NH_KV_FP8=1} keeps the attention layers' keys and values as e4m3 codes with one fp32 scale a (head, token): Bolt and Super VL 4,224 bytes a token instead of 8,192, Lightning 3,168 instead of 6,144; the MTP head's cache stays bf16 (SPD-150). The output is no longer the exact model's, so the knob is off by default. Turn it on with \emph{Long-context cache (FP8)} under Features in the Setup Guide's Tools step, or with \code{QWEN38_NH_KV_FP8=1} at the end of \code{~/TandemLLM/run/ops/serve.env} and \code{~/TandemLLM/bin/tandem restart}. Its speed and cost are not measured.
+
 \section{What is not done}
 
 \begin{itemize}
