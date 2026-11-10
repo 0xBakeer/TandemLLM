@@ -41,6 +41,11 @@ Layer-major windows (SPD-249, `engine/models/flashnext/layer_major.py`): a promp
 - `QWEN38_FN_PF_ATTN_STAGES`: the pipeline stages (1 to 4) of a chunk's attention split launch, a launch setting only; 1 by default, 2 is the decode path's launch.
 - `QWEN38_FN_PF_NOCOPY`: 1 (the default) leaves out a chunk's copies that a view or the reading kernel's stride serves; 0 keeps the copies.
 
+Decode (SPD-249), both on by default and bit-equal to the path they replace:
+
+- `QWEN38_FN_PACK_GRAPH`: a packed MTP draft's steps after the feed (each lane's draft head, top-2 and coupled pick, the one-row MTP steps) replay from one CUDA graph a lane count; 0 runs them eager. `tools/fn_pack_graph_check.py` compares the two.
+- `QWEN38_FN_ROUTE_FUSED`: an MoE call of up to 32 rows takes its router, pad ids and expert order or groups from one launch (`fn_kernels.route`); 0 keeps the router, mask, sort and groups launches. `tools/fn_route_check.py` compares the two.
+
 `tools/fn_window_check.py` and `tools/fn_pf_hc_check.py` compare a prefill with the knobs off and on, bit for bit; `tools/fn_prefill_mm_ref.py` checks the `QWEN38_FN_PREFILL_MM` modes against a prefill with fp64 mixers.
 
 ## NVFP4 matrix products

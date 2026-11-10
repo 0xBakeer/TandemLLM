@@ -104,6 +104,10 @@ JG_PLE_LATE = _S.get("FN_JG_PLE_LATE") == "1"
 #: drafts' collect): its PLE rows are read into the table's row cache on the reader thread, so the verify's own read
 #: (the same ids, the same rows) finds them there; 0: off
 PLE_PREFETCH = _S.get("FN_PLE_PREFETCH") == "1"
+#: SPD-249 (T8): the MoE's router, the pad rows' ids and the experts' launch index (the stable expert order, or the expert
+#: groups) in one launch (`fn_kernels.route`) for calls of up to 32 rows: the same ids, weights, order and groups as the
+#: router, the mask, the sort and the groups launches it replaces; on by default; 0: those launches
+ROUTE_FUSED = _S.get("FN_ROUTE_FUSED") == "1"
 #: SPD-249: the joint graphs kept (the least recently replayed go first)
 JOINT_GRAPH_MAX = int(_S.get("FN_JOINT_GRAPH_MAX") or 12)
 #: SPD-249: a key is captured at its n-th pass (the eager ones before it compile every kernel it runs)
@@ -115,6 +119,20 @@ JG_LANES = 8
 #: SPD-249: the layers where a joint graph's pass is cut into graphs of its own: the host writes a segment's entry rows
 #: while the GPU runs the segment before it (only the first segment's rows wait for the host)
 JG_CUTS = (2, 10, 22, 34)
+#: SPD-249 (T1): a packed MTP draft's depth loop (each lane's draft head and top-2, then the one-row steps after the feed)
+#: replayed from a CUDA graph a lane count (`PackGraph`, key: lanes, depth, draft head, the caches' strides): every lane's
+#: MTP cache and staged rows reached through the graph's attention entry tables (`attn_prep_multi` / `attn_rows_multi`,
+#: each row's arithmetic its lane-at-a-time launch's), the lanes' picks in one pinned copy; the feed of the committed rows
+#: stays eager. A dense draft only (every lane's class 0). On by default; 0: the whole packed draft eager
+PACK_GRAPH = _S.get("FN_PACK_GRAPH") == "1"
+#: SPD-249 (T1): a key's draft graph is captured at its n-th packed draft (the eager drafts before it load what it runs)
+PACK_GRAPH_AFTER = int(_S.get("FN_PACK_GRAPH_AFTER") or 2)
+#: SPD-249 (T1): the packed draft graphs kept; one more resets them all (their capture stream's workspace goes with them)
+PACK_GRAPH_MAX = 16
+#: SPD-249 (T1): the pinned host copies of a draft graph's picks, used in turn: a lane's draft is read before its graph's
+#: PACK_RING-th next replay (a round reads its drafts before the next one is queued; a lane that sits rounds out reads
+#: later, and the same lane count replays at most once a round meanwhile)
+PACK_RING = 8
 # ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
 # expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
 PREFILL = _S.get("FN_PREFILL")
@@ -134,6 +152,12 @@ class FlashNextEngine(FlashNextRef):
     #: rows an item of the prefill MoE group GEMM takes; None = `fn_prefill_kernels.GROUP_ROWS`
     #: (a family whose bits were not checked at 64 keeps 32)
     moe_group_rows: int | None = None
+    #: SPD-249 (T1): FN_PACK_GRAPH acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
+    #: its packed drafts stay eager, whatever the knob says
+    pack_knobs = True
+    #: SPD-249 (T8): FN_ROUTE_FUSED acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
+    #: its MoE calls and its load-time self-check stay the router, mask, sort and groups launches, whatever the knob says
+    route_knobs = True
 
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, tables, dtype=torch.bfloat16, device=device)
@@ -343,22 +367,51 @@ class FlashNextEngine(FlashNextRef):
     def moe_parts(self, x, li, pad=None):
         """The router and the experts of every (row, slot) pair, without the combine (the trunk
         folds it into the next inject): (yd [M S, H] fp32, ids, wts). `pad` (SPD-249, a joint graph): bool [M, 1]
-        on the device, its rows' ids set to -1 (the grouped kernels skip them: they pull no expert)."""
+        on the device, its rows' ids set to -1 (the grouped kernels skip them: they pull no expert). SPD-249 (T8):
+        QWEN38_FN_ROUTE_FUSED, `_moe_routed`, for this family only (`route_knobs`)."""
         from tools import fn_kernels as K
         c = self.cfg
-        logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
-        ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
-        if pad is not None:
-            ids.masked_fill_(pad, -1)
+        if ROUTE_FUSED and self.route_knobs and x.shape[0] <= K.ROUTE_ROWS and K.route_ok(x.device):
+            yd, ids, wts = self._moe_routed(x, li, pad)
+        else:
+            logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
+            ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
+            if pad is not None:
+                ids.masked_fill_(pad, -1)
+            yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
         if self.route_trace is not None:
             self.route_trace.append((li, ids[:, :-1].long()))
-        yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
         if self._moe_record is not None:
             self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), yd.clone()))
         return yd, ids, wts
 
+    def _moe_routed(self, x, li, pad):
+        """SPD-249 (T8): `moe_parts` for M <= 32 rows: the router (after its GEMV), the pad rows' ids and the launch index
+        in one launch (`fn_kernels.route`; one row keeps the router launch, it needs no index), then the experts from
+        that index (`fn_kernels.moe_experts_ix`). The ids, weights, order and groups are those of the router, the mask,
+        the sort and the groups launches it replaces, so every pair's output and the combine's sum are the same bits."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        E, k = c.num_experts, c.num_experts_per_tok
+        M = x.shape[0]
+        logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
+        if K.MOE_GROUP and M > 1:
+            ids, wts, g, ng = K.route(logits, E, k, pad=pad, groups=True)
+            ix = ("groups", g, ng)
+        elif M == 1:
+            ids, wts = K.router(logits, E, k)                  # one row: nothing to order (today's launch)
+            if pad is not None:
+                ids.masked_fill_(pad, -1)
+            ix = ("order", self._order1)
+        else:
+            ids, wts, order = K.route(logits, E, k, pad=pad)
+            ix = ("order", order)
+        return K.moe_experts_ix(x, ids, self.banks[li], ix), ids, wts
+
     _moe_record = None
     spec_ok = False            # the load-time self-check passed (speculation may run)
+    _mtp_pg = None             # SPD-249 (T1): a packed draft graph's step (its tokens, lanes, graph)
+    pack_capture_ok = False    # SPD-249 (T1): a packed draft graph may be captured now (the server's word)
     MOE_ROWS = 2048            # rows the MoE takes in one call (11 pairs a row on the grid's y axis)
     TREE_ROWS = (0, 1, 2, 3, 5, 6, 8, 11)
     CHAIN_WIDTHS = (2, 4, 8, 12, 16, 32)
@@ -372,9 +425,9 @@ class FlashNextEngine(FlashNextRef):
         TREE_ROWS, out of order), with the router recomputed from the recorded inputs, and compare
         every row bit for bit (the
         combine is per row and per column, so equal pairs give an equal sum). Any difference
-        leaves `spec_ok` False and the log names the layer and the row."""
-        from tools import fn_kernels as K
-        c = self.cfg
+        leaves `spec_ok` False and the log names the layer and the row. SPD-249 (T8): with
+        QWEN38_FN_ROUTE_FUSED the same calls also run through the code a verify block runs
+        (`_check_twins`' routed arms)."""
         st = self.new_state(self.max_len)
         logits = self.prefill(torch.tensor(prompt), st)
         tok = int(logits[0].argmax())
@@ -387,29 +440,77 @@ class FlashNextEngine(FlashNextRef):
         by_layer: dict = {}
         for li, x, ids, wts, out in rec:
             by_layer.setdefault(li, []).append((x, ids, wts, out))
-        bad = None
-        checked = 0
-        S = c.num_experts_per_tok + 1
-        for li, rows in sorted(by_layer.items()):
-            X = torch.cat([r[0] for r in rows])
-            I = torch.cat([r[1] for r in rows])
-            Wt = torch.cat([r[2] for r in rows])
-            Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
-            ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
-            calls = [(f"chain{w}", list(range(w))) for w in self.CHAIN_WIDTHS if w <= len(rows)]
-            calls.append(("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)]))
-            for name, sel in calls:
-                sl = torch.tensor(sel, device=X.device)
-                got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
-                for j, t in enumerate(sel):
-                    checked += 1
-                    if bad is None and not (torch.equal(got[j], Y[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
-                        bad = {"layer": li, "row": t, "call": name}
+        bad, arms = self._check_twins(by_layer)
         self.spec_ok = bad is None
-        res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": checked, "first_diff": bad}
+        res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": sum(arms.values()),
+               "first_diff": bad}
+        if len(arms) > 1:
+            res["arms"] = arms
         if log:
             log(f"[fn-selfcheck] {'PASS' if self.spec_ok else 'FAIL: speculation stays off'}: {res}")
         return res
+
+    def _check_twins(self, by_layer: dict) -> tuple:
+        """`self_check`'s compare over the decode step's records {layer: [(x, ids, wts, yd)]}: (the first difference or
+        None, rows compared by arm). Arm 'experts': the router recomputed over every row and `fn_kernels.moe_experts` on
+        each call's rows (today's launches). SPD-249 (T8), with ROUTE_FUSED: arms 'routed' (`moe_parts` with the
+        per-pair kernels: the lone verify's call) and 'routed_grouped' (`moe_parts` with the grouped kernels and every
+        third row a pad row: the joint graph's call), each call's ids, weights and every real pair's output against the
+        decode step's, a pad row's ids -1 in every slot. `moe_parts` takes `_moe_routed` for calls of up to ROUTE_ROWS
+        rows: every call here. A family with `route_knobs` False: arm 'experts' only."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        S = c.num_experts_per_tok + 1
+        bad = None
+        arms = {"experts": 0}
+        fused = ROUTE_FUSED and self.route_knobs and K.route_ok(self.device)
+        if fused:
+            arms["routed"] = arms["routed_grouped"] = 0
+        trace, self.route_trace = self.route_trace, None
+        try:
+            for li, rows in sorted(by_layer.items()):
+                X = torch.cat([r[0] for r in rows])
+                I = torch.cat([r[1] for r in rows])
+                Wt = torch.cat([r[2] for r in rows])
+                Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
+                ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
+                calls = [(f"chain{w}", list(range(w))) for w in self.CHAIN_WIDTHS if w <= len(rows)]
+                calls.append(("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)]))
+                for name, sel in calls:
+                    sl = torch.tensor(sel, device=X.device)
+                    got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
+                    for j, t in enumerate(sel):
+                        arms["experts"] += 1
+                        if bad is None and not (torch.equal(got[j], Y[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
+                            bad = {"layer": li, "row": t, "call": name}
+                    if not fused or len(sel) > K.ROUTE_ROWS:
+                        continue
+                    for arm, grouped in (("routed", False), ("routed_grouped", True)):
+                        pads = [grouped and j % 3 == 2 for j in range(len(sel))]
+                        pm = torch.tensor(pads, device=X.device)
+                        grp, K.MOE_GROUP = K.MOE_GROUP, grouped
+                        try:
+                            yd, gi, gw = self.moe_parts(X[sl].contiguous(), li, pad=pm.view(-1, 1) if grouped else None)
+                        finally:
+                            K.MOE_GROUP = grp
+                        yd = yd.view(len(sel), S, -1)
+                        real = ~pm
+                        rt = sl[real]
+                        arms[arm] += int(real.sum())
+                        ok = (torch.equal(yd[real], Y[rt]) and torch.equal(gi[real], I[rt]) and torch.equal(gw[real], Wt[rt])
+                              and bool((gi[pm] == -1).all()))
+                        if bad is None and not ok:
+                            row = None
+                            for j, t in enumerate(sel):
+                                fine = (bool((gi[j] == -1).all()) if pads[j] else
+                                        torch.equal(yd[j], Y[t]) and torch.equal(gi[j], I[t]) and torch.equal(gw[j], Wt[t]))
+                                if not fine:
+                                    row = t
+                                    break
+                            bad = {"layer": li, "row": row, "call": f"{arm}:{name}"}
+        finally:
+            self.route_trace = trace
+        return bad, arms
 
     # ------------------------------------------------------------------------- the trunk
     def _mix(self, n, p):
@@ -2500,6 +2601,12 @@ class FlashNextEngine(FlashNextRef):
         p = self.pre(li) + "self_attn."
         qkv = self.lin(x, self.W[p + "qkv"])
         iqk = self.lin(x, self.W[p + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+        if self._mtp_pg is not None:
+            # SPD-249 (T1): a packed draft graph's step: every lane's row through the graph's entry tables
+            pg = self._mtp_pg
+            o = self._attn_multi(pg["cx"], pg["G"].rows, qkv, iqk, li, self._pack_use, jg=pg["G"])
+            assert o is not None, "a packed draft graph over caches of different layouts"
+            return self.lin(o, self.W[p + "o_proj.weight"])
         if self._multi is not None:
             # SPD-235: a packed MTP step: the projections once over every lane's rows, the core per lane
             parts, r0 = [], 0
@@ -2617,14 +2724,48 @@ class FlashNextEngine(FlashNextRef):
         there (its warm-up runs this step) emptied them and the commit graph captured after it failed on
         its first layer (SRV-713: a raw 4,024-token request, HTTP 500, KeyError: 0 in `commit_dev`)."""
         self._write = False
+        if self._mtp_pg is not None:
+            return self._mtp_pg["tok"]          # SPD-249 (T1): every lane's pick of the step before, in lane order
         if self._multi is not None:
             return torch.cat([rb["d"]["tok"] for rb, _, _, _ in self._multi])
         rb = self._rows_buffers(M, key)
         self._cur, self._cls = rb, cls
         return rb["d"]["tok"]
 
+    def _mtp_pick_multi(self, x: torch.Tensor, j: int, kp: tuple | None = None) -> tuple:
+        """A packed draft step's head over every lane's row x [lanes, H] at depth j: (prob [lanes, 2] fp32, tok
+        [lanes, 2]) of each lane's top-2 under the draft head, then the coupled pick of the keyed lanes where `kp` =
+        (keyed head, its ids, keys [lanes, 32], parameters [lanes, NPAR], the keyed head is its own, every lane keyed);
+        the eager pass and the draft graph (T1) run this one sequence."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        if kp is not None and kp[5]:
+            head, hids = kp[0], kp[1]
+        else:
+            head, hids = self.draft_head, self.draft_ids
+        if head is not None:
+            lg = K.gemv(x, head)
+        else:
+            lg = K.dense(x, self.W["lm_head.weight"]).float()
+        vals, ids = torch.topk(lg, 2, dim=-1)
+        z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
+        prob = torch.exp(vals - vals[:, :1]) / z
+        tok = hids.index_select(0, ids.view(-1)).view(ids.shape) if head is not None else ids
+        if kp is not None:
+            from engine.models.flashnext import coupled as CP
+            kh, kids, KEYS, PAR, chead, all_k = kp
+            if chead and not all_k:
+                # lanes of both kinds: the keyed lanes' pick over their head's own rows
+                lgc = K.gemv(x, kh)
+                zc = torch.exp(lgc - lgc.amax(-1, keepdim=True)).sum(-1, keepdim=True)
+                CP.pick(lgc, kids, KEYS[:, j], PAR, zc, tok, prob, c.vocab_size, x=x, depth=j)
+            else:
+                CP.pick(lg, hids if head is not None else None, KEYS[:, j], PAR, z, tok, prob, c.vocab_size,
+                        x=x, depth=j)
+        return prob, tok
+
     @torch.no_grad()
-    def mtp_chain_multi(self, items: list, keyed: list | None = None) -> None:
+    def mtp_chain_multi(self, items: list, keyed: list | None = None):
         """SPD-235: `mtp_chain_dev` of several heads over these weights at once: [(head key, MTP state, n fed
         rows, depth, class)], each staged (`stage_mtp`, its streams in its `_mtp_bufs()["stack"]`). Every step
         runs the MTP layer once over all lanes' rows (the attention on each lane's own cache), the draft head
@@ -2632,8 +2773,10 @@ class FlashNextEngine(FlashNextRef):
         SPD-249: `keyed` (a flag a lane, staged by `stage_mtp(keyed=...)`): those lanes' pairs are the coupled
         pick's (engine/models/flashnext/coupled.py), over the keyed head of this many lanes (`keyed_head`: one lane
         the lone head, more the coupled head) where it has its own; with every lane keyed only that head is read,
-        else the others keep the served head's argmax pairs bit for bit."""
-        from tools import fn_kernels as K
+        else the others keep the served head's argmax pairs bit for bit.
+        SPD-249 (T1, QWEN38_FN_PACK_GRAPH): the steps after the feed from the lane count's draft graph; then the
+        picks land in that graph's pinned copy instead and the call returns its `PackOut` (None: the lanes' own
+        buffers hold them)."""
         from tools import fn_seq_kernels as SK
         c = self.cfg
         bs = []
@@ -2642,13 +2785,13 @@ class FlashNextEngine(FlashNextRef):
             bs.append(self._mtp_bufs(depth))
         depth = items[0][3]
         kk = keyed is not None and any(keyed)
+        kp = None
         if kk:
-            from engine.models.flashnext import coupled as CP
-            KEYS = torch.stack([b["ckeys"] for b in bs])           # [lanes, 32]
-            PAR = torch.stack([b["cpar"] for b in bs])             # [lanes, NPAR]: `on` 0 for a lane not keyed
             kh, kids = self.keyed_head(len(items))
-            chead = kh is not self.draft_head              # the keyed lanes read a head of their own
-            all_k = all(keyed)
+            kp = (kh, kids, torch.stack([b["ckeys"] for b in bs]),         # [lanes, 32]
+                  torch.stack([b["cpar"] for b in bs]),                    # [lanes, NPAR]: `on` 0 for a lane not keyed
+                  kh is not self.draft_head,                               # the keyed lanes read a head of their own
+                  all(keyed))
         cuts = np.cumsum([it[2] for it in items])
         last = torch.as_tensor(cuts - 1, dtype=torch.long, device=self.device)
         self._multi = [(self._rows_buffers(n, ("mtp", key, 0, n)), st_m, n, cls) for key, st_m, n, _, cls in items]
@@ -2662,29 +2805,13 @@ class FlashNextEngine(FlashNextRef):
                 own = SK.qsa_pool(st_m.ik[MTP], b["d32"][:SK.OWN * 4].view(SK.OWN, 4), b["d32"][SK.OWN * 4:],
                                   self.W[ip + "k_layernorm.weight"], self.rope_cos, self.rope_sin, c.rms_norm_eps)
                 st_m.pool[MTP].index_copy_(0, b["dpi"], own)
+        if PACK_GRAPH and self.pack_knobs:
+            out = self._pack_graph_run(items, last, x, h, kp)
+            if out is not None:
+                return out
         x, h = x.index_select(0, last), h.index_select(0, last)
         for j in range(depth):
-            if kk and all_k:
-                head, hids = kh, kids
-            else:
-                head, hids = self.draft_head, self.draft_ids
-            if head is not None:
-                lg = K.gemv(x, head)
-            else:
-                lg = K.dense(x, self.W["lm_head.weight"]).float()
-            vals, ids = torch.topk(lg, 2, dim=-1)
-            z = torch.exp(lg - vals[:, :1]).sum(-1, keepdim=True)
-            prob = torch.exp(vals - vals[:, :1]) / z
-            tok = hids.index_select(0, ids.view(-1)).view(ids.shape) if head is not None else ids
-            if kk:
-                if chead and not all_k:
-                    # lanes of both kinds: the keyed lanes' pick over their head's own rows
-                    lgc = K.gemv(x, kh)
-                    zc = torch.exp(lgc - lgc.amax(-1, keepdim=True)).sum(-1, keepdim=True)
-                    CP.pick(lgc, kids, KEYS[:, j], PAR, zc, tok, prob, c.vocab_size, x=x, depth=j)
-                else:
-                    CP.pick(lg, hids if head is not None else None, KEYS[:, j], PAR, z, tok, prob, c.vocab_size,
-                            x=x, depth=j)
+            prob, tok = self._mtp_pick_multi(x, j, kp)
             for i, b in enumerate(bs):
                 b["prob"][j].copy_(prob[i])
                 b["tok"][j].copy_(tok[i])
@@ -2702,6 +2829,152 @@ class FlashNextEngine(FlashNextRef):
         for b in bs:
             b["tok_h"].copy_(b["tok"], non_blocking=True)
             b["prob_h"].copy_(b["prob"], non_blocking=True)
+        return None
+
+    # ------------------------------------------------------------------------- SPD-249 (T1): the packed draft graph
+    def _pg_state(self) -> dict:
+        ps = self.__dict__.get("_pgs")
+        if ps is None:
+            ps = self._pgs = {"graphs": {}, "seen": {}, "stream": None, "eager": {},
+                              "stats": {"captures": 0, "capture_ms": 0.0, "replays": 0, "refills": 0, "flushes": 0}}
+        return ps
+
+    def pack_graph_stats(self) -> dict:
+        """SPD-249 (T1): the packed draft graphs for /health: captures, replays, entry refills (a new set or order of
+        lanes on a kept graph), the eager drafts by reason, the kept keys (lanes, depth), late reads."""
+        ps = self._pg_state()
+        return {**ps["stats"], "eager": dict(ps["eager"]), "kept": [list(k[:2]) for k in ps["graphs"]],
+                "stale": sum(g.stale for g in ps["graphs"].values())}
+
+    def _pack_use(self, x: dict) -> None:
+        self._cur, self._cls = x["rb"], 0
+
+    def _pack_why(self, items: list) -> str | None:
+        """Why this packed draft's depth loop runs eager (None: it may run from a graph)."""
+        from tools import fn_kernels as K
+        if K.MOE_STAGE or self.route_trace is not None or self._moe_record is not None:
+            return "measuring"
+        if len(items) < 2:
+            return "lanes"
+        depth = items[0][3]
+        k0, v0 = items[0][1].k[MTP], items[0][1].v[MTP]
+        s0 = (k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1))
+        for _, st_m, _, d, cls in items:
+            if d != depth:
+                return "depth"
+            if cls:
+                return "sparse"
+            k, v = st_m.k[MTP], st_m.v[MTP]
+            if not (k.is_contiguous() and v.is_contiguous()) or (k.stride(0), k.stride(1), v.stride(0),
+                                                                  v.stride(1)) != s0:
+                return "layout"
+        return None
+
+    def _pack_lanes(self, items: list) -> list:
+        """Per draft step after the feed (1 .. depth - 1), every lane's one row: its MTP state and its staged rows
+        buffer (`stage_mtp`'s), in lane order."""
+        depth = items[0][3]
+        return [[{"st": st_m, "M": 1, "rb": self._rows_buffers(1, ("mtp", key, j, 1))} for key, st_m, _, _, _ in items]
+                for j in range(1, depth)]
+
+    def _pack_body(self, G, cxs: list) -> None:
+        """The depth loop of a packed draft over the graph's inputs G.x / G.h (each lane's last fed row): the head and
+        top-2 of every lane, then the MTP layer over every lane's draft row, `depth` times; the picks into G.tok /
+        G.prob. `mtp_chain_multi`'s eager loop step for step (the coupled pick of keyed lanes over G.keys / G.par),
+        the attention through G's entry tables."""
+        G.aent["k"] = 0
+        x, h = G.x, G.h
+        for j in range(G.depth):
+            prob, tok = self._mtp_pick_multi(x, j, G.kp)
+            G.tok[j].copy_(tok)
+            G.prob[j].copy_(prob)
+            if j + 1 == G.depth:
+                break
+            self._mtp_pg = {"tok": tok[:, 0].contiguous(), "cx": cxs[j], "G": G}
+            try:
+                x, h = self.mtp_rows(None, None, h)
+            finally:
+                self._mtp_pg = None
+
+    def _pack_capture(self, G, cxs: list) -> None:
+        """Capture G's depth loop (on the runner's thread, under the capture lock, on the engine's leased capture
+        stream): one eager run there first (it loads every kernel and makes the scratch outside the graph's pool;
+        it computes what the replay after it computes again), then the capture."""
+        ps = self._pg_state()
+        t0 = time.perf_counter()
+        graphs = ps["graphs"]
+        if len(graphs) >= PACK_GRAPH_MAX:
+            for old in graphs.values():
+                old.drop()
+            graphs.clear()
+            ps["stats"]["flushes"] += 1
+        if ps["stream"] is None:
+            ps["stream"] = capture_lock.lease_stream()
+        s = ps["stream"]
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            self._pack_body(G, cxs)
+        g = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(g, stream=s):
+            self._pack_body(G, cxs)
+        torch.cuda.current_stream().wait_stream(s)
+        G.graph = g
+        graphs[G.key] = G
+        ms = 1e3 * (time.perf_counter() - t0)
+        ps["stats"]["captures"] += 1
+        ps["stats"]["capture_ms"] += ms
+        print(f"[fn-pgraph] captured lanes {G.L} depth {G.depth}: {ms:.0f} ms ({len(graphs)} kept)", flush=True)
+
+    def _pack_graph_run(self, items: list, last: torch.Tensor, x: torch.Tensor, h: torch.Tensor, kp: tuple | None = None):
+        """`mtp_chain_multi` past its feed from the lane count's graph: each lane's last fed row (x, h at `last`) and,
+        with keyed lanes (`kp`), their keys and parameters into the graph's inputs, the replay, the picks to the host ->
+        `PackOut`; None: eager (`_pack_why`, or no graph for the key yet and none may be captured now: the
+        PACK_GRAPH_AFTER-th draft of a key, while the server allows)."""
+        from tools import fn_kernels as K
+        ps = self._pg_state()
+        why = self._pack_why(items)
+        if why is not None:
+            ps["eager"][why] = ps["eager"].get(why, 0) + 1
+            return None
+        L, depth = len(items), items[0][3]
+        k0, v0 = items[0][1].k[MTP], items[0][1].v[MTP]
+        key = (L, depth, id(self.draft_head) if self.draft_head is not None else None,
+               (k0.stride(0), k0.stride(1), v0.stride(0), v0.stride(1)), bool(K.MOE_GROUP), x.dtype, h.dtype,
+               None if kp is None else (id(kp[0]) if kp[0] is not None else None, kp[4], kp[5]))
+        graphs = ps["graphs"]
+        G = graphs.get(key)
+        cxs = None
+        if G is None:
+            seen = ps["seen"][key] = ps["seen"].get(key, 0) + 1
+            if seen < PACK_GRAPH_AFTER or not self.pack_capture_ok:
+                ps["eager"]["no graph"] = ps["eager"].get("no graph", 0) + 1
+                return None
+            G = PackGraph(self, key, x.shape[1], h.shape[1], x.dtype, h.dtype, kp)
+        else:
+            graphs[key] = graphs.pop(key)               # most recently used last
+        sig = tuple((it[0], id(it[1])) for it in items)
+        torch.index_select(x, 0, last, out=G.x)
+        torch.index_select(h, 0, last, out=G.h)
+        if kp is not None:
+            G.keys.copy_(kp[2])
+            G.par.copy_(kp[3])
+        captured = G.graph is None
+        if captured:
+            cxs = self._pack_lanes(items)
+            self._pack_capture(G, cxs)                  # its own run wrote the entry rows of these lanes
+            G.sig = sig
+        elif G.sig != sig:
+            # other lanes (or another order) on a kept graph: their entry rows, once the last replay's copies are done
+            cxs = self._pack_lanes(items)
+            G.done.synchronize()
+            for j in range(depth - 1):
+                self._attn_multi_fill(cxs[j], G.rows, MTP, self._pack_use, G.aent, j)
+            G.sig = sig
+            ps["stats"]["refills"] += 1
+        G.graph.replay()
+        out = G.publish(captured)
+        ps["stats"]["replays"] += 1
+        return out
 
     def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int, keyed: tuple | None = None) -> int:
         """Host work of a greedy chain draft at st_m.length: the feed of n = len(nexts) committed rows
@@ -3245,6 +3518,76 @@ class MTPChainGraph:
         torch.cuda.synchronize()
         for k, v in st_m.pool.items():
             v.copy_(saved[k])
+
+
+class PackGraph:
+    """SPD-249 (T1): the depth loop of a packed MTP draft over `L` lanes captured once (`FlashNextEngine._pack_capture`):
+    its inputs (each lane's last fed row: x [L, H], streams h [L, hc H]; keyed lanes' keys and parameters), its picks (tok, prob [depth, L, 2]) and their
+    pinned copies (`PACK_RING` of them, one a replay), the attention entry tables of its depth - 1 one-row steps (pinned
+    host rows the graph copies to the device at each replay, rewritten only when the lanes change: `sig`)."""
+
+    def __init__(self, eng: FlashNextEngine, key: tuple, xw: int, hw: int, xdt, hdt, kp: tuple | None = None):
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        dev = eng.device
+        L, depth = key[0], key[1]
+        self.key, self.L, self.depth = key, L, depth
+        self.x = torch.zeros(L, xw, dtype=xdt, device=dev)
+        self.h = torch.zeros(L, hw, dtype=hdt, device=dev)
+        self.tok = torch.zeros(depth, L, 2, dtype=torch.long, device=dev)
+        self.prob = torch.zeros(depth, L, 2, dtype=torch.float32, device=dev)
+        # keyed lanes (coupled drafts): their keys and parameters, copied in before each replay; the pick's heads
+        self.kp = self.keys = self.par = None
+        if kp is not None:
+            self.keys, self.par = torch.zeros_like(kp[2]), torch.zeros_like(kp[3])
+            self.kp = (kp[0], kp[1], self.keys, self.par, kp[4], kp[5])
+        self.ring = [(torch.zeros(depth, L, 2, dtype=torch.long, pin_memory=True),
+                      torch.zeros(depth, L, 2, dtype=torch.float32, pin_memory=True)) for _ in range(PACK_RING)]
+        self.gen = [0] * PACK_RING          # the replay whose picks each ring slot holds
+        self.n = 0                          # replays so far
+        self.stale = 0                      # reads of a ring slot a later replay took (none expected)
+        n = max(depth - 1, 1)
+        self.aent = {"ap_h": torch.zeros(n, L, K.APM_FIELDS, dtype=torch.int64, pin_memory=True),
+                     "ap_d": torch.zeros(n, L, K.APM_FIELDS, dtype=torch.int64, device=dev),
+                     "ar_h": torch.zeros(n, L, SK.ARM_FIELDS, dtype=torch.int64, pin_memory=True),
+                     "ar_d": torch.zeros(n, L, SK.ARM_FIELDS, dtype=torch.int64, device=dev),
+                     "k": 0, "lane_d": torch.arange(L, dtype=torch.int32, device=dev)}
+        self.rows = [slice(i, i + 1) for i in range(L)]
+        self.graph = None
+        self.sig = None                     # the lanes (head key, MTP state) the entry rows hold
+        self.done = torch.cuda.Event()      # after the last replay's copies
+
+    def publish(self, captured: bool) -> "PackOut":
+        """After a replay: its picks into the next ring slot (one copy each), on the stream after the graph."""
+        s = self.n % PACK_RING
+        self.n += 1
+        self.gen[s] = self.n
+        tok_h, prob_h = self.ring[s]
+        tok_h.copy_(self.tok, non_blocking=True)
+        prob_h.copy_(self.prob, non_blocking=True)
+        self.done.record()
+        return PackOut(self, s, self.n, captured)
+
+    def drop(self) -> None:
+        if self.graph is not None:
+            self.graph.reset()
+            self.graph = None
+
+
+class PackOut:
+    """SPD-249 (T1): one replay's picks: `read(i, depth)` is lane i's (top-2 tokens, probabilities) a depth, as its
+    head's own pinned buffers would hold them, once the stream is past the replay (the head's read syncs first)."""
+
+    def __init__(self, G: PackGraph, slot: int, gen: int, captured: bool):
+        self.G, self.slot, self.gen_, self.captured = G, slot, gen, captured
+
+    def read(self, i: int, depth: int) -> tuple[list, list]:
+        G = self.G
+        if G.gen[self.slot] != self.gen_:
+            G.stale += 1                    # a draft only proposes: the verify decides the text; counted, never seen
+            print(f"[fn-pgraph] a late read: lanes {G.L}, replay {self.gen_} read after {G.n}", flush=True)
+        tok_h, prob_h = G.ring[self.slot]
+        return tok_h[:depth, i].tolist(), prob_h[:depth, i].tolist()
 
 
 #: the rows past the length a captured step, verify block or commit may write (a block is at most 33 rows)

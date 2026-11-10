@@ -40,6 +40,11 @@ class Qwen35MoeEngine(FlashNextEngine):
 
     #: the 32-row group GEMM: 64 was checked bit for bit on Flash-Next only
     moe_group_rows = 32
+    #: SPD-249: Flash-Next's packed draft graph (FN_PACK_GRAPH) leaves this family's packed drafts eager: no A/B covered it
+    pack_knobs = False
+    #: SPD-249: Flash-Next's T8 knob (FN_ROUTE_FUSED) leaves this family on the router, mask, sort and groups launches
+    #: (`FlashNextEngine.moe_parts`, `_check_twins`): no A/B covered it
+    route_knobs = False
 
     #: the tapped layers (`set_taps`) and the ring's rows
     taps: tuple = ()

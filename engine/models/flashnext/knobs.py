@@ -98,6 +98,10 @@ KNOBS: dict[str, tuple] = {
     # that took a row the lookup shaped (its own, or a spine row it agreed with) starts over, a lone round always looks
     # (engine/methods/mtp_drafter.py `mtp_look_backoff`; the lookup only adds rows to the verified tree); 0: off
     'FN_LOOK_BACKOFF': ('0', 'engine/models/flashnext/serving.py'),
+    # SPD-249 (T8): the MoE's router, the pad rows' ids and the experts' launch index (stable expert order or expert
+    # groups) in one launch for calls of up to 32 rows (the ids, weights, order and groups of the launches it replaces:
+    # router, mask, sort, groups); Flash-Next only (Qwen3.5-MoE keeps those launches); on by default; 0: those launches
+    'FN_ROUTE_FUSED': ('1', 'engine/models/flashnext/engine.py'),
     # SPD-249: the joint graphs kept (the least recently replayed go first)
     'FN_JOINT_GRAPH_MAX': ('12', 'engine/models/flashnext/engine.py'),
     # SPD-249: a key is captured at its n-th pass (the eager passes before it compile what it runs)
@@ -133,4 +137,10 @@ KNOBS: dict[str, tuple] = {
     'FN_MTP_CORRECTOR': ('0', 'engine/models/flashnext/corrector.py'),
     # SPD-249: the corrector's file (safetensors); auto: ops/correctors/<model>/<profile>.corrector.safetensors; without it the coupled drafts stay plain
     'FN_MTP_CORRECTOR_FILE': ('auto', 'engine/models/flashnext/corrector.py'),
+    # SPD-249 (T1): a packed MTP draft's steps after the feed (each lane's draft head and top-2, the one-row steps) from a
+    # CUDA graph a lane count, the lanes' MTP caches and staged rows through its attention entry tables (each row's own
+    # arithmetic: the same drafts); captured on the round runner when its joint pass could capture; on by default; 0: eager
+    'FN_PACK_GRAPH': ('1', 'engine/models/flashnext/engine.py'),
+    # SPD-249 (T1): a packed draft graph's key is captured at its n-th draft (the eager drafts before it load what it runs)
+    'FN_PACK_GRAPH_AFTER': ('2', 'engine/models/flashnext/engine.py'),
 }

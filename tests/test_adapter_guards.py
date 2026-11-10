@@ -172,11 +172,16 @@ GOLDEN_FP4 = {
     # SAME_ROWS entry): qwen4_exp, qwen3_5_moe
     # SPD-249: the bit-equal prefill stack on by default (QWEN38_FN_PF_WINDOW 8192, _HC_FUSED, _INJ_FUSED, _NOCOPY 1,
     # _ATTN_STAGES 1: every output the chunk-major prefill's bits, 0 of 627 digests differ): qwen4_exp, qwen3_5_moe
-    "qwen4_exp": "822f310b7100d49c4e7f1df6b2800590df008a628114922e2267b0a786b4834f",
-    "nemotron_h": "0da1cfeb821d1d657f78455f7b325a9b691704efa1202c322a510a58e1788846",
-    "lfm2_moe": "e6b9d858da7627b878662c97485e408e639b40ac269e6aef1001ef6bcda97ecd",
-    "qwen3_5_moe": "3bd14ef4ecbcc85b4bc70186de1fcf5f98e309eafec5c05a9d1de2c9e68c24ea",
-    "flint": "a2d781443f467bb6d36583810a148fefedd173a8addb91a1c196b99352989d3b",
+    # SPD-249 (T1, T8): the packed draft graph (QWEN38_FN_PACK_GRAPH) and the routing launch (QWEN38_FN_ROUTE_FUSED),
+    # both off, the bits the same; fn_kernels' new route kernel (tools/fn_kernels.py, tools/csrc/fn_kernels): qwen4_exp,
+    # nemotron_h, lfm2_moe, qwen3_5_moe, flint
+    # SPD-249: T1 and T8 on by default (the decode tokens of base and both knobs equal in every served C8 and one-user
+    # round): qwen4_exp, qwen3_5_moe
+    "qwen4_exp": "38362344b958393f87a5ad8c15de69eb3cb130322b3f3d52daf62c6799a5ab64",
+    "nemotron_h": "d062af6596f7dad1b6087f71a604956b19e53ed898a5e45169b9e6de168349f7",
+    "lfm2_moe": "d47cb7022caab678f0195fa78835a7fd1bcc48bb8a4b2c255c763c19fee26964",
+    "qwen3_5_moe": "c56061f0d816e2de7899431132879dc56b1cd032bcacef57a9caa4d0090d8d5b",
+    "flint": "017c12a33cf96980964adb385631aad0541af5983bbae0741c0743c20d647bcb",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option

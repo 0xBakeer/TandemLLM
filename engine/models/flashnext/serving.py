@@ -507,6 +507,8 @@ class FlashNextServing:
         from engine.models.flashnext import engine as E
         if E.JOINT_GRAPH:
             out["joint_graphs"] = self.fn.joint_graph_stats()          # SPD-249
+        if E.PACK_GRAPH and getattr(self.fn, "pack_knobs", False):
+            out["pack_graphs"] = self.fn.pack_graph_stats()            # SPD-249 (T1)
         return out or None
 
     def draft_heads(self) -> dict:
@@ -1225,6 +1227,8 @@ class FlashNextServing:
         # SPD-249: a joint graph may be captured in this pass only when the server's round runner says so (its
         # thread, no request waiting for the GPU: `joint_capture_ok`, set a round at a time)
         fn.joint_capture_ok = bool(getattr(items[0][0], "joint_capture_ok", False))
+        # SPD-249 (T1): the packed draft the round's tails queue next may capture its graph when this pass could
+        fn.pack_capture_ok = fn.joint_capture_ok
         items[0][0].joint_capture_ok = False
         jobs = []
         t0 = time.perf_counter()

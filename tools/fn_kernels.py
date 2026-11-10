@@ -77,7 +77,7 @@ def _module():
                        functions=["fn_gemv", "fn_mix_up", "fn_gemv_mix", "fn_mix_up_a", "fn_router", "fn_moe_gu", "fn_moe_down",
                                   "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_gu_stage", "fn_moe_down_group",
                                   "fn_moe_gu_group_s", "fn_moe_down_stage", "fn_moe_down_group_s", "fn_moe_gud", "fn_set_moe_gpar",
-                                  "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
+                                  "fn_route", "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                   "fn_set_pdl", "fn_set_gemv_split", "fn_set_gemv_nb", "fn_set_gemv_mc", "fn_set_mixer_mma", "fn_set_moe_st", "fn_set_moe_warps", "fn_set_moe_gy", "fn_set_moe_gr", "fn_attn_prep", "fn_attn_prep_multi",
                                   "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
                        extra_cuda_cflags=["-O3", "-lineinfo", *_gpu.arch_flags("fn_kernels")],
@@ -443,6 +443,145 @@ MOE_AS = int(_S.get("FN_MOE_AS") or 0)
 _EMPTY_H: dict = {}
 #: the experts' bits the MoE kernels decode (the half-integer rates as ten times the rate)
 MOE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
+
+
+# ------------------------------------------------------------------ SPD-249 (T8): routing in one launch
+#: the rows `route` takes (a warp a row in one CTA, a row a bit of an expert's row mask)
+ROUTE_ROWS = 32
+#: the groups table's width (2 + the kernels' compile-time group cap; FN_MOE_GR caps a group below it at run time)
+MOE_G_COLS = 2 + MOE_GR
+
+
+def route_ok(dev) -> bool:
+    """SPD-249 (T8): `route` and `moe_experts_ix` run on this device (the CUDA kernels inline; elsewhere `moe_experts`
+    takes its own path)."""
+    dev = torch.device(dev)
+    return dev.type == "cuda" and _gpu.profile(dev).inline("fn_kernels")
+
+
+def route(logits: torch.Tensor, E: int, k: int, pad: torch.Tensor | None = None, groups: bool = False):
+    """SPD-249 (T8): `router` (the same ids and weights, its arithmetic statement for statement), a pad row's ids -1 in
+    every slot (`pad` bool [M], a joint graph's; its weights as computed: `masked_fill_`'s result) and the experts'
+    launch index, in one launch for M <= ROUTE_ROWS rows. groups False: (ids, wts, order), order int32 [M S] =
+    `expert_order(ids)` (the stable sort, pad pairs first); groups True: (ids, wts, g, ng) = `fn_moe_groups`' table over
+    that order (FN_MOE_GR's cap)."""
+    M = logits.shape[0]
+    S = k + 1
+    dev = logits.device
+    ids = torch.empty(M, S, dtype=torch.int32, device=dev)
+    wts = torch.empty(M, S, dtype=torch.float32, device=dev)
+    pd = pad.reshape(-1) if pad is not None else _empty(dev, torch.bool)
+    e32 = _empty(dev, torch.int32)
+    mod = _module()
+    if groups:
+        g = torch.empty(M * S, MOE_G_COLS, dtype=torch.int32, device=dev)
+        ng = torch.empty(1, dtype=torch.int32, device=dev)
+        mod.fn_route(logits, E, k, pd, ids, wts, g, ng, e32)
+        return ids, wts, g, ng
+    order = torch.empty(M * S, dtype=torch.int32, device=dev)
+    mod.fn_route(logits, E, k, pd, ids, wts, e32, e32, order)
+    return ids, wts, order
+
+
+_EMPTY_T: dict = {}
+
+
+def _empty(dev, dtype) -> torch.Tensor:
+    t = _EMPTY_T.get((dev, dtype))
+    if t is None:
+        t = _EMPTY_T[(dev, dtype)] = torch.empty(0, dtype=dtype, device=dev)
+    return t
+
+
+def moe_experts_ix(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, ix: tuple) -> torch.Tensor:
+    """SPD-249 (T8): `moe_experts` with its launch index from `route`: ix ("order", order) for the per-pair kernels or
+    ("groups", g, ng) for the grouped kernels (MOE_GROUP's variants: FN_MOE_AS 1 / 2, FN_MOE_STAGE, plain); the same
+    launches `moe_experts` makes after its index. Returns yd [M S, H] fp32."""
+    M, S = ids.shape
+    mod = _module()
+    flat = ids.reshape(-1)
+    ygu = torch.empty(M * S, 2, bank.I, dtype=torch.bfloat16, device=x.device)
+    yd = torch.empty(M * S, bank.H, dtype=torch.float32, device=x.device)
+    kb = bank.ks[-1]
+    if ix[0] == "order":
+        mod.fn_moe_gu(x, flat, ix[1], bank.tr, bank.kb, bank.su, bank.sv, ygu, kb)
+        mod.fn_moe_down(ygu, flat, ix[1], bank.tr, bank.kb, bank.su, bank.sv, yd, kb)
+        return yd
+    g, ng = ix[1], ix[2]
+    if MOE_AS:
+        xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
+        mod.fn_moe_gu_stage(x, flat, S, bank.tr, bank.kb, bank.su, bank.sv, xs)
+        xd = torch.empty(M * S, bank.I, dtype=torch.float16, device=x.device)
+        if MOE_AS == 2:
+            mod.fn_moe_gud(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, xd, kb)
+        else:
+            mod.fn_moe_gu_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xs, ygu, kb)
+            mod.fn_moe_down_stage(ygu, flat, bank.tr, bank.kb, bank.su, bank.sv, xd)
+        mod.fn_moe_down_group_s(g, ng, bank.tr, bank.kb, bank.su, bank.sv, xd, yd, kb)
+        return yd
+    if MOE_STAGE:
+        xs = torch.empty(M * S, 2, bank.H, dtype=torch.float16, device=x.device)
+        mod.fn_moe_gu_stage(x, flat, S, bank.tr, bank.kb, bank.su, bank.sv, xs)
+    else:
+        xs = _empty(x.device, torch.float16)
+    mod.fn_moe_gu_group(x, g, ng, S, bank.tr, bank.kb, bank.su, bank.sv, ygu, kb, xs)
+    mod.fn_moe_down_group(ygu, g, ng, bank.tr, bank.kb, bank.su, bank.sv, yd, kb)
+    return yd
+
+
+def groups_reference(ids: torch.Tensor, order: torch.Tensor | None, gr: int) -> list:
+    """moe_groups_kernel's walk on the host: [(expert, [pairs])] in launch order (pad pairs left out), from ids [M, S]
+    and the launch order (None: pair order)."""
+    flat = ids.reshape(-1).tolist()
+    seq = order.tolist() if order is not None else range(len(flat))
+    out: list = []
+    cur = None
+    for p in seq:
+        e = flat[p]
+        if e < 0:
+            continue
+        if not out or e != cur or len(out[-1][1]) == gr:
+            out.append((e, []))
+            cur = e
+        out[-1][1].append(p)
+    return out
+
+
+def route_index_reference(ids: torch.Tensor, gr: int) -> tuple:
+    """`route_kernel`'s index step on the host, the way the kernel computes it (an expert's rows as a bit mask, one scan
+    over the experts, a pair's place from popcounts): (order [M S], groups [(expert, [pairs])]). tests/test_fn_route.py
+    holds it to `expert_order` and `groups_reference`."""
+    M, S = ids.shape
+    flat = ids.reshape(-1).tolist()
+    rows: dict = {}
+    padm = 0
+    for p, e in enumerate(flat):
+        m = p // S
+        if e < 0:
+            padm |= 1 << m
+        else:
+            rows[e] = rows.get(e, 0) | (1 << m)
+    E1 = max(rows) + 1 if rows else 0
+    pairs_below, groups_below = [0] * (E1 + 1), [0] * (E1 + 1)
+    for e in range(E1):
+        cnt = bin(rows.get(e, 0)).count("1")
+        pairs_below[e + 1] = pairs_below[e] + cnt
+        groups_below[e + 1] = groups_below[e] + (cnt + gr - 1) // gr
+    npad = bin(padm).count("1")
+    order = [0] * len(flat)
+    table: dict = {}
+    for p, e in enumerate(flat):
+        m = p // S
+        lower = (1 << m) - 1
+        if e < 0:
+            order[bin(padm & lower).count("1") * S + p - m * S] = p
+            continue
+        place = bin(rows[e] & lower).count("1")
+        order[npad * S + pairs_below[e] + place] = p
+        gi = groups_below[e] + place // gr
+        table.setdefault(gi, (e, {}))[1][place % gr] = p
+    groups = [(table[gi][0], [table[gi][1][s] for s in sorted(table[gi][1])]) for gi in sorted(table)]
+    return torch.tensor(order, dtype=torch.int32), groups
 
 
 def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
