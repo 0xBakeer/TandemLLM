@@ -437,7 +437,10 @@ class FlashNextServing:
 
         SRV-775: `line` False, the admission's count of a prefill in flight: by its rows alone, a cold prompt too,
         without the line's floor (2026-11-02: lone cold prompts of 205-215 rows peaked at 0.20-0.67 GiB, charged 2.75;
-        eight such prompts counted 22 GiB against the box's floor and the eighth waited 12 s)."""
+        eight such prompts counted 22 GiB against the box's floor and the eighth waited 12 s).
+
+        SPD-249: a chunk's workspace, as the chunk-major prefill runs it. A layer-major window's bytes past it are asked
+        for when the window is about to run (`window_bytes`, engine/cache.py `WINDOW_GRANT`), not priced here."""
         n = int(n_ctx)
         r = max(1, min(int(rows), n))
         cls = int(self.fn.qsa_class(n - 1))
@@ -642,6 +645,16 @@ class FlashNextServing:
             return False
         from engine.models.flashnext import layer_major as LM
         return LM.ROWS > PREFILL_CHUNK and LM.ok(self.fn, self.st)
+
+    def window_bytes(self, plan: list, lines: bool) -> int:
+        """SPD-249: what engine/cache.py's chunk loop asks the server's memory policy for (`WINDOW_GRANT`) before it
+        hands this slot the window plan [(start, rows)] (`prefill_window`): the largest window's bytes above its chunks'
+        chunk-major workspace (`layer_major.plan_bytes`) and, with `lines`, the loop's state buffer a chunk."""
+        from engine.models.flashnext import layer_major as LM
+        sec = self.__dict__.get("_sec_bytes")
+        if sec is None:
+            sec = self._sec_bytes = sum(int(t.numel() * t.element_size()) for t in self.state.buffers().values())
+        return LM.plan_bytes([int(t) for _, t in plan], LM.ROWS, PREFILL_CHUNK, sec, lines)
 
     @torch.no_grad()
     def prefill_window(self, toks: list, starts: list, bufs: list | None = None) -> tuple:

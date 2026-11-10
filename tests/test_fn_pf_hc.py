@@ -1,8 +1,8 @@
 """SPD-249 P2: the fused prefill mixer's and inject's switches and dispatch (CPU; the bits are
 tests/gpu/test_fn_pf_hc_gpu.py's and tools/fn_pf_hc_check.py's).
 
-  * QWEN38_FN_PF_HC_FUSED and QWEN38_FN_PF_INJ_FUSED are Flash-Next knobs, off by default, owned by the engine
-  * QWEN38_FN_PF_ATTN_STAGES (P6) is a Flash-Next knob, 2 (the decode path's launch) by default, read by
+  * QWEN38_FN_PF_HC_FUSED and QWEN38_FN_PF_INJ_FUSED are Flash-Next knobs, on by default, owned by the engine
+  * QWEN38_FN_PF_ATTN_STAGES (P6) is a Flash-Next knob, 1 by default (2: the decode path's launch), read by
     `_attn_pre` only
   * `fn_pf_hc.mix_ok` / `inject_ok` refuse CPU tensors
   * `_mix_pre` takes the replaced path when its switch is off and `fn_pf_hc.mix` otherwise, whatever `mm_rows` mode
@@ -27,22 +27,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def test_knobs_are_registered_off():
+def test_knobs_are_registered_on():
     from engine.settings import KNOBS
     from engine.models.flashnext import engine as E
     for k in ("FN_PF_HC_FUSED", "FN_PF_INJ_FUSED"):
-        assert KNOBS[k] == ("0", "engine/models/flashnext/engine.py"), k
-    assert E.PF_HC_FUSED is (os.environ.get("QWEN38_FN_PF_HC_FUSED") == "1")
-    assert E.PF_INJ_FUSED is (os.environ.get("QWEN38_FN_PF_INJ_FUSED") == "1")
+        assert KNOBS[k] == ("1", "engine/models/flashnext/engine.py"), k
+    assert E.PF_HC_FUSED is (os.environ.get("QWEN38_FN_PF_HC_FUSED", "1") == "1")
+    assert E.PF_INJ_FUSED is (os.environ.get("QWEN38_FN_PF_INJ_FUSED", "1") == "1")
 
 
-def test_attn_stages_knob_is_the_decode_launch_by_default():
+def test_attn_stages_knob_is_one_stage_by_default():
     import inspect
     from engine.settings import KNOBS
     from engine.models.flashnext import engine as E
     from tools import fn_seq_kernels as SK
-    assert KNOBS["FN_PF_ATTN_STAGES"] == ("2", "engine/models/flashnext/engine.py")
-    assert E.PF_ATTN_STAGES == int(os.environ.get("QWEN38_FN_PF_ATTN_STAGES") or 2)
+    assert KNOBS["FN_PF_ATTN_STAGES"] == ("1", "engine/models/flashnext/engine.py")
+    assert E.PF_ATTN_STAGES == int(os.environ.get("QWEN38_FN_PF_ATTN_STAGES") or 1)
     assert inspect.signature(SK.attn_rows).parameters["stages"].default == 2
     src = inspect.getsource(E.FlashNextEngine)
     assert src.count("stages=PF_ATTN_STAGES") == 1 and "stages=PF_ATTN_STAGES" in inspect.getsource(

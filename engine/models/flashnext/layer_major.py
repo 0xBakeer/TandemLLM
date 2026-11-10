@@ -18,7 +18,10 @@ after the layer.
 
 The window holds every chunk's streams between layers and the experts' buffers of all its rows at once: about
 190 KB a row more than one chunk (the grouped inputs, gate|up, the down products in fp32, the streams and the
-mixer inputs), which the memory policy charges (serving.py `_workspace_rows`). `ROWS` caps a window
+mixer inputs), and a layer's decoded slabs and weight forms. The chunks are priced chunk-major (serving.py
+`_workspace_rows`); a window's bytes above that price (`window_bytes`) are asked of the server's memory policy before
+the window allocates them (engine/cache.py `WINDOW_GRANT`, serving.py `window_bytes`), and held for the request until
+its prefill has run. Not there: the chunks run one at a time, with the same bits. `ROWS` caps a window
 (QWEN38_FN_PF_WINDOW; 0: chunk-major as before).
 
 The injects and mixers are the engine's (`_inject_pre`, `_mix_pre`: QWEN38_FN_PF_INJ_FUSED, QWEN38_FN_PF_HC_FUSED) and
@@ -43,6 +46,15 @@ ROWS = int(_S.get("FN_PF_WINDOW") or 0)
 ROW_BYTES = 256 * 1024
 #: the device memory a window leaves free (unified memory: the box's own work and the other slots' decode)
 MARGIN = 6 << 30
+#: SPD-249: a window's bytes above its chunks' chunk-major workspace (`window_bytes`): a fixed part (a layer's EXL3
+#: slabs and fp32 weight forms, decoded once for the window) and a part a row past one chunk (the experts' buffers of
+#: all its rows, the held streams and mixer inputs), with `WIN_MARGIN`. Measured at 32k on 3.05 (2026-11-10): offline,
+#: the peak above the held bytes was 2.11 GiB more than chunk-major for a window of 8,192 rows and 6.40 for 32,768
+#: (`WIN_ROW`); served, a server's first cold prompt in windows of 8,192 raised the allocator's reserve 3.17 GiB more
+#: than chunk-major (6.54 against 3.37), the window's two state buffers included (`WIN_FIXED`)
+WIN_FIXED = int(2.50 * (1 << 30))
+WIN_ROW = 187_500
+WIN_MARGIN = 1.15
 
 
 def rows_now(chunk: int, cap: int) -> int:
@@ -59,6 +71,23 @@ def rows_now(chunk: int, cap: int) -> int:
     free += reserved - allocated
     fit = chunk + max(0, free - MARGIN) // ROW_BYTES
     return max(chunk, min(cap, fit // chunk * chunk))
+
+
+def window_bytes(rows: int, chunk: int) -> int:
+    """The bytes a window of `rows` rows takes above its chunks' chunk-major workspace; 0 for one chunk or less."""
+    if rows <= chunk:
+        return 0
+    return int(WIN_MARGIN * (WIN_FIXED + WIN_ROW * (rows - chunk)))
+
+
+def plan_bytes(lens: list, cap: int, chunk: int, section: int = 0, lines: bool = False) -> int:
+    """What a plan of chunks of `lens` rows asks the memory policy for before it runs (engine/cache.py
+    `_window_plan`): the largest of its windows under `cap` rows (they run one after another), and with `lines` the
+    chunk loop's state buffer a chunk (`section` bytes each). 0 when no window would run."""
+    wins = [sum(int(lens[i]) for i in g) for g in groups(lens, cap) if len(g) > 1]
+    if not wins:
+        return 0
+    return max(window_bytes(w, chunk) for w in wins) + (len(lens) * int(section) if lines else 0)
 
 
 def groups(lens: list, cap: int) -> list:

@@ -6,7 +6,7 @@ GPU.
     a prompt prefilled in windows ends with the chunk-major prefill's logits, streams, states and length, with one
     expert call a layer over a window's rows, every other part a chunk at a time at its own start and rows, the slab
     and fp32-weight caches on only inside the layers; a resumed prompt too; the route trace in chunk-major order;
-  * the windows' cut (`groups`), what may run one (`ok`), the knob off by default;
+  * the windows' cut (`groups`), what may run one (`ok`), the knob 8,192 by default;
   * the slot verbs engine/cache.py's chunk loop calls (`window_ok`, `prefill_window`, `replay_taps`): never for a
     family built on the adapter; with a state buffer a line, each line replayed as the loop replays it holds the
     chunk-major prefill's sections, length and streams at that line, and the slot ends as `forward` leaves it.
@@ -140,7 +140,7 @@ def test_nocopy_windows_write_the_experts_input_side_by_side(monkeypatch):
     fn = _WEng()
     toks = torch.tensor([3, 9, 1, 4, 7, 2, 8, 5, 6, 1, 1])        # chunks of 4, 4, 3
     lg0, s0, st0, _ = _prefill(fn, toks, 0, monkeypatch=monkeypatch)
-    assert E.PF_NOCOPY is (os.environ.get("QWEN38_FN_PF_NOCOPY") == "1")
+    assert E.PF_NOCOPY is (os.environ.get("QWEN38_FN_PF_NOCOPY", "1") == "1")
     seen, outs, grouped, tail = [], [], PK.moe_grouped, PK.mix_tail
 
     def rec(x, ids, bank, rows=32):
@@ -220,7 +220,7 @@ def test_the_cut_and_what_runs_a_window(monkeypatch):
     assert LM.groups([4, 4, 3], 4) == [[0], [1], [2]]
     assert LM.groups([4, 4, 3], 64) == [[0, 1, 2]]
     assert LM.groups([], 8) == []
-    assert LM.ROWS == 0                                            # off by default: chunk-major
+    assert LM.ROWS == int(os.environ.get("QWEN38_FN_PF_WINDOW") or 8192)          # 8,192 by default
     fn = _WEng()
     st = fn.new_state()
     assert LM.ok(fn, st)
@@ -231,7 +231,7 @@ def test_the_cut_and_what_runs_a_window(monkeypatch):
     st.mm = None
     fn.prefill_path = "ref"
     assert not LM.ok(fn, st)
-    return "windows of at most the knob's rows; text on the prefill kernels only; off by default"
+    return "windows of at most the knob's rows; text on the prefill kernels only; 8,192 by default"
 
 
 def test_the_window_takes_the_memory_that_is_free(monkeypatch):
@@ -275,7 +275,8 @@ def test_the_slot_verbs_hold_every_line(monkeypatch):
     starts = [0, 4, 8, 12]
     chunks = [toks[a:a + 4] for a in starts]
     a = FlashNextServing(fn, 64)
-    assert not a.window_ok(0)                                                  # off by default
+    monkeypatch.setattr(LM, "ROWS", 0)
+    assert not a.window_ok(0)                                                  # QWEN38_FN_PF_WINDOW=0: chunk-major
     monkeypatch.setattr(LM, "ROWS", 8)
     assert a.window_ok(0)
 
@@ -302,7 +303,7 @@ def test_the_slot_verbs_hold_every_line(monkeypatch):
             assert sorted(got[3]) == sorted(ref[3]) and all(torch.equal(got[3][li], ref[3][li]) for li in ref[3])
         _same(a.st, b.st)
         assert torch.equal(a._h_last, b._h_last) and b.stats["prefill_rows"] == 14
-    return "off by default, not for a subclass; every line's sections, length, streams and PLE context = chunk-major"
+    return "off at 0, not for a subclass; every line's sections, length, streams and PLE context = chunk-major"
 
 
 if __name__ == "__main__":

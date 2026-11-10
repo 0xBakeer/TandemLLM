@@ -71,7 +71,7 @@ PF_HC_FUSED = _S.get("FN_PF_HC_FUSED") == "1"
 PF_INJ_FUSED = _S.get("FN_PF_INJ_FUSED") == "1"
 #: SPD-249 P6: the pipeline stages of a prompt chunk's attention split launch (`_attn_pre`), the same bits; 2: the
 #: decode path's launch
-PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 2)
+PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 1)
 #: SPD-249 P4: a prompt chunk's copies that a view or the reading kernel's own stride serves are not launched (the GDN
 #: values and z in place, the PLE states from the rows' words, the indexer scores' fill past the pooled blocks only, a
 #: window's mixer outputs written side by side), the same bits; 0: the copies

@@ -207,6 +207,7 @@ class Admission:
         self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
         self.fwd: dict = {}                # SRV-801: key -> the rows that prefill forwards, where known
         self.over: set = set()             # SRV-801: the keys the gate admitted over the peak, until their prefill ran
+        self.win: dict = {}                # SPD-249: key -> the bytes of `held` its prefill's windows asked (`window`)
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
         self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
         self.holds: dict = {}              # SRV-797: key -> until when (monotonic) a lane backs off, out of the line
@@ -482,6 +483,7 @@ class Admission:
             self.rows.pop(key, None)
             self.fwd.pop(key, None)
             self.over.discard(key)
+            self.win.pop(key, None)
             if key in self.held:
                 self.held[key] = self.kv.get(key, (0,))[0]
 
@@ -520,6 +522,35 @@ class Admission:
                 self.stats["raised"] = self.stats.get("raised", 0) + 1
             else:
                 self.stats["raise_refused"] = self.stats.get("raise_refused", 0) + 1
+            return ok, d
+
+    def window(self, key, nbytes: int) -> tuple[bool, dict | None]:
+        """SPD-249: `key`'s prefill asks for `nbytes` past its chunk-major workspace for a layer-major window, before
+        the window allocates them (server/app.py `_window_grant`). Checked at the floor as `forwards` checks a raise
+        (`check`, what is more than its windows hold already as the need): (True, that check) with the reserve raised
+        until its prefill has run (`prefilled`), (False, that check) with the reserve as it was; the prefill then runs
+        its chunks one at a time and nothing waits. (True, None): nothing to raise, or a request the admission does not
+        hold."""
+        with self._admit:
+            with self.lock:
+                if key not in self.held or key not in self.rows:
+                    return True, None
+                got = int(self.win.get(key, 0))
+                have = int(self.held[key]) - int(self.kv.get(key, (0,))[0])
+                n, fwd, over = int(self.rows[key]), self.fwd.get(key), key in self.over
+            more = int(nbytes) - got
+            if more <= 0:
+                return True, None
+            ok, d = self.check(more, count=False, over_peak=over, rows=n, fwd=fwd, have=have)
+            d["window"] = {"bytes": int(nbytes), "more": more, "have": have}
+            if ok:
+                with self.lock:
+                    if key in self.held:
+                        self.held[key] += more
+                        self.win[key] = got + more
+                self.stats["windows"] = self.stats.get("windows", 0) + 1
+            else:
+                self.stats["window_refused"] = self.stats.get("window_refused", 0) + 1
             return ok, d
 
     def wait(self, key, prio: int = 1) -> int:
@@ -592,6 +623,7 @@ class Admission:
             self.rows.pop(key, None)
             self.fwd.pop(key, None)
             self.over.discard(key)
+            self.win.pop(key, None)
             self.waiting.pop(key, None)
             self.prio.pop(key, None)
             self.holds.pop(key, None)

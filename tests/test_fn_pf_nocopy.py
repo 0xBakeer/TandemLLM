@@ -1,7 +1,7 @@
 """SPD-249 P4: QWEN38_FN_PF_NOCOPY's switch and the PLE states from the rows' words (CPU; the kernels' bits are
 tests/gpu/test_fn_pf_nocopy_gpu.py's and tools/fn_pf_hc_check.py's).
 
-  * QWEN38_FN_PF_NOCOPY is a Flash-Next knob, off by default, owned by the engine and read by the prompt chunk's
+  * QWEN38_FN_PF_NOCOPY is a Flash-Next knob, on by default, owned by the engine and read by the prompt chunk's
     paths only (`_gdn_pre`, `_attn_pre`, `_ple_pre`) and the layer-major window
   * `ple.row_states` gives `decode_rows`' states for every K a 16-bit state allows, and `decode_rows(words=True)`
     the same rows bit for bit
@@ -23,11 +23,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def test_knob_is_registered_off():
+def test_knob_is_registered_on():
     from engine.settings import KNOBS
     from engine.models.flashnext import engine as E
-    assert KNOBS["FN_PF_NOCOPY"] == ("0", "engine/models/flashnext/engine.py")
-    assert E.PF_NOCOPY is (os.environ.get("QWEN38_FN_PF_NOCOPY") == "1")
+    assert KNOBS["FN_PF_NOCOPY"] == ("1", "engine/models/flashnext/engine.py")
+    assert E.PF_NOCOPY is (os.environ.get("QWEN38_FN_PF_NOCOPY", "1") == "1")
 
 
 def test_knob_is_read_by_the_prompt_paths_only():

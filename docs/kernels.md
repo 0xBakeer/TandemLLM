@@ -32,14 +32,14 @@ A prompt chunk is not verified against anything, so its kernels have no twin con
 
 `QWEN38_FN_PREFILL=ref` keeps the reference's batched forward; `QWEN38_FN_PREFILL_CHUNK` is the chunk length (4,096). `QWEN38_FN_GROUP_ROWS` is the rows an item of the MoE group GEMM takes (64; 32 is the earlier tile, any other value refuses at import).
 
-Layer-major windows (SPD-249, `engine/models/flashnext/layer_major.py`): a prompt's chunks can run layer by layer in windows, each layer's experts once over the window's rows and the rest a chunk at a time at its own rows, so every chunk keeps the bits of its chunk-major forward. These knobs leave the prefill as it was by default, and each gives the same bits on:
+Layer-major windows (SPD-249, `engine/models/flashnext/layer_major.py`): a prompt's chunks can run layer by layer in windows, each layer's experts once over the window's rows and the rest a chunk at a time at its own rows, so every chunk keeps the bits of its chunk-major forward. Each of these knobs gives the same bits on and off:
 
-- `QWEN38_FN_PF_WINDOW`: the most rows a layer-major window takes (a multiple of the chunk); 0 (the default) runs chunk-major.
+- `QWEN38_FN_PF_WINDOW`: the most rows a layer-major window takes (a multiple of the chunk); 8,192 by default. A window sizes itself to free memory: before it runs it asks the server's memory policy for its bytes above the chunks' own workspace (the engine's peak and the admission's floor, `layer_major.window_bytes`), and holds them until the prefill has run; when they are not there the chunks run one at a time. `QWEN38_FN_PF_WINDOW=0` restores the previous path (chunk-major).
 - `QWEN38_FN_PF_ROT_ROWS`: 1 rotates a chunk's (row, expert) pairs in row order, a row read once, each pair's arithmetic the same; 0 (the default) keeps the grouped order.
-- `QWEN38_FN_PF_HC_FUSED`: 1 feeds a chunk's mixer GEMMs from fewer launches (`tools/fn_pf_hc.py`), in every `QWEN38_FN_PREFILL_MM` mode; 0 (the default) keeps the separate launches.
-- `QWEN38_FN_PF_INJ_FUSED`: 1 runs a chunk's hyper-connection inject and the next norm in one CTA a row; 0 (the default) keeps `fn_kernels.inject_norm`.
-- `QWEN38_FN_PF_ATTN_STAGES`: the pipeline stages (1 to 4) of a chunk's attention split launch, a launch setting only; 2 (the default) is the decode path's launch.
-- `QWEN38_FN_PF_NOCOPY`: 1 leaves out a chunk's copies that a view or the reading kernel's stride serves; 0 (the default) keeps the copies.
+- `QWEN38_FN_PF_HC_FUSED`: 1 feeds a chunk's mixer GEMMs from fewer launches (`tools/fn_pf_hc.py`), in every `QWEN38_FN_PREFILL_MM` mode (the default); 0 keeps the separate launches.
+- `QWEN38_FN_PF_INJ_FUSED`: 1 runs a chunk's hyper-connection inject and the next norm in one CTA a row (the default); 0 keeps `fn_kernels.inject_norm`.
+- `QWEN38_FN_PF_ATTN_STAGES`: the pipeline stages (1 to 4) of a chunk's attention split launch, a launch setting only; 1 by default, 2 is the decode path's launch.
+- `QWEN38_FN_PF_NOCOPY`: 1 (the default) leaves out a chunk's copies that a view or the reading kernel's stride serves; 0 keeps the copies.
 
 `tools/fn_window_check.py` and `tools/fn_pf_hc_check.py` compare a prefill with the knobs off and on, bit for bit; `tools/fn_prefill_mm_ref.py` checks the `QWEN38_FN_PREFILL_MM` modes against a prefill with fp64 mixers.
 
