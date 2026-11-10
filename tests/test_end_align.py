@@ -486,6 +486,36 @@ def test_srv679_another_call_or_another_text_is_served_as_sent():
     assert not endalign.same_calls("no call here", "no call here")
 
 
+# ------------------------------------------------------------------ 7. asked before the replay
+
+def test_srv801_the_price_asks_the_rows_where_a_copy_resumes():
+    """SRV-801: the admission's price asks the rows how many rows a client's copy forwards
+    (`app._rows_forward`: the copy as the replay would serve it, then `resume_estimate`) before the
+    handler replays it. It is the prefill's own answer for the next turn, for the same prompt sent
+    again and for an edit of its last message, and asking leaves the alignment and the rows as
+    they were. (A regenerate priced on the client's view of the last prompt was charged 1 row and
+    forwarded 4,197.)"""
+    def state(res, al):
+        return ({k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
+                 for k, v in vars(al).items()}, dict(res.stats), res.valid, res.end and res.end["at"])
+    prompt = tokens(100, seed=79)
+    res, al = _setup()
+    out1, _ = _first(prompt, 40)
+    copy2 = prompt + out1[:10] + [NL] + out1[10:] + TOOL
+    said = []
+    for name, copy in (("the next turn", copy2), ("sent again", copy2),
+                       ("its last message edited", copy2[:-len(TOOL)] + TOOL2)):
+        was = state(res, al)
+        fwd = app._rows_forward(res, list(copy), False, {})
+        assert state(res, al) == was, name
+        ids = app._end_replay(res, copy)[0]
+        _, pre, _ = turn(ids, 30)
+        assert fwd == len(ids) - pre["reused"], (name, fwd, len(ids), pre)
+        said.append(f"{name} {fwd} of {len(ids)} from {pre['kind']}")
+    assert len({x.split()[-1] for x in said}) > 1, said     # the end anchor and an anchor under it
+    return "; ".join(said)
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

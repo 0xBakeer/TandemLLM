@@ -20,16 +20,25 @@ state is replayed here on a fake MemAvailable, with Flash-Next's workspace model
 The floor of the whole request (chunk, KV commit, sandbox, margin) is as it was: a turn that maps 5.7 GiB of pages and
 forwards 3,300 rows at 15.3 GiB free is 0.2 GiB short of it and still waits.
 
+Slot 0's share is counted on the client's copy of the last prompt. The rows hold the served prompt, with the spans the
+server put there, so a regenerate or an edit shares the copy further than it shares the rows: priced on the copy it was
+charged 1 row and 488 rows and forwarded 4,197 and 3,968 from the last chunk line below the place the rows part. Those
+turns are priced on the rows (`_rows_forward`), and before any prefill's first forward its real rows are held against
+its price: the reserve is raised, or the lane gives way before the forward allocates (`_first_forward`).
+
 Run: python tests/test_memory_wait.py
 """
 
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import os
 import sys
+import threading
+import time
 import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,6 +58,10 @@ AVAIL, IN_FLIGHT = 15.3, 0.4
 # the turn of the screenshot: 180 new tokens of a 143,590-token chat read back from the NVMe, 11 GiB free
 N_SHOT, FWD_SHOT = 143_590, 180
 MARGIN, KV_STEP = 5 * GiB, 384 * MiB
+# a chunk of the prefill, the row the rows part from a regenerate's copy at (the first span the client's copy lacks
+# near the prompt's end) and the last chunk line below it, where its prefill resumes
+CHUNK = 4_096
+PART, LINE = 203_414, 49 * CHUNK
 
 
 class _Pages:
@@ -64,21 +77,36 @@ class _Pages:
     def need_bytes(self, rows: int) -> int:
         return max(0, int(rows) - self.rows) * PER_ROW
 
+    def trim(self, rows: int = 0) -> int:
+        self.rows = min(self.rows, int(rows))
+        return 0
+
 
 def _engine(rows: int = 0, owner: str = "slot0"):
     return types.SimpleNamespace(kv=types.SimpleNamespace(pages=_Pages(rows, owner), max_len=262_144, length=rows))
 
 
+def _wire(app, adm, kp) -> None:
+    """The guards as the server wires them (`_wire_guards`). 0.15.3 wired them in its start-up, with these lines:
+    kept here so a test of the charge fails there on the charge."""
+    if hasattr(app, "_wire_guards"):
+        return app._wire_guards(adm, kp)
+    adm.guard = lambda rows: app._guard(rows, adm.cap)
+    kp.guard = lambda: (app._guard(adm.ctx_rows(), kp.hard_floor_cfg) or (None,))[0]
+    kp.guard_at = lambda rows: (app._guard(max(int(rows), adm.ctx_rows()), kp.hard_floor_cfg) or (None,))[0]
+    adm.pool_floor = getattr(kp, "floor_at", None) or (lambda rows: kp.hard_floor)
+
+
 @contextlib.contextmanager
-def _box(app, avail_gib: float, in_flight_gib: float = IN_FLIGHT, **state):
+def _box(app, avail_gib: float, in_flight_gib: float = IN_FLIGHT, clock=None, **state):
     """The server's state for one admission: MemAvailable `avail_gib`, a 15 GiB admission floor and a 10 GiB pool
     floor as configured, both reading the live guard (`_wire_guards`), Flash-Next's workspace model, the engine at
-    54.4 GiB under a 75.82 GiB peak, and the KV pages of the lanes in flight. The clock is the test's."""
+    54.4 GiB under a 75.82 GiB peak, and the KV pages of the lanes in flight. The clock is the test's, or `clock`."""
     box = {"avail": int(avail_gib * GiB)}
     adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": box["avail"]}, growth=lambda: 0)
     kp = slots.GuardedPool(hard_floor=10 * GiB, margin_rows=0, meminfo=lambda: box["avail"])
     mem = _FNMem(peak=int(75.82 * GiB), ws=0)
-    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1,
+    pool = types.SimpleNamespace(admission=adm, turn=None, burst=None, running=lambda: 1,
                                  slots=[types.SimpleNamespace(phase="", prefill_left=None) for _ in range(8)])
     st = dict(mem=mem, mem_load={"allocated": int(54.4 * GiB)}, prefix_chunk=4096, engine=_engine(),
               queue_timeout=1.0, request_timeout=30.0)
@@ -87,8 +115,8 @@ def _box(app, avail_gib: float, in_flight_gib: float = IN_FLIGHT, **state):
     app.STATE.clear()
     app.STATE.update(st)
     app.kvpool.POOL = kp
-    app.time = _Clock()
-    app._wire_guards(adm, kp)
+    app.time = clock or _Clock()
+    _wire(app, adm, kp)
     if in_flight_gib:
         kv = int(in_flight_gib * GiB)
         assert adm.reserve("in-flight", kv, kv=kv, owner="slot3")[0]
@@ -100,18 +128,23 @@ def _box(app, avail_gib: float, in_flight_gib: float = IN_FLIGHT, **state):
         app.STATE.clear()
 
 
-def _admit(app, b, cid: str, n: int, home: int = 0, max_new: int = 8192, slot=None, limit_s: float = 2.0):
-    """`_par_admit` of an `n`-token prompt on slot 0 or `slot`, its wait bounded at `limit_s` on the test's clock:
-    (admitted, its record, the engine log's lines)."""
+def _admit(app, b, cid: str, n, home: int = 0, max_new: int = 8192, slot=None, limit_s: float = 2.0,
+           home_rows: bool = False, stream: bool = True):
+    """`_par_admit` of a prompt (`n` tokens, or its ids) on slot 0 or `slot`, its wait bounded at `limit_s` on the
+    test's clock: (admitted, its record, the engine log's lines). `home_rows`: priced on the rows, where the server
+    has that (`_slot_share`'s answer for a regenerate or an edit)."""
     import torch
     from server import usage
     rec = usage.RequestRecord(f"chatcmpl-{cid}", "chat", True)
     out = io.StringIO()
+    prompt = torch.zeros(n, dtype=torch.long) if isinstance(n, int) else torch.tensor(n, dtype=torch.long)
+    kw = {"home_rows": True} if home_rows and "home_rows" in inspect.signature(app.Handler._par_admit).parameters \
+        else {}
     slots.bind(slot)
     try:
         with contextlib.redirect_stdout(out):
-            ok = app.Handler._par_admit(_H(), b.pool, cid, torch.zeros(n, dtype=torch.long), rec=rec, stream=True,
-                                        max_new=max_new, home=home, limit_s=limit_s)
+            ok = app.Handler._par_admit(_H(), b.pool, cid, prompt, rec=rec, stream=stream,
+                                        max_new=max_new, home=home, limit_s=limit_s, **kw)
     finally:
         slots.bind(None)
     return ok, rec, out.getvalue()
@@ -136,6 +169,55 @@ def _slot0(view_end: int = N - FWD):
     view = ids[:view_end] + [2] * 4
     res = _HomeRes(view_end + 31)
     return ids, dict(resident=res, slot0_view=view, engine=_engine(res.valid))
+
+
+def _rows(tokens: list, end_at: int, hidden: list, lines: int = LINE):
+    """Slot 0's rows as the admission asks them: `ResidentPrefix`'s own host-side answers (`common`, `best`,
+    `end_offer`, `resume_estimate`, `replay`) on a served prompt of `tokens`, its end anchor at `end_at` with the
+    spans the server put there, and an anchor at every chunk line up to `lines`. No engine and no buffers."""
+    from engine import cache
+
+    class Rows(cache.ResidentPrefix):
+        def __init__(self):
+            pass
+
+        def clear(self):
+            self.tokens, self.valid, self.anchors, self.end = [], 0, {}, None
+
+    res = Rows()
+    res.tokens, res.valid, res.chunk = list(tokens), len(tokens), CHUNK
+    res.anchors = {k: () for k in range(CHUNK, lines + 1, CHUNK)}
+    res.end = {"at": int(end_at), "hidden": list(hidden), "mark": None}
+    res.pend = res.grid = res.spiller = res._stash = res.end_lost = None
+    res.glue, res.owner, res.end_hold, res.stats = set(), "chat", False, {"end_replayed": 0}
+    return res
+
+
+def _chat(n: int, spans=((PART, 455),), answer: int = 16):
+    """Slot 0 after a turn of `n` client tokens: the client's copy of that prompt (the view), and the rows of the
+    prompt as it was served: the copy with the server's `spans` (row, length) in it, then the answer's rows. The end
+    anchor is the served prompt's end. (the view, the rows, the server's state)"""
+    view = [1] * (n - 4) + [2] * 4
+    rows, hidden, at = [], [], 0
+    for p, k in spans:
+        take = p - len(rows)
+        rows += view[at:at + take]
+        at += take
+        hidden.append((p, [7] * k))
+        rows += [7] * k
+    rows += view[at:]
+    res = _rows(rows + [3] * answer, len(rows), hidden)
+    return view, res, dict(resident=res, slot0_view=view, engine=_engine(res.valid))
+
+
+def _priced(app, b, cid: str, ids: list, conv: int = 5_000):
+    """A turn of `ids` on slot 0 as the handler admits it: its share (`_slot_share`), then `_par_admit`.
+    (admitted, its record, the workspace its reserve holds, the log) In 0.15.3 slot 0 had no share."""
+    why = {"ids": ids, "conv": conv}
+    home = app._slot_share(why, None) if hasattr(app, "_slot_share") else 0
+    ok, rec, log = _admit(app, b, cid, ids, home=home, home_rows=bool(why.get("home_rows")))
+    ws = b.adm.held[cid] - b.adm.kv[cid][0] if cid in b.adm.held else None
+    return ok, rec, ws, log
 
 
 def test_a_turn_of_the_chat_slot_0_holds_is_charged_the_rows_it_reads():
@@ -403,6 +485,297 @@ def test_a_retry_that_frees_nothing_prints_once_then_a_count():
     assert app._empty_line(ev, now=1090.0) == lines[0], "a new run starts with its line"
     app._EMPTY_RUN.clear()
     return f"{len(lines)} hand-backs that freed nothing in 88 s: {len(said)} lines"
+
+
+def test_a_regenerate_is_charged_the_rows_past_the_line_the_rows_part_under():
+    """`t3r`: the last prompt sent again. The view is that prompt, so the share was all of it and the price 1 row
+    (0.79 GiB); the rows hold a span of the server's 1,487 rows before the prompt's end, the prefill resumes at the
+    chunk line below it (row 200,704) and forwards 4,197. Priced on the rows it is charged those, and its reserve
+    holds their workspace by the price's formula."""
+    app = _app()
+    n = LINE + 4_197
+    view, res, st = _chat(n)
+    with _box(app, AVAIL, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t3r", list(view))
+        assert rec.ws_rows == 4_197, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB, {rec.ws_kind}) for a regenerate that forwards 4,197"
+        assert ok is True and rec.ws_kind == "resident" and ws == b.mem.model(n, 4_197, line=False), (vars(rec), log)
+        assert res.stats["end_replayed"] == 0, "asking the rows counts nothing"
+    one = b.mem.model(n, 1, line=False) / GiB
+    return f"4,197 rows: {ws / GiB:.2f} GiB of workspace at the floor (1 row: {one:.2f})"
+
+
+def test_a_regenerate_whose_copy_the_alignment_serves_is_charged_from_the_line_it_serves_to():
+    """The same turn as the box served it: a span of the server's early in the prompt too, so the client's tokens
+    part from the rows at row 3,000 and resume nowhere by themselves. The alignment serves the rows up to the last
+    line under the place they part again and the copy from there (`EndAlign.served`): 4,197 rows forwarded, and the
+    price is the client's tokens less those. With no alignment to ask, the rows serve nothing: priced cold."""
+    app = _app()
+    n = LINE + 4_197 - 303
+    view, res, st = _chat(n, spans=((3_000, 303), (PART, 455)))
+    align = types.SimpleNamespace(moved_common=lambda v, i: i,
+                                  served=lambda r, ids: r.tokens[:LINE] + list(ids[LINE - 303:]))
+    with _box(app, AVAIL, end_align=align, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t3r", list(view))
+        assert rec.ws_rows == 4_197, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB, {rec.ws_kind}) for a regenerate that forwards 4,197"
+        assert ok is True and rec.ws_kind == "rows" and ws == b.mem.model(n, 4_197, line=False), (vars(rec), log)
+    with _box(app, 40.0, **st) as b:
+        ok, rec, _, log = _priced(app, b, "none", list(view))
+        assert ok is True and rec.ws_rows == n and rec.ws_kind is None, (vars(rec), log)
+    return f"4,197 rows by the alignment's answer ({ws / GiB:.2f} GiB); the whole prompt with none"
+
+
+def test_an_edit_of_the_last_message_is_charged_the_rows_past_that_line():
+    """`t3e`: the last message edited. The copy shares the view up to that message, 488 rows before the end (1.83
+    GiB); the rows part from it at the same span as a regenerate's, and the prefill forwards 3,968 from the line."""
+    app = _app()
+    n = LINE + 3_968
+    view, res, st = _chat(n)
+    ids = view[:n - 488] + [5] * 484 + [2] * 4
+    with _box(app, AVAIL, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t3e", ids)
+        assert rec.ws_rows == 3_968, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB, {rec.ws_kind}) for an edit that forwards 3,968"
+        assert ok is True and ws == b.mem.model(n, 3_968, line=False), (vars(rec), log)
+    return f"3,968 rows: {ws / GiB:.2f} GiB (488 rows: {b.mem.model(n, 488, line=False) / GiB:.2f})"
+
+
+def test_a_regenerate_after_several_turns_is_charged_more_than_a_chunk():
+    """`t5`: five turns on, each with its span in the rows and no anchor past row 200,704: the regenerate forwards
+    7,281 rows, more than one chunk. Its price is those rows and the pool's floor holds a whole chunk for it."""
+    app = _app()
+    n = LINE + 7_281
+    view, res, st = _chat(n, spans=((PART, 455), (204_950, 420), (206_010, 380), (207_100, 300)))
+    with _box(app, AVAIL, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t5", list(view))
+        assert rec.ws_rows == 7_281, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB, {rec.ws_kind}) for a regenerate that forwards 7,281"
+        assert ok is True and ws == b.mem.model(n, 7_281, line=False), (vars(rec), log)
+        assert b.adm.fwd["t5"] == 7_281 and b.kp.hard_floor == b.mem.model(n, CHUNK, line=False) + KV_STEP + MARGIN
+    return f"7,281 rows: {ws / GiB:.2f} GiB, a whole chunk in the pool's floor"
+
+
+def test_the_next_turn_of_slot_0s_chat_is_charged_its_new_rows_not_the_prompt():
+    """`t3`, the short follow-up: 199,651 client tokens, 508 of them past the last prompt. The client's tokens part
+    from the rows at the first span the server put there (row 3,000), so 0.15.3 priced the whole prompt: 199,651 rows,
+    10.75 GiB, for a turn that forwarded 998. It is charged the 508 rows past its share, as before this change: the
+    next turn is served from the end anchor and is not priced on the rows again."""
+    app = _app()
+    n, new = 199_651, 508
+    view, res, st = _chat(n - new, spans=((3_000, 305), (150_000, 4_000)), answer=300)
+    assert res.end["at"] == 203_448
+    ids = view + [4] * (new - 4) + [2] * 4
+    with _box(app, AVAIL, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t3", ids)
+        assert rec.ws_rows == new, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB) for a turn that forwards 998"
+        assert ok is True and rec.ws_kind == "home" and "waits for memory" not in log, (vars(rec), log)
+        assert ws == b.mem.model(n, new, line=False)
+        # its prefill, as the box served it: 204,446 rows with the server's spans, resumed at the end anchor
+        app.STATE["pool"] = b.pool
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), app._forward_ask("t3", 204_446):
+            assert app._first_forward(None, None, 203_448, False) is None
+        up = b.mem.model(204_446, 998, line=False)
+        assert b.adm.held["t3"] - b.adm.kv["t3"][0] == up > ws, "the reserve holds the rows it forwards"
+        assert f"[memory] t3 forwards 998 rows, priced at 508 rows: its workspace {ws / GiB:.2f} -> {up / GiB:.2f} " \
+               f"GiB, reserved" in out.getvalue(), out.getvalue()
+    return f"508 rows, {ws / GiB:.2f} GiB at the gate; {up / GiB:.2f} GiB once it forwards 998"
+
+
+def test_a_request_goes_on_past_the_view_only_from_its_generation_prompt():
+    """What tells the next turn from a regenerate or an edit: it is longer than the view and shares it up to the
+    view's generation prompt (the template's marks), or all of it when the marks are not known."""
+    app = _app()
+    view = [1] * 5_000 + [90, 93, 2, 2]
+    v = len(view)
+    old = app._CONV_MARKS
+    try:
+        app._CONV_MARKS = (90, [91], 92)
+        assert app._goes_on(view[:-2] + [4] * 300, view, v - 2), "the next turn"
+        assert not app._goes_on(view, view, v), "a regenerate"
+        assert not app._goes_on(view[:4_000] + [5] * 2_000, view, 4_000), "an edit, longer than the view"
+        assert not app._goes_on(view[:-4] + [5] * 300, view, v - 4), "parts before the generation prompt"
+        app._CONV_MARKS = False
+        assert not app._goes_on(view[:-2] + [4] * 300, view, v - 2), "marks unknown: the whole view"
+        assert app._goes_on(view + [4] * 300, view, v)
+    finally:
+        app._CONV_MARKS = old
+    return "longer than the view and shared up to its generation prompt"
+
+
+def test_a_reserve_is_raised_to_the_rows_the_prefill_forwards_or_refused_there():
+    """The backstop, at the admission: a request admitted at 1 row whose prefill forwards 4,197. `forwards` with their
+    workspace raises its reserve when the floor holds the difference (to the byte: margin + KV commit above the
+    workspace and the pages), and refuses with the reserve as it was when it does not. Nothing to raise when the
+    reserve holds it already, for a key it does not hold, or once the prefill has run."""
+    app = _app()
+    n, kv = LINE + 4_197, 300 * MiB
+    for spare, want in ((16 * MiB, True), (-16 * MiB, False)):
+        with _box(app, 30.0, in_flight_gib=0) as b:
+            ws1, ws = b.mem.model(n, 1, line=False), b.mem.model(n, 4_197, line=False)
+            b.box["avail"] = MARGIN + KV_STEP + ws + kv + spare
+            assert b.adm.reserve("r", ws1 + kv, kv=kv, rows=n, fwd=1)[0]
+            assert b.adm.forwards("r", 1, ws=ws1) == (True, None), "nothing to raise"
+            ok, d = b.adm.forwards("r", 4_197, ws=ws)
+            assert ok is want, (spare, slots.Admission.describe(d))
+            assert d["raise"] == {"rows": 4_197, "priced": 1, "have": ws1, "ws": ws}, d["raise"]
+            assert b.adm.held["r"] == (ws if want else ws1) + kv, "raised, or as it was"
+            assert b.adm.fwd["r"] == 4_197, "the floor holds the chunk it forwards either way"
+            assert b.kp.hard_floor == b.mem.model(n, CHUNK, line=False) + KV_STEP + MARGIN
+            assert (b.adm.stats.get("raised", 0), b.adm.stats.get("raise_refused", 0)) == ((1, 0) if want else (0, 1))
+            if not want:
+                assert d["after"] < d["floor"] and d["floor"] == MARGIN + KV_STEP, d
+            assert b.adm.forwards("other", 4_197, ws=ws) == (True, None)
+            b.adm.prefilled("r")
+            assert b.adm.forwards("r", 9_000, ws=2 * ws) == (True, None) and b.adm.held["r"] == kv
+    return f"{ws1 / GiB:.2f} -> {ws / GiB:.2f} GiB with the floor held; refused 16 MiB under it, the reserve kept"
+
+
+def test_a_prefill_asks_before_its_first_forward_and_gives_way_when_its_rows_are_not_there():
+    """The backstop, at the prefill (`cache.FIRST_FORWARD`): before the first forward the request's real rows are
+    held against its price. With room the reserve is raised and the prefill goes on; without, `ForwardShort` (a
+    refusal of the pool's kind, so the lane gives way as for pages) is raised before anything is forwarded. In a
+    prefill burst the member joins with no job, so the others' joint forward runs, and raises after the join. A
+    prefill that is no request's, or one that forwards what it was priced at, asks nothing."""
+    app = _app()
+    from engine import kvpool
+    n = LINE + 4_197
+
+    def first(b, cid, start, burst=None):
+        b.pool.burst = burst
+        app.STATE["pool"] = b.pool
+        out, err = io.StringIO(), None
+        with contextlib.redirect_stdout(out):
+            try:
+                with app._forward_ask(cid, n):
+                    app._first_forward(types.SimpleNamespace(), None, start, False)
+            except Exception as exc:                               # noqa: BLE001
+                err = exc
+        return err, out.getvalue()
+
+    for avail, want in ((30.0, True), (8.0, False)):
+        with _box(app, avail, in_flight_gib=0) as b:
+            ws1, ws = b.mem.model(n, 1, line=False), b.mem.model(n, 4_197, line=False)
+            assert b.adm.reserve("r", ws1, rows=n, fwd=1)[0]
+            assert first(b, None, LINE) == (None, ""), "the engine's own turn"
+            assert first(b, "r", n - 1) == (None, ""), "forwards what it was priced at"
+            err, log = first(b, "r", LINE)
+            head = (f"[memory] r forwards 4,197 rows, priced at 1 row: its workspace {ws1 / GiB:.2f} -> "
+                    f"{ws / GiB:.2f} GiB")
+            if want:
+                assert err is None and b.adm.held["r"] == ws and f"{head}, reserved" in log, (err, log)
+                continue
+            assert isinstance(err, app.ForwardShort) and isinstance(err, kvpool.PoolFull), err
+            assert app.memory_full_error(err)["code"] == "memory_full"
+            assert b.adm.held["r"] == ws1 and f"{head}, not there (" in log and \
+                "it gives way before its first forward" in log, log
+            assert not app._FWD_ASK, "asked once a prefill"
+            # in a burst: it joins with no job and no rows, then raises
+            joined = []
+            burst = types.SimpleNamespace(member=lambda i: True, join=lambda i, job, run, release=None, acquire=None,
+                                          rows=0: joined.append((job, rows)) or (False, None))
+            old = app.PREFILL_BURST
+            app.PREFILL_BURST = "joint"
+            try:
+                err, log = first(b, "r", LINE, burst)
+            finally:
+                app.PREFILL_BURST = old
+            assert isinstance(err, app.ForwardShort) and joined == [(None, 0)], (err, joined)
+    return f"1 row -> 4,197: raised to {ws / GiB:.2f} GiB at 30 GiB free; at 8 GiB it gives way before the forward"
+
+
+def test_a_lane_short_at_its_first_forward_gives_way_and_is_admitted_on_what_it_reads():
+    """The backstop through the lane (`_recomputing`): a streamed turn admitted at 1 row at 8 GiB free finds 4,197
+    rows to forward. It gives its pages back before the forward, waits in the admission's line priced on what it
+    now reads, and answers once the memory is there. Not streamed and alone, the refusal stands (`memory_full`)."""
+    app = _app()
+    import torch
+    from test_floor_wait import _H as _LaneH, _lane
+    n = LINE + 4_197
+    was = app.KV_GIVE_WAY_BACKOFF_S
+    app.KV_GIVE_WAY_BACKOFF_S = (0.2, 1.0)
+    try:
+        for stream in (True, False):
+            view, res, st = _chat(n)
+            starts = []
+
+            def make(cur, left):
+                rows = int(cur.numel())
+                start = int(app.STATE["resident"].resume_estimate(cur.tolist(), rows)[0])
+                starts.append(start)
+                with app._forward_ask("lane", rows):
+                    app._first_forward(types.SimpleNamespace(), cur, start, False)
+                yield from range(1, left + 1)
+            with _box(app, 8.0, in_flight_gib=0, clock=time, **dict(st, queue_timeout=20.0)) as b:
+                app.STATE["pool"] = b.pool
+                ok, rec0, _ = _admit(app, b, "lane", list(view), home=n, stream=stream)
+                assert ok is True and rec0.ws_rows == 1, vars(rec0)
+                timer = threading.Timer(1.0, lambda: b.box.__setitem__("avail", 40 * GiB))
+                timer.start()
+                t0 = time.monotonic()
+                try:
+                    got, err, raw, rec, log = _lane(app, b.pool, make, stream=stream, prompt=torch.tensor(view),
+                                                    h=_LaneH(app), admit={"home": n, "home_rows": True})
+                finally:
+                    timer.cancel()
+                took = time.monotonic() - t0
+            if not stream:
+                assert isinstance(err, app.ForwardShort) and starts == [LINE] and not getattr(rec, "gave_way", 0), \
+                    (err, starts, log)
+                assert app.memory_full_error(err)["code"] == "memory_full"
+                continue
+            assert err is None and got == list(range(1, 9)), (err, got, log)
+            assert starts == [LINE, 0] and rec.gave_way == 1, (starts, log)
+            assert "it gives way before its first forward" in log and "gives way after 0 tokens" in log, log
+            assert rec.ws_rows == n and took >= 0.9, (rec.ws_rows, took)
+            said = f"gave way before its forward, admitted again on {rec.ws_rows:,} rows after {took:.1f} s"
+    finally:
+        app.KV_GIVE_WAY_BACKOFF_S = was
+    return said
+
+
+def test_rows_that_changed_hands_leave_no_view():
+    """The share is the view's length, so a view left behind rows that hold another prompt priced a later request at
+    home on rows that are not its own. At the end of a request on slot 0 that kept no view, the view goes when the
+    rows no longer hold its prompt. It stays while they do, while a guest's stash waits to put them back, and when
+    the rows are gone (the price takes no more than the rows hold)."""
+    app = _app()
+    n = LINE + 4_197
+    view, res, st = _chat(n)
+    served = res.tokens[:res.end["at"]]
+    with _box(app, AVAIL, **st):
+        why = {"ids": list(view), "conv": 5_000}
+        app.STATE.update(slot0_rows=served, slot0_seen=(0.0, True))
+        assert app._par_view_check() is False and app._slot_share(dict(why), None) == n, "the rows hold it"
+        res.valid = 0
+        assert app._par_view_check() is False and app.STATE["slot0_view"] is view, "rows gone: the view stays"
+        res.tokens, res.valid, res._stash = [9] * 60_000, 60_000, object()
+        assert app._par_view_check() is False, "a guest's stash puts them back"
+        res._stash = None
+        assert app._par_view_check() is True, "another prompt's rows"
+        assert not any(k in app.STATE for k in ("slot0_view", "slot0_rows", "slot0_seen"))
+        assert app._slot_share(dict(why), None) == 0 and app._par_view_check() is False
+    return "the view goes with the rows it stood for"
+
+
+def test_a_quiet_run_says_its_last_count_when_the_wait_ends():
+    """Of a run of hand-backs that freed nothing, only the first had its line when the wait ended inside a minute:
+    the count was lost. The wait's end prints what each run counted since its last line, once, and the next
+    hand-back that frees nothing starts a new run."""
+    app = _app()
+    app._EMPTY_RUN.clear()
+    ev = {"kind": "empty", "why": "kv_pool", "freed": 0, "ms": 0.37}
+    lines = [app._empty_line(ev, now=1000.0 + i / 8) for i in range(12)]
+    assert lines[0] and not any(lines[1:]), lines
+    assert app._empty_line(dict(ev, why="gate"), now=1001.0), "a run of one: no count to say"
+    assert app._empty_last() == ["[memory] reserve back to the driver: 0.00 GiB, 11 more times in 4.1 ms (kv_pool), "
+                                 "the last of the run"]
+    assert app._empty_last() == [] and not app._EMPTY_RUN
+    assert app._empty_line(ev, now=1002.0) == lines[0], "a new run starts with its line"
+    app._EMPTY_RUN.clear()
+    return "12 hand-backs in 1.5 s: the first line, then `11 more times` at the wait's end"
 
 
 if __name__ == "__main__":
