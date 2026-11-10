@@ -633,11 +633,17 @@ def test_export_says_when_the_ring_was_full():
 
 def test_export_lines_arrive_while_the_file_is_built():
     """Scenario: Lines arrive while the file is built. 50 lines a second, then as fast as the
-    writer can: every file is one snapshot with no repeated and no missing seq."""
+    writer can: every file is one snapshot with no repeated and no missing seq.
+
+    A phase builds at least its count of files and goes on building them until the writer has
+    passed its mark (in the second the ring of 2,000 has wrapped), so a busy runner that gives the
+    writer little time makes the phase longer, not red; past `LIMIT_S` it fails and says how far
+    the writer got."""
+    LIMIT_S = 120.0
     serve()
     with Captured() as cap:
         buf = cap.buf = app.STATE["log_buffer"] = logbuf.LogBuffer(size=2_000)
-        for pace, exports in ((0.02, 12), (0.0, 60)):
+        for pace, exports, mark in ((0.02, 12, 20), (0.0, 60, 2_000)):
             stop = threading.Event()
 
             def write():
@@ -646,32 +652,39 @@ def test_export_lines_arrive_while_the_file_is_built():
                     if pace:
                         time.sleep(pace)
 
+            start = buf.seq
             t = threading.Thread(target=write, daemon=True)
             t.start()
+            t0 = time.monotonic()
             try:
-                files, last = [], 0
-                for _ in range(exports):
+                files, last = 0, 0
+                while files < exports or buf.seq <= max(mark, start):
+                    assert time.monotonic() - t0 < LIMIT_S, (
+                        f"the writer did not pass seq {max(mark, start)} in {LIMIT_S:.0f} s: "
+                        f"at seq {buf.seq} after {files} files")
                     code, _, raw = _export()
                     assert code == 200
-                    files.append(_parse_export(raw.decode()))
+                    _, head, body = _parse_export(raw.decode())
+                    files += 1
                     snap, dropped = buf.snapshot()
                     seqs = [e["seq"] for e in snap]
                     assert seqs == list(range(dropped + 1, dropped + 1 + len(seqs))), "a snapshot"
+                    ns = [int(l.rsplit("n=", 1)[1]) for l in body.split("\n")] if body else []
+                    assert head["count"] == f"{len(ns)} lines", head
+                    assert ns == list(range(ns[0], ns[0] + len(ns))) if ns else True, \
+                        "no repeated and no missing seq"
+                    if ns:
+                        assert ns[-1] >= last, "a later file never ends earlier"
+                        last = ns[-1]
+                        assert head["ring"].startswith("full") == (ns[0] > 1), head
                     if pace:
                         time.sleep(0.1)
+                    elif files >= exports:
+                        time.sleep(0.005)                 # the writer's turn on a busy runner
             finally:
                 stop.set()
                 t.join(5)
-            assert buf.seq > (20 if pace else 2_000), "lines did arrive meanwhile"
-            for _, head, body in files:
-                ns = [int(l.rsplit("n=", 1)[1]) for l in body.split("\n")] if body else []
-                assert head["count"] == f"{len(ns)} lines", head
-                assert ns == list(range(ns[0], ns[0] + len(ns))) if ns else True, \
-                    "no repeated and no missing seq"
-                if ns:
-                    assert ns[-1] >= last, "a later file never ends earlier"
-                    last = ns[-1]
-                    assert head["ring"].startswith("full") == (ns[0] > 1), head
+            assert buf.seq > max(mark, start), "lines did arrive meanwhile"
             # the writer was never held up for good, and the ring is whole afterwards
             seqs = [e["seq"] for e in buf.ring]
             assert seqs == list(range(buf.seq - len(seqs) + 1, buf.seq + 1))
