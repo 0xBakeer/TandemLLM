@@ -170,10 +170,12 @@ GOLDEN_FP4 = {
     # the prefill's indexer scores and PLE decode in row tiles (engine/models/flashnext/engine.py): qwen4_exp, qwen3_5_moe
     # SRV-795: each graph captured on its slot's own stream (engine/models/flashnext/engine.py; the same rows, its
     # SAME_ROWS entry): qwen4_exp, qwen3_5_moe
-    "qwen4_exp": "9c1f6a5dc12f3f39881123be4ee793cceefb4a1e46012588d81519d5b374f46a",
+    # SPD-249: the bit-equal prefill stack on by default (QWEN38_FN_PF_WINDOW 8192, _HC_FUSED, _INJ_FUSED, _NOCOPY 1,
+    # _ATTN_STAGES 1: every output the chunk-major prefill's bits, 0 of 627 digests differ): qwen4_exp, qwen3_5_moe
+    "qwen4_exp": "822f310b7100d49c4e7f1df6b2800590df008a628114922e2267b0a786b4834f",
     "nemotron_h": "0da1cfeb821d1d657f78455f7b325a9b691704efa1202c322a510a58e1788846",
     "lfm2_moe": "e6b9d858da7627b878662c97485e408e639b40ac269e6aef1001ef6bcda97ecd",
-    "qwen3_5_moe": "dc5e81cf346b1f9343cab67efaf31e8eebceb325bb127f4397f81524a8803e8d",
+    "qwen3_5_moe": "3bd14ef4ecbcc85b4bc70186de1fcf5f98e309eafec5c05a9d1de2c9e68c24ea",
     "flint": "a2d781443f467bb6d36583810a148fefedd173a8addb91a1c196b99352989d3b",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
