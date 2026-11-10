@@ -974,7 +974,69 @@ def _slot_share(why: dict, side) -> int:
     chunk = int(getattr(res, "chunk", 0) or dict.get(STATE, "prefix_chunk") or 1024)
     conv = why.get("conv")
     vc, _ = _view_share(ids, view, chunk, conv, dict.get(STATE, "end_align"))
-    return int(vc) if _continues_view(len(view), vc, chunk, conv) else 0
+    if not _continues_view(len(view), vc, chunk, conv):
+        return 0
+    # a regenerate or an edit: its share is counted again on the rows (`_par_admit`'s `home_rows`)
+    why["home_rows"] = not _goes_on(ids, view, vc)
+    return int(vc)
+
+
+#: SRV-801: how far back from a view's end its generation prompt's mark is looked for (`_goes_on`)
+GEN_PROMPT_MAX = 16
+
+
+def _goes_on(ids, view, common: int) -> bool:
+    """SRV-801: does a request that shares `common` tokens with slot 0's `view` go on past it? The next turn of
+    that conversation does: it holds the view up to its generation prompt, then the answer and a new message, and
+    the rows serve it from the end anchor. A regenerate sends the view again and an edit parts from it inside its
+    last message: the rows serve those from an anchor below the place they part. Structure of the chat template,
+    not content; with the marks unknown, the whole view must be shared."""
+    v = len(view)
+    if len(ids) <= v:
+        return False
+    at, marks = v, _conv_marks()
+    if marks is not None:
+        for i in range(v - 1, max(-1, v - 1 - GEN_PROMPT_MAX), -1):
+            if view[i] == marks[0]:
+                at = i + 1
+                break
+    return int(common) >= at
+
+
+def _served_rows(res, ids: list) -> list:
+    """SRV-801: the ids the end anchor's replay would serve for a client's copy (`_end_replay`), asked before the
+    handler replays it: nothing is counted or remembered, here or in the rows' record."""
+    if getattr(res, "end", None) is None:
+        return ids
+    stats = getattr(res, "stats", None)
+    seen = stats.get("end_replayed") if isinstance(stats, dict) else None
+    try:
+        al = STATE.get("end_align")
+        return res.replay(ids)[0] if al is None else al.served(res, ids)
+    finally:
+        if seen is not None:
+            stats["end_replayed"] = seen
+
+
+def _rows_forward(res, keys: list, mm_ok: bool, seen: dict) -> int | None:
+    """SRV-801: the rows a prefill of the client's copy `keys` forwards on slot 0, by the rows' own answer: the copy
+    as the replay serves it (`_served_rows`), then where the prefill resumes in place (`ResidentPrefix.
+    resume_estimate`, the calls `_prefill` makes). `seen` keeps the served copy while the end anchor and the rows
+    are the same (a price is asked again at every pass of a wait). None when the rows cannot be asked.
+
+    The rows hold the served prompt, with the spans the server put there; the view holds the client's copy. A
+    regenerate shares the whole view and parts from the rows inside the last answer but one, and its prefill
+    resumes at the last anchor below that place."""
+    try:
+        key = (id(getattr(res, "end", None)), int(getattr(res, "valid", 0) or 0))
+        if seen.get("key") != key:
+            seen.update(key=key, ids=_served_rows(res, keys))
+        served = seen["ids"]
+        start, _ = res.resume_estimate(served, len(served), mm_ok)
+        return max(1, len(served) - int(start))
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return None
 
 
 #: which test decides that a request continues slot 0's conversation and waits for it: `view`
@@ -1102,9 +1164,35 @@ def _par_view_keep(served: list | None, view: list | None) -> bool:
     except Exception:                                              # noqa: BLE001
         return False
     STATE["slot0_view"] = list(view)
+    STATE["slot0_rows"] = served           # SRV-801: the rows the view stands for (`_par_view_check`)
     # SRV-528: when, and whether its rows hold the whole prompt (a prefill cancelled part way does
     # not), for `_slot0_stale`
     STATE["slot0_seen"] = (time.monotonic(), valid >= len(served))
+    return True
+
+
+def _par_view_check() -> bool:
+    """SRV-801: at the end of a request on slot 0 that kept no view: forget the view when the rows no longer hold
+    its conversation (another prompt's rows in place, no guest's stash waiting to put them back). True when
+    forgotten. The view is a length for the admission's price (`_slot_share`): left behind rows that changed
+    hands, a later request that matched it was priced at home on another prompt's rows. Rows that are gone (a
+    reclaim, the NVMe) leave the view: the price takes no more than the rows hold."""
+    res, view = dict.get(STATE, "resident"), dict.get(STATE, "slot0_view")
+    if res is None or not view:
+        return False
+    try:
+        served = dict.get(STATE, "slot0_rows")
+        valid = int(getattr(res, "valid", 0) or 0)
+        chunk = max(1, int(getattr(res, "chunk", 1) or 1))
+        if getattr(res, "_stash", None) is not None or not served:
+            return False
+        n = min(len(served), valid)
+        if res.common(served[:n]) >= n - chunk:
+            return False
+    except Exception:                                              # noqa: BLE001
+        return False
+    for k in ("slot0_view", "slot0_rows", "slot0_seen"):
+        dict.pop(STATE, k, None)
     return True
 
 
@@ -1879,23 +1967,94 @@ def _burst_prefilled() -> None:
                          acquire=(lambda: pool.turn.acquire(i)) if held else None)
 
 
-def _joint_forward(eng, tokens, start: int, whole: bool):
+class ForwardShort(kvpool.PoolFull):
+    """SRV-801: a prefill that forwards more rows than its admission priced, on a box whose floor does not hold
+    their workspace. Raised before its first forward; the lane gives way as for pages the pool refused
+    (`_recomputing`), and is admitted again on the rows it then reads."""
+
+
+#: SRV-801: thread -> (the request's id, its prompt's rows), from the prefill's call to its first forward
+_FWD_ASK: dict = {}
+
+
+@contextlib.contextmanager
+def _forward_ask(cid, rows: int):
+    """SRV-801: this thread's prefill is request `cid`'s, of `rows` rows: what `_first_forward` asks the admission
+    with. None for the engine's own turns."""
+    me = threading.get_ident()
+    if cid is not None:
+        _FWD_ASK[me] = (cid, int(rows))
+    try:
+        yield
+    finally:
+        _FWD_ASK.pop(me, None)
+
+
+def _forward_backstop(start: int):
+    """SRV-801: before a prefill's first forward, the rows it forwards from where it really resumed (`start`)
+    against its admission's price: their workspace by the price's own formula, and the request's reserve raised
+    to it (`Admission.forwards`). None, or the `ForwardShort` to raise when the box's floor does not hold the
+    difference. Once a prefill; nothing for a prefill that is no request's."""
+    ask = _FWD_ASK.pop(threading.get_ident(), None)
+    pool = dict.get(STATE, "pool")
+    if ask is None or pool is None or pool.admission is None:
+        return None
+    cid, n = ask
+    try:
+        fwd = max(1, n - int(start))
+        mem = dict.get(STATE, "mem")
+        ws = (mem.workspace_rows(n, fwd, line=False) if mem is not None
+              else max(cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN))
+        ok, d = pool.admission.forwards(cid, fwd, ws=int(ws))
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return None
+    if d is None:
+        return None
+    up = d["raise"]
+    priced = ("a whole chunk" if up["priced"] is None
+              else f"{int(up['priced']):,} row{'' if int(up['priced']) == 1 else 's'}")
+    said = (f"[memory] {cid} forwards {fwd:,} rows, priced at {priced}: its workspace "
+            f"{up['have'] / (1 << 30):.2f} -> {up['ws'] / (1 << 30):.2f} GiB")
+    if ok:
+        print(f"{said}, reserved", flush=True)
+        return None
+    why = slots_mod.Admission.describe(d)
+    print(f"{said}, not there ({why}); it gives way before its first forward", flush=True)
+    return ForwardShort(f"the prefill forwards {fwd:,} rows, more than it was admitted for, and their memory "
+                        f"is not there: {why}")
+
+
+def _first_forward(eng, tokens, start: int, whole: bool):
+    """engine/cache.py `FIRST_FORWARD`: before a prefill's first forward. SRV-801: the admission's backstop
+    (`_forward_backstop`), then the prefill burst's joint forward (SPD-245, `_joint_forward`). A prefill the
+    backstop refuses joins its burst with no job, so the others run without it, and raises after the join."""
+    short = _forward_backstop(start)
+    if PREFILL_BURST == "joint":
+        return _joint_forward(eng, tokens, start, whole, short=short)
+    if short is not None:
+        raise short
+    return None
+
+
+def _joint_forward(eng, tokens, start: int, whole: bool, short=None):
     """SPD-245, engine/cache.py `FIRST_FORWARD`: a burst member's prompt into the burst's joint forward,
     when that forward can take it (the prompt's only forward, `prefill_joint_ok`); its logits, or None
-    (it prefills alone, and is out of the burst)."""
+    (it prefills alone, and is out of the burst). `short` (SRV-801): an error that keeps it out of the joint
+    forward, raised once it has left the burst."""
     from engine import model as model_mod
     pool = dict.get(STATE, "pool")
-    if pool is None or pool.burst is None:
-        return None
     i = _par_index()
-    if not pool.burst.member(i):
+    if pool is None or pool.burst is None or not pool.burst.member(i):
+        if short is not None:
+            raise short
         return None
     # SPD-249: an adapter with its own joint prefill (`prefill_joint_ok(T, start)` and a static
     # `prefill_joint(items)` of the same contract) runs the burst through it; else engine/model.py's
     own_ok = getattr(eng, "prefill_joint_ok", None)
     err = None
     if own_ok is not None:
-        ok = bool(whole and tokens is not None and own_ok(int(tokens.numel()), int(start)))
+        ok = bool(short is None and whole and tokens is not None and own_ok(int(tokens.numel()), int(start)))
         run = type(eng).prefill_joint
         prep = getattr(eng, "prefill_joint_prepare", None)
         if ok and prep is not None:
@@ -1907,7 +2066,8 @@ def _joint_forward(eng, tokens, start: int, whole: bool):
             except BaseException as e:             # noqa: BLE001 - raised below, after the join
                 ok, err = False, e
     else:
-        ok = bool(whole and tokens is not None and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
+        ok = bool(short is None and whole and tokens is not None
+                  and model_mod.prefill_joint_ok(eng, int(tokens.numel()), int(start)))
         run = model_mod.prefill_joint
     held = pool.turn is not None and pool.turn.held_by(i)
     done, logits = pool.burst.join(
@@ -1915,8 +2075,8 @@ def _joint_forward(eng, tokens, start: int, whole: bool):
         release=(lambda: pool.turn.release(i)) if held else None,
         acquire=(lambda: pool.turn.acquire(i)) if held else None,
         rows=int(tokens.numel()) if ok else 0)
-    if err is not None:
-        raise err
+    if err is not None or short is not None:
+        raise err if err is not None else short
     return logits if done else None
 
 
@@ -2809,7 +2969,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             keys = [COLD_KEY] + list((ctx if keys is None else keys)[1:])
         if REQ_PEAK:
             _req_peak_start()                   # SRV-773: the `[req]` line's `peak_gib=`
-        with _prefill_mark(len(ctx)):           # SRV-763: the other slots' estimates see it
+        # SRV-763: the other slots' estimates see it; SRV-801: its first forward asks the admission as this request
+        with _prefill_mark(len(ctx)), _forward_ask(
+                getattr(getattr(on_prefill, "rec", None), "request_id", None), len(ctx)):
             logits, reused, forwarded = cache.prefill(
                 eng, drafter, ctx, prompt.device, store=None if cold else STATE.get("state_store"),
                 chunk=STATE.get("prefix_chunk", 0), conv_id=COLD_SESSION if cold else conv_id,
@@ -6048,6 +6210,18 @@ def _empty_line(ev: dict, now: float | None = None) -> str | None:
         return f"{head} 0.00 GiB, {n} more times in {total:.1f} ms ({why})"
 
 
+def _empty_last() -> list[str]:
+    """SRV-801: the lines of the runs that end here (a wait for memory is over): what each counted since its last
+    line, once. A run that ended without a hand-back that freed something never said its last count: after a wait
+    of under EMPTY_LOG_S the log held one line and no number. The next hand-back that frees nothing is a first one
+    again."""
+    with _EMPTY_LOCK:
+        out = [f"[memory] reserve back to the driver: 0.00 GiB, {run[0]} more times in {run[1]:.1f} ms ({why}), "
+               f"the last of the run" for why, run in _EMPTY_RUN.items() if run[0]]
+        _EMPTY_RUN.clear()
+    return out
+
+
 def _memory_event(ev: dict) -> None:
     """A `Budget` event: the log for all, the residency journal for what an operator acts on."""
     kind = ev.get("kind")
@@ -8701,7 +8875,8 @@ class Handler(BaseHTTPRequestHandler):
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
                    stream: bool = False, rows: int | None = None, respond: bool = True,
                    cold: bool = False, home: int = 0, priority: int = 1, hold_s: float = 0.0,
-                   limit_s: float | None = None, deadline=None, wait_long: bool = False) -> bool:
+                   limit_s: float | None = None, deadline=None, wait_long: bool = False,
+                   home_rows: bool = False) -> bool:
         """Parallel requests: one memory policy for every prefill, slot 0's and a side slot's alike
         (SRV-773, SRV-775), then admission by bytes (server/slots.py `Admission`). Where the prompt
         resumes in place on its slot (`ResidentPrefix.resume_estimate`; nowhere for a `cold` one, #98)
@@ -8787,6 +8962,7 @@ class Handler(BaseHTTPRequestHandler):
         keys = prompt.tolist()
         mm_ok = rows is not None and MM_END == "on"
         est: dict = {}
+        served_: dict = {}                    # SRV-801: this prompt as the replay serves it (`_rows_forward`)
 
         def price(full: bool = False) -> int:
             """SRV-773: the rows the prefill forwards from where it resumes in place now, their workspace and
@@ -8797,9 +8973,20 @@ class Handler(BaseHTTPRequestHandler):
                            else res_.resume_estimate(keys, n, mm_ok))
             if home and not full and not cold and res_ is not None:
                 # SRV-787: its home slot's rows, read again at every pass (a reclaim empties them)
-                held = min(int(home), int(getattr(res_, "valid", 0) or 0))
+                held, at = min(int(home), int(getattr(res_, "valid", 0) or 0)), "home"
+                if home_rows and held > int(start):
+                    # SRV-801: a regenerate or an edit shares slot 0's view, the client's copy of the last prompt,
+                    # further than it shares the rows, which hold the served prompt (the spans the server put
+                    # there): its prefill resumes at the last anchor below the place the rows part. Priced on the
+                    # view, a regenerate was charged 1 row (0.79 GiB) and forwarded 4,197. The rows are asked as
+                    # the prefill asks them; with images the keys are not the rows' and the share is not taken
+                    fwd_r = None if rows is not None else _rows_forward(res_, keys, mm_ok, served_)
+                    if fwd_r is None:
+                        held = 0
+                    elif n - fwd_r < held:
+                        held, at = max(0, n - fwd_r), "rows"
                 if held > int(start):
-                    start, kind = held, "home"
+                    start, kind = held, at
             if not full and not cold and res_ is not None and int(start) < n - 1:
                 # a conversation the pool's reclaim wrote to the NVMe is read back in place before its prefill
                 # (`_spill_restore`): the rows its entry serves are not forwarded. Asked as the restore asks
@@ -9081,6 +9268,9 @@ class Handler(BaseHTTPRequestHandler):
                     return admitted()
         finally:
             adm.unwait(cid)
+            if STATE.get("verbose"):
+                for line in _empty_last():     # SRV-801: the quiet runs' last counts, with the wait's end
+                    print(line, flush=True)
             if rec is not None:
                 rec.waiting_memory = False
         adm.stats["refused"] += 1
@@ -9180,7 +9370,8 @@ class Handler(BaseHTTPRequestHandler):
                                      respond=False, hold_s=hold, limit_s=(MEM_WAIT_S - waited) if long else None,
                                      deadline=deadline, rows=rows_of(int(cur.numel())) if rows_of else None,
                                      cold=bool(admit.get("cold")), home=int(admit.get("home") or 0),
-                                     priority=int(admit.get("priority", 1)), wait_long=long)
+                                     priority=int(admit.get("priority", 1)), wait_long=long,
+                                     home_rows=bool(admit.get("home_rows")))
                 waited += time.monotonic() - t_w
                 if not ok:
                     st["gave_up"] += 1
@@ -10686,11 +10877,13 @@ class Handler(BaseHTTPRequestHandler):
             admit_kw = {"rows_of": (lambda n: _mm_rows(n, images)) if images else None, "cold": cold,
                         "home": _slot_share(par_why, side) if par is not None else 0,
                         "priority": _priority_of(body), "wait_long": _wait_for_memory(body, self.headers)}
+            # SRV-801: a regenerate or an edit on slot 0 is priced on the rows, not on the view
+            admit_kw["home_rows"] = bool(side is None and admit_kw["home"] and par_why.get("home_rows"))
             if par is not None and not micro and not self._par_admit(
                     par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
                     rows=admit_kw["rows_of"](int(prompt.numel())) if images else None, cold=cold,
                     home=admit_kw["home"], priority=admit_kw["priority"], deadline=deadline,
-                    wait_long=admit_kw["wait_long"]):
+                    wait_long=admit_kw["wait_long"], home_rows=admit_kw["home_rows"]):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -12068,15 +12261,18 @@ class Handler(BaseHTTPRequestHandler):
                         getattr(STATE.get("conductor"), "memory", None) is not None:
                     STATE["conductor"].memory.writer.mark(conv_id, "give_up")
                 if par is not None:
-                    if side is None and not micro and not cold:
+                    if side is None:
                         # SRV-197: the conversation slot 0 now holds, as its client renders it
+                        kept_ = False
                         try:
                             ctx_ = STATE.get("last_ctx")
                             n_ = int(STATE.get("last_prompt_n") or 0)
-                            if ctx_ is not None and ctx_ is not ctx_found and n_:
+                            if not micro and not cold and ctx_ is not None and ctx_ is not ctx_found and n_:
                                 # SRV-629: with images, the rows and the view in key space
-                                _par_view_keep(_keyed(list(ctx_[:n_]), mm_end),
-                                               par_why.get("ids"))
+                                kept_ = _par_view_keep(_keyed(list(ctx_[:n_]), mm_end),
+                                                       par_why.get("ids"))
+                            if not kept_:
+                                _par_view_check()      # SRV-801: rows that changed hands leave no view
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
                     elif (side is not None and not micro and not cold
@@ -14201,8 +14397,8 @@ def _build_side_slots(a, cfg, w, tok, hooks: dict | None = None) -> None:
     if PREFILL_BURST:
         pool.burst = prefill_burst.Burst(PREFILL_BURST_WAIT_S)   # SPD-245
         pool.burst.log = lambda line: print(line, flush=True)    # SRV-769: who holds, for whom
-        if PREFILL_BURST == "joint":
-            cache.FIRST_FORWARD = _joint_forward
+    # SRV-801: the admission's backstop before every prefill's first forward, then the joint forward (SPD-245)
+    cache.FIRST_FORWARD = _first_forward
     slots[0].lock = LOCK
     if a.parallel_switch_ms > 0:
         # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms

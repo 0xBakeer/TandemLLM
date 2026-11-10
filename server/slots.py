@@ -206,6 +206,7 @@ class Admission:
         self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
         self.rows: dict = {}               # SRV-785: key -> the rows of its prefill, until it has run
         self.fwd: dict = {}                # SRV-801: key -> the rows that prefill forwards, where known
+        self.over: set = set()             # SRV-801: the keys the gate admitted over the peak, until their prefill ran
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
         self.prio: dict = {}               # key -> its chat's priority (0 low, 1 normal, 2 high), while it waits
         self.holds: dict = {}              # SRV-797: key -> until when (monotonic) a lane backs off, out of the line
@@ -292,7 +293,8 @@ class Admission:
         return self.floor_at()[0]
 
     def check(self, need: int, count: bool = True, kv: int = 0, over_peak: bool = False,
-              rows: int = 0, kv_prompt: int | None = None, fwd: int | None = None) -> tuple[bool, dict]:
+              rows: int = 0, kv_prompt: int | None = None, fwd: int | None = None,
+              have: int = 0) -> tuple[bool, dict]:
         """`need` (`kv` of it KV pages) against the floor. `over_peak`: the memory gate refused this prefill and
         it runs alone over the engine's peak (server/app.py `_par_admit`): its workspace counts in full, less
         the allocator's free default-pool blocks it takes before any new memory (`spare`), against the room's
@@ -308,7 +310,10 @@ class Admission:
         commit can see, and the pool's floor holds that chunk already (the guard's step). The rest of `kv`
         commits once the prefill has run, under the admission's floor as before. (The one overlap: a cold prompt's
         first 4,096 rows' workspace at its second chunk's commit; a refusal there gives way once, and the
-        continuation resumes past 4,096 rows.)"""
+        continuation resumes past 4,096 rows.)
+
+        `have`: the workspace the request of `need` holds already (`forwards`, a reserve raised to the rows its
+        prefill forwards): the guard's chunk is that workspace and `need` together, as at its admission."""
         floor, gin = self.floor_at(rows, fwd)
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
@@ -323,7 +328,8 @@ class Admission:
             # the chunk's class is this request's own rows unless a longer prefill is in flight: then its workspace
             # is the chunk, all of it (the guard's estimate of a full chunk at its class ran 3.2 GiB above the
             # request's own and held a 177k turn 176 s at 0.1 GiB short, 2026-11-06 15:14)
-            own = int(gin["step"]) if int(rows) >= self.ctx_rows() else min(int(gin["step"]), need_ws)
+            own = (int(gin["step"]) if int(rows) >= self.ctx_rows()
+                   else min(int(gin["step"]), need_ws + max(0, int(have))))
             if own:
                 gin = dict(gin, step=int(gin["step"]) - own, own=own)
                 gin["guard"] = min(int(gin["cap"]), gin["step"] + gin["kv"] + gin["sandbox"] + gin["margin"])
@@ -445,10 +451,13 @@ class Admission:
                     self.held[key] = int(need)
                     self.kv[key] = (int(kv), owner, base)
                     self.fwd.pop(key, None)
+                    self.over.discard(key)
                     if rows:
                         self.rows[key] = int(rows)
                         if fwd is not None:
                             self.fwd[key] = max(1, int(fwd))
+                        if over_peak:
+                            self.over.add(key)
                     self.waiting.pop(key, None)
                     self.prio.pop(key, None)
                     self.holds.pop(key, None)
@@ -472,16 +481,46 @@ class Admission:
         with self.lock:
             self.rows.pop(key, None)
             self.fwd.pop(key, None)
+            self.over.discard(key)
             if key in self.held:
                 self.held[key] = self.kv.get(key, (0,))[0]
 
-    def forwards(self, key, rows: int) -> None:
-        """SRV-801: the rows `key`'s prefill forwards as the prefill found them (server/app.py `_par_chunks`, once
-        its first chunk has run): the guard's chunk is at least theirs from here. A resume that failed forwards more
-        than the admission priced; one whose forwarded rows were never known holds a whole chunk already."""
-        with self.lock:
-            if key in self.rows and key in self.fwd:
-                self.fwd[key] = max(int(self.fwd[key]), int(rows))
+    def forwards(self, key, rows: int, ws: int | None = None) -> tuple[bool, dict | None]:
+        """SRV-801: the rows `key`'s prefill forwards as the prefill found them: the guard's chunk is at least
+        theirs from here. A resume that failed forwards more than the admission priced; one whose forwarded rows
+        were never known holds a whole chunk already.
+
+        `ws`: the workspace of those rows by the price's own formula, asked before the prefill's first forward
+        (server/app.py `_first_forward`). When it is more than the workspace `key` holds, the reserve is raised to
+        it, checked at the floor as a request's own bytes are (`check`, the difference as its need): (True, that
+        check) with the reserve raised, (False, that check) when the floor does not hold it, the reserve as it
+        was; the caller gives way before the forward allocates. (True, None): nothing to raise.
+
+        A served prompt holds spans the client's copy lacks, and the rows part from a copy earlier than the copy's
+        view of the last prompt does: a regenerate priced at 1 row forwarded 4,197, and nothing raised its reserve
+        after the admission."""
+        with self._admit:
+            with self.lock:
+                if key not in self.held or key not in self.rows:
+                    return True, None
+                was = self.fwd.get(key)
+                if was is not None:
+                    self.fwd[key] = max(int(was), int(rows))
+                have = int(self.held[key]) - int(self.kv.get(key, (0,))[0])
+                n, fwd, over = int(self.rows[key]), self.fwd.get(key), key in self.over
+            more = 0 if ws is None else int(ws) - have
+            if more <= 0:
+                return True, None
+            ok, d = self.check(more, count=False, over_peak=over, rows=n, fwd=fwd, have=have)
+            d["raise"] = {"rows": int(rows), "priced": was, "have": have, "ws": int(ws)}
+            if ok:
+                with self.lock:
+                    if key in self.held:
+                        self.held[key] += more
+                self.stats["raised"] = self.stats.get("raised", 0) + 1
+            else:
+                self.stats["raise_refused"] = self.stats.get("raise_refused", 0) + 1
+            return ok, d
 
     def wait(self, key, prio: int = 1) -> int:
         """SRV-305: `key` waits for memory; returns its place in line (1 = next). The line is by the chat's priority
@@ -552,6 +591,7 @@ class Admission:
             self.kv.pop(key, None)
             self.rows.pop(key, None)
             self.fwd.pop(key, None)
+            self.over.discard(key)
             self.waiting.pop(key, None)
             self.prio.pop(key, None)
             self.holds.pop(key, None)

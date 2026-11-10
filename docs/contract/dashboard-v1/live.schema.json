@@ -1451,6 +1451,12 @@
                 "string",
                 "null"
               ],
+              "enum": [
+                "request",
+                "prefill",
+                "peak",
+                null
+              ],
               "description": "SRV-801: the check that holds it: request (the whole request under the admission's floor), prefill (its prompt's pages under the KV pool's floor) or peak"
             },
             "rows": {

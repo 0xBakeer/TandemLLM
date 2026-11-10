@@ -60,6 +60,7 @@ off`): `ResidentPrefix.replay` alone, as before.
 
 from __future__ import annotations
 
+import copy as _copy
 import json
 
 WS = b" \t\n\r"
@@ -191,6 +192,14 @@ class EndAlign:
                     self.last_partial = x
         self._carry = self._carried(res, out)
         return out, spans, aligned
+
+    def served(self, res, ids: list[int]) -> list[int]:
+        """SRV-801: the ids `replay` would serve for the copy `ids`, with nothing counted or remembered: the
+        admission's price asks where a prompt resumes before the handler replays it (server/app.py
+        `_rows_forward`). A twin runs the passes; this one's regions, carry and last answers stay."""
+        twin = _copy.copy(self)
+        twin.stats = dict(self.stats)
+        return twin.replay(res, ids)[0]
 
     def _carried(self, res, served: list[int]) -> list[tuple[int, int]]:
         regs = self.regions(res)
