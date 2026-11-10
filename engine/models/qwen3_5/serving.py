@@ -87,7 +87,9 @@ def serve(a, ctx) -> dict:
                 f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} ")
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": cfg.path, "device": "cuda",
             "cfg": cfg, "w": w, "describe": describe,
-            "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax},
+            "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax,
+                        # SPD-150: which cache the attention layers keep (QWEN38_KV_FP8), /health's weights
+                        "weights_info": {"kv_cache": "e4m3" if eng.kv.fp8 else "bf16"}},
             "side_slots": side_slots(a, ctx, cfg, w)}
 
 
@@ -233,6 +235,14 @@ def side_slots(a, ctx, cfg, w) -> dict:
     def nbytes(L: int, paged: bool) -> tuple[int, int]:
         # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a token) and its
         # constant are memory at load
+        from engine import model as M
+        if M.KV_FP8:
+            # SPD-150: an e4m3 cache is never paged (engine/model.py `KVCache`): its codes and scales are memory at
+            # load, the drafters' KV and the rotary table as before
+            from tools.kv_fp8 import bytes_per_token
+            n, hk, d = len(cfg.attention_layers), cfg.num_key_value_heads, cfg.head_dim
+            return (106_752 - n * bytes_per_token(hk, d, False) + n * bytes_per_token(hk, d, True),
+                    int(ctx.side_const_gb() * (1 << 30)))
         return (256 if paged else 106_752), int(ctx.side_const_gb() * (1 << 30))
 
     def precapture(e2, d2) -> None:
