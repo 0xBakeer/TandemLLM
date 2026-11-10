@@ -721,6 +721,11 @@ def test_export_carries_no_prompt_or_answer_text():
                 finally:
                     app.generate_stream = real
                     app.STATE["log_request_keys"] = False
+                # that request wrote its one line of names and counts, and nothing it carried
+                keys = [e["msg"] for e in cap.buf.ring if e["source"] == "body"]
+                assert len(keys) == 1, list(cap.buf.ring)
+                assert "keys=messages,stop,stream,user" in keys[0] and '"messages": 1' in keys[0] \
+                    and '"stop": 1' in keys[0] and SENTINEL not in keys[0], keys[0]
                 # serve() started the state afresh: the buffer under test and the token again
                 app.STATE.update(log_buffer=cap.buf, auth=auth.Auth(ADMIN),
                                  version="0.15.3+flashnext-3.05", git_sha="952d072d1a2b")
@@ -730,6 +735,7 @@ def test_export_carries_no_prompt_or_answer_text():
                 "the errors are in the file"
             title, head, body = _parse_export(text)       # the fields of the header, and no other
             assert body == _as_lines(cap.buf.ring), "the file takes only what the ring holds"
+            assert f" info {keys[0]}\n" in text, "the working request's line is in the file"
             everything = text + json.dumps(hdr)
             if log_content:
                 assert head["log content"] == "on (--log-content)", head
@@ -757,6 +763,71 @@ def test_export_content_logging_is_on():
             assert head["log content"] == want, head
         finally:
             logbuf.CONFIG["log_content"] = False
+
+
+def test_export_the_caller_says_what_the_header_tells_of_content_logging():
+    """A process with no --log-content flag (the standalone proxy) passes None and its header
+    reads "unknown"; not given, the value is this process's own flag."""
+    buf = logbuf.LogBuffer()
+    buf.append("[server] one")
+
+    def said(**kw):
+        _, raw = logbuf.export(buf, version="1", **kw)
+        return _parse_export(raw.decode())[1]["log content"]
+
+    for flag in (False, True):
+        logbuf.CONFIG["log_content"] = flag
+        try:
+            assert said() == ("on (--log-content)" if flag else "off")
+            assert said(log_content=None) == "unknown", "never the flag of another process"
+            assert said(log_content=True) == "on (--log-content)"
+            assert said(log_content=False) == "off"
+        finally:
+            logbuf.CONFIG["log_content"] = False
+
+
+def test_export_a_header_value_is_one_line():
+    """A version or a commit with a newline or another control character in it gives one header
+    line: it cannot write a second, forged one."""
+    forged = "1.0\nlog content: on (--log-content)"
+    text = logbuf.export_text([], version=forged, git_sha="ab\r\ncd\x00\x0b\x85\u2028ef\tgh",
+                              log_content=False)
+    _, head, _ = _parse_export(text)                      # these fields, each once, in this order
+    assert head["version"] == "1.0 log content: on (--log-content)", head
+    assert head["commit"] == "ab cd ef gh" and head["log content"] == "off", head
+    assert len(text.splitlines()) == len(HEADER_KEYS) + 2, text
+    assert "version: unknown\n" in logbuf.export_text([], version="\n\x00 \r")
+    # and through the route: one header, one safe file name
+    serve()
+    with Captured():
+        app.STATE.update(version=forged, git_sha="952d072d1a2b")
+        code, hdr, raw = _export()
+    _, head, body = _parse_export(raw.decode())
+    assert code == 200 and head["version"] == "1.0 log content: on (--log-content)", head
+    assert head["log content"] == "off" and body == "", (head, body)
+    assert re.match(r'^attachment; filename="tandemllm-1\.0-log-content--on----log-content--'
+                    r'\d{8}T\d{6}Z\.log"$', hdr["Content-Disposition"]), hdr
+
+
+def test_export_the_file_name_has_a_length_limit():
+    """A long version is cut: the name before ".log" is at most 120 characters, and it still ends
+    with the time of export."""
+    at = datetime.datetime(2026, 11, 9, 0, 39, 59, tzinfo=datetime.timezone.utc)
+    stamp = "20261109T003959Z"
+    room = logbuf.EXPORT_NAME_MAX - len(f"tandemllm--{stamp}")
+    assert logbuf.EXPORT_NAME_MAX == 120 and room == 93
+    for n in (1, room - 1, room):                         # a version that fits stays whole
+        assert logbuf.export_name("v" * n, at) == f"tandemllm-{'v' * n}-{stamp}.log"
+    for n in (room + 1, 400, 5000):
+        name = logbuf.export_name("v" * n, at)
+        assert name == f"tandemllm-{'v' * room}-{stamp}.log", (n, name)
+        assert len(name) == logbuf.EXPORT_NAME_MAX + len(".log")
+    serve()
+    with Captured():
+        app.STATE.update(version="0.15.3+" + "x" * 400)
+        _, hdr, _ = _export()
+    name = re.match(r'^attachment; filename="([^"]+)"$', hdr["Content-Disposition"]).group(1)
+    assert len(name) == 124 and re.match(r"^tandemllm-0\.15\.3-x+-\d{8}T\d{6}Z\.log$", name), name
 
 
 def test_export_the_contract_example():
