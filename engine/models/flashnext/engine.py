@@ -148,6 +148,9 @@ class FlashNextEngine(FlashNextRef):
     #: rows an item of the prefill MoE group GEMM takes; None = `fn_prefill_kernels.GROUP_ROWS`
     #: (a family whose bits were not checked at 64 keeps 32)
     moe_group_rows: int | None = None
+    #: SPD-249 (T1): FN_PACK_GRAPH acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
+    #: its packed drafts stay eager, whatever the knob says
+    pack_knobs = True
 
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, tables, dtype=torch.bfloat16, device=device)
@@ -2720,7 +2723,7 @@ class FlashNextEngine(FlashNextRef):
                 own = SK.qsa_pool(st_m.ik[MTP], b["d32"][:SK.OWN * 4].view(SK.OWN, 4), b["d32"][SK.OWN * 4:],
                                   self.W[ip + "k_layernorm.weight"], self.rope_cos, self.rope_sin, c.rms_norm_eps)
                 st_m.pool[MTP].index_copy_(0, b["dpi"], own)
-        if PACK_GRAPH:
+        if PACK_GRAPH and self.pack_knobs:
             out = self._pack_graph_run(items, last, x, h, kp)
             if out is not None:
                 return out

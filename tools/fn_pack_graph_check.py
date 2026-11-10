@@ -13,6 +13,9 @@ run packed eager (QWEN38_FN_PACK_GRAPH off), B's packed with the graph (on, capt
 lane and depth: the top-2 token ids and both probabilities, bit for bit (the float32 bits), and the lanes' MTP caches
 (K, V, indexer keys, pooled keys) past the round. Reported: the comparisons, the graph's captures / replays / entry
 refills / eager drafts, and ms a round of each (offline, after a warm round; not a served measurement).
+--keyed (coupled drafts, QWEN38_FN_MTP_COUPLED on): each lane drafts as a seeded sampled request (its seed, the
+corrector's sampling where a corrector file is loaded), both twins staged with the same keys and parameters each round;
+every fifth round a random half of the lanes drafts argmax (a pass with keyed and argmax lanes).
 """
 
 from __future__ import annotations
@@ -61,6 +64,18 @@ def _caches_equal(a, b, upto: int) -> bool:
     return bool(ok)
 
 
+def _samplers(n: int) -> list:
+    """--keyed: a seeded sampled request a lane, sampled as the corrector's file was trained (else T 1, top-k 20,
+    top-p 0.95)."""
+    import types
+    from engine.models.flashnext import corrector as CR
+    c = CR.get() if CR.ON else None
+    sm = dict(getattr(c, "sampling", None) or {})
+    return [types.SimpleNamespace(coupled=True, seed=1000 + i, temperature=float(sm.get("temperature") or 1.0),
+                                  top_k=int(sm.get("top_k") or 20), top_p=float(sm.get("top_p") or 0.95), min_p=0.0)
+            for i in range(n)]
+
+
 def run_head(fn, lanes: list, a, hot: int, log) -> dict:
     """Both twin sets of every lane over the trace with draft head `hot` (0: the full head)."""
     from engine.models.flashnext import engine as E
@@ -81,7 +96,9 @@ def run_head(fn, lanes: list, a, hot: int, log) -> dict:
         twins.append({"A": pair[0], "B": pair[1], "k": k})
     torch.cuda.synchronize()
     res = {"hot": hot, "rounds": 0, "lane_rounds": 0, "picks": 0, "tok_diff": 0, "prob_diff": 0, "cache_diff": 0,
-           "by_lanes": {}, "ms_eager": {}, "ms_graph": {}, "first_diff": None}
+           "by_lanes": {}, "ms_eager": {}, "ms_graph": {}, "first_diff": None, "keyed_lane_rounds": 0,
+           "mixed_rounds": 0}
+    sms = _samplers(len(lanes)) if a.keyed else None
     stats0 = fn.pack_graph_stats()
     for r in range(a.rounds):
         live = [i for i, t in enumerate(twins) if t["k"] + a.depth + 2 < len(lanes[i]["ids"])]
@@ -99,6 +116,14 @@ def run_head(fn, lanes: list, a, hot: int, log) -> dict:
             k = t["k"]
             feeds.append((x["rows"][k:k + n], x["ids"][k + 1:k + n + 1]))
             t["k"] = k + n
+        if sms is not None:
+            argmax = set(rng.sample(sel, len(sel) // 2)) if r % 5 == 4 else set()
+            res["mixed_rounds"] += bool(argmax)
+            for i in sel:
+                t = twins[i]
+                kd = None if i in argmax else t["A"].keyed_for(sms[i], t["k"] + 1)
+                t["A"].keyed = t["B"].keyed = kd
+                res["keyed_lane_rounds"] += kd is not None
         torch.cuda.synchronize()
         E.PACK_GRAPH = False
         t0 = time.perf_counter()
@@ -160,18 +185,22 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--heads", default="32768,0", help="draft heads to check: hot vocabulary sizes, 0 = the full head")
     ap.add_argument("--seed", type=int, default=249)
+    ap.add_argument("--keyed", action="store_true", help="coupled drafts: every lane seeded and sampled")
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
     from engine.models.flashnext.serving import build
     from tools.fn_mtp_accept import g2_bench_texts
+    if a.keyed:
+        from engine.models.flashnext import coupled as CP
+        assert CP.ON, "--keyed needs QWEN38_FN_MTP_COUPLED=1"
     tok = AutoTokenizer.from_pretrained(a.pack)
     texts = g2_bench_texts(a.texts.split(","), tok, 1000)
     L = max(len(t["ids"]) + len(t["out"]) for t in texts) + 256
     t0 = time.time()
     eng, _, _ = build(a.pack, L, tok, spec=True, depth=a.depth, log=lambda s: print(s, flush=True))
     fn = eng.fn
-    print(f"[pgraph] loaded in {time.time() - t0:.0f} s; {len(texts)} lanes", flush=True)
+    print(f"[pgraph] loaded in {time.time() - t0:.0f} s; {len(texts)} lanes; keyed {a.keyed}", flush=True)
     lanes = []
     for t in texts:
         ids = list(t["ids"]) + list(t["out"])
@@ -188,7 +217,7 @@ def main() -> None:
         res = run_head(fn, lanes, a, hot, lambda s: print(s, flush=True))
         out["heads"].append(res)
         print(f"[pgraph] head {hot or 'full'}: ALL EQUAL {res['all_equal']} over {res['rounds']} rounds, "
-              f"{res['lane_rounds']} lane-rounds, {res['picks']} picks (top-2 ids + probability bits), caches; "
+              f"{res['lane_rounds']} lane-rounds ({res['keyed_lane_rounds']} keyed, {res['mixed_rounds']} mixed rounds), {res['picks']} picks (top-2 ids + probability bits), caches; "
               f"diffs tok {res['tok_diff']} prob {res['prob_diff']} cache {res['cache_diff']}; by lanes "
               f"{ {k: (v['equal'], v['rounds']) for k, v in sorted(res['by_lanes'].items())} }; graph {res['graph']}; "
               f"ms eager {res['ms_eager']} graph {res['ms_graph']}", flush=True)

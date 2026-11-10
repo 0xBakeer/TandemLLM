@@ -507,7 +507,7 @@ class FlashNextServing:
         from engine.models.flashnext import engine as E
         if E.JOINT_GRAPH:
             out["joint_graphs"] = self.fn.joint_graph_stats()          # SPD-249
-        if E.PACK_GRAPH:
+        if E.PACK_GRAPH and self.fn.pack_knobs:
             out["pack_graphs"] = self.fn.pack_graph_stats()            # SPD-249 (T1)
         return out or None
 

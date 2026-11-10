@@ -7,7 +7,10 @@
   * a kept graph rewrites its entry rows only for other lanes or another lane order, never for the same lanes;
   * the head reads its own lane of the replay it was in; the ring of pinned copies keeps a replay's picks for
     PACK_RING replays, and a read past that is counted, not hidden;
-  * `run_packed` hands each head its lane, and a capture round counts as one on every head (its price is skipped).
+  * `run_packed` hands each head its lane, and a capture round counts as one on every head (its price is skipped);
+  * keyed lanes (coupled drafts) are a key of their own (the keyed head, every lane keyed or not), their keys and
+    parameters copied into the graph's inputs before each replay;
+  * the knob acts for Flash-Next only: Qwen3.5-MoE's packed drafts stay eager with it on.
 
 The bits of the graph against the eager pass are the board's: tools/fn_pack_graph_check.py,
 tests/gpu/test_fn_pack_graph_gpu.py.
@@ -71,8 +74,11 @@ class _PG:
 
     made: list = []
 
-    def __init__(self, eng, key, xw, hw, xdt, hdt):
+    def __init__(self, eng, key, xw, hw, xdt, hdt, kp=None):
         self.key, self.L, self.depth = key, key[0], key[1]
+        self.keys = self.par = None
+        if kp is not None:
+            self.keys, self.par = torch.zeros_like(kp[2]), torch.zeros_like(kp[3])
         self.x, self.h = torch.zeros(key[0], xw), torch.zeros(key[0], hw)
         self.graph, self.sig, self.done = None, None, _Event()
         self.rows = [slice(i, i + 1) for i in range(key[0])]
@@ -120,10 +126,10 @@ class _Eng:
         ps["stats"]["captures"] += 1
 
 
-def _run(eng, items, rows=6, H=4):
+def _run(eng, items, rows=6, H=4, kp=None):
     x, h = torch.arange(rows * H, dtype=torch.float32).view(rows, H), torch.zeros(rows, 2 * H)
     last = torch.tensor([1 + 2 * i for i in range(len(items))])
-    return eng._pack_graph_run(items, last, x, h)
+    return eng._pack_graph_run(items, last, x, h, kp)
 
 
 def test_t1_the_knobs_are_registered_off():
@@ -259,6 +265,7 @@ def test_t1_run_packed_hands_each_head_its_lane():
     for i in range(2):
         h = object.__new__(FlashNextMTPHead)
         h.fn, h.depth, h.key, h._n, h._cls, h._pk, h.captures = fn, 3, 10 + i, 2 + i, 0, None, 5
+        h._keyed = False
         h.st = types.SimpleNamespace(length=40)
         heads.append(h)
     FlashNextMTPHead.run_packed(heads)
@@ -276,6 +283,82 @@ def test_t1_run_packed_hands_each_head_its_lane():
     finally:
         torch.cuda.current_stream = real
     return "lane i to head i, a capture counted on every head; eager leaves the heads' buffers"
+
+
+def test_t1_keyed_lanes_are_a_key_of_their_own():
+    _PG.made.clear()
+    real, after = E.PackGraph, E.PACK_GRAPH_AFTER
+    E.PackGraph, E.PACK_GRAPH_AFTER = _PG, 1
+    try:
+        eng = _Eng()
+        eng.pack_capture_ok = True
+        items = _items(n=3)
+        head = object()
+        keys = torch.arange(3 * 32, dtype=torch.int64).view(3, 32)
+        par = torch.arange(3 * 8, dtype=torch.float32).view(3, 8)
+        _run(eng, items)                                      # argmax lanes: one graph
+        _run(eng, items, kp=(head, None, keys, par, True, True))
+        assert len(_PG.made) == 2 and _PG.made[0].key != _PG.made[1].key
+        G = _PG.made[1]
+        assert G.key[-1] == (id(head), True, True), G.key
+        assert torch.equal(G.keys, keys) and torch.equal(G.par, par)
+        keys2, par2 = keys + 1000, par + 0.5                  # the next round's keys: copied in before the replay
+        _run(eng, items, kp=(head, None, keys2, par2, True, True))
+        assert len(_PG.made) == 2 and G.graph.replays == 2
+        assert torch.equal(G.keys, keys2) and torch.equal(G.par, par2)
+        _run(eng, items, kp=(head, None, keys, par, True, False))   # some lanes keyed: a key of its own
+        assert len(_PG.made) == 3
+    finally:
+        E.PackGraph, E.PACK_GRAPH_AFTER = real, after
+    return "argmax / every lane keyed / some keyed: three keys; keys and parameters copied in a replay"
+
+
+def _chain_fake(cls, calls):
+    """An engine of `cls` made without its __init__, with what `mtp_chain_multi` reads on the host."""
+    eng = object.__new__(cls)
+    eng.cfg = types.SimpleNamespace(has_indexer=False)
+    eng.device = torch.device("cpu")
+    eng._multi = None
+    bufs = {}
+
+    def _mtp_bufs(depth):
+        b = bufs.setdefault(eng._mtp_key, {"stack": torch.zeros(4, 6), "tok": torch.zeros(depth, 2, dtype=torch.long),
+                                           "prob": torch.zeros(depth, 2), "tok_h": torch.zeros(depth, 2, dtype=torch.long),
+                                           "prob_h": torch.zeros(depth, 2)})
+        return b
+
+    eng._mtp_bufs = _mtp_bufs
+    eng._rows_buffers = lambda n, key: {"d": {"tok": torch.zeros(n, dtype=torch.long)}}
+    eng.mtp_rows = lambda st, key, h: (torch.zeros(h.shape[0], 3), torch.zeros(h.shape[0], 6))
+
+    def pick(x, j, kp=None):
+        return torch.full((x.shape[0], 2), 0.5), torch.ones(x.shape[0], 2, dtype=torch.long)
+
+    eng._mtp_pick_multi = pick
+
+    def graph_run(items, last, x, h, kp=None):
+        calls.append(cls.__name__)
+        return None
+
+    eng._pack_graph_run = graph_run
+    return eng
+
+
+def test_t1_qwen35_moe_ignores_the_knob():
+    from engine.models.qwen3_5_moe.engine import Qwen35MoeEngine
+    real = E.PACK_GRAPH
+    E.PACK_GRAPH = True
+    try:
+        calls: list = []
+        for cls in (E.FlashNextEngine, Qwen35MoeEngine):
+            eng = _chain_fake(cls, calls)
+            items = [(k, _state(), 2, 3, 0) for k in range(3)]
+            assert cls.mtp_chain_multi(eng, items) is None
+        assert calls == ["FlashNextEngine"], calls
+        assert E.FlashNextEngine.pack_knobs is True and Qwen35MoeEngine.pack_knobs is False
+    finally:
+        E.PACK_GRAPH = real
+    return "FN_PACK_GRAPH on: Flash-Next asks its draft graph, Qwen3.5-MoE runs eager"
 
 
 if __name__ == "__main__":
