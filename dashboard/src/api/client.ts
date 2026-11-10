@@ -5,6 +5,7 @@
 
 import type { Bucket, Live, LogsJson, Requests, ResidencyPlan, SessionInfo, Summary, SystemInfo, Usage } from './types';
 import type { Parallel } from '../lib/parallel';
+import { LOGS_EXPORT, nameFrom } from '../lib/log-export';
 
 export class ApiError extends Error {
   constructor(
@@ -53,7 +54,7 @@ export function engineAway(): EngineAway | null {
   return away;
 }
 
-export async function request<T>(endpoint: string, init: RequestInit = {}, parse: 'json' | 'text' | 'none' = 'json'): Promise<T> {
+export async function request<T>(endpoint: string, init: RequestInit = {}, parse: 'json' | 'text' | 'none' | 'response' = 'json'): Promise<T> {
   let res: Response;
   try {
     res = await fetch(base + endpoint, { credentials: 'same-origin', cache: 'no-store', ...init });
@@ -97,6 +98,7 @@ export async function request<T>(endpoint: string, init: RequestInit = {}, parse
     throw new ApiError(endpoint, res.status, msg, type, parsed);
   }
   if (parse === 'none') return undefined as T;
+  if (parse === 'response') return res as T; // the caller reads the headers and the body
   if (parse === 'text') return (await res.text()) as T;
   return (await res.json()) as T;
 }
@@ -150,6 +152,20 @@ export const api = {
     if (p.backlog) q.set('backlog', String(p.backlog));
     return `${base}/v1/dashboard/logs?${q}`;
   },
+  /** SRV-803: the whole log ring as one text file, with the name the engine gave it. Fetched, not
+   *  linked: a 401 or an engine that is away throws like every other call, and nothing is saved. */
+  logsExport: async (): Promise<{ name: string | null; blob: Blob }> => {
+    const res = await request<Response>(LOGS_EXPORT, { headers: { Accept: 'text/plain' } }, 'response');
+    if (!(res.headers.get('Content-Type') ?? '').startsWith('text/plain')) throw new ApiError(LOGS_EXPORT, res.status, 'the answer is not a log file', 'error');
+    let blob: Blob;
+    try {
+      blob = await res.blob();
+    } catch (e) {
+      throw new ApiError(LOGS_EXPORT, 0, `the download broke off (${(e as Error).message})`, 'offline');
+    }
+    return { name: nameFrom(res.headers.get('Content-Disposition')), blob };
+  },
+  logsExportUrl: () => `${base}${LOGS_EXPORT}`,
   live: () => request<Live>('/v1/dashboard/live?follow=0'),
   /** every request in flight on every backend (server/parallel.py); `since` = the newest series
    *  sample the page holds, so a poll carries the new samples only */

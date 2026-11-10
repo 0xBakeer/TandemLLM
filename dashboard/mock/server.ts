@@ -21,6 +21,8 @@ import { dayKey } from '../src/lib/time.ts';
 import { generateYear, makeRow, rng, type LedgerRow, ENGINE_VERSION, CODE_SHA } from './generate.ts';
 import { requests as aggRequests, summary as aggSummary, usage as aggUsage } from './aggregate.ts';
 import { LogRing } from './logs.ts';
+import { exportText } from './log-export.ts';
+import { exportName } from '../src/lib/log-export.ts';
 import { applyRow, initialState, renderMetrics, type LiveEngineState } from './metrics.ts';
 import { engineFamilies } from './engines.ts';
 import { MockLive, type MockLiveRequest } from './live.ts';
@@ -506,7 +508,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           if (typeof b.draining === 'boolean') draining = b.draining;
           if (typeof b.waiting === 'number') state.waiting = b.waiting;
         }
-        return json(res, 200, { mode, password, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq });
+        return json(res, 200, { mode, password, draining, waiting: state.waiting, rows: full.rows.length, lastSeq: logs.lastSeq, logLines: logs.size });
       }
       if (path === '/__mock/log' && req.method === 'POST') {
         // tests: inject N lines
@@ -774,6 +776,13 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
           return json(res, 200, { contract_version: '1.0', lines, last_seq: logs.lastSeq });
         }
         return streamLogs(req, res, q);
+      }
+      if (path === '/v1/dashboard/logs/export') {
+        // SRV-803: the whole ring as one text file, whatever level or search a page uses
+        const now = new Date();
+        const text = exportText(logs.all(), { version: ENGINE_VERSION, gitSha: CODE_SHA, uptimeS: (now.getTime() - startedAt) / 1000, now, dropped: logs.dropped, capacity: logs.capacity, logContent: false });
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `attachment; filename="${exportName(ENGINE_VERSION, now)}"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        return res.end(text);
       }
       if (path.startsWith('/v1/dashboard/')) return error(res, 404, 'not_found', `no route ${path}`);
 

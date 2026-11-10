@@ -1405,6 +1405,19 @@ textarea {
 .panel-console .panel-body {
   margin: 0 -18px -14px;
 }
+/* the export's error (SRV-803): a state block above the console, inset like the panel's own text */
+.console-export {
+  padding: 0 18px 12px;
+}
+.console-export-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.console-export-actions a.btn:hover {
+  text-decoration: none;
+}
 .console {
   position: relative;
   background: var(--bg-inset);
@@ -1879,6 +1892,9 @@ mark {
   }
   .panel-console .panel-body {
     margin: 0 -14px -12px;
+  }
+  .console-export {
+    padding: 0 14px 12px;
   }
   .console-scroll {
     height: 360px;

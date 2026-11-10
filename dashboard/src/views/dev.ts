@@ -10,6 +10,7 @@ import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow
 import { exact, fixed, money, ms, NOT_REPORTED, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { isReplay } from '../lib/cache-source';
+import { CannotSave, canSave, exportName, LOGS_EXPORT, saveFile } from '../lib/log-export';
 import '../ui/speed-check';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
 import { badge } from '../lib/supervisor';
@@ -40,6 +41,9 @@ export class QseDev extends LightElement {
   private stream: ResumableStream | null = null;
   private maxSeq = 0;
   private grepTimer: ReturnType<typeof setTimeout> | null = null;
+  // the export of the whole log (SRV-803)
+  @state() private exporting = false;
+  @state() private exportError: { endpoint: string; message: string; cannotSave: boolean } | null = null;
 
   // requests
   @state() private requests: Loadable<RequestRow[]> = { state: 'loading' };
@@ -170,6 +174,45 @@ export class QseDev extends LightElement {
     this.grepTimer = setTimeout(() => this.openStream(), 350);
   }
 
+  /** SRV-803: save the engine's whole log as one text file. The engine builds it: a build header
+   *  and every line its ring holds at every level, whatever this view's level, search and pause
+   *  are. A refusal or an engine that does not answer shows in the panel and saves nothing. */
+  private async exportLog(): Promise<void> {
+    if (this.exporting) return;
+    this.exporting = true;
+    this.exportError = null;
+    try {
+      if (!canSave()) throw new CannotSave();
+      const { name, blob } = await api.logsExport();
+      saveFile(blob, name ?? exportName(this.system.state === 'ready' ? this.system.data.engine.version : null));
+    } catch (e) {
+      if (e instanceof CannotSave) this.exportError = { endpoint: LOGS_EXPORT, message: 'This browser cannot save a file that the page hands it. Open the file from the engine instead.', cannotSave: true };
+      else {
+        const d = describeError(e);
+        this.exportError = { endpoint: d.endpoint || LOGS_EXPORT, message: d.message, cannotSave: false };
+      }
+    } finally {
+      this.exporting = false;
+    }
+  }
+
+  private renderExportError(): TemplateResult | typeof nothing {
+    const x = this.exportError;
+    if (!x) return nothing;
+    return html`<div class="console-export" data-log-export-error>
+      <div class="state state-error" role="alert">
+        <div class="state-title">${icon('warn')} <span>Could not export the log from <code>${x.endpoint}</code></span></div>
+        <div class="state-body">${x.message} No file was saved.</div>
+        <div class="console-export-actions">
+          ${x.cannotSave
+            ? html`<a class="btn" href=${api.logsExportUrl()} target="_blank" rel="noopener" data-log-export-link>${icon('external')} Open the file</a>`
+            : html`<button class="btn" @click=${() => this.exportLog()}>${icon('refresh')} Try again</button>`}
+          <button class="btn btn-ghost" @click=${() => (this.exportError = null)}>Dismiss</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   private highlight(msg: string): TemplateResult | string {
     if (!this.grep) return msg;
     const q = this.grep.toLowerCase();
@@ -206,8 +249,10 @@ export class QseDev extends LightElement {
       <button class="btn btn-ghost btn-sm ${this.follow ? 'is-on' : ''}" title=${this.follow ? 'Pause' : 'Follow'} aria-pressed=${this.follow} @click=${() => (this.follow ? (this.follow = false) : this.resume())}>${this.follow ? icon('pause') : icon('play')} ${this.follow ? 'following' : 'paused'}</button>
       <button class="btn btn-ghost btn-sm ${this.wrap ? 'is-on' : ''}" title="Wrap long lines" aria-pressed=${this.wrap} @click=${() => (this.wrap = !this.wrap)}>${icon('wrap')}</button>
       <button class="btn btn-ghost btn-sm" title="Clear view" @click=${() => ((this.lines = []), (this.pending = 0))}>${icon('trash')}</button>
+      <button class="btn btn-ghost btn-sm" title="Export the whole log as a text file" aria-busy=${this.exporting} ?disabled=${this.exporting} data-log-export @click=${() => this.exportLog()}>${icon('down')} Export</button>
     `;
     const body = html`
+      ${this.renderExportError()}
       <div class="console ${this.wrap ? 'is-wrap' : ''}" data-state=${this.streamState}>
         <div class="console-status"><span class="dot dot-${this.streamState}"></span>${stateLabel[this.streamState]} · <span class="num">${total}</span> lines${this.streamState === 'reconnecting' || this.streamState === 'error' ? html` · resuming after <code>${this.stream?.lastId ?? '—'}</code>` : nothing}</div>
         <div class="console-scroll" @scroll=${this.onConsoleScroll} tabindex="0" role="log" aria-live="off">

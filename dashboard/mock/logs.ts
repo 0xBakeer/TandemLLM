@@ -99,6 +99,21 @@ export class LogRing {
     return out.slice(-limit);
   }
 
+  /** Every line the ring holds, oldest first, whatever its level: what the export writes. */
+  all(): LogLine[] {
+    return this.lines.slice();
+  }
+
+  /** How many lines the ring holds now. */
+  get size(): number {
+    return this.lines.length;
+  }
+
+  /** How many older lines the ring has already dropped. */
+  get dropped(): number {
+    return this.seq - this.lines.length;
+  }
+
   subscribe(fn: (l: LogLine) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
