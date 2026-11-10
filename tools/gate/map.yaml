@@ -188,9 +188,14 @@ kernels:
     tests:
       - tests/gpu/test_lfm2_moe_gpu.py
       - tests/gpu/test_lfm2_moe_box_gpu.py
+      - tests/gpu/test_kv_fp8_families_gpu.py
   - paths: ['engine/models/nemotron_h/**']
     tests:
       - tests/gpu/test_nemotron_h_exl3_gpu.py
+      - tests/gpu/test_kv_fp8_families_gpu.py
+  - paths: ['tools/kv_fp8.py']
+    tests:
+      - tests/gpu/test_kv_fp8_families_gpu.py
   - paths: ['engine/models/qwen3_5/**', 'engine/drafters/**', 'engine/methods/**', 'engine/{spec,tree,router,lenrouter}.py']
     tests:
       - tests/gpu/test_attn_group_gpu.py
