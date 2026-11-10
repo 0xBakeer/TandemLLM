@@ -118,7 +118,7 @@ def test_every_flash_next_capture_names_a_real_stream():
     from engine.models.flashnext.ref import FNState
     src = open(os.path.join(ROOT, "engine", "models", "flashnext", "engine.py")).read()
     calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and ast.unparse(n.func) == "torch.cuda.graph"]
-    assert len(calls) == 5, len(calls)
+    assert len(calls) == 6, len(calls)                    # SPD-249: T1's packed draft graph, on a leased stream
     for c in calls:
         kw = [k for k in c.keywords if k.arg == "stream"]
         assert kw and not (isinstance(kw[0].value, ast.Constant) and kw[0].value.value is None), ast.unparse(c)
@@ -127,7 +127,7 @@ def test_every_flash_next_capture_names_a_real_stream():
     with _streams() as made:
         st.graphs = GraphSet()
         assert E.capture_stream(st) is made[0] and made[0] is not None and st.graphs.holding
-    return "5 captures (decode, joint, verify, commit, MTP chain) name a stream; an owner's is a leased one"
+    return "6 captures (decode, joint, verify, commit, MTP chain, packed draft) name a stream; an owner's is a leased one"
 
 
 class _DEng:
