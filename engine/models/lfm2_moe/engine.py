@@ -22,6 +22,12 @@ and the step as a CUDA graph.
                      library GEMM, the grouped EXL3 experts, SDPA with a lower-right causal mask):
                      the next token agrees with the row path, the bits do not
 
+LFM2_KV_FP8=1 (SPD-150, off): the attention layers keep K and V as e4m3 codes with one fp32 scale a (head,
+token), tools/kv_fp8.py. A row is written in bf16 to a staging buffer and coded into the cache at its slot
+(one launch for K and V); attention decodes codes times scale to bf16 on load. A row is coded on its own, so
+a verify row is still the decode step's bit for bit. A prompt chunk attends to its own rows in bf16 and to
+the cached ones decoded, then codes its rows.
+
 `DecodeGraph` captures the decode step once per attention class (kernels.classes: the number of
 512-key programs, which never changes a row's bits) and `VerifyGraph` an M-row block.
 """
@@ -40,6 +46,7 @@ import tools.exl3_linear as _x3
 from tools import gpu as _gpu
 from engine.models.lfm2_moe.ref import Lfm2MoeRef, LfmState
 from engine.settings import SETTINGS as _S
+from tools import kv_fp8 as _kv8
 
 #: rows a prompt chunk takes (the caches' anchor grid, `serving.Lfm2MoeServing.caps`)
 PREFILL_CHUNK = 4096
@@ -132,6 +139,15 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         self.exl3 = any(_is_exl3(w) for w in W.values())
         self.banks = {li: e.bank(self.device) for li, e in experts.items() if hasattr(e, "bank")} \
             if str(self.device).startswith("cuda") else {}
+        # LFM2_KV_FP8: the staging rows a call's K and V are written to before they are coded, and their row
+        # index (a call's own rows 0 .. M - 1), fixed buffers a graph holds
+        self.kv_fp8 = _S.get("LFM2_KV_FP8") == "1"
+        self._kst = self._vst = self._kix = None
+        if self.kv_fp8:
+            self._kst = torch.zeros(c.num_key_value_heads, ROWS_MAX + 1, c.head_dim, dtype=self.dtype,
+                                    device=self.device)
+            self._vst = torch.zeros_like(self._kst)
+            self._kix = torch.arange(ROWS_MAX + 1, device=self.device)
 
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None, paged: bool = False) -> LfmState:
@@ -144,15 +160,19 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         st = LfmState(cap=cap)
         if paged and _kvp.POOL is not None and cap >= _kvp.PAGED_MIN_ROWS and str(self.device).startswith("cuda"):
             st.pages = _kvp.PagedSet(_kvp.OWNER)
+        dt = torch.uint8 if self.kv_fp8 else self.dtype
         for li in range(c.num_hidden_layers):
             if c.is_attention(li):
                 for kind, d in (("k", st.k), ("v", st.v)):
                     shape = (c.num_key_value_heads, cap, c.head_dim)
                     if st.pages is None:
-                        d[li] = torch.zeros(*shape, dtype=self.dtype, device=self.device)
+                        d[li] = torch.zeros(*shape, dtype=dt, device=self.device)
                     else:
-                        d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, self.dtype, self.device, owner=st.pages.owner,
+                        d[li] = st.pages.add(_kvp.PagedBuffer(shape, 1, dt, self.device, owner=st.pages.owner,
                                                               name=f"lfm.{kind}.{li}")).tensor
+                if self.kv_fp8:
+                    st.ks[li] = torch.zeros(c.num_key_value_heads, cap, dtype=torch.float32, device=self.device)
+                    st.vs[li] = torch.zeros_like(st.ks[li])
             else:
                 st.conv[li] = torch.zeros(c.conv_state_len, c.hidden_size, dtype=self.dtype, device=self.device)
         return st
@@ -355,6 +375,16 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 o = torch.empty(R, c.num_attention_heads, c.head_dim, dtype=self.dtype, device=self.device)
                 for (st, rb, M, ns), r in zip(parts, sl):
                     d = rb["d"]
+                    if li in st.ks:
+                        # LFM2_KV_FP8: K and V in bf16 to the staging rows, then coded into the cache at the slots
+                        q = K.qk_prep(qkv[r], d["pos"], self._kix[:M], self.W[a + "q_layernorm.weight"],
+                                      self.W[a + "k_layernorm.weight"], self.rope_cos, self.rope_sin, self._kst,
+                                      self._vst, c.num_attention_heads, c.num_key_value_heads, eps)
+                        _kv8.kv_quant2(self._kst, self._vst, self._kix[:M], st.k[li], st.ks[li], st.v[li], st.vs[li],
+                                       d["slot"])
+                        K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"].setdefault(ns, {}),
+                                    out=o[r], ks=st.ks[li], vs=st.vs[li])
+                        continue
                     q = K.qk_prep(qkv[r], d["pos"], d["slot"], self.W[a + "q_layernorm.weight"],
                                   self.W[a + "k_layernorm.weight"], self.rope_cos, self.rope_sin, st.k[li], st.v[li],
                                   c.num_attention_heads, c.num_key_value_heads, eps)
@@ -549,6 +579,9 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             for li in c.attention_layers:
                 st.k[li].index_copy_(1, d["dst"], st.k[li].index_select(1, d["src"]))
                 st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
+                if li in st.ks:
+                    st.ks[li].index_copy_(1, d["dst"], st.ks[li].index_select(1, d["src"]))
+                    st.vs[li].index_copy_(1, d["dst"], st.vs[li].index_select(1, d["src"]))
 
     # ------------------------------------------------------------------------- prompt chunks
     @torch.no_grad()
@@ -622,23 +655,37 @@ class Lfm2MoeEngine(Lfm2MoeRef):
     def _attn_chunk(self, n, li, st, pos):
         """Attention of a prompt chunk: q|k|v, the prep kernel (norms, rotary, the chunk's K and V into
         the cache at their positions), SDPA over the cache's rows [0, L + T) with the lower-right
-        causal mask, out_proj."""
+        causal mask, out_proj. LFM2_KV_FP8: the chunk's own rows in bf16 as computed, the cached ones
+        decoded; then the chunk's rows coded into the cache."""
         from torch.nn.attention.bias import causal_lower_right
         c = self.cfg
         a = self.pre(li) + "self_attn."
         T, L = n.shape[0], int(pos[0])
         qkv = self._fused(n, a, "qkv", ("q_proj", "k_proj", "v_proj"))
-        q = K.qk_prep(qkv, pos, pos, self.W[a + "q_layernorm.weight"], self.W[a + "k_layernorm.weight"],
-                      self.rope_cos, self.rope_sin, st.k[li], st.v[li], c.num_attention_heads,
-                      c.num_key_value_heads, c.rms_norm_eps)
-        k = st.k[li][:, :L + T].unsqueeze(0)
-        v = st.v[li][:, :L + T].unsqueeze(0)
+        fp8 = li in st.ks
+        if fp8:
+            kt = torch.empty(c.num_key_value_heads, T, c.head_dim, dtype=self.dtype, device=n.device)
+            vt = torch.empty_like(kt)
+            own = torch.arange(T, device=n.device)
+            q = K.qk_prep(qkv, pos, own, self.W[a + "q_layernorm.weight"], self.W[a + "k_layernorm.weight"],
+                          self.rope_cos, self.rope_sin, kt, vt, c.num_attention_heads, c.num_key_value_heads,
+                          c.rms_norm_eps)
+            k = _kv8.kv_dequant_cat(st.k[li], st.ks[li], L, kt).unsqueeze(0)
+            v = _kv8.kv_dequant_cat(st.v[li], st.vs[li], L, vt).unsqueeze(0)
+        else:
+            q = K.qk_prep(qkv, pos, pos, self.W[a + "q_layernorm.weight"], self.W[a + "k_layernorm.weight"],
+                          self.rope_cos, self.rope_sin, st.k[li], st.v[li], c.num_attention_heads,
+                          c.num_key_value_heads, c.rms_norm_eps)
+            k = st.k[li][:, :L + T].unsqueeze(0)
+            v = st.v[li][:, :L + T].unsqueeze(0)
         qh = q.transpose(0, 1).unsqueeze(0)                                  # [1, Hq, T, D]
         o = chunk_attention(qh, k, v)
         if o is None:
             o = F.scaled_dot_product_attention(qh, k.repeat_interleave(c.gqa, 1), v.repeat_interleave(c.gqa, 1),
                                                attn_mask=causal_lower_right(T, L + T))
         o = o[0].transpose(0, 1).reshape(T, -1)
+        if fp8:
+            _kv8.kv_quant2(kt, vt, own, st.k[li], st.ks[li], st.v[li], st.vs[li], pos)
         return self.lin(o, self.W[a + "out_proj.weight"])
 
     def _moe_bf16_chunk(self, n, ids, li):
@@ -827,11 +874,11 @@ class CommitGraph:
 
 
 def _state_saved(eng: Lfm2MoeEngine, st: LfmState) -> list:
-    """What a capture's warm-up may write, cloned: the conv states whole, the K and V rows from the
-    length on (`CAPTURE_ROWS`)."""
+    """What a capture's warm-up may write, cloned: the conv states whole, the K and V rows (and their e4m3
+    scales, LFM2_KV_FP8) from the length on (`CAPTURE_ROWS`)."""
     L = st.length
     out = [(t, 0, 0, t.shape[0]) for t in st.conv.values()]
-    for d in (st.k, st.v):
+    for d in (st.k, st.v, st.ks, st.vs):
         for t in d.values():
             out.append((t, 1, L, min(CAPTURE_ROWS, t.shape[1] - L)))
     return [(t, ax, lo, n, t.narrow(ax, lo, n).clone()) for t, ax, lo, n in out if n > 0]

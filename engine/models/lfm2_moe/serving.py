@@ -28,12 +28,14 @@ from engine.models.graph_lru import joint_graphs
 from engine.models.lfm2_moe import kernels as K
 from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
 from engine.models.state import SectionState
+from engine.settings import SETTINGS as _S
 from tools import gpu as _gpu
+from tools.kv_fp8 import bytes_per_token as _kv_bytes
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/lfm2_moe/__init__.py", "engine/models/lfm2_moe/config.py",
            "engine/models/lfm2_moe/engine.py", "engine/models/lfm2_moe/kernels.py",
-           "engine/models/lfm2_moe/load.py", "engine/models/lfm2_moe/pack.py",
+           "engine/models/lfm2_moe/knobs.py", "engine/models/lfm2_moe/load.py", "engine/models/lfm2_moe/pack.py",
            "engine/models/lfm2_moe/ref.py", "engine/settings.py")
 #: the model's name in ops/prices/ and models/
 MODEL_ID = "lfm2.5-24b-a2b"
@@ -45,7 +47,9 @@ TABLES = ("ops/lfm25-dense-splits.json",)
 
 
 def manifest() -> Manifest:
-    return Manifest(arch="lfm2_moe", modules=MODULES, data=TABLES)
+    # an e4m3 cache (LFM2_KV_FP8) stores other rows: its entries are another arch's, never read as the bf16 cache's
+    return Manifest(arch="lfm2_moe-kvfp8" if _S.get("LFM2_KV_FP8") == "1" else "lfm2_moe", modules=MODULES,
+                    data=TABLES)
 
 
 def _tensors(o) -> list:
@@ -101,7 +105,7 @@ class _KV:
 class Lfm2CacheState(SectionState):
     """What the caches keep of a sequence (engine/models/state.py): sections the conv states of every
     conv layer ("conv.<layer>", [conv_L_cache - 1, H] bf16); views K and V of every attention layer
-    ([kv heads, rows, D], axis 1)."""
+    ([kv heads, rows, D], axis 1), and with LFM2_KV_FP8 their e4m3 scales ([kv heads, rows], axis 1)."""
 
     def __init__(self, serving: "Lfm2MoeServing"):
         self.s = serving
@@ -115,6 +119,8 @@ class Lfm2CacheState(SectionState):
         out = []
         for li in sorted(st.k):
             out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+            if li in st.ks:
+                out += [(f"ks.{li}", st.ks[li], 1), (f"vs.{li}", st.vs[li], 1)]
         return out
 
 
@@ -209,10 +215,14 @@ class Lfm2MoeServing:
         return self._hidden[0, -1:] if self._hidden is not None else torch.zeros(1, self.cfg.hidden_size)
 
     def cost(self) -> CostModel:
-        """A snapshot: the conv states whole; K and V of the 10 attention layers a token (bf16)."""
+        """A snapshot: the conv states whole; K and V of the 10 attention layers a token (bf16, or e4m3 codes and
+        one fp32 scale a KV head with LFM2_KV_FP8)."""
+        c = self.cfg
         sec = sum(t.numel() * t.element_size() for t in self.st.conv.values())
-        return CostModel(section_bytes=sec, view_bytes_per_token=self.cfg.kv_bytes_per_token(2),
-                         parts={"recurrent": 0, "conv": sec})
+        fp8 = getattr(self.fn, "kv_fp8", False)
+        per_tok = (_kv_bytes(c.num_key_value_heads, c.head_dim, True) * len(c.attention_layers) if fp8
+                   else c.kv_bytes_per_token(2))
+        return CostModel(section_bytes=sec, view_bytes_per_token=per_tok, parts={"recurrent": 0, "conv": sec})
 
     def manifest(self) -> Manifest:
         return manifest()
@@ -254,7 +264,7 @@ class Lfm2MoeServing:
                     seen.add(s.data_ptr())
                     w += s.nbytes()
         st = self.st
-        kv = sum(int(t.numel() * t.element_size()) for d in (st.k, st.v) for t in d.values())
+        kv = sum(int(t.numel() * t.element_size()) for d in (st.k, st.v, st.ks, st.vs) for t in d.values())
         return {"weights": w, "kv_pool": kv, "drafter_kv": 0,
                 "gdn_state": sum(int(t.numel() * t.element_size()) for t in st.conv.values())}
 
@@ -547,12 +557,14 @@ def serve(a, ctx) -> dict:
             ctx.log("[server] LFM2 self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
     fmt = "exl3" if info["exl3"] else "bf16"
+    # SPD-150: which cache the attention layers keep, so a box can see LFM2_KV_FP8 took effect (/health's weights)
+    kv = "e4m3" if srv.fn.kv_fp8 else "bf16"
     describe = (f"LFM2 MoE {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
-                f"{'lookup + StairCut' if drafter is not None else 'none'}, max_len {a.max_len:,},")
+                f"{'lookup + StairCut' if drafter is not None else 'none'}, KV cache {kv}, max_len {a.max_len:,},")
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"]}}}
+                                         "self_check": info["self_check"], "kv_cache": kv}}}

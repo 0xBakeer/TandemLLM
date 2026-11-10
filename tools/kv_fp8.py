@@ -8,6 +8,9 @@ round to bf16 before the product with the query, which is the bf16 cache's arith
 
   quantize_kv   [..., D] bf16 -> (codes uint8, scales fp32), torch (the CPU twin and the prompt paths)
   kv_dequant    codes and scales -> bf16, torch
+  kv_dequant_cat
+                a prompt chunk's keys or values: the cached rows decoded and its own bf16 rows after them, in
+                one buffer, decoded a block of rows at a time (the fp32 product never spans the context)
   kv_quant2     a call's K and V rows, written in bf16 to a staging buffer, coded into the caches at their
                 slots in one launch (Triton; the torch twin on the CPU)
   bytes_per_token
@@ -45,6 +48,19 @@ def quantize_kv(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def kv_dequant(codes: torch.Tensor, scales: torch.Tensor, dtype=torch.bfloat16) -> torch.Tensor:
     """[..., n, D] uint8 e4m3 codes and [..., n] fp32 scales -> bf16 (the value a reader multiplies by)."""
     return (codes.view(torch.float8_e4m3fn).float() * scales[..., None]).to(dtype)
+
+
+def kv_dequant_cat(codes: torch.Tensor, scales: torch.Tensor, L: int, rows: torch.Tensor,
+                   block: int = 16384) -> torch.Tensor:
+    """codes [Hk, cap, D] uint8 and scales [Hk, cap] fp32 of a cache, `rows` [Hk, T, D] bf16 -> [Hk, L + T, D]
+    bf16: the cache's rows [0, L) decoded (`kv_dequant`'s values), then `rows`."""
+    Hk, T, D = rows.shape
+    out = torch.empty(Hk, L + T, D, dtype=rows.dtype, device=rows.device)
+    for a in range(0, L, block):
+        b = min(L, a + block)
+        out[:, a:b] = kv_dequant(codes[:, a:b], scales[:, a:b], rows.dtype)
+    out[:, L:] = rows
+    return out
 
 
 if HAVE_TRITON:

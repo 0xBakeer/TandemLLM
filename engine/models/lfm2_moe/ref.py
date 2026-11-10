@@ -50,6 +50,8 @@ class LfmState:
     v: dict = field(default_factory=dict)
     pages: object = None        # the KV pool's paged set of the K and V rows (engine/kvpool.py), or None
     block: tuple | None = None  # the board engine's last verify block: (tokens, parents, paths, row buffers key)
+    ks: dict = field(default_factory=dict)     # LFM2_KV_FP8: an attention layer's e4m3 scales [kv heads, cap] fp32
+    vs: dict = field(default_factory=dict)
 
     def reset_inplace(self) -> None:
         """A new sequence in the same buffers: the conv state zeroed, the length 0 (KV rows past the
