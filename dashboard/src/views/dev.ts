@@ -44,6 +44,8 @@ export class QseDev extends LightElement {
   // the export of the whole log (SRV-803)
   @state() private exporting = false;
   @state() private exportError: { endpoint: string; message: string; cannotSave: boolean } | null = null;
+  /** the name of the file the last good export handed to the browser */
+  @state() private exportSaved: string | null = null;
 
   // requests
   @state() private requests: Loadable<RequestRow[]> = { state: 'loading' };
@@ -176,15 +178,20 @@ export class QseDev extends LightElement {
 
   /** SRV-803: save the engine's whole log as one text file. The engine builds it: a build header
    *  and every line its ring holds at every level, whatever this view's level, search and pause
-   *  are. A refusal or an engine that does not answer shows in the panel and saves nothing. */
+   *  are. A refusal or an engine that does not answer shows in the panel and saves nothing. A good
+   *  export leaves one line with the file's name: the page cannot see whether the browser kept the
+   *  file, so the line also offers the engine's own copy. */
   private async exportLog(): Promise<void> {
     if (this.exporting) return;
     this.exporting = true;
     this.exportError = null;
+    this.exportSaved = null;
     try {
       if (!canSave()) throw new CannotSave();
       const { name, blob } = await api.logsExport();
-      saveFile(blob, name ?? exportName(this.system.state === 'ready' ? this.system.data.engine.version : null));
+      const file = name ?? exportName(this.system.state === 'ready' ? this.system.data.engine.version : null);
+      saveFile(blob, file);
+      this.exportSaved = file;
     } catch (e) {
       if (e instanceof CannotSave) this.exportError = { endpoint: LOGS_EXPORT, message: 'This browser cannot save a file that the page hands it. Open the file from the engine instead.', cannotSave: true };
       else {
@@ -196,6 +203,24 @@ export class QseDev extends LightElement {
     }
   }
 
+  /** The link to the engine's own attachment. The page holds no token: it is let in by where it
+   *  runs or by its same-site session cookie, and a link to the same origin carries either. */
+  private exportLink(cls = ''): TemplateResult {
+    return html`<a class=${cls} href=${api.logsExportUrl()} target="_blank" rel="noopener" title="Get the log from the engine directly" data-log-export-link>${icon('external')} Open the file</a>`;
+  }
+
+  private renderExportSaved(): TemplateResult | typeof nothing {
+    if (!this.exportSaved) return nothing;
+    return html`<div class="console-export" data-log-export-saved>
+      <div class="console-export-saved" role="status">
+        ${icon('check')}
+        <span>Saved as <code>${this.exportSaved}</code></span>
+        ${this.exportLink()}
+        <button class="btn btn-ghost btn-sm" @click=${() => (this.exportSaved = null)}>Dismiss</button>
+      </div>
+    </div>`;
+  }
+
   private renderExportError(): TemplateResult | typeof nothing {
     const x = this.exportError;
     if (!x) return nothing;
@@ -205,7 +230,7 @@ export class QseDev extends LightElement {
         <div class="state-body">${sentence(x.message)} No file was saved.</div>
         <div class="console-export-actions">
           ${x.cannotSave
-            ? html`<a class="btn" href=${api.logsExportUrl()} target="_blank" rel="noopener" data-log-export-link>${icon('external')} Open the file</a>`
+            ? this.exportLink('btn')
             : html`<button class="btn" @click=${() => this.exportLog()}>${icon('refresh')} Try again</button>`}
           <button class="btn btn-ghost" @click=${() => (this.exportError = null)}>Dismiss</button>
         </div>
@@ -252,7 +277,7 @@ export class QseDev extends LightElement {
       <button class="btn btn-ghost btn-sm" title="Export the whole log as a text file" aria-busy=${this.exporting} ?disabled=${this.exporting} data-log-export @click=${() => this.exportLog()}>${icon('down')} Export</button>
     `;
     const body = html`
-      ${this.renderExportError()}
+      ${this.renderExportSaved()}${this.renderExportError()}
       <div class="console ${this.wrap ? 'is-wrap' : ''}" data-state=${this.streamState}>
         <div class="console-status"><span class="dot dot-${this.streamState}"></span>${stateLabel[this.streamState]} · <span class="num">${total}</span> lines${this.streamState === 'reconnecting' || this.streamState === 'error' ? html` · resuming after <code>${this.stream?.lastId ?? '—'}</code>` : nothing}</div>
         <div class="console-scroll" @scroll=${this.onConsoleScroll} tabindex="0" role="log" aria-live="off">

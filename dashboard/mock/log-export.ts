@@ -32,7 +32,8 @@ export function uptimeText(seconds: number | null | undefined): string {
 }
 
 export function exportText(lines: LogLine[], b: ExportBuild = {}): string {
-  const known = (v: string | null | undefined) => (v ?? '').trim() || 'unknown';
+  // one line each: a newline or another control character reads as a space (server/logbuf.py `known`)
+  const known = (v: string | null | undefined) => (v ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim() || 'unknown';
   const dropped = b.dropped ?? 0;
   const head = [
     EXPORT_TITLE,

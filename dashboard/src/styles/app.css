@@ -1418,6 +1418,26 @@ textarea {
 .console-export-actions a.btn:hover {
   text-decoration: none;
 }
+/* a good export's one line (SRV-803): the file's name and the engine's own copy; it wraps on a phone */
+.console-export-saved {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.console-export-saved > .icon {
+  color: var(--ok);
+}
+.console-export-saved code {
+  overflow-wrap: anywhere;
+}
+.console-export-saved a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .console {
   position: relative;
   background: var(--bg-inset);

@@ -4,12 +4,18 @@
 // browser to save under the name the engine chose.
 
 export const LOGS_EXPORT = '/v1/dashboard/logs/export';
+/** How long the page waits for the file: the engine's own handler timeout (server/app.py
+ *  `HANDLER_TIMEOUT_S`), after which the engine has given the request up as well. */
+export const EXPORT_LIMIT_MS = 60_000;
+/** The file name's length before ".log" (server/logbuf.py `EXPORT_NAME_MAX`). */
+export const EXPORT_NAME_MAX = 120;
 
 /** The engine's naming rule, for an answer that came without a name:
- *  `tandemllm-<version>-<time of export, UTC>.log`, in letters, digits, dot and dash only. */
+ *  `tandemllm-<version>-<time of export, UTC>.log`, in letters, digits, dot and dash only, a long
+ *  version cut so the name before ".log" keeps to `EXPORT_NAME_MAX`. */
 export function exportName(version: string | null | undefined, now: Date = new Date()): string {
-  const v = String(version ?? '').trim().replace(/[^A-Za-z0-9.-]/g, '-') || 'unknown';
   const t = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const v = (String(version ?? '').trim().replace(/[^A-Za-z0-9.-]/g, '-') || 'unknown').slice(0, EXPORT_NAME_MAX - `tandemllm--${t}`.length);
   return `tandemllm-${v}-${t}.log`;
 }
 
@@ -30,7 +36,8 @@ export function sentence(message: string): string {
 export interface SaveEnv {
   document: Pick<Document, 'createElement'> & { body: { append(node: unknown): void } };
   URL: { createObjectURL(blob: Blob): string; revokeObjectURL(url: string): void };
-  later?: (fn: () => void, ms: number) => unknown;
+  /** the window's, for `pagehide` */
+  addEventListener?: (type: string, fn: () => void) => void;
 }
 
 /** Whether this browser can save a file the page holds in memory (an `<a download>` on an object URL). */
@@ -49,10 +56,33 @@ export class CannotSave extends Error {
   }
 }
 
+// The object URL of the last file handed over. A browser may read it long after the click (one that
+// asks before it downloads reads it at the answer), so no timer frees it: the next export does, or
+// the page when it goes.
+let held: { url: string; URL: SaveEnv['URL'] } | null = null;
+const watched = new WeakSet<object>();
+
+/** Free the object URL of the last file handed to the browser, if one is still held. */
+export function releaseSaved(): void {
+  const h = held;
+  held = null;
+  try {
+    h?.URL.revokeObjectURL(h.url);
+  } catch {
+    /* already gone */
+  }
+}
+
 /** Hand `blob` to the browser as a download named `name`. Throws `CannotSave` where that is not possible. */
 export function saveFile(blob: Blob, name: string, env: SaveEnv = globalThis as unknown as SaveEnv): void {
   if (!canSave(env)) throw new CannotSave();
+  releaseSaved();
   const url = env.URL.createObjectURL(blob);
+  held = { url, URL: env.URL };
+  if (typeof env.addEventListener === 'function' && !watched.has(env)) {
+    watched.add(env);
+    env.addEventListener('pagehide', releaseSaved);
+  }
   const a = env.document.createElement('a') as HTMLAnchorElement;
   a.href = url;
   a.download = name;
@@ -63,7 +93,5 @@ export function saveFile(blob: Blob, name: string, env: SaveEnv = globalThis as 
     a.click();
   } finally {
     a.remove();
-    // the download reads the object URL after the click returns; free it once it has had time to start
-    (env.later ?? setTimeout)(() => env.URL.revokeObjectURL(url), 60_000);
   }
 }

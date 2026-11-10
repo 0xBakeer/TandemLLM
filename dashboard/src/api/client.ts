@@ -5,7 +5,7 @@
 
 import type { Bucket, Live, LogsJson, Requests, ResidencyPlan, SessionInfo, Summary, SystemInfo, Usage } from './types';
 import type { Parallel } from '../lib/parallel';
-import { LOGS_EXPORT, nameFrom } from '../lib/log-export';
+import { EXPORT_LIMIT_MS, LOGS_EXPORT, nameFrom } from '../lib/log-export';
 
 export class ApiError extends Error {
   constructor(
@@ -153,17 +153,32 @@ export const api = {
     return `${base}/v1/dashboard/logs?${q}`;
   },
   /** SRV-803: the whole log ring as one text file, with the name the engine gave it. Fetched, not
-   *  linked: a 401 or an engine that is away throws like every other call, and nothing is saved. */
-  logsExport: async (): Promise<{ name: string | null; blob: Blob }> => {
-    const res = await request<Response>(LOGS_EXPORT, { headers: { Accept: 'text/plain' } }, 'response');
-    if (!(res.headers.get('Content-Type') ?? '').startsWith('text/plain')) throw new ApiError(LOGS_EXPORT, res.status, 'the answer is not a log file', 'error');
-    let blob: Blob;
+   *  linked: a 401 or an engine that is away throws like every other call, and nothing is saved.
+   *  An engine that takes the request and sends no file is given up after `limitMs`, headers and
+   *  body together, so the caller's button never waits on it for good. */
+  logsExport: async (limitMs: number = EXPORT_LIMIT_MS): Promise<{ name: string | null; blob: Blob }> => {
+    const ctrl = new AbortController();
+    let late = false;
+    const timer = setTimeout(() => {
+      late = true;
+      ctrl.abort();
+    }, limitMs);
     try {
-      blob = await res.blob();
+      const res = await request<Response>(LOGS_EXPORT, { headers: { Accept: 'text/plain' }, signal: ctrl.signal }, 'response');
+      if (!(res.headers.get('Content-Type') ?? '').startsWith('text/plain')) throw new ApiError(LOGS_EXPORT, res.status, 'the answer is not a log file', 'error');
+      let blob: Blob;
+      try {
+        blob = await res.blob();
+      } catch (e) {
+        throw new ApiError(LOGS_EXPORT, 0, `the download broke off (${(e as Error).message})`, 'offline');
+      }
+      return { name: nameFrom(res.headers.get('Content-Disposition')), blob };
     } catch (e) {
-      throw new ApiError(LOGS_EXPORT, 0, `the download broke off (${(e as Error).message})`, 'offline');
+      if (late) throw new ApiError(LOGS_EXPORT, 0, `the engine did not send the log within ${Math.round(limitMs / 1000)} s`, 'timeout');
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    return { name: nameFrom(res.headers.get('Content-Disposition')), blob };
   },
   logsExportUrl: () => `${base}${LOGS_EXPORT}`,
   live: () => request<Live>('/v1/dashboard/live?follow=0'),
