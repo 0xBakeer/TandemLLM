@@ -176,7 +176,7 @@ Clients ignore comment lines. Proxies see a live stream and do not time it out.
 
 ## Admission and limits
 
-TandemLLM holds one sequence, so requests wait for it in a bounded queue.
+With one sequence (`QSE_PARALLEL=1`; the shipped profile runs 8 lanes, [parallel-requests.md](parallel-requests.md)) requests wait for it in a bounded queue.
 
 | limit | served value | what happens |
 |-|-|-|

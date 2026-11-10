@@ -12,7 +12,7 @@ With memory notes on, the model keeps notes as files, one fact per file and at m
 
 One dashboard watches this engine and the others. It reads the metrics pages of vLLM and SGLang every 15~s, and small plugins inside them report each request's own times. For a cloud API it measures time to first token and decode speed at the proxy, and it shows the machines behind every backend (Chapter~\ref{ch:hosts}).
 
-Requests run in parallel. With \code{--parallel 4} the engine decodes up to four requests in the same rounds (Section~\ref{sec:parallel-requests}), and the proxy relays any number of requests to other backends at once.
+Requests run in parallel. The shipped profile's 8 lanes decode up to eight requests in the same rounds (Section~\ref{sec:parallel-requests}), and the proxy relays any number of requests to other backends at once.
 
 TandemLLM is not tied to one model. Its main model is Qwen3.8-27B, and a second, Qwen3.8-Flash-Next, runs on the same board in its place (Chapter~\ref{ch:flashnext}). The small models are Qwen3.5 and Laya checkpoints, the proxy serves any model behind an OpenAI-compatible API, and Chapter~\ref{ch:adding-model} lists the seams where a main model plugs in.
 
@@ -56,7 +56,7 @@ The roadmap (Chapter~\ref{ch:roadmap}) widens each of these, one step at a time.
 \begin{itemize}
 \item Models: Qwen3.8-27B is the main model the engine serves, a hybrid of 48 Gated DeltaNet layers and 16 attention layers; Chapter~\ref{ch:architecture} explains why much of the engine follows that mix. Qwen3.8-Flash-Next, a mixture of experts on the same hybrid, is the second, served from turboderp's EXL3 packs one model at a time (Chapter~\ref{ch:flashnext}). Beside it run the two fine-tuned DFlash2 drafters, the lookup drafter and, when you turn them on, Laya, the narrator and the shadow reader. Behind the proxy, any model a backend serves.
 \item Hardware: the DGX Spark is the only board with measured kernels and prices (Section~\ref{sec:test-env}). Other CUDA GPUs are best effort.
-\item Requests: \code{--parallel N} gives the engine N sequences, and requests that decode at the same time share one draft pass and one verify pass a round (Section~\ref{sec:parallel-requests}). The shipped profile keeps one sequence, and the measurements go up to four. With one sequence a request that finds the engine busy waits in a bounded queue, and a short request is served at a safe point inside the running one (the side lane, Section~\ref{sec:side-lane}). The proxy relays any number of requests to other backends at once (Chapter~\ref{ch:harness-proxy}).
+\item Requests: \code{--parallel N} gives the engine N sequences, and requests that decode at the same time share one draft pass and one verify pass a round (Section~\ref{sec:parallel-requests}). The shipped profile runs 8 lanes since 0.15.0 (SRV-707, \code{QSE_PARALLEL=8} in \code{ops/serve.env}), and every weight card has a speed row with 1, 2, 4 and 8 requests at once. With one sequence a request that finds the engine busy waits in a bounded queue, and a short request is served at a safe point inside the running one (the side lane, Section~\ref{sec:side-lane}). The proxy relays any number of requests to other backends at once (Chapter~\ref{ch:harness-proxy}).
 \end{itemize}
 
 \section{Two rules}

@@ -248,4 +248,4 @@ flowchart TB
 
 ## One request, one engine
 
-By default the engine holds one sequence at a time. Requests wait for the engine lock in a bounded queue (8 by default), and a request that waits longer than the queue timeout gets a 503. The numbers on this page describe that single-request loop. With `--parallel N` the engine holds N sequences over one copy of the weights and verifies them in one joint pass ([parallel-requests.md](parallel-requests.md)); it is off in every shipped profile, the Flash-Next ones included.
+With `--parallel 1` the engine holds one sequence at a time; the shipped `ops/serve.env` runs 8 lanes since 0.15.0 (SRV-707, `QSE_PARALLEL=8`). Requests wait for the engine lock in a bounded queue (8 by default), and a request that waits longer than the queue timeout gets a 503. The numbers on this page describe that single-request loop. With `--parallel N` the engine holds N sequences over one copy of the weights and verifies them in one joint pass ([parallel-requests.md](parallel-requests.md)), as `ops/serve.env` and the profiles of every family with side slots do, except Ornith's and Flint's, which keep one sequence.
