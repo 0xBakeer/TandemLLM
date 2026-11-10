@@ -387,10 +387,10 @@ if HAVE_TRITON:
 
     @triton.jit
     def _attn_rows_split(Q, K, V, CTL, ANCT, SEL, PM, PL, PACC,
-                         s_kh, s_kn, s_vh, s_vn,
+                         s_kh, s_kn, s_vh, s_vn, KS, VS, s_sh,
                          SCALE: tl.constexpr, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr,
                          HK: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, CHUNK: tl.constexpr,
-                         NA: tl.constexpr, NSEL: tl.constexpr, NS: tl.constexpr):
+                         NA: tl.constexpr, NSEL: tl.constexpr, NS: tl.constexpr, FP8: tl.constexpr = False):
         # CTL[t] = (visible keys n, block start L, dense) int32
         t = tl.program_id(0)
         kvh = tl.program_id(1)
@@ -416,7 +416,13 @@ if HAVE_TRITON:
             tail = pos >= L
             a = tl.load(ANCT + t * NA + (pos - L), mask=cmask & tail, other=0)
             slot = tl.where(tail, a, pos)
-            k = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
+            if FP8:
+                # an e4m3 cache (SPD-150, QWEN38_FN_KV_FP8): the codes times the (head, token) scale, rounded to bf16
+                kq = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0)
+                ksc = tl.load(KS + kvh * s_sh + slot, mask=cmask, other=0.0)
+                k = (kq.to(tl.float8e4nv, bitcast=True).to(tl.float32) * ksc[:, None]).to(tl.bfloat16)
+            else:
+                k = tl.load(K + kvh * s_kh + slot[:, None] * s_kn + od[None, :], mask=cmask[:, None], other=0.0)
             s = tl.dot(q, tl.trans(k))
             s = s * SCALE
             vis = cmask[None, :] & rmask[:, None]
@@ -426,7 +432,12 @@ if HAVE_TRITON:
             p = tl.exp(s - m_safe[:, None])
             alpha = tl.exp(m_i - m_safe)
             l_i = l_i * alpha + tl.sum(p, 1)
-            v = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
+            if FP8:
+                vq = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0)
+                vsc = tl.load(VS + kvh * s_sh + slot, mask=cmask, other=0.0)
+                v = (vq.to(tl.float8e4nv, bitcast=True).to(tl.float32) * vsc[:, None]).to(tl.bfloat16)
+            else:
+                v = tl.load(V + kvh * s_vh + slot[:, None] * s_vn + od[None, :], mask=cmask[:, None], other=0.0)
             acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
             m_i = m_new
         base = ((t * HK + kvh) * NS + sp) * BM + rows
@@ -563,8 +574,9 @@ def attn_rows_multi(q, pt, lane, strides: tuple, HK: int, bufs: dict | None = No
     return out
 
 
-def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None, stages: int = 2):
-    """q [M, Hq, D] bf16 (normed, rotated); kc / vc [Hk, cap, D] bf16 (the caches); ctl int32 [M, 4]
+def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None, stages: int = 2, ks=None, vs=None):
+    """q [M, Hq, D] bf16 (normed, rotated); kc / vc [Hk, cap, D] bf16 (the caches), or uint8 e4m3 codes with
+    `ks` / `vs` [Hk, cap] fp32 their (head, token) scales (SPD-150, QWEN38_FN_KV_FP8); ctl int32 [M, 4]
     (visible keys, block start L, dense flag, -); anc int32 [M, ANC] (the cache slot of the row's
     ancestor at each depth, 0 the block's first row); sel int32 [M, NSEL] (QSA: the visible
     positions in ascending order; read only for rows not dense) -> o [M, Hq, D] bf16. `stages`: the split
@@ -585,18 +597,24 @@ def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None, stages: int = 
     else:
         pl, pacc = b["pl"], b["pacc"]
     out = torch.empty(M, HQ, D, dtype=torch.bfloat16, device=q.device)
+    fp8 = ks is not None
+    assert not fp8 or (kc.dtype == vc.dtype == torch.uint8 and ks.stride() == vs.stride() and ks.stride(1) == 1)
     _attn_rows_split[(M, HK, ATTN_SPLITS)](
         q, kc, vc, ctl, anc, sel, pm, pl, pacc,
-        kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1),
+        kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1), ks if fp8 else pm, vs if fp8 else pm,
+        ks.stride(0) if fp8 else 0,
         SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, BN=32, CHUNK=ATTN_CHUNK,
-        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=stages)
+        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=stages, FP8=fp8)
     _attn_rows_combine[(M, HQ)](pm, pl, pacc, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ATTN_SPLITS,
                                 num_warps=4)
     return out
 
 
-def attn_rows_reference(q, kc, vc, ctl, anc, sel):
-    """`attn_rows` in torch, fp32, from the same visible-key lists."""
+def attn_rows_reference(q, kc, vc, ctl, anc, sel, ks=None, vs=None):
+    """`attn_rows` in torch, fp32, from the same visible-key lists (an e4m3 cache decoded to bf16 first)."""
+    if ks is not None:
+        from tools.kv_fp8 import kv_dequant
+        kc, vc = kv_dequant(kc, ks), kv_dequant(vc, vs)
     M, HQ, D = q.shape
     HK = kc.shape[0]
     rep = HQ // HK

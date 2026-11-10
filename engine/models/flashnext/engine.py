@@ -141,6 +141,9 @@ PREFILL_CHUNK = int(_S.get("FN_PREFILL_CHUNK"))
 #: GEMM block, so a tile's products are the whole chunk's; and the tokens a tile of the PLE decode (`_ple_pre`)
 QSA_TILE = 1024
 PLE_DECODE_TOKENS = 512
+#: SPD-150: the rows a call writes to the e4m3 cache's staging buffers at most (a decode step, a verify block, a
+#: joint pass's lane); a prompt chunk stages in its own scratch
+KV_STAGE_ROWS = 64
 
 
 class ClassError(RuntimeError):
@@ -158,6 +161,9 @@ class FlashNextEngine(FlashNextRef):
     #: SPD-249 (T8): FN_ROUTE_FUSED acts for this family only. A family built on this class sets it False (Qwen3.5-MoE):
     #: its MoE calls and its load-time self-check stay the router, mask, sort and groups launches, whatever the knob says
     route_knobs = True
+    #: SPD-150: the knob that keeps the trunk's attention K and V as e4m3 codes. A family built on this class names its
+    #: own (or None: its caches stay bf16, whatever this family's knob says)
+    kv_fp8_knob: str | None = "FN_KV_FP8"
 
     def __init__(self, cfg, W: dict, tables: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, tables, dtype=torch.bfloat16, device=device)
@@ -184,6 +190,19 @@ class FlashNextEngine(FlashNextRef):
         self.joint_timing = {} if JOINT_TIMING else None  # a dict: `verify_multi` adds each part's GPU ms (a measurement)
         from engine.models.flashnext.union import ExpertUnion
         self.union = ExpertUnion(cfg.num_hidden_layers, cfg.num_experts, UNION_EVERY, device)   # SPD-249
+        # SPD-150 (QWEN38_FN_KV_FP8): the trunk's attention layers keep K and V as e4m3 codes with one fp32 scale a
+        # (head, token), the indexer keys and the MTP layer's cache bf16. A call's rows are written in bf16 to the
+        # staging buffers (`_kst`, `_vst`, `_ist` at the row's index), then coded at their slots (`_kv_code`)
+        self.kv_fp8 = (str(device).startswith("cuda") and self.kv_fp8_knob is not None
+                       and _S.get(self.kv_fp8_knob) == "1")
+        self._kst = self._vst = self._ist = self._kidx = None
+        if self.kv_fp8:
+            self._kst = torch.zeros(cfg.num_key_value_heads, KV_STAGE_ROWS, cfg.head_dim, dtype=torch.bfloat16,
+                                    device=device)
+            self._vst = torch.zeros_like(self._kst)
+            if cfg.has_indexer:
+                self._ist = torch.zeros(KV_STAGE_ROWS, cfg.indexer_head_dim, dtype=torch.bfloat16, device=device)
+            self._kidx = torch.arange(KV_STAGE_ROWS, dtype=torch.int64, device=device)
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
         self._wc: dict = {}
@@ -220,8 +239,13 @@ class FlashNextEngine(FlashNextRef):
                                        c.linear_value_head_dim, dtype=torch.float32, device=dev)
                 st.conv[li] = torch.zeros(1, c.conv_dim, c.linear_conv_kernel_dim - 1, dtype=self.dtype, device=dev)
             else:
-                st.k[li] = self._rows_tensor(st, (c.num_key_value_heads, cap, c.head_dim), 1, f"k.{li}")
-                st.v[li] = self._rows_tensor(st, (c.num_key_value_heads, cap, c.head_dim), 1, f"v.{li}")
+                # SPD-150: e4m3 codes (uint8) and their scales [Hk, cap] fp32 with QWEN38_FN_KV_FP8
+                kdt = torch.uint8 if self.kv_fp8 else None
+                st.k[li] = self._rows_tensor(st, (c.num_key_value_heads, cap, c.head_dim), 1, f"k.{li}", kdt)
+                st.v[li] = self._rows_tensor(st, (c.num_key_value_heads, cap, c.head_dim), 1, f"v.{li}", kdt)
+                if self.kv_fp8:
+                    st.ks[li] = self._rows_tensor(st, (c.num_key_value_heads, cap), 1, f"ks.{li}", torch.float32)
+                    st.vs[li] = self._rows_tensor(st, (c.num_key_value_heads, cap), 1, f"vs.{li}", torch.float32)
                 if c.has_indexer:
                     st.ik[li] = self._rows_tensor(st, (cap, c.indexer_head_dim), 0, f"ik.{li}")
                     st.pool[li] = self._pool_tensor(cap)
@@ -230,12 +254,13 @@ class FlashNextEngine(FlashNextRef):
                                           dtype=self.dtype, device=dev)
         return st
 
-    def _rows_tensor(self, st: FNState, shape: tuple, axis: int, name: str) -> torch.Tensor:
-        """A buffer indexed by position on `axis`: paged in the state's set, else zeros."""
+    def _rows_tensor(self, st: FNState, shape: tuple, axis: int, name: str, dtype=None) -> torch.Tensor:
+        """A buffer indexed by position on `axis`: paged in the state's set, else zeros (`dtype`: the engine's)."""
+        dt = self.dtype if dtype is None else dtype
         if st.pages is None:
-            return torch.zeros(*shape, dtype=self.dtype, device=self.device)
+            return torch.zeros(*shape, dtype=dt, device=self.device)
         from engine import kvpool as _kvp
-        return st.pages.add(_kvp.PagedBuffer(shape, axis, self.dtype, self.device, owner=st.pages.owner,
+        return st.pages.add(_kvp.PagedBuffer(shape, axis, dt, self.device, owner=st.pages.owner,
                                              name=f"fn.{name}")).tensor
 
     def _pool_tensor(self, cap: int) -> torch.Tensor:
@@ -244,6 +269,29 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_seq_kernels as SK
         return torch.zeros(cap // self.cfg.indexer_compress_ratio + SK.OWN + 1, self.cfg.indexer_head_dim,
                            dtype=self.dtype, device=self.device)
+
+    def _kv_targets(self, st: FNState, li: int, M: int, kt=None, vt=None, it=None) -> tuple:
+        """SPD-150: where a call's attention prep writes its M rows of layer li: the caches at the rows' slots (bf16),
+        or with an e4m3 cache the staging buffers at the rows' index (`kt` / `vt` [Hk, >= M, D], `it` [>= M, ihd]: a
+        prompt chunk's own; else the engine's) -> (k, v, indexer keys, the index or None)."""
+        if li not in st.ks:
+            return st.k[li], st.v[li], st.ik.get(li), None
+        if kt is None:
+            assert M <= KV_STAGE_ROWS, f"{M} rows into the e4m3 cache's staging buffers of {KV_STAGE_ROWS}"
+            kt, vt, it = self._kst, self._vst, self._ist
+            idx = self._kidx[:M]
+        else:
+            idx = torch.arange(M, dtype=torch.int64, device=kt.device)
+        return kt, vt, (it if li in st.ik else None), idx
+
+    def _kv_code(self, st: FNState, li: int, kt, vt, it, idx, slot) -> None:
+        """SPD-150: the staged rows `idx` coded into layer li's e4m3 cache at `slot` (int64 [M]), one launch for K and
+        V; the indexer keys copied to their slots as they are (bf16). Before anything reads the rows."""
+        from tools import kv_fp8 as KQ
+        M = idx.numel()
+        KQ.kv_quant2(kt, vt, idx, st.k[li], st.ks[li], st.v[li], st.vs[li], slot[:M])
+        if it is not None:
+            st.ik[li].index_copy_(0, slot[:M], it[:M])
 
     @torch.no_grad()
     def build_pool(self, st: FNState, layers=None) -> None:
@@ -266,7 +314,7 @@ class FlashNextEngine(FlashNextRef):
     def reset(self, st: FNState) -> None:
         self.drop_parked(st)
         st.reset_inplace()
-        for d in (st.k, st.v, st.ik, st.pool):
+        for d in (st.k, st.v, st.ik, st.pool, st.ks, st.vs):
             for v in d.values():
                 v.zero_()
 
@@ -587,6 +635,9 @@ class FlashNextEngine(FlashNextRef):
     def forward(self, tokens, st, layers=None, trace=None, head="all"):
         """A prompt chunk (or any block) through the fused trunk; the reference's forward for a
         layer subset or a trace."""
+        if st.ks:
+            raise NotImplementedError("the reference forward keeps a bf16 cache: an e4m3 cache (QWEN38_FN_KV_FP8) "
+                                      "takes the prefill kernels (QWEN38_FN_PREFILL=kernels)")
         if layers is not None or trace is not None:
             return super().forward(tokens, st, layers=layers, trace=trace, head=head)
         tokens = tokens.view(-1).to(self.device)
@@ -735,10 +786,27 @@ class FlashNextEngine(FlashNextRef):
             if iq is None:
                 iq = P["bufs"]["iq"] = torch.empty(x.shape[0], c.indexer_n_heads, c.indexer_head_dim,
                                                    dtype=self.dtype, device=x.device)
+        kt = vt = it = None
+        if li in st.ks:
+            # SPD-150: the chunk's rows staged in bf16 in the chunk's scratch, then coded at their positions; every
+            # row then reads the cache decoded, its own key too (the decode step's arithmetic)
+            T, b, Hk, D = x.shape[0], P["bufs"], c.num_key_value_heads, c.head_dim
+            if b.get("kst") is None or b["kst"].numel() < Hk * T * D:
+                b["kst"] = torch.empty(Hk * T * D, dtype=self.dtype, device=x.device)
+                b["vst"] = torch.empty_like(b["kst"])
+                b["ist"] = (torch.empty(T * c.indexer_head_dim, dtype=self.dtype, device=x.device)
+                            if c.has_indexer else None)
+            # contiguous [Hk, T, D] and [T, ihd] views (the prep kernel's layout)
+            kt, vt = b["kst"][:Hk * T * D].view(Hk, T, D), b["vst"][:Hk * T * D].view(Hk, T, D)
+            it = b["ist"][:T * c.indexer_head_dim].view(T, -1) if b["ist"] is not None else None
+        kc, vc, ikc, kidx = self._kv_targets(st, li, x.shape[0], kt, vt, it)
         q = K.attn_prep(qkv, iqk, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
-                        P["cos"], P["sin"], st.k[li], st.v[li], st.ik.get(li), c.num_attention_heads,
+                        P["cos"], P["sin"], kc, vc, ikc, c.num_attention_heads,
                         c.num_key_value_heads, c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0,
-                        c.rms_norm_eps, slot=P["pos"], qln=self.W[ip + "q_layernorm.weight"] if cls else None, iq=iq)
+                        c.rms_norm_eps, slot=P["pos"] if kidx is None else kidx,
+                        qln=self.W[ip + "q_layernorm.weight"] if cls else None, iq=iq)
+        if kidx is not None:
+            self._kv_code(st, li, kc, vc, ikc, kidx, P["pos"])
         if c.has_indexer and P["pool"][1] > P["pool"][0]:
             SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], P["cos"],
                         P["sin"], c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
@@ -753,7 +821,8 @@ class FlashNextEngine(FlashNextRef):
                 sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls, lean=PF_NOCOPY)
                 SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
                 del sc
-        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES)
+        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES,
+                         ks=st.ks.get(li), vs=st.vs.get(li))
         y = K.gate_mul(o, qkv, c.head_dim)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
@@ -1422,6 +1491,8 @@ class FlashNextEngine(FlashNextRef):
             return "switches"
         if K.MOE_STAGE or self.joint_timing is not None or self.route_trace is not None or self._moe_record is not None:
             return "measuring"
+        if self.kv_fp8:
+            return "kv_fp8"         # SPD-150: the joint graph's attention entries name bf16 caches only
         if len(items) > JG_LANES:
             return "lanes"
         if rows > JG_ROWS[-1]:
@@ -2010,6 +2081,9 @@ class FlashNextEngine(FlashNextRef):
                     src, dst = d["src"][:n], d["dst"][:n]
                     st.k[li].index_copy_(1, dst, st.k[li].index_select(1, src))
                     st.v[li].index_copy_(1, dst, st.v[li].index_select(1, src))
+                    if li in st.ks:                     # SPD-150: the scales with their codes
+                        st.ks[li].index_copy_(1, dst, st.ks[li].index_select(1, src))
+                        st.vs[li].index_copy_(1, dst, st.vs[li].index_select(1, src))
                     if li in st.ik:
                         st.ik[li].index_copy_(0, dst, st.ik[li].index_select(0, src))
             if c.has_indexer:
@@ -2192,6 +2266,9 @@ class FlashNextEngine(FlashNextRef):
             for li in c.attention_layers:
                 st.k[li].index_copy_(1, d["dst"], st.k[li].index_select(1, d["src"]))
                 st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
+                if li in st.ks:                         # SPD-150: the scales with their codes
+                    st.ks[li].index_copy_(1, d["dst"], st.ks[li].index_select(1, d["src"]))
+                    st.vs[li].index_copy_(1, d["dst"], st.vs[li].index_select(1, d["src"]))
                 if li in st.ik:
                     st.ik[li].index_copy_(0, d["dst"], st.ik[li].index_select(0, d["src"]))
         if c.has_indexer:
@@ -2432,6 +2509,8 @@ class FlashNextEngine(FlashNextRef):
         from tools import fn_seq_kernels as SK
         c = self.cfg
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
+        if any(li in x["st"].ks for x in cx):
+            return None             # SPD-150: an e4m3 cache's lanes take `_attn1_core` a lane at a time
         ks = [x["st"].k[li] for x in cx]
         vs = [x["st"].v[li] for x in cx]
         strides = (ks[0].stride(0), ks[0].stride(1), vs[0].stride(0), vs[0].stride(1))
@@ -2627,11 +2706,14 @@ class FlashNextEngine(FlashNextRef):
         M = qkv.shape[0]
         cls = self._cls if c.has_indexer else 0
         ip = p + "indexer."
+        kc, vc, ikc, kidx = self._kv_targets(st, li, M)
         q = K.attn_prep(qkv, iqk, d["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
-                        self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), Hq, Hk,
+                        self.rope_cos, self.rope_sin, kc, vc, ikc, Hq, Hk,
                         c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0, c.rms_norm_eps,
-                        slot=d["slot"], qln=self.W[ip + "q_layernorm.weight"] if cls else None,
+                        slot=d["slot"] if kidx is None else kidx, qln=self.W[ip + "q_layernorm.weight"] if cls else None,
                         iq=d["iq"] if cls else None)
+        if kidx is not None:
+            self._kv_code(st, li, kc, vc, ikc, kidx, d["slot"])          # SPD-150
         if c.has_indexer and (cls or self._write):
             # the pooled keys of the row's own blocks (from its own path); a decode step also keeps
             # its block in the shared pool (garbage until the block is complete, then its value)
@@ -2645,7 +2727,8 @@ class FlashNextEngine(FlashNextRef):
                     sc = self._cur[("sc", cls)] = torch.empty(M, cls, dtype=torch.float32, device=qkv.device)
                 SK.qsa_scores(d["iq"], st.pool[li], own.view(M, SK.OWN, -1), d["qctl"], cls, out=sc)
                 SK.qsa_select(sc, d["tail"], d["sel"])
-        o = SK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"], bufs=self._cur["attn"])
+        o = SK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"], bufs=self._cur["attn"],
+                         ks=st.ks.get(li), vs=st.vs.get(li))
         return K.gate_mul(o, qkv, D)
 
     # ------------------------------------------------------------------------- MTP (ENG-153)
@@ -3611,7 +3694,7 @@ def _state_saved(eng: FlashNextEngine, st: FNState) -> list:
     out = []
     for name, t in _state_tensors(st).items():
         kind = name.split(".", 1)[0]
-        if kind in ("k", "v"):
+        if kind in ("k", "v", "ks", "vs"):
             out.append((t, 1, L, min(CAPTURE_ROWS, t.shape[1] - L)))
         elif kind == "ik":
             out.append((t, 0, L, min(CAPTURE_ROWS, t.shape[0] - L)))
@@ -3631,7 +3714,7 @@ def _state_restore(saved: list) -> None:
 def _state_tensors(st: FNState) -> dict:
     out = {}
     for name, d in (("S", st.S), ("conv", st.conv), ("k", st.k), ("v", st.v), ("ik", st.ik), ("pconv", st.ple_conv),
-                    ("pool", st.pool)):
+                    ("pool", st.pool), ("ks", st.ks), ("vs", st.vs)):
         for li, t in d.items():
             out[f"{name}.{li}"] = t
     return out

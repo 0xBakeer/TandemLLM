@@ -61,8 +61,10 @@ TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 def manifest() -> Manifest:
     """What Flash-Next's stored rows depend on (fingerprint v3, ENG-243): its package's arithmetic
-    (not this adapter), the knob registry, its own tile tables; the `tools/` kernels follow."""
-    return Manifest(arch="qwen4_exp", modules=MODULES, data=TABLES)
+    (not this adapter), the knob registry, its own tile tables; the `tools/` kernels follow. SPD-150: an e4m3 cache
+    stores other rows, so its entries are another arch's, never read as the bf16 cache's."""
+    return Manifest(arch="qwen4_exp-kvfp8" if _S.get("FN_KV_FP8") == "1" else "qwen4_exp", modules=MODULES,
+                    data=TABLES)
 
 
 class _DraftReadWait:
@@ -263,6 +265,8 @@ class FlashNextCacheState(SectionState):
         out = []
         for li in sorted(st.k):
             out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+            if li in st.ks:                     # SPD-150: an e4m3 cache's scales, by position as the codes
+                out += [(f"ks.{li}", st.ks[li], 1), (f"vs.{li}", st.vs[li], 1)]
             if li in st.ik:
                 out.append((f"ik.{li}", st.ik[li], 0))
         return out
@@ -403,11 +407,11 @@ class FlashNextServing:
 
     def cost(self) -> CostModel:
         """What a state snapshot holds: its sections whole (the recurrent, conv and PLE ones) and the
-        cache rows a token adds (K, V and the indexer key of every attention layer, bf16)."""
+        cache rows a token adds (K, V and the indexer key of every attention layer, bf16; SPD-150: K and V as e4m3
+        codes and one fp32 scale a head with QWEN38_FN_KV_FP8)."""
         sec = {k: t.numel() * t.element_size() for k, t in self.state.buffers().items()}
         c = self.cfg
-        per_tok = len(c.attention_layers) * (c.num_key_value_heads * c.head_dim * 2
-                                             + (c.indexer_head_dim if c.has_indexer else 0)) * 2
+        per_tok = len(c.attention_layers) * self._kv_layer_bytes(getattr(self.fn, "kv_fp8", False))
         # the prefill workspace, measured 2026-10-12 on 3.05: 2.51 GiB at 8k and 2.40 GiB at 32k
         # (tools/fn_memory_check.py; the 4,096-row chunk's activations), 10.46 GiB above the engine at a
         # 147,149-token prefill and 10.47 GiB at 261,549 (SPD-99): it grows to about 140k tokens and then
@@ -427,6 +431,14 @@ class FlashNextServing:
                          workspace_rows=self._workspace_rows,
                          parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
                                 "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
+
+    def _kv_layer_bytes(self, fp8: bool) -> int:
+        """An attention layer's cache bytes a token: K and V (bf16, or e4m3 codes and one fp32 scale a head) and the
+        indexer key (bf16)."""
+        from tools.kv_fp8 import bytes_per_token
+        c = self.cfg
+        return (bytes_per_token(c.num_key_value_heads, c.head_dim, fp8)
+                + (c.indexer_head_dim * 2 if c.has_indexer else 0))
 
     def _workspace_rows(self, n_ctx: int, rows: int, line: bool = True) -> int:
         """SRV-773 (`CostModel.workspace_rows`): the workspace of forwarding `rows` rows onto `n_ctx` served rows, at
@@ -544,7 +556,10 @@ class FlashNextServing:
         MTP head's when the window is not paged; the recurrent sections, and the graphs' pools a slot
         captures (SIDE_SLOT_CONST, measured)."""
         cost = self.cost()
-        per_token = 0 if paged else cost.view_bytes_per_token * 13 // 12      # the MTP layer's 13th
+        # the MTP layer's own cache beside the trunk's, bf16 (SPD-150: with an e4m3 trunk cache too)
+        fp8 = getattr(self.fn, "kv_fp8", False)
+        per_token = 0 if paged else (cost.view_bytes_per_token + self._kv_layer_bytes(False) if fp8
+                                     else cost.view_bytes_per_token * 13 // 12)
         return per_token, cost.section_bytes + SIDE_SLOT_CONST
 
     def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
@@ -605,7 +620,7 @@ class FlashNextServing:
         mtp_kv = 0
         if head is not None:
             mtp_kv = nb(head.st.k, head.st.v, head.st.ik, head.st.pool)
-        return {**self._weights, "kv_pool": nb(st.k, st.v, st.ik, st.pool), "drafter_kv": mtp_kv,
+        return {**self._weights, "kv_pool": nb(st.k, st.v, st.ik, st.pool, st.ks, st.vs), "drafter_kv": mtp_kv,
                 "gdn_state": sum(int(t.numel() * t.element_size()) for t in self.state.buffers().values())}
 
     def resident_files(self) -> list:
@@ -1531,7 +1546,7 @@ def serve(a, ctx) -> dict:
     describe = (f"Flash-Next {a.model}: load {info['load'].get('total_s')} s, drafter "
                 f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}"
                 f"{' + lookup' if getattr(drafter, 'ngram', None) is not None else ''}, "
-                f"max_len {a.max_len:,},")
+                f"KV cache {'e4m3' if eng.fn.kv_fp8 else 'bf16'}, max_len {a.max_len:,},")
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
@@ -1539,4 +1554,6 @@ def serve(a, ctx) -> dict:
                                          "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
                                          "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
                                          "self_check": info["self_check"],
+                                         # SPD-150: which cache the trunk's attention layers keep (QWEN38_FN_KV_FP8)
+                                         "kv_cache": "e4m3" if eng.fn.kv_fp8 else "bf16",
                                          **({"corrector": info["corrector"]} if "corrector" in info else {})}}}

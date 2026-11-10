@@ -143,4 +143,7 @@ KNOBS: dict[str, tuple] = {
     'FN_PACK_GRAPH': ('1', 'engine/models/flashnext/engine.py'),
     # SPD-249 (T1): a packed draft graph's key is captured at its n-th draft (the eager drafts before it load what it runs)
     'FN_PACK_GRAPH_AFTER': ('2', 'engine/models/flashnext/engine.py'),
+    # SPD-150: the trunk's attention layers keep K and V as e4m3 codes with one fp32 scale a (head, token) (the MTP
+    # layer's cache and the indexer keys stay bf16); 0: the exact bf16 cache
+    'FN_KV_FP8': ('0', 'engine/models/flashnext/engine.py'),
 }
