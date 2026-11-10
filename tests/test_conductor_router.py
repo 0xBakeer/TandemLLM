@@ -1160,6 +1160,46 @@ def test_notes_head_keeps_the_head_on_later_turns_and_puts_new_notes_at_the_tail
     assert p3.injected and all(x["at"] >= p1.head_end for x in p3.injected), p3.injected
     assert text_of(ids3).endswith(p3.injected[-1]["text"] + "<|im_end|>\n<|im_start|>assistant\n<think>\n")
 
+def test_the_served_prompt_is_known_before_it_is_served():
+    """SRV-801: `served` is the prompt `apply_prompt` then serves, with the client's position and
+    the length of every note in it, and it changes nothing of the plan or its session: a request
+    is priced on the rows its prefill reads before it is admitted."""
+    cond, fakes = setup(decider=by_label("code_edit", 0.91))
+    tok = app.STATE["tok"]
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": CODE}]
+    for step in ("the first turn", "a tool turn"):
+        b = body(list(msgs))
+        plan = cond.plan(b, {"x-session-id": "ses-1"}, client_kind="opencode", request_id="req",
+                         chat=True)
+        prompt, _, in_think = app.build_prompt(b)
+
+        def state():
+            return ([id(n) for n in plan.session.notes], repr(plan.row), list(plan.injected),
+                    list(plan.spans), plan.changed, plan.clean_ids, plan._probe_at, plan.head_end,
+                    len(fakes["decider"].calls))
+        before = state()
+        got = plan.served(prompt, tok, in_think)
+        assert state() == before, f"{step}: the dry run changed the plan"
+        assert plan.served(prompt, tok, in_think) == got, "asked twice, the same answer"
+        out, _ = plan.apply_prompt(prompt, tok, in_think)
+        assert got is not None and got[0] == out.tolist(), f"{step}: not the prompt it serves"
+        assert plan.changed and got[1] == [(n.pos, len(n.ids)) for n in plan.session.notes]
+        assert len(got[0]) - prompt.numel() == sum(k for _, k in got[1]) > 0
+        assert all(0 < p < prompt.numel() for p, _ in got[1]), "positions on the client's tokens"
+        msgs += [{"role": "assistant", "content": "", "reasoning_content": "step",
+                  "tool_calls": [{"id": "c0", "type": "function",
+                                  "function": {"name": "bash",
+                                               "arguments": json.dumps({"command": "ls"})}}]},
+                 {"role": "tool", "tool_call_id": "c0", "content": "ran ls"}]
+    assert plan.row["replayed"]["count"] == 1 and not plan.injected, "the second was a replay"
+    # a raw request is served as rendered: nothing to say
+    b = body([{"role": "user", "content": CODE}])
+    plan = cond.plan(b, {"X-Tandem": "raw", "x-session-id": "raw"}, client_kind="opencode",
+                     request_id="req", chat=True)
+    prompt, _, in_think = app.build_prompt(b)
+    assert not plan.active and plan.served(prompt, tok, in_think) is None
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

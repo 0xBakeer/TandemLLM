@@ -129,17 +129,18 @@ def _box(app, avail_gib: float, in_flight_gib: float = IN_FLIGHT, clock=None, **
 
 
 def _admit(app, b, cid: str, n, home: int = 0, max_new: int = 8192, slot=None, limit_s: float = 2.0,
-           home_rows: bool = False, stream: bool = True):
+           home_rows: bool = False, stream: bool = True, **more):
     """`_par_admit` of a prompt (`n` tokens, or its ids) on slot 0 or `slot`, its wait bounded at `limit_s` on the
     test's clock: (admitted, its record, the engine log's lines). `home_rows`: priced on the rows, where the server
-    has that (`_slot_share`'s answer for a regenerate or an edit)."""
+    has that (`_slot_share`'s answer for a regenerate or an edit). `more`: `served` (the ids the prefill reads),
+    `home_ask`, `undecided`, each where the server has it; without them the client's tokens are priced."""
     import torch
     from server import usage
     rec = usage.RequestRecord(f"chatcmpl-{cid}", "chat", True)
     out = io.StringIO()
     prompt = torch.zeros(n, dtype=torch.long) if isinstance(n, int) else torch.tensor(n, dtype=torch.long)
-    kw = {"home_rows": True} if home_rows and "home_rows" in inspect.signature(app.Handler._par_admit).parameters \
-        else {}
+    has = inspect.signature(app.Handler._par_admit).parameters
+    kw = {k: v for k, v in dict(more, home_rows=home_rows).items() if v and k in has}
     slots.bind(slot)
     try:
         with contextlib.redirect_stdout(out):
@@ -210,12 +211,17 @@ def _chat(n: int, spans=((PART, 455),), answer: int = 16):
     return view, res, dict(resident=res, slot0_view=view, engine=_engine(res.valid))
 
 
-def _priced(app, b, cid: str, ids: list, conv: int = 5_000):
-    """A turn of `ids` on slot 0 as the handler admits it: its share (`_slot_share`), then `_par_admit`.
+def _priced(app, b, cid: str, ids: list, conv: int = 5_000, served=None, notes=(), **kw):
+    """A turn of `ids` on slot 0 as the handler admits it: its share (`_slot_share`), then `_par_admit` with the
+    rows asked for that share. `served`: the prompt its prefill reads, the server's `notes` (the client's position,
+    tokens) in it (`_plan_served`); the share is then counted on it (`_served_share`).
     (admitted, its record, the workspace its reserve holds, the log) In 0.15.3 slot 0 had no share."""
     why = {"ids": ids, "conv": conv}
     home = app._slot_share(why, None) if hasattr(app, "_slot_share") else 0
-    ok, rec, log = _admit(app, b, cid, ids, home=home, home_rows=bool(why.get("home_rows")))
+    if served is not None and hasattr(app, "_served_share"):
+        home = app._served_share(home, notes)
+    ok, rec, log = _admit(app, b, cid, ids, home=home, home_rows=bool(why.get("home_rows")), home_ask=bool(home),
+                          served=served, **kw)
     ws = b.adm.held[cid] - b.adm.kv[cid][0] if cid in b.adm.held else None
     return ok, rec, ws, log
 
@@ -556,32 +562,154 @@ def test_a_regenerate_after_several_turns_is_charged_more_than_a_chunk():
     return f"7,281 rows: {ws / GiB:.2f} GiB, a whole chunk in the pool's floor"
 
 
-def test_the_next_turn_of_slot_0s_chat_is_charged_its_new_rows_not_the_prompt():
-    """`t3`, the short follow-up: 199,651 client tokens, 508 of them past the last prompt. The client's tokens part
-    from the rows at the first span the server put there (row 3,000), so 0.15.3 priced the whole prompt: 199,651 rows,
-    10.75 GiB, for a turn that forwarded 998. It is charged the 508 rows past its share, as before this change: the
-    next turn is served from the end anchor and is not priced on the rows again."""
-    app = _app()
+def _t3():
+    """`t3` as the box served it: 199,651 client tokens, 508 of them past the last prompt, and a 490-token note of
+    the server's before the last message's end. The rows hold the last prompt with two spans of the server's (row
+    3,000 and row 150,000) and end at row 203,448. (the client's ids, the note's position, the slot's rows, state)"""
     n, new = 199_651, 508
     view, res, st = _chat(n - new, spans=((3_000, 305), (150_000, 4_000)), answer=300)
     assert res.end["at"] == 203_448
-    ids = view + [4] * (new - 4) + [2] * 4
+    return view + [4] * (new - 4) + [2] * 4, n - 5, res, st
+
+
+def _first(app, b, cid: str, rows: int, start: int):
+    """The request's first forward of `rows` served rows resumed at `start`: (what the backstop raised, its log)."""
+    app.STATE["pool"] = b.pool
+    out, err = io.StringIO(), None
+    with contextlib.redirect_stdout(out):
+        try:
+            with app._forward_ask(cid, rows):
+                app._first_forward(None, None, start, False)
+        except Exception as exc:                                   # noqa: BLE001
+            err = exc
+    return err, out.getvalue()
+
+
+def test_the_next_turn_of_slot_0s_chat_is_charged_the_rows_it_forwards_not_the_prompt():
+    """`t3`, the short follow-up. The client's tokens part from the rows at the first span the server put there (row
+    3,000), so 0.15.3 priced the whole prompt: 199,651 rows, 10.75 GiB, for a turn that forwarded 998. Priced on the
+    client's tokens past its share it was charged 508 rows, and its first forward found 998: the note the server
+    puts into the last message was in no price. It is priced on the prompt it is served as, 204,446 rows: 998 at the
+    gate, the rows' own answer from the end anchor, and its first forward raises nothing."""
+    app = _app()
+    ids, at, res, st = _t3()
+    served = ids[:at] + [8] * 490 + ids[at:]
     with _box(app, AVAIL, **st) as b:
-        ok, rec, ws, log = _priced(app, b, "t3", ids)
-        assert rec.ws_rows == new, \
+        ok, rec, ws, log = _priced(app, b, "t3", ids, served=served, notes=[(at, 490)])
+        assert rec.ws_rows == 998, \
             f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB) for a turn that forwards 998"
         assert ok is True and rec.ws_kind == "home" and "waits for memory" not in log, (vars(rec), log)
-        assert ws == b.mem.model(n, new, line=False)
-        # its prefill, as the box served it: 204,446 rows with the server's spans, resumed at the end anchor
-        app.STATE["pool"] = b.pool
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), app._forward_ask("t3", 204_446):
-            assert app._first_forward(None, None, 203_448, False) is None
-        up = b.mem.model(204_446, 998, line=False)
-        assert b.adm.held["t3"] - b.adm.kv["t3"][0] == up > ws, "the reserve holds the rows it forwards"
-        assert f"[memory] t3 forwards 998 rows, priced at 508 rows: its workspace {ws / GiB:.2f} -> {up / GiB:.2f} " \
-               f"GiB, reserved" in out.getvalue(), out.getvalue()
-    return f"508 rows, {ws / GiB:.2f} GiB at the gate; {up / GiB:.2f} GiB once it forwards 998"
+        assert ws == b.mem.model(204_446, 998, line=False) > b.mem.model(199_651, 508, line=False)
+        assert res.stats["end_replayed"] == 0, "asking the rows counts nothing"
+        # its prefill, as the box served it: 204,446 rows resumed at the end anchor
+        assert _first(app, b, "t3", 204_446, 203_448) == (None, ""), "nothing to raise at the first forward"
+        assert b.adm.held["t3"] - b.adm.kv["t3"][0] == ws and not b.adm.stats.get("raised")
+    return f"998 rows, {ws / GiB:.2f} GiB at the gate (508 rows: {b.mem.model(199_651, 508, line=False) / GiB:.2f})"
+
+
+def test_a_next_turn_the_floor_holds_at_its_clients_rows_only_waits_at_the_gate():
+    """The band between the two prices: the floor holds the 508 rows the client sent (1.87 GiB) and not the 998 the
+    prefill forwards (2.92). Priced on the client's tokens the turn passed the gate there and gave way at its first
+    forward, and one not streamed got `memory_full`. Priced on the served prompt (here with the session's notes
+    replayed by the plan, where the rows hold them) it waits at the gate: no reserve, no give-way, no `memory_full`,
+    streamed or not. With the floor held it is admitted and its first forward raises nothing."""
+    app = _app()
+    ids, at, res, st = _t3()
+    served = res.tokens[:203_448] + ids[199_143:at] + [8] * 490 + ids[at:]
+    notes = [(3_000, 305), (150_000 - 305, 4_000), (at, 490)]
+    assert len(served) == 204_446
+    with _box(app, 30.0, in_flight_gib=0, **st) as b:
+        ok, rec, up, log = _priced(app, b, "fits", ids, served=served, notes=notes)
+        assert rec.ws_rows == 998, f"charged {rec.ws_rows:,} rows at the gate for a turn that forwards 998"
+        assert ok is True and up == b.mem.model(204_446, 998, line=False), (vars(rec), log)
+        assert app._served_share(199_143, notes) == 203_448, "the share on the served prompt: its end anchor"
+        kv, low = b.adm.kv["fits"][0], b.mem.model(199_651, 508, line=False)
+    band = MARGIN + KV_STEP + kv + (low + up) // 2
+    # the client's tokens alone: through the gate, then short at the first forward
+    with _box(app, 30.0, in_flight_gib=0, **st) as b:
+        b.box["avail"] = band
+        ok, rec, ws, log = _priced(app, b, "old", ids)
+        assert ok is True and rec.ws_rows == 508 and ws == low, (vars(rec), log)
+        err, said = _first(app, b, "old", 204_446, 203_448)
+        assert isinstance(err, app.ForwardShort) and "it gives way before its first forward" in said, (err, said)
+    for stream in (True, False):
+        with _box(app, 30.0, in_flight_gib=0, **st) as b:
+            b.box["avail"] = band
+            ok, rec, ws, log = _priced(app, b, "t3", ids, served=served, notes=notes, stream=stream)
+            assert rec.ws_rows == 998, f"charged {rec.ws_rows:,} rows at the gate for a turn that forwards 998"
+            assert ok is False and rec.stop_detail == "memory_wait_timeout", (stream, ok, rec.stop_detail)
+            assert "t3 waits for memory" in log and "gives way" not in log and "memory_full" not in log, log
+            assert "t3" not in b.adm.held and ws is None, "it holds nothing while it waits"
+            assert not b.adm.stats.get("raised") and not b.adm.stats.get("raise_refused"), b.adm.stats
+    with _box(app, 30.0, in_flight_gib=0, **st) as b:
+        b.box["avail"] = MARGIN + KV_STEP + kv + up + 16 * MiB
+        ok, rec, ws, log = _priced(app, b, "t3", ids, served=served, notes=notes)
+        assert ok is True and ws == up and "waits for memory" not in log, (vars(rec), log)
+        assert _first(app, b, "t3", 204_446, 203_448) == (None, "") and not b.adm.stats.get("raised")
+    return f"with {low / GiB:.2f} to {up / GiB:.2f} GiB of workspace free it waits at the gate; admitted at 998 rows"
+
+
+def test_a_new_chat_is_priced_on_the_prompt_it_is_served_as():
+    """`t1`: a new chat of 54 client tokens, served as 3,412 rows with the server's notes. Its price was the 54 rows
+    (0.81 GiB of workspace) and the prefill forwarded 3,412. Priced on the served prompt it is charged those, its
+    pages are counted on the client's tokens as before (the notes have their margin there), and the first forward
+    raises nothing."""
+    app = _app()
+    ids = [1] * 50 + [2] * 4
+    served = ids[:10] + [8] * 3_000 + ids[10:50] + [8] * 358 + ids[50:]
+    with _box(app, AVAIL) as b:
+        ok, rec, log = _admit(app, b, "t1", ids, served=served)
+        assert rec.ws_rows == 3_412, f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB) for a prompt served as 3,412"
+        assert ok is True and "waits for memory" not in log, (vars(rec), log)
+        ws = b.adm.held["t1"] - b.adm.kv["t1"][0]
+        assert ws == b.mem.model(3_412, 3_412, line=False) > b.mem.model(54, 54, line=False)
+        assert _admit(app, b, "client", ids)[0] and b.adm.kv["client"] == b.adm.kv["t1"], "the pages as before"
+        assert _first(app, b, "t1", 3_412, 0) == (None, "") and not b.adm.stats.get("raised")
+    return f"3,412 rows: {ws / GiB:.2f} GiB of workspace (54 rows: {b.mem.model(54, 54, line=False) / GiB:.2f})"
+
+
+def test_a_regenerate_counts_the_note_the_server_puts_into_it():
+    """`t3r` with a note of this turn: the regenerate's copy with 300 tokens of the server's in its last message.
+    The rows part under the span before it and the prefill resumes at the chunk line below: the 4,197 rows of the
+    copy and the note's 300 are forwarded, and the gate prices all of them."""
+    app = _app()
+    n = LINE + 4_197
+    view, res, st = _chat(n)
+    served = view[:n - 5] + [8] * 300 + view[n - 5:]
+    with _box(app, AVAIL, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "t3r", list(view), served=served, notes=[(n - 5, 300)])
+        assert rec.ws_rows == 4_497, \
+            f"charged {rec.ws_rows:,} rows ({rec.ws_gib:.2f} GiB, {rec.ws_kind}) for a regenerate that forwards 4,497"
+        assert ok is True and ws == b.mem.model(n + 300, 4_497, line=False), (vars(rec), log)
+        assert _first(app, b, "t3r", n + 300, LINE) == (None, "") and not b.adm.stats.get("raised")
+    return f"4,497 rows: {ws / GiB:.2f} GiB"
+
+
+def test_notes_the_server_decides_after_the_admission_are_counted_at_their_cap():
+    """With the in-context stage still to run, the turn's class is decided by a forward under the admission, so its
+    note is not in the served prompt the gate reads: the class's note is counted at its cap (`max_note_tokens`),
+    on top of the rows the prompt forwards. A share counted on the client's tokens moves by the notes before it."""
+    app = _app()
+    ids, at, res, st = _t3()
+    with _box(app, 30.0, **st) as b:
+        ok, rec, ws, log = _priced(app, b, "ctx", ids, undecided=6_000)
+        assert rec.ws_rows == 6_508, f"charged {rec.ws_rows:,} rows with a note of up to 6,000 still to come"
+        assert ok is True and ws == b.mem.model(203_956 + 6_000, 6_508, line=False), (vars(rec), log)
+    plan = types.SimpleNamespace(active=True, context={"due": "followup"}, prompt_client=False,
+                                 router_cfg={"injection": {"max_note_tokens": 6_000}},
+                                 served=lambda prompt, tok, in_think: ([1, 8, 8, 2], [(1, 2)]))
+    app.STATE.update(tok=None)
+    try:
+        assert app._plan_served(plan, None, False) == ([1, 8, 8, 2], [(1, 2)], 6_000)
+        plan.context = None
+        assert app._plan_served(plan, None, False) == ([1, 8, 8, 2], [(1, 2)], 0)
+        plan.served = lambda prompt, tok, in_think: None
+        assert app._plan_served(plan, None, False) == (None, (), 0), "served as rendered"
+        assert app._plan_served(None, None, False) == (None, (), 0), "a raw request"
+    finally:
+        app.STATE.clear()
+    assert app._served_share(0, [(0, 9)]) == 0 and app._served_share(100, [(40, 7), (100, 5), (180, 3)]) == 107
+    return f"508 rows and a 6,000-token cap: {ws / GiB:.2f} GiB"
 
 
 def test_a_request_goes_on_past_the_view_only_from_its_generation_prompt():
