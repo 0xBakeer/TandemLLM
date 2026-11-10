@@ -342,7 +342,8 @@ describe('localStorage tandem.setup.v1', () => {
 
 describe('the memory check on Review', () => {
   it('exl3-6.0, every tool, 4 slots of 262,144 without the pool does not fit; How to fix names the pool first', () => {
-    const all = Object.fromEntries(M.components.map((c) => [c.id, true]));
+    // every tool but the e4m3 cache (SPD-150), which halves the KV: the heaviest selection
+    const all = Object.fromEntries(M.components.map((c) => [c.id, c.id !== 'kv_fp8']));
     const sel = { ...defaults(M), profile: 'exl3-6.0', components: normaliseComponents(M, all), kv_pool: false, slots: 4 };
     const e = estimate(M, sel);
     expect(e.fits).toBe(false);
