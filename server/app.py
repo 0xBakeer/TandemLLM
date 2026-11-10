@@ -9029,7 +9029,12 @@ class Handler(BaseHTTPRequestHandler):
                         held = 0 if home_rows else held
                     else:
                         n_p = max(n, int(served_.get("n") or 0))
-                        if n - fwd_r < held:
+                        # The rows' answer above the share too: the view is the last prompt, so a next turn's
+                        # share ends in its generation prompt, and its prefill resumes at the end anchor, past
+                        # the answer. A copy without the answer's reasoning parts from the rows there, so the
+                        # plain estimate stays below the share; priced at the share, every such turn was charged
+                        # the copy's empty think block and its answer again (1,002 rows for 998 forwarded)
+                        if n - fwd_r != held:
                             held, at = max(0, n - fwd_r), "rows"
                 if held > int(start):
                     start, kind = held, at
