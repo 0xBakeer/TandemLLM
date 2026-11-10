@@ -177,11 +177,14 @@ GOLDEN_FP4 = {
     # nemotron_h, lfm2_moe, qwen3_5_moe, flint
     # SPD-249: T1 and T8 on by default (the decode tokens of base and both knobs equal in every served C8 and one-user
     # round): qwen4_exp, qwen3_5_moe
-    "qwen4_exp": "38362344b958393f87a5ad8c15de69eb3cb130322b3f3d52daf62c6799a5ab64",
-    "nemotron_h": "d062af6596f7dad1b6087f71a604956b19e53ed898a5e45169b9e6de168349f7",
-    "lfm2_moe": "d47cb7022caab678f0195fa78835a7fd1bcc48bb8a4b2c255c763c19fee26964",
-    "qwen3_5_moe": "c56061f0d816e2de7899431132879dc56b1cd032bcacef57a9caa4d0090d8d5b",
-    "flint": "017c12a33cf96980964adb385631aad0541af5983bbae0741c0743c20d647bcb",
+    # SPD-150: the e4m3 KV cache, off unless a family's knob asks (FN_KV_FP8, Q35M_KV_FP8, LFM2_KV_FP8, NH_KV_FP8; the
+    # kernels' FP8 branch a constexpr off by default, the same rows): qwen4_exp, qwen3_5_moe, lfm2_moe, nemotron_h and
+    # flint (it shares lfm2_moe's kernels and reference)
+    "qwen4_exp": "8814f8aef5064f448a48d8de2cce1261fcced597b24b0239e1ee6890885fc2e4",
+    "nemotron_h": "748cf77d5397146906bf7eb352e09154a0019e7fb5789e7fc98a425b09fdf3b6",
+    "lfm2_moe": "6445f5bda811ddef922e55466e9da85afb34d9b78daf4bcf0c313b3a13d5f747",
+    "qwen3_5_moe": "c7672b436c95859cd36d82fd716c67c1e1df14ca9af3c7aa5906b8b182629279",
+    "flint": "ade2cb91ef2dd650be81670a0ecb4b5fc3b91359d3e3f0707a10f4a3bea702b1",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
 #: table and its kernels take the generic launch option
