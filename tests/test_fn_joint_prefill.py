@@ -72,6 +72,8 @@ class _Eng:
     forward_pre = E.FlashNextEngine.forward_pre
     trunk = E.FlashNextEngine.trunk
     _mix_pre = E.FlashNextEngine._mix_pre
+    _inject_pre = E.FlashNextEngine._inject_pre
+    _n32_clear = E.FlashNextEngine._n32_clear
     _moe_pre = E.FlashNextEngine._moe_pre
     moe_group_rows = None                # the grouped GEMM's default item rows, as FlashNextEngine
     prefill_path = "kernels"
@@ -167,8 +169,9 @@ def _moe_combine(yd, ids, wts, out=None):
     return (yd.view(M, S, -1) * wts[:, :, None]).sum(1)
 
 
-def _mix_tail(u, n, hc):
-    return (torch.sigmoid(u) * n.float()).view(n.shape[0], hc, -1).mean(1)
+def _mix_tail(u, n, hc, out=None):
+    x = (torch.sigmoid(u) * n.float()).view(n.shape[0], hc, -1).mean(1)
+    return x if out is None else out.copy_(x)
 
 
 def _kernels(monkeypatch):

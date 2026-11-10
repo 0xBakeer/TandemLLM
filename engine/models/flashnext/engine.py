@@ -63,6 +63,19 @@ PLE_LATE = _S.get("FN_PLE_LATE") == "1"
 GDN_MULTI = _S.get("FN_GDN_MULTI") == "1"
 #: SPD-249: the mixers' down GEMV writes the mix_up's A in its own launch (`fn_kernels.gemv_mix`); 0: mix_a apart
 MIX_FUSED = _S.get("FN_MIX_FUSED") == "1"
+#: SPD-249 P2: a prompt chunk's mixers in two launches a site (`_mix_pre`, tools/fn_pf_hc.py), the same bits; 0: the
+#: library GEMMs with silu and mix_tail apart
+PF_HC_FUSED = _S.get("FN_PF_HC_FUSED") == "1"
+#: SPD-249 P2: a prompt chunk's injects in a CTA a row (`_inject_pre`, tools/fn_pf_hc.py), the same bits; 0: the
+#: decode path's inject_norm
+PF_INJ_FUSED = _S.get("FN_PF_INJ_FUSED") == "1"
+#: SPD-249 P6: the pipeline stages of a prompt chunk's attention split launch (`_attn_pre`), the same bits; 2: the
+#: decode path's launch
+PF_ATTN_STAGES = int(_S.get("FN_PF_ATTN_STAGES") or 2)
+#: SPD-249 P4: a prompt chunk's copies that a view or the reading kernel's own stride serves are not launched (the GDN
+#: values and z in place, the PLE states from the rows' words, the indexer scores' fill past the pooled blocks only, a
+#: window's mixer outputs written side by side), the same bits; 0: the copies
+PF_NOCOPY = _S.get("FN_PF_NOCOPY") == "1"
 #: SPD-249: a joint pass's GDN conv and gates of every state in one launch a layer (`gdn_pre_multi`); 0: a launch a state
 GDN_PRE_MULTI = _S.get("FN_GDN_PRE_MULTI") == "1"
 #: SPD-249: a joint pass leaves up to N parked GDN rows parked (no state write-back that round; the next call walks
@@ -443,13 +456,13 @@ class FlashNextEngine(FlashNextRef):
             else:
                 out = self._attn1(x, li, st) if step else (self._attn_pre(x, li, st) if pre else
                                                            self.attention(x, li, st, positions))
-            h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
-                                 self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+            h, n = (self._inject_pre if pre else K.inject_norm)(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                                                                self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
             x, di = mix(n, p + "mlp_hyper_connection")
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
             if pre:
-                h, n = K.inject_norm(h, self._moe_pre(x, li), di, R, nxt, hc, eps)
+                h, n = self._inject_pre(h, self._moe_pre(x, li), di, R, nxt, hc, eps)
             elif x.shape[0] <= self.MOE_ROWS:
                 yd, ids, wts = self.moe_parts(x, li)
                 if step and not self._write:
@@ -501,6 +514,7 @@ class FlashNextEngine(FlashNextRef):
             e = self._image_rows(e, st, st.length)
         h = e.repeat(1, self.cfg.hc_count)
         n = self.trunk(h, tokens, st, None, pre=True)
+        self._n32_clear()
         st.length += T
         self._pre = None
         if head == "none":
@@ -543,15 +557,49 @@ class FlashNextEngine(FlashNextRef):
                        pool_pos=(b * r + off).contiguous())
         return out
 
-    def _mix_pre(self, n, p):
-        """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
-        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings."""
+    def _mix_pre(self, n, p, out=None):
+        """The mixer of a chunk: down and inject on `mm_rows` (the library GEMM in fp32 by default), the up
+        projection of a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings (into `out`
+        [M, H] bf16 when given; `mix_up_tail`: one launch for both under QWEN38_FN_PREFILL_MM=tcn). SPD-249 P2
+        (QWEN38_FN_PF_HC_FUSED): the same GEMMs of the `mm_rows` mode that runs on the same values, a from one launch
+        and, where the GEMM reads fp32, n's fp32 form from the inject's launch when it wrote one (`_inject_pre`;
+        tools/fn_pf_hc.py `mix`)."""
         from tools import fn_prefill_kernels as PK
         c = self.cfg
-        di = PK.mm_rows(n, self.W[p + ".down_inject"])
+        wd, wu = self.W[p + ".down_inject"], self.W[p + ".input_mix_weight_up.weight"]
         R = self.W[p + ".rank"]
+        st = getattr(self, "_n32", None)
+        ent = st.pop(id(n), None) if st else None
+        if PF_HC_FUSED:
+            from tools import fn_pf_hc as HC
+            if HC.mix_ok(n, c.hc_count):
+                return HC.mix(n, ent[1] if ent is not None and ent[0] is n else None, wd, wu, R, c.hc_count, out)
+        di = PK.mm_rows(n, wd)
         a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
-        return PK.mix_tail(PK.mm_rows(a, self.W[p + ".input_mix_weight_up.weight"]), n, c.hc_count), di
+        return PK.mix_up_tail(a, wu, n, c.hc_count, out=out), di
+
+    def _inject_pre(self, h, out, di, R, w, hc, eps):
+        """A chunk's inject and the next site's norm: `fn_kernels.inject_norm`, or with QWEN38_FN_PF_INJ_FUSED its bits
+        in a CTA a row (tools/fn_pf_hc.py); with QWEN38_FN_PF_HC_FUSED too and a mixer GEMM that reads fp32, the same
+        launch writes n's fp32 form for the next `_mix_pre` (kept by n's identity until that call takes it, or
+        `_n32_clear`)."""
+        from tools import fn_kernels as K
+        if PF_INJ_FUSED:
+            from tools import fn_pf_hc as HC
+            if HC.inject_ok(h, out, hc):
+                want = w is not None and PF_HC_FUSED and HC.wants_n32()
+                hn, nn, n32 = HC.inject_norm(h, out, di, R, w, hc, eps, n32=want)
+                if n32 is not None:
+                    if getattr(self, "_n32", None) is None:
+                        self._n32 = {}
+                    self._n32[id(nn)] = (nn, n32)
+                return hn, nn
+        return K.inject_norm(h, out, di, R, w, hc, eps)
+
+    def _n32_clear(self) -> None:
+        """Drop the fp32 forms no mixer took (the last layer's, which feeds the final mixer's own kernels)."""
+        if getattr(self, "_n32", None):
+            self._n32.clear()
 
     def _moe_pre(self, x, li):
         """The MoE of a chunk: the router (library GEMM, the router kernel), every pair's expert output
@@ -601,10 +649,10 @@ class FlashNextEngine(FlashNextRef):
             # arithmetic is the whole call's (measured 2026-11-06 at 200k: the chunk's peak 4.2 -> 2.7 GiB)
             for r0 in range(0, x.shape[0], QSA_TILE):
                 r1 = min(x.shape[0], r0 + QSA_TILE)
-                sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls)
+                sc = PK.qsa_scores_rows(iq[r0:r1], pool, P["nblk"][r0:r1], cls, lean=PF_NOCOPY)
                 SK.qsa_select(sc, P["tail"][r0:r1], P["sel"][r0:r1])
                 del sc
-        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
+        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"], stages=PF_ATTN_STAGES)
         y = K.gate_mul(o, qkv, c.head_dim)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
@@ -636,7 +684,7 @@ class FlashNextEngine(FlashNextRef):
         if T > 64 and not fused_prefill_refusal(GDN_CHUNK):
             # the key heads as they are (the kernel maps value heads to them) and value blocks of 16:
             # 10.2 vs 15.4 ms a layer at 4,096 rows (2026-10-11), the output within one bf16 step
-            o, S = fused_chunk_prefill(q, k, v, g, beta, st.S[li], chunk_size=GDN_CHUNK, bv=16)
+            o, S = fused_chunk_prefill(q, k, v, g, beta, st.S[li], chunk_size=GDN_CHUNK, bv=16, view=PF_NOCOPY)
         else:
             if c.num_v_per_k > 1:
                 q = q.repeat_interleave(c.num_v_per_k, dim=2)
@@ -644,8 +692,12 @@ class FlashNextEngine(FlashNextRef):
             o, S = self.delta_rule(q, k, v, g, beta, st.S[li])
         st.S[li].copy_(S)
         z = qkvz[:, C:]
-        hh = K.gated_norm(o.reshape(-1, c.linear_value_head_dim).to(self.dtype), z.reshape(-1, c.linear_value_head_dim),
-                          self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        o = o.reshape(-1, c.linear_value_head_dim).to(self.dtype)
+        if PF_NOCOPY and PK.gated_norm_ok(o, z):
+            hh = PK.gated_norm_rows(o, z, self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        else:
+            hh = K.gated_norm(o, z.reshape(-1, c.linear_value_head_dim),
+                              self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
         return self.lin(hh.view(T, -1), self.W[a + "out_proj.weight"])
 
     def _ple_pre(self, h, tokens, li, st):
@@ -669,7 +721,7 @@ class FlashNextEngine(FlashNextRef):
         # alone (integer ops, one multiply and add an element), so the tiles' rows are the whole call's
         step = max(1, PLE_DECODE_TOKENS * (packed.shape[0] // max(1, T)))
         emb = torch.cat([decode_rows(packed[r0:r0 + step], heads[r0:r0 + step], pd["bias"], tab.K,
-                                     pd["codebook"]).to(self.dtype)
+                                     pd["codebook"], words=PF_NOCOPY).to(self.dtype)
                          for r0 in range(0, packed.shape[0], step)]).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
         val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)
@@ -2881,11 +2933,24 @@ class FlashNextEngine(FlashNextRef):
         chunk = chunk or (PREFILL_CHUNK if path == "kernels" else 2048)
         out = None
         stacks = []
-        for i in range(0, ids.numel(), chunk):
-            last = i + chunk >= ids.numel()
-            out = fwd(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
-            if keep_stack:
-                stacks.append(self.stack)
+        from engine.models.flashnext import layer_major as LM
+        starts = list(range(0, ids.numel(), chunk))
+        wins = ([[i] for i in range(len(starts))] if not (LM.ROWS > chunk and len(starts) > 1 and LM.ok(self, st))
+                else LM.groups([min(chunk, ids.numel() - a) for a in starts], LM.rows_now(chunk, LM.ROWS)))
+        for win in wins:
+            last = win[-1] == len(starts) - 1
+            if len(win) > 1:
+                # SPD-249 P1 (QWEN38_FN_PF_WINDOW): the window's chunks layer-major, each chunk's own bits
+                out, hs = LM.window(self, [ids[starts[j]:starts[j] + chunk].to(self.device) for j in win], st,
+                                   head=last)
+                if keep_stack:
+                    stacks += hs
+                del hs
+            else:
+                i = starts[win[0]]
+                out = fwd(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
+                if keep_stack:
+                    stacks.append(self.stack)
             if st.length > 4096:
                 # the reference attention's score blocks grow with the context; cached blocks of one
                 # chunk fit no request of the next (a 32k prompt held tens of GB, 2026-10-11)
@@ -2937,10 +3002,11 @@ class FlashNextEngine(FlashNextRef):
         n = K.hc_norm(h, self.W[p + "attn_hyper_connection.hc_norm.weight"], H, eps)
         x, di = self._mix_pre(n, p + "attn_hyper_connection")
         out = self._attn_pre(x, MTP, st_m)
-        h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
-                             self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+        h, n = self._inject_pre(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                                self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
         x, di = self._mix_pre(n, p + "mlp_hyper_connection")
-        h, _ = K.inject_norm(h, self._moe_pre(x, MTP), di, self.W[p + "mlp_hyper_connection.rank"], None, hc, eps)
+        h, _ = self._inject_pre(h, self._moe_pre(x, MTP), di, self.W[p + "mlp_hyper_connection.rank"], None, hc, eps)
+        self._n32_clear()
         st_m.length += T
         self._pre = None
         return h

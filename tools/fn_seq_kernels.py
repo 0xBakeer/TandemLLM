@@ -432,7 +432,8 @@ if HAVE_TRITON:
         base = ((t * HK + kvh) * NS + sp) * BM + rows
         tl.store(PM + base, m_i)
         tl.store(PL + base, l_i)
-        tl.store(PACC + base[:, None] * D + od[None, :], acc)
+        # a 64-bit offset: M rows hold M * HK * NS * BM * D elements, past 2^31 from 29,128 rows (HK 2, D 256)
+        tl.store(PACC + base.to(tl.int64)[:, None] * D + od[None, :], acc)
 
     @triton.jit
     def _attn_rows_combine(PM, PL, PACC, OUT, REP: tl.constexpr, D: tl.constexpr, HQ: tl.constexpr,
@@ -452,7 +453,7 @@ if HAVE_TRITON:
         # in chunk order: the chunks past a row's last key add exact zeros
         for s in tl.static_range(0, NS):
             w = tl.exp(tl.load(PM + b0 + s * BM) - mx)
-            num = num + tl.load(PACC + (b0 + s * BM) * D + od) * w
+            num = num + tl.load(PACC + (b0 + s * BM).to(tl.int64) * D + od) * w     # as the split's store
             den = den + tl.load(PL + b0 + s * BM) * w
         o = num / tl.where(den == 0.0, 1.0, den)
         tl.store(OUT + (t * HQ + qh) * D + od, o.to(tl.bfloat16))
@@ -516,7 +517,8 @@ if HAVE_TRITON:
         base = ((t * HK + kvh) * NS + sp) * BM + rows
         tl.store(PM + base, m_i)
         tl.store(PL + base, l_i)
-        tl.store(PACC + base[:, None] * D + od[None, :], acc)
+        # a 64-bit offset: M rows hold M * HK * NS * BM * D elements, past 2^31 from 29,128 rows (HK 2, D 256)
+        tl.store(PACC + base.to(tl.int64)[:, None] * D + od[None, :], acc)
 
 
 #: SPD-249: the int64 fields of an `attn_rows_multi` lane entry (row0, K, V, CTL, ANC, SEL, -, -)
@@ -561,11 +563,12 @@ def attn_rows_multi(q, pt, lane, strides: tuple, HK: int, bufs: dict | None = No
     return out
 
 
-def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None):
+def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None, stages: int = 2):
     """q [M, Hq, D] bf16 (normed, rotated); kc / vc [Hk, cap, D] bf16 (the caches); ctl int32 [M, 4]
     (visible keys, block start L, dense flag, -); anc int32 [M, ANC] (the cache slot of the row's
     ancestor at each depth, 0 the block's first row); sel int32 [M, NSEL] (QSA: the visible
-    positions in ascending order; read only for rows not dense) -> o [M, Hq, D] bf16."""
+    positions in ascending order; read only for rows not dense) -> o [M, Hq, D] bf16. `stages`: the split
+    launch's pipeline stages (a launch setting; tests/gpu/test_fn_attn_stages_gpu.py holds its bits to 2's)."""
     M, HQ, D = q.shape
     HK = kc.shape[0]
     REP = HQ // HK
@@ -586,7 +589,7 @@ def attn_rows(q, kc, vc, ctl, anc, sel, bufs: dict | None = None):
         q, kc, vc, ctl, anc, sel, pm, pl, pacc,
         kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1),
         SCALE=D ** -0.5, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, BN=32, CHUNK=ATTN_CHUNK,
-        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=2)
+        NA=anc.shape[1], NSEL=sel.shape[1], NS=ATTN_SPLITS, num_warps=4, num_stages=stages)
     _attn_rows_combine[(M, HQ)](pm, pl, pacc, out, REP=REP, D=D, HQ=HQ, HK=HK, BM=BM, NS=ATTN_SPLITS,
                                 num_warps=4)
     return out

@@ -229,17 +229,52 @@ def _ring_src(K: int, device) -> torch.Tensor:
     return _SRC[key]
 
 
+_SYM: dict = {}
+
+
+def _sym_src(K: int, device) -> tuple:
+    """Element i's K stream bits [i K, (i + 1) K) in the row's 16-bit words, and the elements a state reads:
+    (its first word, the first bit's place there, the next word, the mask of that word's low bits the element
+    takes, their place in the element, [160, T] the element of state part t, [T] that part's shift), T = the
+    parts a 16-bit state holds."""
+    key = (K, str(device))
+    if key not in _SYM:
+        b = torch.arange(ROW_DIM) * K
+        w0, o = b // 16, b % 16
+        over = (o + K - 16).clamp(min=0)                       # bits past the first word's end
+        w1 = (w0 + 1).clamp(max=ROW_DIM * K // 16 - 1)
+        t = torch.arange(15 // K + 1)
+        src = (torch.arange(ROW_DIM).view(-1, 1) - t.view(1, -1)) % ROW_DIM
+        i32 = lambda v: v.to(torch.int32).to(device)           # noqa: E731
+        _SYM[key] = (w0.to(device), i32(o), w1.to(device), i32((1 << over) - 1), i32(16 - o), src.to(device), i32(t * K))
+    return _SYM[key]
+
+
+def row_states(packed: torch.Tensor, K: int) -> torch.Tensor:
+    """`decode_rows`' states int32 [N, 160] from the rows' words, without the bit stream: element i's K bits come
+    from one word or two, and state bit m of element i is bit m % K of element (i - m // K) mod 160 (`_ring_src`),
+    so a state is its 16 // K + 1 last elements side by side, cut at 16 bits. Integer ops: the same states."""
+    w0, o, w1, low, up, src, sh = _sym_src(K, packed.device)
+    words = packed[:, 1:].view(torch.uint16).to(torch.int32)                       # [N, 10 K]
+    sym = ((words.index_select(1, w0) >> o) | ((words.index_select(1, w1) & low) << up)) & ((1 << K) - 1)
+    return (sym[:, src] << sh).sum(-1, dtype=torch.int32) & 0xffff
+
+
 def decode_rows(packed: torch.Tensor, heads: torch.Tensor, bias: torch.Tensor, K: int,
-                codebook: torch.Tensor) -> torch.Tensor:
+                codebook: torch.Tensor, words: bool = False) -> torch.Tensor:
     """packed int16 [N, 1 + 10 K], heads [N] (the hash head of each row), bias [n_heads, 160]
-    -> fp32 [N, 160]. Fixed-shape torch ops on the rows' device (capturable in a graph)."""
+    -> fp32 [N, 160]. Fixed-shape torch ops on the rows' device (capturable in a graph). `words` (SPD-249 P4): the
+    states from the rows' words (`row_states`), the same integers."""
     dev = packed.device
     scales = packed[:, 0].contiguous().view(torch.float16).float()
-    words = packed[:, 1:].view(torch.uint16).to(torch.int32)                       # [N, 10 K]
-    stream = ((words.unsqueeze(-1) >> torch.arange(16, device=dev, dtype=torch.int32)) & 1)
-    stream = stream.reshape(packed.shape[0], ROW_DIM * K)
-    m = torch.arange(16, device=dev, dtype=torch.int32)
-    states = (stream[:, _ring_src(K, dev)] << m).sum(-1)                            # [N, 160]
+    if words:
+        states = row_states(packed, K)
+    else:
+        wd = packed[:, 1:].view(torch.uint16).to(torch.int32)                      # [N, 10 K]
+        stream = ((wd.unsqueeze(-1) >> torch.arange(16, device=dev, dtype=torch.int32)) & 1)
+        stream = stream.reshape(packed.shape[0], ROW_DIM * K)
+        m = torch.arange(16, device=dev, dtype=torch.int32)
+        states = (stream[:, _ring_src(K, dev)] << m).sum(-1)                        # [N, 160]
     return codebook[states.long()].float() * scales[:, None] + bias[heads.long()].float()
 
 

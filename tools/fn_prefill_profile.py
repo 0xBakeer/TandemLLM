@@ -9,6 +9,17 @@ prefill untimed for the honest wall time and tok/s. Parts: the PLE branch, the h
 mixers (down GEMV, mix_up) and injects, EXL3 projections, other projections, the GDN conv and gates, the
 delta rule, attention (the core, the QSA indexer), the router, the experts, the final mixer and head.
 `--path kernel` profiles `FlashNextEngine.prefill_kernels` (ENG-225); `ref` the reference forward.
+
+`--kernels N`: one more run under torch.profiler (device activity only): the top N kernels and every kernel's time by
+stage (`STAGES`). `--sites N` (SPD-249 P4): one more run under torch.profiler with the host's ops and their Python
+stacks, and the launches of the "copies and elementwise" stage by the line that issued them: a kernel belongs to the
+op that launched it (the profiler's correlation), the op to the innermost frame of this repo on its stack. Launches,
+device seconds, the op and the kernel's kind a line, the top N. The stacks slow the host, not the kernels: the
+seconds are device time, to lay beside the stage table, and the run's wall time is not a prefill's.
+`--sync-sites N`: the same question asked another way, one more run with every torch call timed on the host with a
+device sync before and after it (`SyncSites`), by the innermost repo line that made the call: calls and wall seconds
+of each (line, function), the top N. A kernel launched outside torch (the Triton kernels) is not a torch call: its
+time is drained by the sync before the next call and counted nowhere.
 """
 
 from __future__ import annotations
@@ -16,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -91,10 +103,194 @@ def instrument(eng: FlashNextEngine) -> PartTimer:
                       ("qsa_pool", "qsa pool"), ("gdn_pre", "gdn conv + gates")):
         T.wrap(SK, name, lab)
     from tools import fn_prefill_kernels as PK
-    for name, lab in (("moe_grouped", "moe experts"), ("mm_rows", "library GEMM rows (mixers, router, a/b, ple)"),
-                      ("mix_tail", "mixer up")):
+    from tools import gdn_prefill_kernels as GK
+    fam = weight_families(eng)
+
+    def mm_label(x, w):
+        return "library GEMM rows: " + fam.get(id(w), "other")
+    T.wrap(PK, "mm_rows", mm_label)
+    for name, lab in (("moe_grouped", "moe experts"), ("mix_tail", "mixer up"), ("mix_up_tail", "mixer up"),
+                      ("qsa_scores_rows", "attention qsa")):
         T.wrap(PK, name, lab)
+    T.wrap(GK, "fused_chunk_prefill", "gdn delta rule")
     return T
+
+
+def weight_families(eng: FlashNextEngine) -> dict:
+    """SPD-249 P0: id(weight) -> the family `mm_rows` serves it to (mixers, router, GDN a|b, PLE)."""
+    out = {}
+    for k, w in eng.W.items():
+        if k.endswith((".down_inject", ".input_mix_weight_up.weight")):
+            out[id(w)] = "mixers"
+        elif k.endswith("mlp.router"):
+            out[id(w)] = "router"
+        elif k.endswith("linear_attn.ab"):
+            out[id(w)] = "gdn a|b"
+        elif ".ple." in k:
+            out[id(w)] = "ple"
+    return out
+
+
+#: SPD-249 P0: a kernel's stage by its name (first match), for the stage table of a prefill profile
+STAGES = (
+    ("expert grouped GEMMs", ("group_gemm_kernel",)),
+    ("expert rotations + combine + routing", ("pair_rot_kernel", "pair_silu_rot_kernel", "moe_combine_kernel",
+                                              "router_kernel", "RadixSort", "radixSort", "DeviceScan",
+                                              "kernelHistogram", "histogram")),
+    ("hyper-connection norms + mix tails", ("inject_norm_kernel", "hc_norm_kernel", "mix_tail_kernel",
+                                           "mix_up", "combine_inject", "pf_mix_a_kernel")),
+    ("EXL3 projections: rotations", ("rot_in_kernel", "rot_out_kernel")),
+    ("EXL3 projections: slab decode", ("recon_kernel",)),
+    ("int8 GEMM on the tensor cores (mm_rows tc, tcn)", ("mix_gemm_kernel", "mm_i8_kernel")),
+    ("library fp32 GEMM (mm_rows)", ("magma_sgemm", "sgemm", "gemmSN", "gemv2T", "gemvx")),
+    ("library fp16 GEMM (EXL3 slabs)", ("s16816gemm", "s1688gemm", "nvjet", "cutlass_80_tensorop", "xmma")),
+    ("DeltaNet kernels", ("_scan", "_intra", "gdn_pre_kernel", "gated_norm_kernel", "fused_chunk", "_prep",
+                          "chunk_", "_ut", "_wy")),
+    ("attention core + QSA", ("_attn_rows", "attn_prep_kernel", "qsa_", "gate_mul_kernel")),
+    ("PLE kernels", ("ple_", "decode_rows", "_decode")),
+    ("copies and elementwise", ("direct_copy", "copy_kernel", "Memcpy", "Memset", "elementwise_kernel",
+                                "FillFunctor", "reduce_kernel", "index_elementwise", "index_copy", "index_select",
+                                "indexSelect", "cat_", "CatArray", "fill_", "scatter", "gather")),
+)
+
+
+def stage_of(name: str) -> str:
+    for stage, keys in STAGES:
+        if any(k in name for k in keys):
+            return stage
+    return "other kernels"
+
+
+COPIES = "copies and elementwise"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def site_of(stack: list) -> str:
+    """The innermost frame of this repo on a profiler stack ("file(line): function"), the repo's path dropped."""
+    for fr in stack:
+        if fr.startswith(ROOT + os.sep) and "fn_prefill_profile.py" not in fr:
+            return fr[len(ROOT) + 1:]
+    return "(no repo frame)"
+
+
+_FRAME = re.compile(r"^(.*\.py)\((\d+)\): (.+)$")
+
+
+def frame_of(name: str):
+    """A profiler Python-function event's name as a repo frame ("file(the function's first line): function"), else
+    None. The tracer names a frame by its file with a `sys.path` prefix dropped."""
+    m = _FRAME.match(name)
+    if not m:
+        return None
+    f = m.group(1)
+    if os.path.isabs(f):
+        if not f.startswith(ROOT + os.sep):
+            return None
+        f = f[len(ROOT) + 1:]
+    else:                                                    # the longest tail of the path that is a repo file
+        parts = f.split("/")
+        tails = ["/".join(parts[i:]) for i in range(len(parts))] + ["tools/" + parts[-1]]
+        f = next((t for t in tails if os.path.isfile(os.path.join(ROOT, t))), None)
+        if f is None:
+            return None
+    if f.endswith("fn_prefill_profile.py"):
+        return None
+    return f"{f}({m.group(2)}): {m.group(3)}"
+
+
+def frames_of(ev) -> tuple:
+    """(the innermost repo function above a profiler event, the repo function that called it): from the Python
+    frames among the event's parents, or where the build gives events a stack, from the stack."""
+    got, e = [], ev
+    while e is not None and len(got) < 2:
+        fr = frame_of(e.name)
+        if fr:
+            got.append(fr)
+        elif not got and getattr(e, "stack", None):
+            fr = site_of(e.stack)
+            if fr != "(no repo frame)":
+                return fr, ""
+        e = e.cpu_parent
+    return (got + ["(no repo frame)", ""])[0], (got + ["", ""])[1]
+
+
+def copy_sites(prof, top: int) -> dict:
+    """SPD-249 P4: the launches of the "copies and elementwise" stage by the function that issued them."""
+    from torch.autograd import DeviceType
+    keys = dict(STAGES)[COPIES]
+    by, line, linked = defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0]), defaultdict(lambda: [0.0, 0])
+    for fe in prof.events():
+        ks = getattr(fe, "kernels", None)
+        if not ks or fe.device_type != DeviceType.CPU:
+            continue
+        site = outer = None
+        for k in ks:
+            stage = stage_of(k.name)
+            us = getattr(k, "duration", 0)
+            linked[stage][0] += us / 1e6
+            linked[stage][1] += 1
+            if stage != COPIES:
+                continue
+            if site is None:
+                # the kernel hangs on the event that launched it: the op itself or a runtime call under it
+                op = fe
+                while not op.name.startswith("aten::") and op.cpu_parent is not None:
+                    op = op.cpu_parent
+                outer = op
+                while outer.cpu_parent is not None and outer.cpu_parent.name.startswith("aten::"):
+                    outer = outer.cpu_parent
+                site, via = frames_of(fe)
+            kind = next(x for x in keys if x in k.name)
+            for d, key in ((by, (site, via, outer.name, op.name, kind)), (line, site)):
+                d[key][0] += us / 1e6
+                d[key][1] += 1
+    tot = sum(v[0] for v in by.values())
+    return {"method": "torch.profiler, host ops with Python frames + device kernels; a kernel's site is the innermost "
+                      "repo function above the op that launched it (file, the function's first line) and that "
+                      "function's repo caller; device seconds",
+            "copies_s": round(tot, 3), "copies_launches": sum(v[1] for v in by.values()),
+            "linked_by_stage": {k: (round(v[0], 3), v[1]) for k, v in sorted(linked.items(), key=lambda kv: -kv[1][0])},
+            "lines": [(k, round(v[0], 4), v[1]) for k, v in sorted(line.items(), key=lambda kv: -kv[1][0])[:top]],
+            "sites": [(*k, round(v[0], 4), v[1]) for k, v in sorted(by.items(), key=lambda kv: -kv[1][0])[:top]]}
+
+
+class SyncSites(torch.overrides.TorchFunctionMode):
+    """Every torch call under the mode timed alone: a device sync, the call, a sync; by the innermost repo frame."""
+
+    def __init__(self):
+        super().__init__()
+        self.by = defaultdict(lambda: [0.0, 0])
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        name = getattr(func, "__name__", None) or str(func)
+        if name in ("__get__", "__set__", "size", "dim", "numel", "data_ptr", "element_size", "is_contiguous", "stride"):
+            return func(*args, **(kwargs or {}))
+        def repo(f):
+            while f is not None and not (f.f_code.co_filename.startswith(ROOT + os.sep)
+                                         and not f.f_code.co_filename.endswith("fn_prefill_profile.py")):
+                f = f.f_back
+            return f
+        f = repo(sys._getframe(1))
+        up = repo(f.f_back) if f is not None else None
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        out = func(*args, **(kwargs or {}))
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
+        site = "(no repo frame)" if f is None else f"{f.f_code.co_filename[len(ROOT) + 1:]}({f.f_lineno}): {f.f_code.co_name}"
+        via = "" if up is None else f"{up.f_code.co_filename[len(ROOT) + 1:]}({up.f_lineno}): {up.f_code.co_name}"
+        g = self.by[(site, via, name)]
+        g[0] += dt
+        g[1] += 1
+        return out
+
+    def table(self, top: int) -> dict:
+        rows = sorted(self.by.items(), key=lambda kv: -kv[1][0])
+        return {"method": "TorchFunctionMode: each torch call between two device syncs, host wall seconds, by the "
+                          "innermost repo line and the repo line that called its function; kernels launched "
+                          "outside torch are not counted",
+                "torch_calls": sum(v[1] for v in self.by.values()), "torch_s": round(sum(v[0] for v in self.by.values()), 3),
+                "sites": [(*k, round(v[0], 4), v[1]) for k, v in rows[:top]]}
 
 
 def run(eng: FlashNextEngine, ids: list[int], path: str, chunk: int) -> float:
@@ -118,6 +314,10 @@ def main() -> None:
     ap.add_argument("--timed", default="1", help="0: wall time only (no per-part profile)")
     ap.add_argument("--wall-max", type=int, default=1 << 30, help="no untimed run past this context")
     ap.add_argument("--kernels", type=int, default=0, help="also the top N kernels of one untimed run (torch.profiler)")
+    ap.add_argument("--repeat", type=int, default=1, help="untimed runs (wall_s is the last; wall_runs all of them)")
+    ap.add_argument("--sites", type=int, default=0, help="also the top N lines that launch copies and elementwise kernels")
+    ap.add_argument("--sites-min", type=int, default=0, help="no --sites / --sync-sites run below this context")
+    ap.add_argument("--sync-sites", type=int, default=0, help="also the top N (line, torch function) by sync-timed seconds")
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
@@ -126,7 +326,23 @@ def main() -> None:
     eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max(ctxs) + 64)
     tok = AutoTokenizer.from_pretrained(a.pack)
     res = {"pack": a.pack, "path": a.path, "chunk": a.chunk, "load": timing, "mem_after_load_gib": mem_available_gib(),
-           "knobs": {"kv_dtype": "bf16", "prefix_cache": "off", "head": "last row of the last chunk"}, "rows": []}
+           "knobs": {"kv_dtype": "bf16", "prefix_cache": "off", "head": "last row of the last chunk",
+                     "env": {k: v for k, v in os.environ.items() if k.startswith("QWEN38_FN_P")}}, "rows": []}
+    from engine.models.flashnext import engine as E
+    from engine.models.flashnext import layer_major as LM
+    from tools import fn_prefill_kernels as PK
+    res["knobs"]["effective"] = {
+        "FN_PF_WINDOW": LM.ROWS, "FN_PF_ROT_ROWS": int(PK.ROT_ROWS), "FN_PF_HC_FUSED": int(E.PF_HC_FUSED),
+        "FN_PF_INJ_FUSED": int(E.PF_INJ_FUSED), "FN_PF_ATTN_STAGES": E.PF_ATTN_STAGES,
+        "FN_PF_NOCOPY": int(E.PF_NOCOPY), "FN_PREFILL_MM": PK.MM,
+        "FN_PREFILL_CHUNK": E.PREFILL_CHUNK, "FN_GROUP_ROWS": PK.GROUP_ROWS, "prefill_path": eng.prefill_path}
+    print(f"[prefill-profile] knobs {json.dumps(res['knobs']['effective'])}", flush=True)
+    nwin, window = [0], LM.window
+
+    def counted(*args, **kw):
+        nwin[0] += 1
+        return window(*args, **kw)
+    LM.window = counted
     run(eng, class_prompt(tok, "prose", 256), a.path, a.chunk)          # build the kernels
     for n in ctxs:
         ids = class_prompt(tok, "prose", n)
@@ -141,9 +357,11 @@ def main() -> None:
             row["parts_share"] = {k: round(v / dt, 3) for k, v in parts}
             row["calls"] = dict(T.n)
         if len(ids) <= a.wall_max:
-            dt = run(eng, ids, a.path, a.chunk)
+            walls = [run(eng, ids, a.path, a.chunk) for _ in range(max(1, a.repeat))]
+            dt = walls[-1]
             row["wall_s"] = round(dt, 2)
             row["tok_s"] = round(len(ids) / dt, 1)
+            row["wall_runs"] = [round(w, 3) for w in walls]
         if a.kernels:
             from torch.profiler import ProfilerActivity, profile
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
@@ -154,8 +372,40 @@ def main() -> None:
                 if us:
                     per[e.key] = (per.get(e.key, (0.0, 0))[0] + us / 1e6, e.count)
             row["gpu_s"] = round(sum(v[0] for v in per.values()), 2)
-            row["kernels"] = [(k[:80], round(v[0], 3), v[1]) for k, v in sorted(per.items(), key=lambda kv: -kv[1][0])[:a.kernels]]
+            row["kernels"] = [(k[:160], round(v[0], 3), v[1]) for k, v in sorted(per.items(), key=lambda kv: -kv[1][0])[:a.kernels]]
+            stages: dict = defaultdict(lambda: [0.0, 0, 0])
+            for k, (s_, n_) in per.items():
+                g = stages[stage_of(k)]
+                g[0] += s_
+                g[1] += n_
+                g[2] += 1
+            row["stages_s"] = {k: (round(v[0], 3), v[1], v[2]) for k, v in sorted(stages.items(), key=lambda kv: -kv[1][0])}
+            row["kernel_kinds"] = len(per)
+            del prof
+        def keep():                                                        # a later pass may not fit: keep the rest
+            if a.json:
+                json.dump({**res, "rows": res["rows"] + [row]}, open(a.json, "w"), indent=1)
+        keep()
+        if a.sync_sites and len(ids) >= a.sites_min:
+            m = SyncSites()
+            try:
+                with m:
+                    row["sync_sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+                row["sync_sites"] = m.table(a.sync_sites)
+            except Exception as e:  # noqa: BLE001
+                row["sync_sites"] = {"error": f"{type(e).__name__}: {e}"[:400], "partial": m.table(a.sync_sites)}
+            keep()
+        if a.sites and len(ids) >= a.sites_min:
+            from torch.profiler import ProfilerActivity, profile
+            try:
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True) as prof:
+                    row["sites_run_s"] = round(run(eng, ids, a.path, a.chunk), 2)
+                row["copy_sites"] = copy_sites(prof, a.sites)
+                del prof
+            except Exception as e:  # noqa: BLE001
+                row["copy_sites"] = {"error": f"{type(e).__name__}: {e}"[:400]}
         row["mem_gib"] = mem_available_gib()
+        row["windows"], nwin[0] = nwin[0], 0                              # layer-major windows over the row's runs
         res["rows"].append(row)
         print(f"[prefill-profile] {json.dumps(row)}", flush=True)
     if a.json:

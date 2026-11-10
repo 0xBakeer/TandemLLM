@@ -64,10 +64,32 @@ KNOBS: dict[str, tuple] = {
     # SPD-249: the round runner hands a lane's tree over when its tokens are known (before its cuts and staging): its PLE
     # rows are read into the table's row cache on the reader thread, the verify's own read finds them there; 0: off
     'FN_PLE_PREFETCH': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P2: a prompt chunk's mixers feed the same GEMMs the same values with fewer passes, in every
+    # FN_PREFILL_MM mode: a from one launch, and for the fp32 GEMMs n's fp32 form from the inject's launch (with
+    # FN_PF_INJ_FUSED) (tools/fn_pf_hc.py `mix`; the bits of `mm_rows`, the torch silu, `mm_rows`, `mix_tail`); 0: those
+    'FN_PF_HC_FUSED': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P2: a prompt chunk's injects (the layer output into the streams and the next site's norm) in a CTA a row
+    # with 16-byte loads (tools/fn_pf_hc.py `inject_norm`: fn_kernels.inject_norm's bits, the norm's sum in its order);
+    # 0: fn_kernels.inject_norm
+    'FN_PF_INJ_FUSED': ('0', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P6: the pipeline stages (Triton num_stages, 1 .. 4) of the attention split launch over a prompt chunk's
+    # rows (`_attn_pre`, tools/fn_seq_kernels.py `attn_rows`): a launch setting, the output's bits are 2's at every
+    # value (tests/gpu/test_fn_attn_stages_gpu.py); 2: the launch of the decode path
+    'FN_PF_ATTN_STAGES': ('2', 'engine/models/flashnext/engine.py'),
+    # SPD-249 P4: a prompt chunk's copies a view serves are not launched: the GDN delta rule reads the values and the
+    # output norm reads z in place (tools/gdn_prefill_kernels.py `view`, tools/fn_prefill_kernels.py `gated_norm_rows`),
+    # the PLE states come from the rows' words (ple.py `row_states`), the indexer scores are filled with -inf only
+    # past the pooled blocks, and a layer-major window's MLP mixers write the experts' input side by side (no cat);
+    # every output's bits are the copies' (tools/fn_pf_hc_check.py, tools/fn_window_check.py); 0: the copies
+    'FN_PF_NOCOPY': ('0', 'engine/models/flashnext/engine.py'),
     # SPD-249: a prefill burst's prompts in one forward (`FlashNextServing.prefill_joint`, joint_prefill.py): each
     # layer's experts once for every prompt's rows, what depends on a chunk's row count a prompt at a time at its own
     # rows (each prompt's logits, streams, KV and GDN state its own prefill's bits); 0: each prompt prefills alone
     'FN_JOINT_PREFILL': ('0', 'engine/models/flashnext/joint_prefill.py'),
+    # SPD-249 P1: a prompt's prefill chunks go LAYER-major in windows of up to this many rows: each layer's experts
+    # once over the window's rows, the rest a chunk at a time at its own rows (every chunk's bits its chunk-major
+    # forward's); 0: chunk-major
+    'FN_PF_WINDOW': ('0', 'engine/models/flashnext/layer_major.py'),
     # SPD-249: the MTP lanes' lookup backs off where other lanes share the round (its host time comes after their
     # drafts are done): after a round the lookup gave the walk nothing, up to N rounds skip it (1, 2, 4 .. N), a round
     # that took a row the lookup shaped (its own, or a spine row it agreed with) starts over, a lone round always looks

@@ -99,8 +99,8 @@ def _joint(fn, jobs: list) -> list:
                 n = s["n"] if s["n"] is not None else K.hc_norm(h, fn._site_norm(li), H, eps)
                 x, di = fn._mix_pre(n, p + "attn_hyper_connection")
                 out = fn._gdn_pre(x, li, st) if c.is_linear(li) else fn._attn_pre(x, li, st)
-                h, n = K.inject_norm(h, out, di, W[p + "attn_hyper_connection.rank"],
-                                     W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+                h, n = fn._inject_pre(h, out, di, W[p + "attn_hyper_connection.rank"],
+                                      W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
                 x, di = fn._mix_pre(n, p + "mlp_hyper_connection")
                 s["h"] = h
                 xs.append(x)
@@ -121,7 +121,7 @@ def _joint(fn, jobs: list) -> list:
             r0 = 0
             for s, i_, w_, di in zip(seqs, ids, wts, dis):
                 r1 = r0 + i_.numel()
-                s["h"], s["n"] = K.inject_norm(s["h"], K.moe_combine(yd[r0:r1], i_, w_), di, R, nxt, hc, eps)
+                s["h"], s["n"] = fn._inject_pre(s["h"], K.moe_combine(yd[r0:r1], i_, w_), di, R, nxt, hc, eps)
                 r0 = r1
             del yd, ids, wts, dis
             X.slab_cache_clear()
@@ -129,6 +129,7 @@ def _joint(fn, jobs: list) -> list:
     finally:
         X.slab_cache_off()
         PK.wf_cache_off()
+        fn._n32_clear()
         fn._pre = None
     res = []
     for s in seqs:                                            # `forward_pre`'s end and `prefill`'s
