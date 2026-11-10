@@ -29,9 +29,9 @@ The test matrix:
      window; 6.05 fits no window and says by how much; a window above a profile's largest is a 422;
      the fixture holds a case per pack at 131,072 and 262,144     test_flash_next_packs
  11  #104, Ornith (no side slots): one chat fits, two are a 422 in both copies of the check   test_the_fixture
- 10  SPD-150, the e4m3 caches: the fixture holds Flint, Flash-Next and Ornith with the cache off and on (the
-     27B's with its components), so the page's copy counts a component's KV bytes a token as the server
-     does                                                         test_the_fixture
+ 10  SPD-150, the e4m3 caches: the fixture holds Flint, Flash-Next, Ornith, LFM2.5 and the three Nemotrons with
+     the cache off and on (the 27B's with its components), so the page's copy counts a component's KV bytes a
+     token as the server does                                     test_the_fixture
 
  12  SRV-707, one window for every lane: the KV is lanes x window (worst) and lanes x min(window, fill)
      with the pool; lanes_full is min(lanes, floor(room / one lane at the full window)), every lane
@@ -68,6 +68,15 @@ def _fn() -> dict:
 
 def _fl() -> dict:
     return registry.get("flint")
+
+
+#: SPD-150: the models whose e4m3 cache the fixture holds beside Flint, Flash-Next and Ornith
+FP8_OTHERS = ("lfm2.5-24b-a2b", "nemotron-3.5-bolt-74b-a9b", "nemotron-3.5-lightning-30b-a3b",
+              "nemotron-3.5-super-vl-120b-a12b")
+
+
+def _fp8_others() -> tuple:
+    return tuple(registry.get(x) for x in FP8_OTHERS)
 
 
 def _orn() -> dict:
@@ -295,13 +304,13 @@ def _cases() -> list[dict]:
                     "selection": {"model": fl["id"], "components": {"kv_fp8": on}}})
     orn = _orn()
     # SPD-150: the other families' e4m3 caches, off and on (the 27B's is among its components above)
-    for x in (f, orn):
+    for x in (f, orn) + _fp8_others():
         for on in (False, True):
             out.append({"name": f"{x['id']}, the e4m3 cache {'on' if on else 'off'} (SPD-150)",
                         "selection": {"model": x["id"], "components": {"kv_fp8": on}}})
     out.append({"name": "Ornith, one chat (its engine has no side slots, #104)", "selection": {"model": orn["id"]}})
     out.append({"name": "refused: Ornith, two chats", "selection": {"model": orn["id"], "slots": 2}})
-    models = {m["id"]: m, f["id"]: f, fl["id"]: fl, orn["id"]: orn}
+    models = {m["id"]: m, f["id"]: f, fl["id"]: fl, orn["id"]: orn, **{x["id"]: x for x in _fp8_others()}}
     for c in out:
         mm = models[c["selection"].get("model", m["id"])] if c["selection"].get("model") in models else m
         try:
@@ -347,7 +356,7 @@ def _fixture() -> dict:
                      "every `error` case with that status and code. `model` is the part of the "
                      "model payload (GET /v1/setup/models/{id}) the formula reads. Regenerate with "
                      "python tests/test_setup_estimate.py --write after a registry change.",
-            "model": _formula_model(m), "models": {x["id"]: _formula_model(x) for x in (_fn(), _fl(), _orn())}, "cases": _cases()}
+            "model": _formula_model(m), "models": {x["id"]: _formula_model(x) for x in (_fn(), _fl(), _orn()) + _fp8_others()}, "cases": _cases()}
 
 
 def test_the_fixture():

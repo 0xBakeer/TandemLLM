@@ -837,7 +837,9 @@ def test_flints_fp8_cache_switch():
 
 #: SPD-150: the KV bytes a token of window with each model's e4m3 cache off and on (the engines' cost())
 FP8_BYTES = {"flint": (28672, 14784), "qwen3.8-flash-next": (31040, 18944), "ornith-1.5-122b": (24576, 12480),
-             "qwen3.8-27b": (106752, 74496)}
+             "qwen3.8-27b": (106752, 74496), "lfm2.5-24b-a2b": (20480, 10880),
+             "nemotron-3.5-bolt-74b-a9b": (8192, 4224), "nemotron-3.5-lightning-30b-a3b": (6144, 3168),
+             "nemotron-3.5-super-vl-120b-a12b": (8192, 4224)}
 
 
 def test_every_fp8_cache_switch():
