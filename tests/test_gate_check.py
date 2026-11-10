@@ -60,7 +60,10 @@ def test_good_report_passes():
     rep = report(rows_ok(), kernels=["tests/gpu/test_fn_kernels_gpu.py", "tests/gpu/test_fn_prefill_kernels_gpu.py",
                                      "tests/gpu/test_fn_seq_kernels_gpu.py", "tests/gpu/test_fn_attn_multi_gpu.py",
                                      "tests/gpu/test_fn_gemv_nb_gpu.py", "tests/gpu/test_fn_mixer_mma_gpu.py",
-                                     "tests/gpu/test_fn_joint_graph_gpu.py", "tests/gpu/test_fn_joint_prefill_gpu.py"])
+                                     "tests/gpu/test_fn_joint_graph_gpu.py", "tests/gpu/test_fn_joint_prefill_gpu.py",
+                                     "tests/gpu/test_fn_attn_rows_big_gpu.py", "tests/gpu/test_fn_attn_stages_gpu.py",
+                                     "tests/gpu/test_fn_pf_hc_gpu.py", "tests/gpu/test_fn_pf_nocopy_gpu.py",
+                                     "tests/gpu/test_fn_pf_window_gpu.py", "tests/gpu/test_fn_prefill_mm_gpu.py"])
     res = run_check(rep)
     assert res["ok"], res["problems"]
 
@@ -117,7 +120,10 @@ def test_failing_rows_and_unexplained_changes():
                  kernels=["tests/gpu/test_fn_kernels_gpu.py", "tests/gpu/test_fn_prefill_kernels_gpu.py",
                           "tests/gpu/test_fn_seq_kernels_gpu.py", "tests/gpu/test_fn_attn_multi_gpu.py",
                           "tests/gpu/test_fn_gemv_nb_gpu.py", "tests/gpu/test_fn_mixer_mma_gpu.py",
-                          "tests/gpu/test_fn_joint_graph_gpu.py", "tests/gpu/test_fn_joint_prefill_gpu.py"])
+                          "tests/gpu/test_fn_joint_graph_gpu.py", "tests/gpu/test_fn_joint_prefill_gpu.py",
+                          "tests/gpu/test_fn_attn_rows_big_gpu.py", "tests/gpu/test_fn_attn_stages_gpu.py",
+                          "tests/gpu/test_fn_pf_hc_gpu.py", "tests/gpu/test_fn_pf_nocopy_gpu.py",
+                          "tests/gpu/test_fn_pf_window_gpu.py", "tests/gpu/test_fn_prefill_mm_gpu.py"])
     res = run_check(rep)
     assert res["ok"], res["problems"]
     assert any("explained" in n for n in res["notes"])
