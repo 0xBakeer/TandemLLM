@@ -179,8 +179,9 @@ def test_live_rates_leave_the_warm_up_out():
         for s in snaps[::5]:
             assert not contract_check.check(s, "live")
         assert snaps[-1]["windows"]["decode_warmup_tokens"] == 50
+        # "prefill" starts at the lock; activity.prefill stays null until the prompt is counted
         pre = [(s, r) for s in snaps for r in s["requests"] if r["phase"] == "prefill"
-               and r["activity"]["prefill"]["pct"] is not None]
+               and (r["activity"]["prefill"] or {}).get("pct") is not None]
         warming = [p for _, r in pre for p in [r["activity"]["prefill"]]
                    if p["tps_live"] is None]
         rated = [(s, r["activity"]["prefill"]) for s, r in pre
