@@ -1,14 +1,14 @@
 \chapter{The dashboard, view by view}\label{ch:dashboard}
 
-The engine serves its own web page at \code{/dashboard/}, and the standalone proxy serves the same page at \code{:8080/dashboard/}. It answers what a log cannot answer at a glance: what the engine is doing right now, for whom, and how fast. It is written in TypeScript with Lit components, its charts are hand-drawn SVG, it loads nothing from a CDN, and the server serves it from \code{dashboard/dist/} with no Node on the machine that serves it. The parts every view loads are about 45~KB of gzip. Figure~\ref{fig:dashboard-map} shows the seven views and what each reads.
+The engine serves its own web page at \code{/dashboard/}, and the standalone proxy serves the same page at \code{:8080/dashboard/}. It answers what a log cannot answer at a glance: what the engine is doing right now, for whom, and how fast. It is written in TypeScript with Lit components, its charts are hand-drawn SVG, it loads nothing from a CDN, and the server serves it from \code{dashboard/dist/} with no Node on the machine that serves it. The parts every view loads are about 45~KB of gzip. Figure~\ref{fig:dashboard-map} shows the nine views and what each reads.
 
 \begin{figure}[htbp]
 \centering
 \input{figures/dashboard-map}
-\caption[The dashboard's views]{The dashboard's seven views, in the order of its navigation rail, and the server routes each reads. Every view only reads, except where an edit makes a new version of a document or a configuration row.}\label{fig:dashboard-map}
+\caption[The dashboard's views]{The dashboard's nine views, in the order of its navigation rail, and the server routes each reads. Chat sends messages and Setup installs a model; the other views only read, except where an edit makes a new version of a document or a configuration row.}\label{fig:dashboard-map}
 \end{figure}
 
-The navigation also holds Chat, the Chat tab (Chapter~\ref{ch:chat}), and Setup, the Setup Guide that picks and installs a model (Section~\ref{sec:new-box}); a box in setup mode opens on it. On a phone a bottom bar keeps Chat beside Usage and Performance, and a More button opens the rest.
+Chat, first in the navigation, is the Chat tab (Chapter~\ref{ch:chat}), and Setup, last, is the Setup Guide that picks and installs a model (Section~\ref{sec:new-box}); a box in setup mode opens on it. On a phone a bottom bar keeps Chat beside Usage and Performance, and a More button opens the rest.
 
 \section{Performance: the live panel}\index{Live panel}
 
