@@ -72,6 +72,12 @@ compaction lands under half the limit that set it off: a long run keeps fewer th
 steps until it does. The `[compact]` log line and the Context panel give the chat's request size
 before and after, and the summary call's size apart.
 
+## Memory priority
+
+Each chat has a priority for the engine's memory: high, normal or low (0.15.3, #169). Normal is the default. The tools pill in the composer's options row ("3 tools") opens a menu with a Memory priority row of three buttons. When several chats need more memory than the box has, the higher one goes first, and a chat that waits moves up a step every 30 minutes. When memory is short, the engine gives back a low chat's idle conversation before a normal one's.
+
+chatd keeps the value in the chat's settings (`priority`, through `PATCH /conversations/{id}/settings`; any other value is a 400) and sends it to the engine as `tandem.priority` on each call, high and low only. A normal chat sends nothing, which the engine reads as normal. Only waits for memory use it; a chat runs no faster for it. [parallel-requests.md](parallel-requests.md#waiting-for-memory) has the engine's side.
+
 ## Starting and stopping
 
 chatd starts with the engine and stops with `tandem stop` (OPS-155). `tandem start` and

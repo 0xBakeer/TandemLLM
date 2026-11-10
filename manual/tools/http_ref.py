@@ -281,7 +281,7 @@ ERRORS = [
     ("502", ["connect_error", "upstream_error", "key_unreadable"], "the proxy could not reach the backend or read its stored key, after its retries", False),
     ("200", ["upstream_closed", "upstream_error"], "a stream that already began: the backend failed or closed early; the client gets an error event, then [DONE]", False),
     ("503", ["server_busy"], "the queue is full, the server is draining, or the memory gate or the admission by bytes cannot make room", True),
-    ("503", ["memory_wait_timeout"], "a request without a stream that waited past --queue-timeout for memory to free (type server_busy, Retry-After: 30)", True),
+    ("503", ["memory_wait_timeout"], "a request that waited for memory to its bound: --queue-timeout without a stream, QSE_MEM_WAIT_S streamed or with wait_for_memory; a stream that opened while it waited ends with it as an error event (type server_busy, Retry-After: 30)", True),
     ("503", ["setup_mode"], "any route but the dashboard, /health, /v1/models and /v1/setup/* on a box in setup mode (Retry-After: 60)", True),
     ("503", ["max_inflight"], "every backend for the model is at the max_inflight you set (Retry-After: 1)", True),
     ("503", ["warming", "loading", "refused", "failed", "not_loaded", "busy_decoding"], "a decision request while the model loads, was refused memory, failed, or the engine kept decoding past the deadline", True),

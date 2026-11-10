@@ -23,7 +23,7 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 | `--side-max-len` | 0 | a side slot's window; 0 is `--max-len`, every lane the same window (SRV-707). A shorter one is kept for old setups; a request whose prompt plus `max_tokens` does not fit it waits for slot 0 |
 | `--parallel-floor-gb` | 15 | a request waits while what the caches may still grow into (at most the engine's room to `--mem-peak-gib`), the workspaces of the prefills in flight, its own and the KV pages still to commit would push MemAvailable under this, a request alone too (0.15.1, SRV-775); a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
 | `QSE_GUARD_MARGIN_GB` | 5 | the floor a check holds is the live guard (SRV-785): one prefill chunk's workspace at the class of the longest prefill in flight, one KV commit, a chat sandbox's ask from the last minute and this margin, never above `--parallel-floor-gb` (for the KV pool's commits, never above `QSE_KV_HARD_FLOOR_GB`). The wait line names its inputs |
-| `QSE_MEM_WAIT_S` | 600 | the longest a request waits for memory, streamed or not (a request without a stream: at most `--queue-timeout`); then it is refused with the reason: a 503 with `Retry-After`, or an error event (`memory_wait_timeout`) on a stream opened while it waited (SRV-787) |
+| `QSE_MEM_WAIT_S` | 10800 | the longest a streamed request, or one that sends `wait_for_memory: true`, waits for memory (3 h); any other request without a stream waits at most `--queue-timeout`. Then it is refused with the reason: a 503 with `Retry-After`, or an error event (`memory_wait_timeout`) on a stream opened while it waited (SRV-787, SRV-797; [Waiting for memory](#waiting-for-memory)) |
 | `QSE_PEAK_STRICT` | 0 | `1`: a lone request the memory gate refuses waits too instead of running over the peak, and the gate counts the workspaces of the prefills in flight on the reserve (SRV-775; in no profile) |
 | `QSE_REQ_PEAK` | 0 | `1`: the `[req]` line adds `peak_gib=`, the allocator's peak over a request that ran alone less what was allocated at its prefill's start (a measurement, SRV-773) |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
@@ -55,6 +55,46 @@ The guide counts how many lanes can all hold the full window at once, the guaran
 Admission reserves KV pages for the prompt and at most `QSE_KV_ADMIT_ROWS` (8,192) of `max_tokens` (0: all of it), so more lanes start than the worst case allows; a lane that writes past its reservation and finds the pool full gives way as above.
 
 A round with more than 16 decoding lanes verifies in more than one pass of 32 rows (2 rows a lane), so each lane gets less speculation; the guide says so above 16 and takes up to 64.
+
+## Waiting for memory
+
+A request whose bytes do not fit above the floor waits for memory before its prefill. The server pauses it and does not refuse it: it keeps its place in the line, and its prefill starts by itself once memory frees. The client sends nothing again. This holds with more than one lane, where the admission by bytes runs (`server/app.py` `_par_admit`).
+
+What a client sees while it waits:
+
+- A streamed chat request gets its stream's headers at once, with `X-Tandem-Wait: memory`, and an SSE comment every 15 s: `: waiting for memory, position <n>, <x> GiB short, <s> s so far, refused in <s> s unless memory frees`. A comment is no event, so no client reads it as a token, and an idle-read timeout does not close the connection. With the profile's progress lines on, the client also gets a waiting line, "memory is almost full, your request starts when a running one frees memory".
+- The live view and the Lanes view show the request as `waiting_memory`, with `activity.memory`: `need_gib` (what this turn takes in the check that holds it), `others_gib` (what other turns and the caches hold, 0.15.4), `check` (`request`, `prefill` or `peak`, 0.15.4), `rows` (the rows it forwards), `free_gib`, `guard_gib` and its inputs `guard`, `short_gib`, `freed_gib`, `in_the_way` (the prefill in its way, with its time left), `place`, `waited_ms`, `bound_s`, `ends_in_ms`, and `lines`, the three sentences the dashboard shows ([dashboard.md](dashboard.md#held-for-memory)).
+- The engine log has `[parallel] <id> waits for memory: ...` with the check's terms, `still waits for memory (<s> s of <bound>)` every 15 s, and `[parallel] <id> admitted after <s> s` at the end. The ledger books the wait as `wait_mem_ms`. A wait does not count toward `--request-timeout`.
+
+The line for memory goes by the chat's priority, then by arrival (`server/slots.py` `Admission.wait`). The priority is `tandem.priority` in the request body: `"high"`, `"normal"` or `"low"`, and anything else or no field is normal. A request that waits moves up one step for every 30 minutes it has waited, so a low chat still gets its turn. A new request does not take the bytes a higher-priority waiter is held for: it joins the line behind it. The KV pool's reclaim takes the idle conversations of lower-priority chats first, after the older copies of a chat. A lane that gave its memory back in the middle of its answer goes to the head of the line. The Chat tab sets the priority per chat ([chat.md](chat.md#memory-priority)).
+
+How long it waits:
+
+| knob | default | what it does |
+|-|-|-|
+| `QSE_MEM_WAIT_S` | 10800 (3 h) | the longest wait of a streamed request, or of one that asks for the long wait with `wait_for_memory: true` (in the body or in its `tandem` object) or `X-Tandem-Wait-For-Memory: 1` |
+| `--queue-timeout` | 120 (serve.env: 240) | the longest wait of any other request not streamed |
+| `QSE_KV_ADMIT_ROWS` | 8192 | the part of `max_tokens` the admission reserves KV pages for; 0 is all of it |
+| `QSE_KV_RECOMPUTE` | on | a lane the KV pool refuses gives way and goes on later; `off` ends it with `memory_full` |
+
+The table in the section Switching it on above has the floors the wait checks against: `--parallel-floor-gb`, `QSE_GUARD_MARGIN_GB` and, for the pool's commits, `QSE_KV_HARD_FLOOR_GB` (10).
+
+At its bound the server checks the request once more and then refuses it: a 503 with `Retry-After: 30`, type `server_busy`, code `memory_wait_timeout`, and a message that says what it needed and what was free above the guard. A stream opened while it waited ends with the same error as an event. A planned stop ends the wait at once with a 503 to send again. A client that leaves while it waits is booked `abandoned` (`left_while_waiting_memory`).
+
+### What a turn is charged (0.15.4, SRV-801)
+
+The admission reserves the workspace of the rows the prefill forwards and the KV pages its prompt may still commit. It counts the rows from where the prompt resumes on its slot: the rows in place, the end anchor, or the conversation's entry on the NVMe (`ws_kind=spill`, #167). The `[req]` line has the charge as `ws_rows` and `ws_gib`, and the rows forwarded as `fwd`.
+
+- Slot 0 counts its own conversation. On 0.15.3 slot 0 had no share of it, so a turn of the chat it held was charged a cold read of the whole chat. On a user's box such a turn waited 148.6 s, charged 212,938 rows (10.75 GiB), and then forwarded 449.
+- The price is the served prompt's: the router's notes and the replayed spans count as the prefill reads them.
+- A regenerate or an edit asks the slot's rows where its prefill will resume, the way the prefill asks them, and pays the rows from there. A prompt with images cannot ask the rows, so a regenerate or an edit with images takes no share and pays more.
+- A next turn whose copy leaves out the last answer's reasoning is charged from the end anchor. Before, the last answer was charged twice.
+- The floor a prefill's pages commit under holds the chunk the turn forwards, not a whole 4,096-row chunk. Where the forwarded rows are not known, it holds a whole chunk, as before.
+- Before the prefill's first forward the server compares the rows it forwards with the price (`server/app.py` `_forward_backstop`). When they need more workspace, the request's own reserve is raised, checked at the floor, and the log says `[memory] <id> forwards <n> rows, priced at <m>: its workspace <a> -> <b> GiB, reserved`. When the floor does not hold the raise, the lane gives way before the forward allocates anything: a streamed one, or one that asked for the long wait, waits and reads again; any other that runs alone ends with `memory_full`.
+
+A hand-back that frees nothing during a wait prints its line once, then a count once a minute, and the count again when the wait ends (`--verbose` only). Before, every one-second retry printed eight lines.
+
+Measured on one DGX Spark (2026-11-10, Flash-Next 3.05, 8 lanes, a synthetic chat of about 203,000 tokens through the chat endpoint, then short turns): every request line of the build had `ws_rows` equal to `fwd`. Follow-ups forwarded 931 to 1,059 rows, a regenerate 7,281 and an edit 2,737. No turn waited in that run, so a wait at the new price is not measured yet. Known gap (SRV-805, open): a cold read took more host memory than its reserve, 0.37 GiB more for a 3,412-row prompt and 0.44 GiB for a 203,415-row one. The cause is not known.
 
 ## How a round runs
 
@@ -180,8 +220,8 @@ recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
   (SRV-305): its stream carries "waiting: memory is almost full" and the rest of that line every 15 s (Open WebUI's status
   line, opencode's reasoning; the states lines are stripped from a turn sent back), the header
   `X-Tandem-Wait: memory`, the Parallel view shows the lane as `waiting_memory` and counts
-  `totals.waiting_memory`; a streamed request waits up to `--request-timeout`, a non-streamed one gets a
-  503 `memory_wait_timeout` with `Retry-After` after `--queue-timeout`.
+  `totals.waiting_memory`; a streamed request waits up to `QSE_MEM_WAIT_S` (SRV-787; until then `--request-timeout`),
+  a non-streamed one gets a 503 `memory_wait_timeout` with `Retry-After` after `--queue-timeout`.
 - **The memory policy** no longer holds slot 0's window: its ceiling and peak drop by it (26 GiB at
   262,144), so the residency planner sees the uncommitted window as free and loads the narrator and the
   Laya decider beside four slots. `/health` `kv_pool` shows the committed pages by slot and by kind

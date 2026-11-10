@@ -28,6 +28,15 @@ The conductor's routes and the proxy's configuration routes are generated from t
 
 \input{generated/routes}
 
+\section{Request fields of TandemLLM's own}\label{sec:ref-tandem-fields}\index{tandem object}
+
+Two fields of a chat or completion request concern the wait for memory (Section~\ref{sec:memory-wait}). The engine reads them; Section~\ref{sec:api-fields} lists the OpenAI fields.
+
+\begin{itemize}
+\item \code{tandem.priority}\index{memory priority}: \code{"high"}, \code{"normal"} or \code{"low"}, the chat's place in the line for memory and in the order the KV pool's reclaim takes idle conversations. Any other value, or none, is normal (0.15.3).
+\item \code{wait_for_memory: true}, in the body or in its \code{tandem} object: a request without a stream waits for memory up to \code{QSE_MEM_WAIT_S} instead of \code{--queue-timeout}, as the header \code{X-Tandem-Wait-For-Memory: 1} asks (0.15.3).
+\end{itemize}
+
 \section{Headers}\index{headers}
 
 Table~\ref{tab:ref-headers} lists every header the engine and the proxy read or write beyond the ones HTTP itself needs. \emph{in} is a header the server reads, \emph{out} one it writes.

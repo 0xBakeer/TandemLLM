@@ -1,6 +1,6 @@
 \chapter{Serving}\label{ch:serving}
 
-\code{server/app.py}\index{server/app.py@\texttt{server/app.py}} speaks the OpenAI HTTP API, so any OpenAI client uses the engine by changing its base URL. It is built on the Python standard library (\code{ThreadingHTTPServer}), with no web framework. This chapter covers the request fields, reasoning and thinking budgets, tool calls, structured outputs, streaming, images, and how the server behaves under load: the queue, the side lane, the memory gate and the loop guard. Chapter~\ref{ch:ref-http} lists every route.
+\code{server/app.py}\index{server/app.py@\texttt{server/app.py}} speaks the OpenAI HTTP API, so any OpenAI client uses the engine by changing its base URL. It is built on the Python standard library (\code{ThreadingHTTPServer}), with no web framework. This chapter covers the request fields, reasoning and thinking budgets, tool calls, structured outputs, streaming, images, and how the server behaves under load: the queue, the side lane, the memory gate, the wait for memory and the loop guard. Chapter~\ref{ch:ref-http} lists every route.
 
 \section{What the API supports}\label{sec:api-fields}\index{OpenAI API}
 
@@ -14,7 +14,7 @@
 
 The request's own shape is checked first, and a wrong one is a 400 that names the field before anything reads it: no \code{messages} or an empty list, an unknown role (\code{messages[0].role}), a system prompt alone or only tool results (no user message to answer), a system message after the conversation began, \code{max_tokens} or \code{max_completion_tokens} below 1, an empty completion \code{prompt}, a body that is not a JSON object, and a prompt that renders to no token. OpenAI's \code{developer} role is the system prompt; a system and a developer message at the start become one system prompt, because the chat template reads one.
 
-Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: \code{top_k}, \code{min_p}, \code{repetition_penalty}, \code{no_repeat_ngram_size}, \code{max_reasoning_tokens}, \code{reasoning_format}, \code{draft_temperature}, \code{chat_template_kwargs}, \code{cache_prompt}, and the other servers' thinking-budget shapes.
+Fields that are not OpenAI's pass through without a 400, because clients send extensions meant for other servers. The engine reads its own: \code{top_k}, \code{min_p}, \code{repetition_penalty}, \code{no_repeat_ngram_size}, \code{max_reasoning_tokens}, \code{reasoning_format}, \code{draft_temperature}, \code{chat_template_kwargs}, \code{cache_prompt}, \code{wait_for_memory} and \code{tandem.priority} (Section~\ref{sec:ref-tandem-fields}), and the other servers' thinking-budget shapes.
 
 The prompt caches are on for every request. \code{cache_prompt: false} reads the whole prompt, so \code{timings.cache_n} is 0, and leaves every prompt cache as it was: the conversation in place is set aside as for another client's and is there for the next request without the flag. Any other value, or none, keeps the caches on. \code{docs/server.md} has the details.
 
@@ -124,7 +124,7 @@ A long conversation is not refused for the images it has gathered. A coding agen
 
 \section{Admission and limits}\index{admission}
 
-A sequence serves one request at a time, so requests wait for a free one in a bounded queue. The shipped profile has one sequence; Section~\ref{sec:parallel-requests} adds more.
+A sequence serves one request at a time, so requests wait for a free one in a bounded queue. The shipped profile runs 8 of them (Section~\ref{sec:parallel-requests}).
 
 \begin{table}[htbp]
 \centering\small
@@ -148,7 +148,7 @@ At load the server allocates the KV buffer for the whole context, so the context
 
 Three limits hold the engine's memory. \code{--mem-ceiling-gib}\index{mem-ceiling-gib@\texttt{-\kern0pt-mem-ceiling-gib}} (70) is what the engine may hold between requests, allocated plus the allocator's reserve; a cache grows only while the engine stays under it. \code{--mem-peak-gib}\index{mem-peak-gib@\texttt{-\kern0pt-mem-peak-gib}} (77) is the ceiling plus the workspace of a 262,144-token prefill, what the engine may hold during a prefill. \code{--reserve-slack-gib}\index{reserve-slack-gib@\texttt{-\kern0pt-reserve-slack-gib}} (2) is how many free blocks the allocator may keep between requests; over it they go back to the driver after the request, never inside one.
 
-Before every prefill the gate brings the engine back under the ceiling and then checks that the prompt's estimated workspace fits under the peak. When it does not, it gives caches back, cheapest first (Figure~\ref{fig:memory-gate}). The last level releases the small models' own memory pools. Before a refusal the gate collects and empties the allocator once more, and a prompt whose workspace fits in the allocator's own free reserve is admitted. When nothing is enough, the request gets a 503 with \code{Retry-After} instead of running the board into its out-of-memory wedge, and the Dev view shows an error line with the allocated and reserved figures.
+Before every prefill the gate brings the engine back under the ceiling and then checks that the prompt's estimated workspace fits under the peak. When it does not, it gives caches back, cheapest first (Figure~\ref{fig:memory-gate}). The last level releases the small models' own memory pools. Before a refusal the gate collects and empties the allocator once more, and a prompt whose workspace fits in the allocator's own free reserve is admitted. When nothing is enough, the request gets a 503 with \code{Retry-After} instead of running the board into its out-of-memory wedge, and the Dev view shows an error line with the allocated and reserved figures. With more than one lane, a request the admission cannot fit waits for memory (Section~\ref{sec:memory-wait}).
 
 \begin{figure}[htbp]
 \centering
@@ -199,6 +199,37 @@ A request beside others writes its alone text up to a near tie (Chapter~\ref{ch:
 \paragraph{Waiting for slot~0.} A request that continues slot~0's conversation prefers slot~0, but since 0.8.2 it waits there at most \code{QWEN38_SIDE_SLOT0_WAIT_S} seconds (3), then takes a free side slot its prompt fits in and prefills there what the disk tier does not hold. A request too long for every side slot still waits for slot~0. A match on the NVMe now counts as the request's conversation only when it reaches past the first user message; a match at the client's head, such as Open WebUI's system prompt and tool list, is logged as \code{spill_head=} and the request is a new conversation. On v0.8.0 such a head match held a new chat for 437~s while both side slots were free. \code{/health} \code{parallel} says how many requests may run at once (\code{max_running} with \code{max_running_reason}) and counts \code{spill_waits} and \code{slot0_gave_up}; the Lanes view's queued line says why a request waits, for example \enquote{Queued: all 3 slots are busy}.
 
 \paragraph{Images on a side slot.} Since 0.12.1 a request with images takes a side slot the way a text request does (\code{QWEN38_SIDE_IMAGES}, on; \code{off} keeps images on slot~0, as 0.12.0). Each side slot is its own engine over the same weights, with its own image context and rotary offset. The router expands each image to its rows on the host and keys them by the image's digest, as the caches do, and the window, the output cut and the memory admission count those rows: a screenshot of 1,280 by 800 pixels is 1,000 rows. On the 27B, one image request wrote the same 300 tokens on slot~1 as twice on slot~0 (\measured). Super VL's tower stays on slot~0.
+
+\section{Waiting for memory}\label{sec:memory-wait}\index{waiting for memory}\index{memory wait}
+
+With more than one lane, a request whose bytes do not fit above the floor waits for memory before its prefill. The server pauses it and does not refuse it: the request keeps its place in the line, and its prefill starts by itself once memory frees. The client sends nothing again. The floors are those of Section~\ref{sec:parallel-requests}: \code{--parallel-floor-gb} (15) for the whole request, and while its prefill runs the KV pool's \code{--kv-hard-floor-gb} (10). Each floor holds the largest prefill chunk in flight or of this turn, one KV commit, a chat sandbox's last ask and \code{QSE_GUARD_MARGIN_GB} (5), at most the configured value.
+
+A streamed chat request gets its stream's headers at once, with \code{X-Tandem-Wait: memory}, and an SSE comment every 15~s:
+
+\begin{plain}
+: waiting for memory, position <n>, <x> GiB short, <s> s so far, refused in <s> s unless memory frees
+\end{plain}
+
+The live view and the Lanes view show the request as \code{waiting_memory} with the server's reason and when the wait ends (Section~\ref{sec:dash-held}); the live view's \code{activity.memory} has the same numbers as fields. The engine log prints \code{[parallel] <id> waits for memory} with the check's terms, again every 15~s, and \code{admitted after <s> s} at the end; the ledger books the wait as \code{wait_mem_ms}. The wait does not count toward \code{--request-timeout}.
+
+\paragraph{The line.}\index{memory priority} Requests that wait stand in line by their chat's priority, then by arrival. The priority is \code{tandem.priority} in the request body, \code{"high"}, \code{"normal"} or \code{"low"}; any other value, or none, is normal. For every 30 minutes a request has waited it counts one step higher, so a low chat still gets its turn. A new request does not take the bytes a higher-priority waiter is held for, and the KV pool's reclaim takes the idle conversations of lower-priority chats first, after the older copies of a chat. A lane that gave its memory back in the middle of its answer goes to the head of the line. The Chat tab sets the priority per chat (Section~\ref{sec:chat-priority}).
+
+\paragraph{How long.} A streamed request waits up to \code{QSE_MEM_WAIT_S}\index{qsememwaits@\texttt{QSE\_MEM\_WAIT\_S}} (10,800~s, 3~hours). A request without a stream waits up to \code{--queue-timeout} (120~s; the served profile 240), unless it asks for the long wait with \code{wait_for_memory: true} in the body or in its \code{tandem} object, or with the header \code{X-Tandem-Wait-For-Memory: 1}. At the bound the server checks once more, then answers 503 with \code{Retry-After: 30}, type \code{server_busy} and code \code{memory_wait_timeout}; the message says what the turn needed and what was free above the guard. A stream that opened while it waited ends with the same error as an event. A planned stop ends every wait at once with a 503 to send again.
+
+\paragraph{What a turn is charged (0.15.4, SRV-801).} The admission reserves the workspace of the rows the prefill forwards and the KV pages its prompt and up to \code{QSE_KV_ADMIT_ROWS} (8,192) of its \code{max_tokens} may still commit. It counts the rows from where the prompt resumes on its slot: the rows in place, the end anchor or the conversation's entry on the NVMe. The \code{[req]} line has the charge as \code{ws_rows} and \code{ws_gib} and the rows forwarded as \code{fwd}. On 0.15.3 slot~0 had no share of its own conversation, so a turn of the chat it held was charged a cold read of the whole chat; on a user's box such a turn was charged 212,938 rows (10.75~GiB), waited 148.6~s and then forwarded 449. Since 0.15.4:
+
+\begin{itemize}
+\item slot~0 counts the share of the conversation it holds, as a side slot does;
+\item the price is the served prompt's, with the router's notes and the replayed spans in it;
+\item a regenerate or an edit asks the slot's rows where its prefill will resume and pays the rows from there (with images it cannot ask them, takes no share and pays more);
+\item a next turn whose copy leaves out the last answer's reasoning is charged from the end anchor, so the last answer no longer counts twice;
+\item the floor a prefill's pages commit under holds the chunk the turn forwards, not a whole 4,096-row chunk, unless the rows are not known;
+\item before the prefill's first forward the server compares the rows it forwards with the price. When they need more workspace it raises the request's own reserve at the floor (\code{[memory] <id> forwards <n> rows, priced at <m>}). When the floor does not hold the raise, the lane gives way before the forward allocates anything: a streamed one waits and reads again, one not streamed that runs alone ends with \code{memory_full}.
+\end{itemize}
+
+A hand-back that frees nothing during a wait now prints one line, then a count once a minute and at the wait's end (with \code{--verbose}); before, each one-second retry printed eight.
+
+Measured on one DGX Spark (\measured, 2026-11-10, Flash-Next 3.05, 8 lanes, a synthetic chat of about 203,000 tokens, then short turns): every request line had \code{ws_rows} equal to \code{fwd}. Follow-ups forwarded 931 to 1,059 rows, a regenerate 7,281 and an edit 2,737. No turn waited in that run, so a wait at the new price is not measured yet. A cold read took more host memory than its reserve, 0.37~GiB more for a 3,412-row prompt and 0.44~GiB for a 203,415-row one; the cause is not known (SRV-805, open).
 
 \section{A second model behind the same server}\label{sec:serving-flashnext}\index{Flash-Next!serving}
 
