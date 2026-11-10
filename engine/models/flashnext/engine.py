@@ -106,7 +106,7 @@ JG_PLE_LATE = _S.get("FN_JG_PLE_LATE") == "1"
 PLE_PREFETCH = _S.get("FN_PLE_PREFETCH") == "1"
 #: SPD-249 (T8): the MoE's router, the pad rows' ids and the experts' launch index (the stable expert order, or the expert
 #: groups) in one launch (`fn_kernels.route`) for calls of up to 32 rows: the same ids, weights, order and groups as the
-#: router, the mask, the sort and the groups launches it replaces; 0: those launches
+#: router, the mask, the sort and the groups launches it replaces; on by default; 0: those launches
 ROUTE_FUSED = _S.get("FN_ROUTE_FUSED") == "1"
 #: SPD-249: the joint graphs kept (the least recently replayed go first)
 JOINT_GRAPH_MAX = int(_S.get("FN_JOINT_GRAPH_MAX") or 12)
@@ -123,7 +123,7 @@ JG_CUTS = (2, 10, 22, 34)
 #: replayed from a CUDA graph a lane count (`PackGraph`, key: lanes, depth, draft head, the caches' strides): every lane's
 #: MTP cache and staged rows reached through the graph's attention entry tables (`attn_prep_multi` / `attn_rows_multi`,
 #: each row's arithmetic its lane-at-a-time launch's), the lanes' picks in one pinned copy; the feed of the committed rows
-#: stays eager. A dense draft only (every lane's class 0). 0: the whole packed draft eager
+#: stays eager. A dense draft only (every lane's class 0). On by default; 0: the whole packed draft eager
 PACK_GRAPH = _S.get("FN_PACK_GRAPH") == "1"
 #: SPD-249 (T1): a key's draft graph is captured at its n-th packed draft (the eager drafts before it load what it runs)
 PACK_GRAPH_AFTER = int(_S.get("FN_PACK_GRAPH_AFTER") or 2)

@@ -1,6 +1,6 @@
 """SPD-249 (T1): the host side of Flash-Next's packed MTP draft graph (QWEN38_FN_PACK_GRAPH), no GPU.
 
-  * the knobs are registered, off by default, and read where the registry says;
+  * the knobs are registered, FN_PACK_GRAPH on by default, and read where the registry says;
   * a draft runs eager where a graph would not hold it (a measurement on, one lane, mixed depths, a sparse class,
     caches of another layout), and while its key has no graph and may not capture one (before its
     QWEN38_FN_PACK_GRAPH_AFTER-th draft, or without the server's word); a key captures once, then replays;
@@ -132,13 +132,13 @@ def _run(eng, items, rows=6, H=4, kp=None):
     return eng._pack_graph_run(items, last, x, h, kp)
 
 
-def test_t1_the_knobs_are_registered_off():
+def test_t1_the_knobs_are_registered_on():
     from engine.settings import KNOBS
-    assert KNOBS["FN_PACK_GRAPH"] == ("0", "engine/models/flashnext/engine.py"), KNOBS["FN_PACK_GRAPH"]
+    assert KNOBS["FN_PACK_GRAPH"] == ("1", "engine/models/flashnext/engine.py"), KNOBS["FN_PACK_GRAPH"]
     assert KNOBS["FN_PACK_GRAPH_AFTER"] == ("2", "engine/models/flashnext/engine.py"), KNOBS["FN_PACK_GRAPH_AFTER"]
     if "QWEN38_FN_PACK_GRAPH" not in os.environ:
-        assert E.PACK_GRAPH is False
-    return "FN_PACK_GRAPH 0, FN_PACK_GRAPH_AFTER 2, read in engine.py"
+        assert E.PACK_GRAPH is True
+    return "FN_PACK_GRAPH 1, FN_PACK_GRAPH_AFTER 2, read in engine.py"
 
 
 def test_t1_why_a_draft_runs_eager():

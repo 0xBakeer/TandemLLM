@@ -4,8 +4,8 @@
      popcounts), modelled by `fn_kernels.route_index_reference`, is `expert_order`'s stable sort and
      moe_groups_kernel's walk over it (`groups_reference`): random routings of 1..32 rows, pad rows, caps 1..8
                                                                      test_index_is_the_sort_and_the_walk
-  2  the knob is registered, off by default, and the adapter reads it
-                                                                     test_knobs_off_by_default
+  2  the knob is registered, on by default, and the adapter reads it
+                                                                     test_knob_on_by_default
   3  `_moe_routed` asks for one route launch (the order, or the groups on the grouped kernels; one row keeps the router
      launch) and the experts from that index; `moe_parts` takes it only with the knob on, for 1..32 rows, where the
      CUDA kernels run (a fake kernel module records the calls)       test_moe_routed_dispatch
@@ -61,18 +61,18 @@ def test_index_is_the_sort_and_the_walk():
     return f"{n} routings: order = stable sort, groups = the walk"
 
 
-def test_knobs_off_by_default():
+def test_knob_on_by_default():
     from engine.models.flashnext.knobs import KNOBS
     from engine.settings import KNOBS as ALL
-    assert KNOBS["FN_ROUTE_FUSED"] == ("0", "engine/models/flashnext/engine.py") and "FN_ROUTE_FUSED" in ALL
+    assert KNOBS["FN_ROUTE_FUSED"] == ("1", "engine/models/flashnext/engine.py") and "FN_ROUTE_FUSED" in ALL
     for k in ("FN_SHARED_SIDE", "FN_SHARED_MODE"):
         assert k not in KNOBS, f"{k}: M4 is not on this branch"
     src = open(os.path.join(ROOT, "engine/models/flashnext/engine.py")).read()
     assert 'ROUTE_FUSED = _S.get("FN_ROUTE_FUSED") == "1"' in src
     if "QWEN38_FN_ROUTE_FUSED" not in os.environ:
         from engine.models.flashnext import engine as EM
-        assert EM.ROUTE_FUSED is False
-    return "FN_ROUTE_FUSED registered, '0', read in engine.py; no M4 knob"
+        assert EM.ROUTE_FUSED is True
+    return "FN_ROUTE_FUSED registered, '1', read in engine.py; no M4 knob"
 
 
 class _Rec:

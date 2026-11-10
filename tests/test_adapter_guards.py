@@ -175,10 +175,12 @@ GOLDEN_FP4 = {
     # SPD-249 (T1, T8): the packed draft graph (QWEN38_FN_PACK_GRAPH) and the routing launch (QWEN38_FN_ROUTE_FUSED),
     # both off, the bits the same; fn_kernels' new route kernel (tools/fn_kernels.py, tools/csrc/fn_kernels): qwen4_exp,
     # nemotron_h, lfm2_moe, qwen3_5_moe, flint
-    "qwen4_exp": "b7726a38c60bbf56bc379f896931c955a896c4f8737088cd081c67baf84e9940",
+    # SPD-249: T1 and T8 on by default (the decode tokens of base and both knobs equal in every served C8 and one-user
+    # round): qwen4_exp, qwen3_5_moe
+    "qwen4_exp": "38362344b958393f87a5ad8c15de69eb3cb130322b3f3d52daf62c6799a5ab64",
     "nemotron_h": "d062af6596f7dad1b6087f71a604956b19e53ed898a5e45169b9e6de168349f7",
     "lfm2_moe": "d47cb7022caab678f0195fa78835a7fd1bcc48bb8a4b2c255c763c19fee26964",
-    "qwen3_5_moe": "8c4d58e0a7f5b8a27ed236ba19eafef28c56e52502a66bd692456cd8585a41cc",
+    "qwen3_5_moe": "c56061f0d816e2de7899431132879dc56b1cd032bcacef57a9caa4d0090d8d5b",
     "flint": "017c12a33cf96980964adb385631aad0541af5983bbae0741c0743c20d647bcb",
 }
 #: adapters the refactor may move once (the coordinator's OK, 2026-10-22): Flint's knobs leave the shared
