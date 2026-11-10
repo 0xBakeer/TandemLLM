@@ -1427,8 +1427,9 @@ textarea {
   font-size: var(--fs-sm);
   color: var(--ink-2);
 }
-.console-export-saved > .icon {
+.console-export-saved > span > .icon {
   color: var(--ok);
+  vertical-align: -4px;
 }
 .console-export-saved code {
   overflow-wrap: anywhere;

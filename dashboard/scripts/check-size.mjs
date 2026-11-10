@@ -37,7 +37,7 @@
 // 463 KB since the guide learned a simple mode (#103, 2026-11-03: 462.2 KB, 473,274 bytes, on the pako measure, rebuilt
 // against main): the mode's own chunk (the three-page flow, the folded settings page, the card tiles and their
 // note-line trim) and the Finish gate's plan-check round trip.
-// 465 KB with the Log panel's export button (SRV-803, 2026-11-10: 464.4 KB, 475,517 bytes, from 462.9 KB with
+// 465 KB with the Log panel's export button (SRV-803, 2026-11-10: 464.4 KB, 475,542 bytes, from 462.9 KB with
 // 122 bytes left): the fetch of the engine's file and its time limit, the save step, the panel's error block,
 // the line after a save and their styles.
 import { BUDGET, distSizes } from './gzip-size.mjs';

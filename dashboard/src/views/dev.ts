@@ -213,8 +213,7 @@ export class QseDev extends LightElement {
     if (!this.exportSaved) return nothing;
     return html`<div class="console-export" data-log-export-saved>
       <div class="console-export-saved" role="status">
-        ${icon('check')}
-        <span>Saved as <code>${this.exportSaved}</code></span>
+        <span>${icon('check')} Saved as <code>${this.exportSaved}</code></span>
         ${this.exportLink()}
         <button class="btn btn-ghost btn-sm" @click=${() => (this.exportSaved = null)}>Dismiss</button>
       </div>
