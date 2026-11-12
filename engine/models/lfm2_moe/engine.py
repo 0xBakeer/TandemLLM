@@ -49,7 +49,7 @@ from engine.settings import SETTINGS as _S
 from tools import kv_fp8 as _kv8
 
 #: rows a prompt chunk takes (the caches' anchor grid, `serving.Lfm2MoeServing.caps`)
-PREFILL_CHUNK = 4096
+PREFILL_CHUNK = int(_S.get("LFM2_PREFILL_CHUNK") or 4096)
 #: rows up to which a projection runs on the row-invariant kernels (their limit, the verify width)
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
@@ -120,6 +120,10 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         cos, sin = Lfm2MoeRef.rope(self, torch.arange(max_len, device=self.device))
         self.rope_cos, self.rope_sin = cos.contiguous(), sin.contiguous()        # [max_len, D] bf16
         self.classes = K.classes(max_len)
+        # the Triton MoE path slows superlinearly on Ada at 4096-row chunks (measured:
+        # 3072 beats 4096 by ~20% on this card); GB10 keeps 4096. Settings override wins.
+        self.prefill_chunk = int(_S.get("LFM2_PREFILL_CHUNK") or
+                                 (3072 if _gpu.profile(self.device).id == "ada" else PREFILL_CHUNK))
         self._rb: dict = {}
         self.rec: dict = {}
         self.host_ms: dict = {}
@@ -590,9 +594,10 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         [1, vocab] fp32 (`head="all"`: of every row of the last chunk; "none": None)."""
         tokens = tokens.view(-1).to(self.device)
         out, rows = None, []
-        for a in range(0, tokens.numel(), PREFILL_CHUNK):
-            chunk = tokens[a:a + PREFILL_CHUNK]
-            last = a + PREFILL_CHUNK >= tokens.numel()
+        chunk_rows = self.prefill_chunk
+        for a in range(0, tokens.numel(), chunk_rows):
+            chunk = tokens[a:a + chunk_rows]
+            last = a + chunk_rows >= tokens.numel()
             out = self.forward_chunk(chunk, st, head=head if last else "none")
             rows.append(self.prompt_hidden)
         # every row's final normed state (what a drafter syncs from), not the last chunk's alone

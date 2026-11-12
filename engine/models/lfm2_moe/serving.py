@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 
 import torch
 
@@ -137,7 +138,7 @@ CONDUCTOR_FIT = {"served_classifier": False, "fallback": "lean", "packages": "co
 class Lfm2MoeServing:
     """`Lfm2MoeEngine` with one state and its graphs, in the server's engine interface."""
 
-    # the caches on the prefill's 4,096-token grid (a restore answered as a cold prefill, logprobs equal:
+    # the caches on the prefill's chunk grid (a restore answered as a cold prefill, logprobs equal:
     # tools/fn_cache_check.py on 4.0, 2026-10-14); side slots with joint passes, a plain step joining the
     # round (`joint_plain`: no draft head, so most rounds are plain steps); the shadow reader was
     # validated on Qwen text; the side lane copies the 27B's pending commit
@@ -146,6 +147,8 @@ class Lfm2MoeServing:
 
     def __init__(self, eng: Lfm2MoeEngine, max_len: int, slot=None):
         self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len
+        # the engine's device-resolved chunk, not the module default (Ada takes 3072)
+        self.caps = replace(self.caps, anchor_grid=eng.prefill_chunk)
         # slot 0 (None) keys its row buffers by row count; a side slot by (its tag, rows), so no slot
         # stages into a buffer another slot's graph reads
         self.slot = slot

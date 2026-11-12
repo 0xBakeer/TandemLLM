@@ -537,6 +537,14 @@ def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
         if _gpu.profile(y.device).exl3_rot_ok(y.device):
             gok = _gpu.profile(y.device).exl3_gemv_ok(y.device, w.kb)
             xh = exl3_ada.rot_in_silu(y, w.suh[0])
+            if y.shape[0] > CHUNK_UNTIL and _S.get("EXL3_DSILU_SLAB") != "0":
+                # prefill rows: the slab decode + library GEMM, the same M > CHUNK_UNTIL
+                # branch exl3_matmul takes -- the gemv path was per-row code at M in the
+                # thousands (the dense feed-forward's down projection at prefill).
+                r = torch.empty(y.shape[0], w.N,
+                                dtype=torch.float32 if w.out_fp32 else torch.bfloat16,
+                                device=y.device)
+                return _slab_matmul_ada(y, w, r, xh=xh[None])
             outs = []
             for g, n0, n1 in segments(w):
                 if gok:
@@ -713,18 +721,39 @@ def _slab_matmul_ada(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
                 xh[g] = exl3_ada.rot_in(x, w.suh[g])
         else:
             xh = rotate_in(x, w)             # the torch rotation: rotate_in's non-native path
+    # fp32-out GEMMs land on cuBLAS's s1688 (m16n8k8) kernels on Ada at the prefill shapes --
+    # up to 8x slower than the fp16-out k16 kernels. fp16-out rounds the fp32-accumulated
+    # product on write, which is what exllamav3's own prefill GEMM does; only the out_fp32
+    # blocks (the head) keep the wide output. torch's default lets fp16 GEMMs reduce in fp16
+    # too -- force the fp32 accumulation the reference GEMM uses.
+    fp32_out = w.out_fp32 or _S.get("EXL3_FP32_MM") == "1"
+
+    def mm(a, b):
+        if fp32_out:
+            return _mm_fp32(a, b)
+        old = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        try:
+            return torch.mm(a, b)
+        finally:
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = old
     if rot:
+        odt = torch.float32 if w.out_fp32 else torch.bfloat16
+        direct = out.dtype == odt and out.stride(1) == 1
         for g, n0, n1 in segments(w, SLAB_N):
             wi = w.inner(n0, n1)
-            yp = _mm_fp32(xh[g], wi)
-            out[:, n0:n1] = exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32)
+            yp = mm(xh[g], wi)
+            if direct:
+                exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32, out=out[:, n0:n1])
+            else:
+                out[:, n0:n1] = exl3_ada.rot_out(yp, w.svh[n0:n1], w.out_fp32)
             del wi, yp
     else:
         H = hadamard128(x.device)
         M = x.shape[0]
         for g, n0, n1 in segments(w, SLAB_N):
             wi = w.inner(n0, n1)
-            yp = _mm_fp32(xh[g], wi)
+            yp = mm(xh[g], wi)
             out[:, n0:n1] = (yp.view(M, -1, 128) @ H).view(M, n1 - n0) * \
                 w.svh[n0:n1].float()
             del wi, yp
